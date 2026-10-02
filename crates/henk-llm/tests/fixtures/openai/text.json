@@ -1,0 +1,9 @@
+{
+  "id": "chatcmpl-2",
+  "object": "chat.completion",
+  "model": "proxy-model",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "Not bad."}, "finish_reason": "stop"}
+  ],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 3}
+}

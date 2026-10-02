@@ -1,0 +1,80 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/henk-domain",
+  "crates/henk-llm",
+  "crates/henk-mcp",
+  "crates/henk-agent",
+  "crates/henk-platform",
+  "crates/henk-store",
+  "crates/henk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "UNLICENSED"
+publish = false
+repository = "https://github.com/StephanMeijer/meneerhenk"
+
+[workspace.dependencies]
+henk-domain = { path = "crates/henk-domain" }
+henk-llm = { path = "crates/henk-llm" }
+henk-mcp = { path = "crates/henk-mcp" }
+henk-agent = { path = "crates/henk-agent" }
+henk-platform = { path = "crates/henk-platform" }
+henk-store = { path = "crates/henk-store" }
+
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path"] }
+base64 = "0.22"
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+hmac = "0.13"
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng", "thread_rng"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
+ring = "0.17"
+rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite_migration = "2.5"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+secrecy = "0.10"
+serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+subtle = "2.6"
+thiserror = "2.0"
+time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing", "macros"] }
+tokio = { version = "1.47", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "signal", "fs"] }
+tokio-util = { version = "0.7", default-features = false }
+toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
+tower-http = { version = "0.7", default-features = false, features = ["trace", "limit", "timeout"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "json"] }
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

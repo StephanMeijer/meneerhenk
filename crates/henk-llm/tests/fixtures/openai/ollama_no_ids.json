@@ -1,0 +1,14 @@
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {"function": {"name": "list_issues", "arguments": {"owner": "o", "repo": "r"}}}
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

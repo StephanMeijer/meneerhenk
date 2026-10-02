@@ -1,0 +1,20 @@
+[package]
+name = "henk-store"
+description = "SQLite run records: runs, lanes, findings and events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+henk-domain = { workspace = true }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

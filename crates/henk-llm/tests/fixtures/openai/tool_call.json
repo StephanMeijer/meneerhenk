@@ -1,0 +1,28 @@
+{
+  "id": "chatcmpl-1",
+  "object": "chat.completion",
+  "model": "proxy-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "get_pull_request", "arguments": "{\"owner\":\"o\",\"repo\":\"r\",\"pullNumber\":7}"}
+          },
+          {
+            "id": "call_def",
+            "type": "function",
+            "function": {"name": "get_file_contents", "arguments": "{not json"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}
+}

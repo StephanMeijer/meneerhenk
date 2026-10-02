@@ -1,0 +1,50 @@
+[package]
+name = "henk"
+description = "Meneer Henk: the team's AI colleague on GitHub, GitLab, Discord and email"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "henk"
+path = "src/main.rs"
+
+[dependencies]
+henk-domain = { workspace = true }
+henk-llm = { workspace = true }
+henk-mcp = { workspace = true }
+henk-agent = { workspace = true }
+henk-platform = { workspace = true }
+henk-store = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+hmac = { workspace = true }
+sha2 = { workspace = true }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true

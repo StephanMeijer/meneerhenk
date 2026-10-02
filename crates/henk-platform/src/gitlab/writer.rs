@@ -1,0 +1,476 @@
+//! The GitLab writer. Every write is an MCP call to the configured
+//! write-mode `gitlab-mcp` session, made by Henk's code with arguments it
+//! constructs. No model ever holds this session.
+
+use std::sync::Arc;
+
+use henk_domain::allowlist::Platform;
+use henk_domain::marker::{Marker, MarkerKind};
+use henk_domain::review::{CommitSha, ReviewOutcome};
+use henk_mcp::McpSession;
+use serde_json::{Value, json};
+use tracing::{debug, instrument, warn};
+
+use crate::error::PlatformError;
+use crate::writer::{
+    DiffSide, ExistingFinding, ExistingSummary, PlatformWriter, PostedComment, PullRequestInfo,
+    PullRequestState, ReviewHandle, ReviewTarget,
+};
+
+/// Name of the commit status (§3.3).
+pub const STATUS_NAME: &str = "Meneer Henk";
+
+/// Prefix of a folded summary note.
+pub const OUTDATED_PREFIX: &str = "*Outdated.*";
+
+/// Writes to GitLab through a write-mode MCP session.
+pub struct GitLabWriter {
+    session: Arc<dyn McpSession>,
+    username: String,
+}
+
+impl std::fmt::Debug for GitLabWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitLabWriter")
+            .field("session", &self.session.alias())
+            .field("username", &self.username)
+            .finish()
+    }
+}
+
+/// The diff refs a positioned note needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffRefs {
+    base: String,
+    start: String,
+    head: String,
+}
+
+impl GitLabWriter {
+    /// Builds a writer. `username` is Henk's GitLab username, used to
+    /// recognise his notes.
+    #[must_use]
+    pub fn new(session: Arc<dyn McpSession>, username: impl Into<String>) -> Self {
+        Self {
+            session,
+            username: username.into(),
+        }
+    }
+
+    /// Calls a tool and parses its text as JSON. A result the server flags
+    /// as an error becomes [`PlatformError::ToolFailed`].
+    pub(crate) async fn call_tool(
+        &self,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, PlatformError> {
+        let outcome = self.session.call_tool(tool, arguments).await?;
+        if outcome.is_error {
+            return Err(PlatformError::ToolFailed {
+                tool: tool.to_owned(),
+                message: outcome.text,
+            });
+        }
+        if let Some(structured) = outcome.structured {
+            return Ok(structured);
+        }
+        Ok(serde_json::from_str(&outcome.text).unwrap_or(Value::String(outcome.text)))
+    }
+
+    fn base_args(target: &ReviewTarget) -> serde_json::Map<String, Value> {
+        let mut map = serde_json::Map::new();
+        map.insert("project_id".into(), json!(target.repo.path()));
+        map.insert("merge_request_iid".into(), json!(target.number.to_string()));
+        map
+    }
+
+    async fn merge_request(&self, target: &ReviewTarget) -> Result<Value, PlatformError> {
+        self.call_tool("get_merge_request", Value::Object(Self::base_args(target)))
+            .await
+    }
+
+    fn diff_refs(merge_request: &Value) -> Result<DiffRefs, PlatformError> {
+        let refs = merge_request
+            .get("diff_refs")
+            .ok_or_else(|| PlatformError::Decode("merge request without diff_refs".to_owned()))?;
+        let get = |key: &str| {
+            refs.get(key)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| PlatformError::Decode(format!("diff_refs without {key}")))
+        };
+        Ok(DiffRefs {
+            base: get("base_sha")?,
+            start: get("start_sha")?,
+            head: get("head_sha")?,
+        })
+    }
+
+    /// All discussions of a merge request, across pages.
+    async fn discussions(&self, target: &ReviewTarget) -> Result<Vec<Value>, PlatformError> {
+        let mut all = Vec::new();
+        for page in 1..=10 {
+            let mut args = Self::base_args(target);
+            args.insert("per_page".into(), json!(100));
+            args.insert("page".into(), json!(page));
+            let value = self
+                .call_tool("mr_discussions", Value::Object(args))
+                .await?;
+            let items: Vec<Value> = match value {
+                Value::Array(items) => items,
+                Value::Object(ref map) => map
+                    .get("items")
+                    .or_else(|| map.get("discussions"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let count = items.len();
+            all.extend(items);
+            if count < 100 {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    fn is_henk_note(&self, note: &Value) -> bool {
+        note.pointer("/author/username").and_then(Value::as_str) == Some(self.username.as_str())
+            || Marker::is_present(note_body(note))
+    }
+}
+
+fn note_body(note: &Value) -> &str {
+    note.get("body").and_then(Value::as_str).unwrap_or("")
+}
+
+fn note_id(note: &Value) -> Option<String> {
+    match note.get("id") {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn is_system(note: &Value) -> bool {
+    note.get("system").and_then(Value::as_bool).unwrap_or(false)
+}
+
+#[async_trait::async_trait]
+impl PlatformWriter for GitLabWriter {
+    fn platform(&self) -> Platform {
+        Platform::GitLab
+    }
+
+    async fn pull_request(&self, target: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {
+        let mr = self.merge_request(target).await?;
+        let head = mr
+            .get("sha")
+            .and_then(Value::as_str)
+            .or_else(|| mr.pointer("/diff_refs/head_sha").and_then(Value::as_str))
+            .and_then(|sha| CommitSha::parse(sha).ok())
+            .ok_or_else(|| PlatformError::Decode("merge request without head sha".to_owned()))?;
+        Ok(PullRequestInfo {
+            title: mr
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            head,
+            base_ref: mr
+                .get("target_branch")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            draft: mr.get("draft").and_then(Value::as_bool).unwrap_or(false)
+                || mr
+                    .get("work_in_progress")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            state: if mr.get("state").and_then(Value::as_str) == Some("opened") {
+                PullRequestState::Open
+            } else {
+                PullRequestState::Closed
+            },
+        })
+    }
+
+    #[instrument(skip_all, fields(project = %target.repo.path(), iid = target.number))]
+    async fn start_review(
+        &self,
+        target: &ReviewTarget,
+        _commit: &CommitSha,
+        _run_link: &str,
+    ) -> Result<Option<ReviewHandle>, PlatformError> {
+        let mut args = Self::base_args(target);
+        args.insert("name".into(), json!("eyes"));
+        if let Err(error) = self
+            .call_tool("create_merge_request_emoji_reaction", Value::Object(args))
+            .await
+        {
+            // Reacting twice is an error on GitLab; it is not worth failing a review over.
+            warn!(%error, "could not react to the merge request");
+        }
+        Ok(None)
+    }
+
+    async fn acknowledge(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+        _is_review_comment: bool,
+    ) -> Result<(), PlatformError> {
+        let mut args = Self::base_args(target);
+        args.insert("note_id".into(), json!(comment_id));
+        args.insert("name".into(), json!("eyes"));
+        self.call_tool(
+            "create_merge_request_note_emoji_reaction",
+            Value::Object(args),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn existing_findings(
+        &self,
+        target: &ReviewTarget,
+    ) -> Result<Vec<ExistingFinding>, PlatformError> {
+        let mut findings = Vec::new();
+        for discussion in self.discussions(target).await? {
+            let notes = discussion
+                .get("notes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let Some(first) = notes.first() else { continue };
+            if is_system(first) || first.get("position").is_none_or(Value::is_null) {
+                continue;
+            }
+            let Some(marker) = Marker::parse(note_body(first)) else {
+                continue;
+            };
+            if marker.kind.is_some_and(|k| k != MarkerKind::Finding) {
+                continue;
+            }
+            let Some(id) = note_id(first) else { continue };
+            let position = first.get("position").cloned().unwrap_or(Value::Null);
+            let line = position
+                .get("new_line")
+                .and_then(Value::as_u64)
+                .or_else(|| position.get("old_line").and_then(Value::as_u64))
+                .and_then(|l| u32::try_from(l).ok());
+            let answered_by_person = notes
+                .iter()
+                .skip(1)
+                .any(|n| !is_system(n) && !self.is_henk_note(n));
+            findings.push(ExistingFinding {
+                comment_id: id,
+                node_id: discussion
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                path: position
+                    .get("new_path")
+                    .or_else(|| position.get("old_path"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                line,
+                body: note_body(first).to_owned(),
+                marker,
+                resolved: first
+                    .get("resolved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                answered_by_person,
+            });
+        }
+        debug!(count = findings.len(), "existing findings");
+        Ok(findings)
+    }
+
+    async fn existing_summaries(
+        &self,
+        target: &ReviewTarget,
+    ) -> Result<Vec<ExistingSummary>, PlatformError> {
+        let mut summaries = Vec::new();
+        for discussion in self.discussions(target).await? {
+            let notes = discussion
+                .get("notes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let Some(first) = notes.first() else { continue };
+            if is_system(first)
+                || !first.get("position").is_none_or(Value::is_null)
+                || !self.is_henk_note(first)
+            {
+                continue;
+            }
+            let Some(marker) = Marker::parse(note_body(first)) else {
+                continue;
+            };
+            if marker.kind != Some(MarkerKind::Summary) {
+                continue;
+            }
+            let Some(id) = note_id(first) else { continue };
+            summaries.push(ExistingSummary {
+                comment_id: id,
+                node_id: discussion
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                marker,
+                folded: note_body(first).trim_start().starts_with(OUTDATED_PREFIX),
+            });
+        }
+        Ok(summaries)
+    }
+
+    async fn post_finding(
+        &self,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        path: &str,
+        line: u32,
+        side: DiffSide,
+        body: &str,
+    ) -> Result<PostedComment, PlatformError> {
+        let mr = self.merge_request(target).await?;
+        let refs = Self::diff_refs(&mr)?;
+        if refs.head != commit.as_str() {
+            warn!(head = %refs.head, reviewed = %commit, "merge request moved on; positioning on its current head");
+        }
+        let mut position = serde_json::Map::new();
+        position.insert("base_sha".into(), json!(refs.base));
+        position.insert("start_sha".into(), json!(refs.start));
+        position.insert("head_sha".into(), json!(refs.head));
+        position.insert("position_type".into(), json!("text"));
+        position.insert("new_path".into(), json!(path));
+        position.insert("old_path".into(), json!(path));
+        let line_key = match side {
+            DiffSide::Right => "new_line",
+            DiffSide::Left => "old_line",
+        };
+        position.insert(line_key.into(), json!(line));
+        let position = Value::Object(position);
+        let mut args = Self::base_args(target);
+        args.insert("body".into(), json!(body));
+        args.insert("position".into(), position);
+        let created = self
+            .call_tool("create_merge_request_thread", Value::Object(args))
+            .await?;
+        let first = created.pointer("/notes/0").cloned().unwrap_or(Value::Null);
+        let id = note_id(&first)
+            .or_else(|| note_id(&created))
+            .ok_or_else(|| PlatformError::Decode("thread without a note id".to_owned()))?;
+        Ok(PostedComment {
+            id,
+            node_id: created.get("id").and_then(Value::as_str).map(str::to_owned),
+            url: String::new(),
+        })
+    }
+
+    async fn update_finding(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+        body: &str,
+    ) -> Result<(), PlatformError> {
+        let mut args = Self::base_args(target);
+        args.insert("note_id".into(), json!(comment_id));
+        args.insert("body".into(), json!(body));
+        self.call_tool("update_merge_request_note", Value::Object(args))
+            .await?;
+        Ok(())
+    }
+
+    async fn post_comment(
+        &self,
+        target: &ReviewTarget,
+        body: &str,
+    ) -> Result<PostedComment, PlatformError> {
+        let mut args = Self::base_args(target);
+        args.insert("body".into(), json!(body));
+        let created = self
+            .call_tool("create_merge_request_note", Value::Object(args))
+            .await?;
+        let id =
+            note_id(&created).ok_or_else(|| PlatformError::Decode("note without id".to_owned()))?;
+        Ok(PostedComment {
+            id,
+            node_id: None,
+            url: String::new(),
+        })
+    }
+
+    async fn reply(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+        is_review_comment: bool,
+        body: &str,
+    ) -> Result<PostedComment, PlatformError> {
+        if is_review_comment {
+            // `comment_id` is the discussion id for diff notes (see events.rs).
+            let mut args = Self::base_args(target);
+            args.insert("discussion_id".into(), json!(comment_id));
+            args.insert("body".into(), json!(body));
+            let created = self
+                .call_tool("create_merge_request_discussion_note", Value::Object(args))
+                .await?;
+            let id = note_id(&created)
+                .ok_or_else(|| PlatformError::Decode("reply without id".to_owned()))?;
+            return Ok(PostedComment {
+                id,
+                node_id: Some(comment_id.to_owned()),
+                url: String::new(),
+            });
+        }
+        self.post_comment(target, body).await
+    }
+
+    async fn fold_summary(
+        &self,
+        target: &ReviewTarget,
+        summary: &ExistingSummary,
+    ) -> Result<(), PlatformError> {
+        if summary.folded {
+            return Ok(());
+        }
+        let body = format!("{OUTDATED_PREFIX}\n\n{}", summary.marker.render());
+        self.update_finding(target, &summary.comment_id, &body)
+            .await
+    }
+
+    async fn fold_finding(
+        &self,
+        _target: &ReviewTarget,
+        _finding: &ExistingFinding,
+    ) -> Result<(), PlatformError> {
+        // GitLab collapses resolved threads itself; there is nothing to fold.
+        Ok(())
+    }
+
+    async fn finish_review(
+        &self,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        _handle: Option<&ReviewHandle>,
+        outcome: &ReviewOutcome,
+        run_link: &str,
+    ) -> Result<(), PlatformError> {
+        // Always success: the status must never block a pipeline (§8.2).
+        let args = json!({
+            "project_id": target.repo.path(),
+            "sha": commit.as_str(),
+            "state": "success",
+            "name": STATUS_NAME,
+            "description": outcome.headline(),
+            "target_url": run_link,
+        });
+        self.call_tool("create_commit_status", args).await?;
+        Ok(())
+    }
+}
