@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/henk-domain", "crates/henk"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "UNLICENSED"
+publish = false
+repository = "https://github.com/StephanMeijer/HenkBot"
+
+[workspace.dependencies]
+henk-domain = { path = "crates/henk-domain" }
+
+anyhow = "1.0"
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
+thiserror = "2.0"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

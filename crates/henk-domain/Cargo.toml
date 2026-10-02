@@ -1,0 +1,16 @@
+[package]
+name = "henk-domain"
+description = "Domain model for Meneer Henk: terms, permissions, allowlists and invariants from docs/SPEC.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+# Meneer Henk configuration. See docs/SPEC.md.
+#
+# No credential goes in this file (spec §8.4). Platform, mail and Discord
+# tokens are read from the environment by the tools that need them.
+# Identity is always an id, never a display name (spec §2).
+
+[discord]
+# The one channel Henk works in.
+channel_id = 123456789012345678
+# Henk's own bot user id. He never reacts to himself.
+henk_user_id = 223456789012345678
+# Henk's role id, if mentioning a role should count as mentioning him.
+henk_role_id = 323456789012345678
+# The "Collega van Henk" role id.
+colleague_role_id = 423456789012345678
+# Team Lead user ids. `sudo!` from these users is an order.
+team_lead_ids = [523456789012345678]
+
+[mail]
+# The address Henk sends from. Mail from this address is never answered.
+address = "henk@example.com"
+
+[allowlist]
+# Henk works only here (spec §2, §8.7).
+github_repositories = ["StephanMeijer/scratch-repo"]
+github_owners = ["docspec", "NotedThat"]
+gitlab_projects = []
+gitlab_groups = ["9xxlab"]
+
+# People Henk knows by id (spec §2, "Known people").
+[[people]]
+discord_id = 523456789012345678
+name = "Stephan"
+role = "team lead"
