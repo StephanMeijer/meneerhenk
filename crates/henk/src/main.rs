@@ -4,19 +4,27 @@
 
 mod app;
 mod config;
+mod coordinator;
+mod dispatch;
 mod ids;
+mod plan;
+mod plan_tools;
 mod review;
 mod review_tools;
+mod server;
+mod urls;
+mod web_fetch;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::urls::{parse_issue_url, parse_pull_request_url};
 use anyhow::{Context as _, anyhow};
 use clap::{Parser, Subcommand};
-use henk_domain::allowlist::{Platform, RepoRef};
+use henk_domain::allowlist::Platform;
 use henk_llm::{ChatMessage, CompletionRequest};
 use henk_mcp::McpSession as _;
-use henk_platform::ReviewTarget;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -41,6 +49,8 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Serve webhooks, the API and run pages until stopped.
+    Serve,
     /// Review one pull request now, from the command line.
     Review {
         /// Pull request URL, such as <https://github.com/owner/repo/pull/7>
@@ -48,6 +58,14 @@ enum Command {
         /// Review this commit instead of the current head.
         #[arg(long)]
         commit: Option<String>,
+    },
+    /// Plan one issue now, from the command line (§4).
+    Plan {
+        /// Issue URL, such as <https://github.com/owner/repo/issues/9>
+        url: String,
+        /// A note for the planner, as a colleague would give in conversation.
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Talk to a configured model once.
     Llm {
@@ -146,7 +164,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             print!("{}", config::EXAMPLE);
             Ok(())
         }
+        Command::Serve => {
+            let settings = load_settings(&cli.config)?;
+            let app = Arc::new(App::build(settings, None).await?);
+            server::serve(app).await
+        }
         Command::Review { url, commit } => cmd_review(&cli.config, &url, commit).await,
+        Command::Plan { url, note } => cmd_plan(&cli.config, &url, note).await,
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
@@ -186,6 +210,28 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
     }
     if let Some(outcome) = report.outcome {
         println!("check conclusion: {:?}", outcome.check_conclusion());
+    }
+    Ok(())
+}
+
+async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let app = App::build(settings, None).await?;
+    let target = parse_issue_url(url)?;
+    let report = plan::run_plan(
+        &app,
+        plan::PlanRequest {
+            target,
+            note,
+            trigger: "cli".to_owned(),
+        },
+        CancellationToken::new(),
+    )
+    .await?;
+    println!("run {}", report.run);
+    println!("plan written: {}", report.planned);
+    for change in report.changes {
+        println!("- {change}");
     }
     Ok(())
 }
@@ -255,68 +301,4 @@ async fn cmd_mcp_probe(config: &Path, server: &str, show: &[String]) -> anyhow::
     }
     session.close().await;
     Ok(())
-}
-
-/// Parses `https://github.com/owner/repo/pull/7` or
-/// `https://gitlab.example/group/sub/project/-/merge_requests/5`.
-fn parse_pull_request_url(url: &str) -> anyhow::Result<ReviewTarget> {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| anyhow!("expected an https URL"))?;
-    let (host, path) = without_scheme
-        .split_once('/')
-        .ok_or_else(|| anyhow!("URL has no path"))?;
-    let path = path.trim_end_matches('/');
-    if host == "github.com" {
-        let mut parts = path.split('/');
-        let (Some(owner), Some(repo), Some("pull"), Some(number)) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            return Err(anyhow!("expected https://github.com/owner/repo/pull/N"));
-        };
-        let number: u64 = number.parse().context("pull request number")?;
-        return Ok(ReviewTarget {
-            repo: RepoRef::parse(Platform::GitHub, &format!("{owner}/{repo}"))?,
-            number,
-        });
-    }
-    if let Some((project, number)) = path.split_once("/-/merge_requests/") {
-        let number: u64 = number
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .parse()
-            .context("merge request iid")?;
-        return Ok(ReviewTarget {
-            repo: RepoRef::parse(Platform::GitLab, project)?,
-            number,
-        });
-    }
-    Err(anyhow!(
-        "expected a GitHub pull request URL or a GitLab merge request URL"
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-
-    #[test]
-    fn pull_request_urls_are_parsed() {
-        let target =
-            parse_pull_request_url("https://github.com/StephanMeijer/scratch-repo/pull/12")
-                .unwrap();
-        assert_eq!(target.repo.path(), "StephanMeijer/scratch-repo");
-        assert_eq!(target.number, 12);
-        assert!(parse_pull_request_url("https://github.com/a/b/issues/1").is_err());
-        let mr = parse_pull_request_url("https://gitlab.com/9xxlab/tools/cli/-/merge_requests/5")
-            .unwrap();
-        assert_eq!(mr.repo.path(), "9xxlab/tools/cli");
-        assert_eq!(mr.repo.platform(), Platform::GitLab);
-        assert_eq!(mr.number, 5);
-        assert!(parse_pull_request_url("https://gitlab.com/a/b/-/issues/1").is_err());
-    }
 }

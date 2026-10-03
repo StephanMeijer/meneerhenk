@@ -23,6 +23,11 @@ use crate::app::App;
 use crate::ids::new_run_id;
 use crate::review_tools::{ImproveFinding, LaneContext, ListExistingFindings, PostFinding};
 
+/// The review was cancelled because a newer commit arrived.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("superseded by a review of a newer commit")]
+pub struct Superseded;
+
 /// A request to review one pull/merge request.
 #[derive(Debug, Clone)]
 pub struct ReviewRequest {
@@ -281,6 +286,9 @@ async fn review_body(
         }
     }
     lanes.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
+    if cancel.is_cancelled() {
+        return Err(Superseded.into());
+    }
 
     // The count comes from the platform, not from memory (§3.3).
     let after = writer

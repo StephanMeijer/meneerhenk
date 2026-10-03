@@ -7,9 +7,9 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow};
 use henk_llm::{ModelClient, client_for};
 use henk_mcp::{McpServerConfig, RmcpSession};
-use henk_platform::PlatformWriter;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::GitLabWriter;
+use henk_platform::{IssueWriter, PlatformWriter};
 use henk_store::RunStore;
 
 use crate::config::Settings;
@@ -168,6 +168,29 @@ impl App {
                 .gitlab
                 .clone()
                 .map(|w| w as Arc<dyn PlatformWriter>)
+                .ok_or_else(|| anyhow!("GitLab is not configured")),
+        }
+    }
+
+    /// The issue writer for a platform.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform is not configured.
+    pub fn issue_writer(
+        &self,
+        platform: henk_domain::allowlist::Platform,
+    ) -> anyhow::Result<Arc<dyn IssueWriter>> {
+        match platform {
+            henk_domain::allowlist::Platform::GitHub => self
+                .github
+                .clone()
+                .map(|w| w as Arc<dyn IssueWriter>)
+                .ok_or_else(|| anyhow!("GitHub is not configured")),
+            henk_domain::allowlist::Platform::GitLab => self
+                .gitlab
+                .clone()
+                .map(|w| w as Arc<dyn IssueWriter>)
                 .ok_or_else(|| anyhow!("GitLab is not configured")),
         }
     }
