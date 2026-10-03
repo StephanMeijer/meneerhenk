@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use henk_domain::run::RunId;
-use henk_events::{Event, EventKind, EventSource, parse_github, parse_gitlab};
+use henk_events::{Event, EventBus, EventSource, parse_github, parse_gitlab};
 use henk_platform::webhook::{verify_github_signature, verify_gitlab_token};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
@@ -22,14 +22,15 @@ use tracing::{info, warn};
 
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
-use crate::dispatch::{Dispatched, Dispatcher};
 use crate::ids::new_event_id;
+use crate::listeners::{MentionListener, PlanListener, ReviewListener, Writers};
+use crate::recorder::StoreRecorder;
 use crate::review::ReviewRequest;
 
 /// What every handler can reach.
 pub struct Shared {
     coordinator: Arc<Coordinator>,
-    dispatcher: Dispatcher,
+    bus: Arc<EventBus>,
     github_secret: Option<SecretString>,
     gitlab_token: Option<SecretString>,
     api_token: Option<SecretString>,
@@ -37,7 +38,7 @@ pub struct Shared {
 
 /// Builds the router. Secrets come from the environment variables the
 /// settings name; a missing one disables its route with a clear status.
-pub fn router(app: Arc<App>) -> Router {
+pub fn router(app: &Arc<App>) -> Router {
     let server = &app.settings.server;
     let github_secret = env_var(&server.github_webhook_secret_env).map(SecretString::from);
     let gitlab_token = env_var(&server.gitlab_webhook_token_env).map(SecretString::from);
@@ -65,16 +66,28 @@ pub fn router(app: Arc<App>) -> Router {
 
 /// Builds the router with explicit secrets, for tests and for `router`.
 pub fn router_with_secrets(
-    app: Arc<App>,
+    app: &Arc<App>,
     github_secret: Option<SecretString>,
     gitlab_token: Option<SecretString>,
     api_token: Option<SecretString>,
 ) -> Router {
-    let coordinator = Arc::new(Coordinator::new(app));
-    let dispatcher = Dispatcher::new(Arc::clone(&coordinator));
+    let settings = Arc::new(app.settings.clone());
+    let writers: Arc<dyn Writers> = Arc::clone(app) as Arc<dyn Writers>;
+    let coordinator = Arc::new(Coordinator::new(Arc::clone(app)));
+    let bus = Arc::new(EventBus::new(
+        Arc::new(StoreRecorder(Arc::clone(&app.store))),
+        vec![
+            Arc::new(ReviewListener::new(
+                Arc::clone(&coordinator),
+                Arc::clone(&writers),
+            )),
+            Arc::new(MentionListener::new(settings, writers)),
+            Arc::new(PlanListener::new(Arc::clone(&coordinator))),
+        ],
+    ));
     let shared = Arc::new(Shared {
         coordinator,
-        dispatcher,
+        bus,
         github_secret,
         gitlab_token,
         api_token,
@@ -102,7 +115,7 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
 /// Returns an error when the bind address is unusable.
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let bind = app.settings.server.bind.clone();
-    let router = router(app);
+    let router = router(&app);
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
@@ -184,7 +197,7 @@ async fn github_webhook(
         payload: Some(payload),
     };
     info!(event = %event.id, kind = event.kind.name(), "GitHub webhook");
-    dispatch_in_background(shared, event);
+    shared.bus.publish(event);
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -225,7 +238,7 @@ async fn gitlab_webhook(
         payload: Some(payload),
     };
     info!(event = %event.id, kind = event.kind.name(), "GitLab webhook");
-    dispatch_in_background(shared, event);
+    shared.bus.publish(event);
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -233,17 +246,6 @@ fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
-}
-
-fn dispatch_in_background(shared: Arc<Shared>, event: Event) {
-    tokio::spawn(async move {
-        let kind: EventKind = event.kind;
-        match shared.dispatcher.handle(kind).await {
-            Dispatched::Ignored(reason) => info!(%reason, "event ignored"),
-            Dispatched::Review(decision) => info!(?decision, "review dispatched"),
-            Dispatched::Greeted => info!("greeted"),
-        }
-    });
 }
 
 fn unauthorized(shared: &Shared, headers: &HeaderMap) -> Option<Response> {
@@ -310,19 +312,20 @@ async fn api_review(
         .planning
         .as_ref()
         .map(|p| p.requester_id.to_string());
-    let decision = shared.coordinator.submit_review(
+    let (decision, run) = shared.coordinator.submit_review(
         ReviewRequest {
             target,
             commit: Some(commit.clone()),
             trigger: "api".to_owned(),
             requester,
             acknowledge: None,
+            run: None,
         },
         commit,
     );
     (
         StatusCode::ACCEPTED,
-        axum::Json(json!({"decision": format!("{decision:?}")})),
+        axum::Json(json!({"decision": format!("{decision:?}"), "run": run.to_string()})),
     )
         .into_response()
 }
@@ -480,7 +483,7 @@ github_owners = ["docspec"]
                 .unwrap(),
         );
         router_with_secrets(
-            app,
+            &app,
             Some(SecretString::from("whsec".to_owned())),
             Some(SecretString::from("gltok".to_owned())),
             Some(SecretString::from("apitok".to_owned())),

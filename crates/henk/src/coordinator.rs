@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex};
 use henk_domain::allowlist::Platform;
 use henk_domain::queue::{Decision, decide};
 use henk_domain::review::CommitSha;
+use henk_domain::run::RunId;
 use henk_platform::{IssueTarget, ReviewTarget};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::app::App;
+use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
 use crate::review::{ReviewRequest, run_review};
 
@@ -35,6 +37,7 @@ impl Key {
 
 #[derive(Debug)]
 struct Active {
+    run: RunId,
     commit: CommitSha,
     cancel: CancellationToken,
     generation: u64,
@@ -80,25 +83,31 @@ impl Coordinator {
     }
 
     /// Decides what to do with a review request for `commit` and acts on it.
-    pub fn submit_review(&self, request: ReviewRequest, commit: CommitSha) -> Decision {
+    /// Returns the decision and the run it concerns: the new run, or the one joined.
+    pub fn submit_review(&self, request: ReviewRequest, commit: CommitSha) -> (Decision, RunId) {
         let key = Key::of(&request.target);
         let generation = {
             let Ok(mut counter) = self.generation.lock() else {
-                return Decision::Start;
+                return (Decision::Start, new_run_id());
             };
             *counter += 1;
             *counter
         };
+        let run = new_run_id();
         let (decision, cancel) = {
             let Ok(mut active) = self.active.lock() else {
                 error!("coordinator lock poisoned");
-                return Decision::Start;
+                return (Decision::Start, run);
             };
             let decision = decide(active.get(&key).map(|a| &a.commit), &commit);
             match decision {
                 Decision::Join => {
-                    info!(repo = %key.repo, number = key.number, "joined the running review");
-                    return Decision::Join;
+                    let joined = active
+                        .get(&key)
+                        .map_or_else(|| run.clone(), |a| a.run.clone());
+                    info!(repo = %key.repo, number = key.number, run = %joined, "joined the running review");
+                    let _ = self.app.store.joined(&joined, &request.trigger);
+                    return (Decision::Join, joined);
                 }
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
@@ -112,6 +121,7 @@ impl Coordinator {
             active.insert(
                 key.clone(),
                 Active {
+                    run: run.clone(),
                     commit: commit.clone(),
                     cancel: cancel.clone(),
                     generation,
@@ -125,6 +135,7 @@ impl Coordinator {
         let active = Arc::clone(&self.active);
         let request = ReviewRequest {
             commit: Some(commit),
+            run: Some(run.clone()),
             ..request
         };
         tokio::spawn(async move {
@@ -142,26 +153,24 @@ impl Coordinator {
                 map.remove(&key);
             }
         });
-        decision
+        (decision, run)
     }
 
-    /// Starts a plan in the background.
-    pub fn submit_plan(&self, target: IssueTarget, note: Option<String>, trigger: String) {
+    /// Starts a plan in the background and returns its run id.
+    pub fn submit_plan(&self, target: IssueTarget, note: Option<String>, trigger: String) -> RunId {
+        let run = new_run_id();
+        let request = PlanRequest {
+            target,
+            note,
+            trigger,
+            run: Some(run.clone()),
+        };
         let app = Arc::clone(&self.app);
         tokio::spawn(async move {
-            if let Err(error) = run_plan(
-                &app,
-                PlanRequest {
-                    target,
-                    note,
-                    trigger,
-                },
-                CancellationToken::new(),
-            )
-            .await
-            {
+            if let Err(error) = run_plan(&app, request, CancellationToken::new()).await {
                 warn!(%error, "plan ended with an error");
             }
         });
+        run
     }
 }

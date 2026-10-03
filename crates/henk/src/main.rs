@@ -5,11 +5,12 @@
 mod app;
 mod config;
 mod coordinator;
-mod dispatch;
 mod doctor;
 mod ids;
+mod listeners;
 mod plan;
 mod plan_tools;
+mod recorder;
 mod review;
 mod review_tools;
 mod server;
@@ -216,6 +217,7 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
             trigger: "cli".to_owned(),
             requester,
             acknowledge: None,
+            run: None,
         },
         CancellationToken::new(),
     )
@@ -240,6 +242,7 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
             target,
             note,
             trigger: "cli".to_owned(),
+            run: None,
         },
         CancellationToken::new(),
     )

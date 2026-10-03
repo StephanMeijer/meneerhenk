@@ -34,6 +34,8 @@ pub struct PlanRequest {
     pub note: Option<String>,
     /// What started it.
     pub trigger: String,
+    /// The run id to use, when the caller already announced one.
+    pub run: Option<RunId>,
 }
 
 /// How planning ended.
@@ -83,7 +85,7 @@ pub async fn run_plan(
         ));
     }
 
-    let run = new_run_id();
+    let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
     let requester = planning.requester_id;
     app.store.create_run(&NewRun {
