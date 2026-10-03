@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use henk_domain::allowlist::Platform;
-use henk_domain::run::{RunId, RunKind};
+use henk_domain::run::{EventId, RunId, RunKind};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use rusqlite_migration::{M, Migrations};
 use time::OffsetDateTime;
@@ -203,6 +203,45 @@ pub struct EventRecord {
     pub message: String,
 }
 
+/// A recorded inbound event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundEvent {
+    /// Its id.
+    pub id: EventId,
+    /// RFC 3339.
+    pub received_at: String,
+    /// Source name.
+    pub source: String,
+    /// Kind name.
+    pub kind: String,
+    /// `owner/name`, when the event is about a repository.
+    pub repo: Option<String>,
+    /// Pull/merge request or issue number, when about one.
+    pub target: Option<u64>,
+    /// The raw payload as received, when recorded.
+    pub payload: Option<String>,
+}
+
+/// What one listener did with an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeRecord {
+    /// The event.
+    pub event_id: EventId,
+    /// Listener name.
+    pub listener: String,
+    /// Outcome name.
+    pub outcome: String,
+    /// Detail text.
+    pub detail: String,
+    /// The run it led to, if any.
+    pub run_id: Option<String>,
+    /// RFC 3339.
+    pub at: String,
+}
+
+/// Payloads larger than this are not recorded; the event still is.
+pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+
 /// The store.
 #[derive(Debug)]
 pub struct RunStore {
@@ -216,7 +255,10 @@ fn now() -> String {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../migrations/001_initial.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/001_initial.sql")),
+        M::up(include_str!("../migrations/002_inbound_events.sql")),
+    ])
 }
 
 impl RunStore {
@@ -538,6 +580,146 @@ impl RunStore {
     }
 }
 
+impl RunStore {
+    /// Records an inbound event. A payload over [`MAX_PAYLOAD_BYTES`] is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure, including a duplicate id.
+    pub fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
+        let payload = event
+            .payload
+            .as_deref()
+            .filter(|p| p.len() <= MAX_PAYLOAD_BYTES);
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    event.id.as_str(),
+                    event.received_at,
+                    event.source,
+                    event.kind,
+                    event.repo,
+                    event.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
+                    payload,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Records what a listener did with an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn record_outcome(&self, outcome: &OutcomeRecord) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO event_outcomes (event_id, listener, outcome, detail, run_id, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    outcome.event_id.as_str(),
+                    outcome.listener,
+                    outcome.outcome,
+                    outcome.detail,
+                    outcome.run_id,
+                    if outcome.at.is_empty() { now() } else { outcome.at.clone() },
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Reads one event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    pub fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events WHERE id = ?1",
+                params![id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(id, received_at, source, kind, repo, target, payload)| {
+                let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt { column: "inbound_events.id", value: id })?;
+                Ok(InboundEvent {
+                    id,
+                    received_at,
+                    source,
+                    kind,
+                    repo,
+                    target: target.and_then(|t| u64::try_from(t).ok()),
+                    payload,
+                })
+            })
+            .transpose()
+        })
+    }
+
+    /// The outcomes of one event, in recording order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT listener, outcome, detail, run_id, at FROM event_outcomes WHERE event_id = ?1 ORDER BY rowid",
+            )?;
+            let rows = statement.query_map(params![id.as_str()], |row| {
+                Ok(OutcomeRecord {
+                    event_id: id.clone(),
+                    listener: row.get(0)?,
+                    outcome: row.get(1)?,
+                    detail: row.get(2)?,
+                    run_id: row.get(3)?,
+                    at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        })
+    }
+
+    /// The events whose outcomes point at a run, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    pub fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError> {
+        let ids: Vec<String> = self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT DISTINCT e.id FROM inbound_events e JOIN event_outcomes o ON o.event_id = e.id WHERE o.run_id = ?1 ORDER BY e.received_at",
+            )?;
+            let rows = statement.query_map(params![run.as_str()], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        })?;
+        let mut events = Vec::new();
+        for id in ids {
+            let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
+                column: "inbound_events.id",
+                value: id,
+            })?;
+            if let Some(event) = self.inbound_event(&id)? {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+}
+
 fn kind_str(kind: RunKind) -> &'static str {
     match kind {
         RunKind::Review => "review",
@@ -695,6 +877,69 @@ mod tests {
         assert_eq!(lanes[0].input_tokens, 1000);
         assert_eq!(lanes[1].error.as_deref(), Some("timeout"));
         assert_eq!(store.events(&run.id).unwrap()[0].message, "started");
+    }
+
+    #[test]
+    fn events_and_outcomes_round_trip() {
+        let store = RunStore::in_memory().unwrap();
+        store.create_run(&new_run("r-9")).unwrap();
+        let id = EventId::parse("e-1").unwrap();
+        store
+            .record_event(&InboundEvent {
+                id: id.clone(),
+                received_at: "2026-10-03T00:00:00Z".into(),
+                source: "github_webhook".into(),
+                kind: "pull_request".into(),
+                repo: Some("o/r".into()),
+                target: Some(7),
+                payload: Some("{}".into()),
+            })
+            .unwrap();
+        store
+            .record_outcome(&OutcomeRecord {
+                event_id: id.clone(),
+                listener: "review".into(),
+                outcome: "started".into(),
+                detail: "r-9".into(),
+                run_id: Some("r-9".into()),
+                at: String::new(),
+            })
+            .unwrap();
+        let event = store.inbound_event(&id).unwrap().unwrap();
+        assert_eq!(event.kind, "pull_request");
+        assert_eq!(event.target, Some(7));
+        assert_eq!(event.payload.as_deref(), Some("{}"));
+        let outcomes = store.outcomes(&id).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(!outcomes[0].at.is_empty());
+        let linked = store
+            .inbound_events_for_run(&RunId::parse("r-9").unwrap())
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert!(
+            store
+                .inbound_event(&EventId::parse("e-nope").unwrap())
+                .unwrap()
+                .is_none()
+        );
+
+        let big = "x".repeat(MAX_PAYLOAD_BYTES + 1);
+        store
+            .record_event(&InboundEvent {
+                id: EventId::parse("e-2").unwrap(),
+                payload: Some(big),
+                ..event
+            })
+            .unwrap();
+        assert!(
+            store
+                .inbound_event(&EventId::parse("e-2").unwrap())
+                .unwrap()
+                .unwrap()
+                .payload
+                .is_none(),
+            "oversized payload dropped"
+        );
     }
 
     #[test]

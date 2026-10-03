@@ -7,9 +7,8 @@ use henk_domain::allowlist::Platform;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::queue::Decision;
 use henk_domain::review::{is_review_request, mentions_henk};
-use henk_platform::{
-    CommentKind, IncomingEvent, PlatformWriter, PullRequestAction, ReviewTarget, Sender,
-};
+use henk_events::{CommentKind, EventKind, PullRequestAction, Sender};
+use henk_platform::{PlatformWriter, ReviewTarget};
 use tracing::{info, instrument, warn};
 
 use crate::coordinator::Coordinator;
@@ -50,11 +49,15 @@ impl Dispatcher {
 
     /// Handles one event.
     #[instrument(skip_all)]
-    pub async fn handle(&self, event: IncomingEvent) -> Dispatched {
+    pub async fn handle(&self, event: EventKind) -> Dispatched {
         let app = self.coordinator.app();
         match event {
-            IncomingEvent::Ignored(reason) => Dispatched::Ignored(reason),
-            IncomingEvent::PullRequest {
+            EventKind::Ignored(reason) => Dispatched::Ignored(reason),
+            EventKind::Unmodelled { name } => Dispatched::Ignored(format!("event {name}")),
+            EventKind::ReviewRequested { .. } | EventKind::PlanRequested { .. } => {
+                Dispatched::Ignored("direct requests are handled by the API".to_owned())
+            }
+            EventKind::PullRequest {
                 repo,
                 number,
                 action,
@@ -92,7 +95,7 @@ impl Dispatcher {
                 };
                 Dispatched::Review(self.coordinator.submit_review(request, head))
             }
-            IncomingEvent::Comment {
+            EventKind::Comment {
                 repo,
                 number,
                 body,

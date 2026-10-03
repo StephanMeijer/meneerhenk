@@ -1,27 +1,12 @@
 //! What Henk writes to a platform, behind one trait per platform.
 
-use henk_domain::allowlist::{Platform, RepoRef};
+use henk_domain::allowlist::Platform;
 use henk_domain::marker::Marker;
 use henk_domain::review::{CommitSha, ReviewOutcome};
 
 use crate::error::PlatformError;
 
-/// One pull/merge request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReviewTarget {
-    /// Repository.
-    pub repo: RepoRef,
-    /// Number (GitLab: iid).
-    pub number: u64,
-}
-
-impl ReviewTarget {
-    /// The platform.
-    #[must_use]
-    pub fn platform(&self) -> Platform {
-        self.repo.platform()
-    }
-}
+pub use henk_domain::review::ReviewTarget;
 
 /// Open or not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

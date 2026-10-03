@@ -4,7 +4,7 @@ use std::fmt::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
 
-use crate::allowlist::Platform;
+use crate::allowlist::{Platform, RepoRef};
 use crate::identity::Requester;
 use crate::marker::ModelId;
 use crate::{GITHUB_HANDLE, GITLAB_HANDLE};
@@ -64,6 +64,23 @@ impl From<CommitSha> for String {
 impl fmt::Display for CommitSha {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// One pull/merge request.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReviewTarget {
+    /// Repository.
+    pub repo: RepoRef,
+    /// Number (GitLab: iid).
+    pub number: u64,
+}
+
+impl ReviewTarget {
+    /// The platform.
+    #[must_use]
+    pub fn platform(&self) -> Platform {
+        self.repo.platform()
     }
 }
 
