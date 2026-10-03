@@ -69,11 +69,13 @@ impl Dispatcher {
                 if !app.settings.allowlist.allows(&repo) {
                     return Dispatched::Ignored(format!("{repo} is not on the allowlist"));
                 }
-                if draft && !(platform == Platform::GitLab || app.settings.review.github_drafts) {
-                    return Dispatched::Ignored("draft pull request".to_owned());
-                }
-                if draft && platform == Platform::GitLab {
-                    return Dispatched::Ignored("draft merge request".to_owned());
+                // GitLab drafts are never reviewed (§3.1); GitHub drafts only when configured.
+                let drafts_reviewed =
+                    platform == Platform::GitHub && app.settings.review.github_drafts;
+                if draft && !drafts_reviewed {
+                    return Dispatched::Ignored(
+                        "draft; not reviewed until marked ready".to_owned(),
+                    );
                 }
                 let trigger = match action {
                     PullRequestAction::Opened => "opened",

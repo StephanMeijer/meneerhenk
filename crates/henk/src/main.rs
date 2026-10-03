@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod coordinator;
 mod dispatch;
+mod doctor;
 mod ids;
 mod plan;
 mod plan_tools;
@@ -48,6 +49,12 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Check secrets, models, the GitHub App, MCP servers and the database.
+    Doctor {
+        /// Also send one short prompt to every configured model.
+        #[arg(long)]
+        probe: bool,
     },
     /// Serve webhooks, the API and run pages until stopped.
     Serve,
@@ -162,6 +169,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             command: ConfigCommand::Example,
         } => {
             print!("{}", config::EXAMPLE);
+            Ok(())
+        }
+        Command::Doctor { probe } => {
+            let settings = load_settings(&cli.config)?;
+            let checks = doctor::run(&settings, probe).await;
+            println!("{}", doctor::render(&checks));
+            if checks.iter().any(doctor::Check::is_failure) {
+                return Err(anyhow!("doctor found failing checks"));
+            }
             Ok(())
         }
         Command::Serve => {

@@ -360,12 +360,13 @@ async fn spawn_lanes(
         let cancel = cancel.clone();
         let number = target.number;
         let platform = target.platform();
+        let short = commit.short().to_owned();
         set.spawn(async move {
             let opening = ChatMessage::user(format!(
                 "Review {} {} at commit {}. Read the diff first.",
                 kind_name(platform),
                 target_ref(platform, number),
-                commit_short(&run_id, &model_name)
+                short
             ));
             let outcome = agent.run(vec![opening], cancel).await;
             let (status, lane_outcome, error) = match &outcome.stop {
@@ -452,11 +453,6 @@ fn target_ref(platform: Platform, number: u64) -> String {
         Platform::GitHub => format!("#{number}"),
         Platform::GitLab => format!("!{number}"),
     }
-}
-
-fn commit_short(_run: &RunId, _model: &str) -> String {
-    // Placeholder kept trivially simple; the commit is in the system prompt.
-    "the reviewed commit".to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,0 +1,11 @@
+# Build context for the Dockerfile: the workspace manifests, the crates and
+# the example config that config.rs embeds. Everything else stays out.
+*
+!Cargo.toml
+!Cargo.lock
+!henk.example.toml
+!crates/
+crates/*/tests/
+**/target/
+**/*.db
+**/.env*

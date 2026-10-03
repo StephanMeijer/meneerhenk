@@ -1,0 +1,75 @@
+# henk.toml for the container image. Mount it at /etc/henk/henk.toml.
+# Differences from henk.example.toml: the server listens on all interfaces,
+# the database lives on the /var/lib/henk volume, and the MCP servers are
+# the copies inside the image.
+
+[server]
+bind = "0.0.0.0:8080"
+public_base_url = "https://henk.example.com"
+database_path = "/var/lib/henk/henk.db"
+
+[discord]
+channel_id = 123456789012345678
+henk_user_id = 223456789012345678
+team_lead_ids = [523456789012345678]
+
+[mail]
+address = "henk@example.com"
+
+[allowlist]
+github_repositories = ["StephanMeijer/scratch-repo"]
+github_owners = ["docspec", "NotedThat"]
+gitlab_groups = ["9xxlab"]
+
+[github]
+app_id = 123456
+installation_id = 7654321
+private_key_path_env = "GITHUB_APP_PRIVATE_KEY_PATH"
+bot_login = "meneer-henk[bot]"
+mcp_server = "github"
+
+[gitlab]
+api_url = "https://gitlab.com/api/v4"
+username = "meneerhenk"
+mcp_server = "gitlab"
+write_mcp_server = "gitlab-write"
+
+[models.proxy-fast]
+provider = "open_ai"
+base_url = "https://llm3.9xx.nl/v1"
+api_key_env = "LLM3_API_KEY"
+model = "fast-model"
+
+[models.claude]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-5-5"
+
+[review]
+lanes = [
+  { name = "lane-a", model = "proxy-fast" },
+  { name = "lane-b", model = "claude" },
+]
+
+[planning]
+model = "claude"
+requester_id = 523456789012345678
+
+[mcp.github]
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels", GITHUB_APP_ID = "123456", GITHUB_APP_INSTALLATION_ID = "7654321" }
+pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
+
+[mcp.gitlab]
+command = "node"
+args = ["/opt/mcp-gitlab/lib/node_modules/@zereight/mcp-gitlab/build/index.js"]
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "readonly" }
+pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
+
+[mcp.gitlab-write]
+command = "node"
+args = ["/opt/mcp-gitlab/lib/node_modules/@zereight/mcp-gitlab/build/index.js"]
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels" }
+pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]

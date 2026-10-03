@@ -86,6 +86,39 @@ The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node
 for `npx @zereight/mcp-gitlab`.
 
+## Check a deployment
+
+```sh
+henk doctor            # secrets, models, GitHub App token, MCP servers, database
+henk doctor --probe    # also one short prompt to every model
+```
+
+Every check is reported on its own line; the command fails when any
+check fails.
+
+## Container image
+
+The `Dockerfile` builds one image with `henk`, the `github-mcp-server`
+binary from its official image, and `@zereight/mcp-gitlab` installed
+under `/opt/mcp-gitlab`, on a distroless Node base, running as user
+65532. It cross-compiles, so `docker buildx build --platform
+linux/amd64,linux/arm64` works on an amd64 builder.
+
+```sh
+docker build -t henk .
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --tmpfs /tmp -v henk-data:/var/lib/henk \
+  -v ./henk.toml:/etc/henk/henk.toml:ro -v ./app.pem:/run/secrets/app.pem:ro \
+  -e GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/app.pem -e LLM3_API_KEY -e ANTHROPIC_API_KEY \
+  -e GITLAB_PERSONAL_ACCESS_TOKEN -e HENK_GITHUB_WEBHOOK_SECRET -e HENK_GITLAB_WEBHOOK_TOKEN -e HENK_API_TOKEN \
+  -p 127.0.0.1:8080:8080 henk
+```
+
+`deploy/henk.container.example.toml` is the example config with the
+container's paths: the GitLab servers are started as `node
+/opt/mcp-gitlab/.../build/index.js` because distroless has no
+`/usr/bin/env`. The only writable path is `/var/lib/henk`.
+
 ## Run
 
 ```sh
