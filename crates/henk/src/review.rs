@@ -42,6 +42,8 @@ pub struct ReviewRequest {
     pub requester: Option<String>,
     /// A comment to react 👀 to first: (id, is review comment).
     pub acknowledge: Option<(String, bool)>,
+    /// The run id to use, when the caller already announced one.
+    pub run: Option<RunId>,
 }
 
 /// How a review ended, for the caller.
@@ -65,7 +67,7 @@ pub async fn run_review(
 ) -> anyhow::Result<ReviewReport> {
     let platform = request.target.platform();
     let writer = app.writer(platform)?;
-    let run = new_run_id();
+    let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
 
     let (info, commit) = preflight(app, &writer, &request).await?;
