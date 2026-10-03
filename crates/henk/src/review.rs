@@ -4,17 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_agent::{Agent, AgentConfig, StopCause, ToolSet, Verdict, mcp_tools, prompts};
+use henk_agent::{AgentConfig, ToolSet, prompts};
 use henk_domain::allowlist::Platform;
 use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, LaneOutcome, LaneResult, LaneSpec, ReviewOutcome};
 use henk_domain::run::{RunId, RunKind};
-use henk_domain::scope::{self, Scope};
+use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
-use henk_mcp::{McpSession, NameMap};
+use henk_mcp::McpSession;
 use henk_platform::{PlatformWriter, PullRequestState, ReviewTarget};
-use henk_store::{LaneStatus, NewRun, RunStatus};
+use henk_session::{SessionSpec, model_id, platform_tools, run_session};
+use henk_store::{NewRun, RunStatus};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -338,7 +339,7 @@ async fn spawn_lanes(
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
-        let agent = build_lane(
+        let spec = build_lane(
             app,
             lane,
             session,
@@ -353,67 +354,22 @@ async fn spawn_lanes(
         )
         .await?;
         let lane_name = lane.name.clone();
-        let model_name = agent.model_name().to_owned();
-        app.store.start_lane(run, lane_name.as_str(), &model_name)?;
         let store = Arc::clone(&app.store);
         let run_id = run.clone();
         let cancel = cancel.clone();
-        let number = target.number;
-        let platform = target.platform();
-        let short = commit.short().to_owned();
         set.spawn(async move {
-            let opening = ChatMessage::user(format!(
-                "Review {} {} at commit {}. Read the diff first.",
-                kind_name(platform),
-                target_ref(platform, number),
-                short
-            ));
-            let outcome = agent.run(vec![opening], cancel).await;
-            let (status, lane_outcome, error) = match &outcome.stop {
-                StopCause::EndTurn | StopCause::MaxTurns => {
-                    (LaneStatus::Finished, LaneOutcome::Finished, None)
-                }
-                StopCause::Timeout => (
-                    LaneStatus::Dropped,
-                    LaneOutcome::Dropped,
-                    Some("timed out".to_owned()),
-                ),
-                StopCause::Cancelled => (
-                    LaneStatus::Dropped,
-                    LaneOutcome::Dropped,
-                    Some("cancelled".to_owned()),
-                ),
-                StopCause::ModelError(e) => (
-                    LaneStatus::Dropped,
-                    LaneOutcome::Dropped,
-                    Some(e.to_string()),
-                ),
+            let outcome = run_session(&store, &run_id, spec, cancel).await;
+            let lane_outcome = if outcome.finished() {
+                LaneOutcome::Finished
+            } else {
+                LaneOutcome::Dropped
             };
-            let _ = store.finish_lane(
-                &run_id,
-                lane_name.as_str(),
-                status,
-                u64::from(outcome.turns),
-                outcome.usage.input_tokens,
-                outcome.usage.output_tokens,
-                error.as_deref(),
-            );
-            let _ = store.event(
-                &run_id,
-                if error.is_some() { "warn" } else { "info" },
-                &format!(
-                    "lane {lane_name}: {:?}; last words: {}",
-                    outcome.stop,
-                    outcome.final_text.chars().take(200).collect::<String>()
-                ),
-            );
             LaneResult {
                 lane: lane_name,
                 outcome: lane_outcome,
             }
         });
     }
-
     Ok(set)
 }
 
@@ -468,26 +424,12 @@ async fn build_lane(
     title: &str,
     base_ref: &str,
     run: &RunId,
-) -> anyhow::Result<Agent> {
+) -> anyhow::Result<SessionSpec> {
     let platform = target.platform();
     let model = app.model(lane.model.as_str())?;
-
-    let guard_scope = scope.clone();
-    let guard: henk_agent::Guard = Arc::new(move |tool: &str, args: &serde_json::Value| {
-        match scope::guard(platform, tool, args, &guard_scope) {
-            scope::Verdict::Allow(rewritten) => Verdict::Allow(rewritten),
-            scope::Verdict::Deny(reason) => Verdict::Deny(reason),
-        }
-    });
-    let mut names = NameMap::new();
-    let tools = mcp_tools(
-        Arc::clone(session),
-        &mut names,
-        |info| scope::is_exposed(platform, &info.name),
-        guard,
-    )
-    .await
-    .context("listing MCP tools")?;
+    let tools = platform_tools(Arc::clone(session), platform, scope.clone())
+        .await
+        .context("listing MCP tools")?;
     if tools.is_empty() {
         return Err(anyhow!(
             "the MCP server exposes none of the tools a review needs"
@@ -500,7 +442,7 @@ async fn build_lane(
     let context = Arc::new(LaneContext {
         run: run.clone(),
         lane: lane.name.clone(),
-        model: ModelId::parse(model.model().to_owned()).unwrap_or_else(|_| lane.model.clone()),
+        model: model_id(model.as_ref()),
         target: target.clone(),
         commit: commit.clone(),
         registry,
@@ -526,10 +468,23 @@ async fn build_lane(
             ],
         )
     );
-    let config = AgentConfig {
+    let limits = AgentConfig {
         max_turns: app.settings.review.lane_max_turns,
         timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
         ..AgentConfig::default()
     };
-    Ok(Agent::new(model, set, system, config))
+    let opening = ChatMessage::user(format!(
+        "Review {} {} at commit {}. Read the diff first.",
+        kind_name(platform),
+        target_ref(platform, target.number),
+        commit.short()
+    ));
+    Ok(SessionSpec {
+        name: lane.name.as_str().to_owned(),
+        model,
+        system,
+        opening: vec![opening],
+        tools: set,
+        limits,
+    })
 }

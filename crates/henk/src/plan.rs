@@ -4,14 +4,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_agent::{Agent, AgentConfig, StopCause, ToolSet, Verdict, mcp_tools, prompts};
+use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::plan::{ChangeBudget, SessionEntry, extract_plan, with_plan_section};
 use henk_domain::run::{RunId, RunKind};
-use henk_domain::scope::{self, Scope};
+use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
-use henk_mcp::{McpSession, NameMap};
+use henk_mcp::McpSession;
 use henk_platform::{IssueTarget, IssueUpdate};
+use henk_session::{SessionSpec, model_id, platform_tools, run_session};
 use henk_store::{NewRun, RunStatus};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -101,9 +102,7 @@ pub async fn run_plan(
     let model = app.model(&planning.model)?;
     let context = Arc::new(PlanContext {
         run: run.clone(),
-        model: ModelId::parse(model.model().to_owned()).unwrap_or_else(|_| {
-            ModelId::parse("model").unwrap_or_else(|_| unreachable!("constant"))
-        }),
+        model: model_id(model.as_ref()),
         requester: Some(requester.get()),
         target: request.target.clone(),
         writer: Arc::clone(&writer),
@@ -241,22 +240,9 @@ async fn planner_tools(
     scope: &Scope,
     context: Arc<PlanContext>,
 ) -> anyhow::Result<ToolSet> {
-    let guard_scope = scope.clone();
-    let guard: henk_agent::Guard = Arc::new(move |tool: &str, args: &serde_json::Value| {
-        match scope::guard(platform, tool, args, &guard_scope) {
-            scope::Verdict::Allow(rewritten) => Verdict::Allow(rewritten),
-            scope::Verdict::Deny(reason) => Verdict::Deny(reason),
-        }
-    });
-    let mut names = NameMap::new();
-    let tools = mcp_tools(
-        Arc::clone(&session),
-        &mut names,
-        |info| scope::is_exposed(platform, &info.name),
-        guard,
-    )
-    .await
-    .context("listing MCP tools")?;
+    let tools = platform_tools(session, platform, scope.clone())
+        .await
+        .context("listing MCP tools")?;
     let mut set = ToolSet::new();
     for tool in tools {
         set.add(tool);
@@ -327,27 +313,24 @@ async fn plan_body(
             ],
         )
     );
-    let config = AgentConfig {
+    let limits = AgentConfig {
         max_turns: planning.max_turns,
         timeout: Duration::from_secs(planning.timeout_secs),
         ..AgentConfig::default()
     };
-    let agent = Agent::new(model, set, system, config);
     let opening = ChatMessage::user(format!(
         "Plan issue {reference}: {title}\n\nCurrent description (without any earlier plan section):\n\n{}",
         henk_domain::plan::body_without_plan(body)
     ));
-    let outcome = agent.run(vec![opening], cancel).await;
-    let _ = app.store.event(
-        &context.run,
-        "info",
-        &format!(
-            "planner: {:?} after {} turns; last words: {}",
-            outcome.stop,
-            outcome.turns,
-            outcome.final_text.chars().take(200).collect::<String>()
-        ),
-    );
+    let spec = SessionSpec {
+        name: "planner".to_owned(),
+        model,
+        system,
+        opening: vec![opening],
+        tools: set,
+        limits,
+    };
+    let outcome = run_session(&app.store, &context.run, spec, cancel).await;
     match outcome.stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
         StopCause::Timeout => Err(anyhow!(
