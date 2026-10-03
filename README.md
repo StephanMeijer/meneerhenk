@@ -12,6 +12,8 @@ voice (§5.5) are later passes.
 
 ## How it is built
 
+[ARCHITECTURE.md](ARCHITECTURE.md) has the diagrams: system context, crates, a review end to end, where a tool call goes, trust boundaries and deployment.
+
 Henk's process is an MCP *client*. The platforms are reached through
 external MCP servers that are not part of this codebase and run as child
 processes over stdio:
