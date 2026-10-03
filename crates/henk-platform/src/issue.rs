@@ -5,14 +5,7 @@ use henk_domain::allowlist::{Platform, RepoRef};
 use crate::error::PlatformError;
 use crate::writer::PostedComment;
 
-/// One issue.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IssueTarget {
-    /// Repository.
-    pub repo: RepoRef,
-    /// Number (GitLab: iid).
-    pub number: u64,
-}
+pub use henk_domain::plan::IssueTarget;
 
 /// What a planner needs to know about an issue.
 #[derive(Debug, Clone, PartialEq, Eq)]

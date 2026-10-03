@@ -580,6 +580,7 @@ dependencies = [
  "clap",
  "henk-agent",
  "henk-domain",
+ "henk-events",
  "henk-llm",
  "henk-mcp",
  "henk-platform",

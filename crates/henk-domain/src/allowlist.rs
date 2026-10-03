@@ -45,7 +45,7 @@ pub enum RepoRefError {
 /// On GitHub `owner` is a user or organisation. On GitLab it is the full
 /// namespace path, so `9xxlab/tools/cli` has owner `9xxlab/tools` and name
 /// `cli`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RepoRef {
     platform: Platform,
     owner: String,

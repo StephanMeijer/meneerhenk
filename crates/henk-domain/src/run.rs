@@ -71,6 +71,51 @@ impl fmt::Display for RunId {
     }
 }
 
+/// The identifier of one inbound event: something a hook received and the
+/// bus delivered. Recorded locally next to the runs it led to (§8.6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct EventId(String);
+
+impl EventId {
+    /// Validates an event id. It must be non-empty and free of whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError`] for an empty or unprintable id.
+    pub fn parse(value: impl Into<String>) -> Result<Self, TokenError> {
+        let value = value.into();
+        validate_token(&value)?;
+        Ok(Self(value))
+    }
+
+    /// The id as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EventId {
+    type Error = TokenError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<EventId> for String {
+    fn from(id: EventId) -> Self {
+        id.0
+    }
+}
+
+impl fmt::Display for EventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The kinds of run (§1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

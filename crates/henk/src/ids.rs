@@ -1,6 +1,6 @@
 //! Run ids: `r-YYYYMMDD-xxxxxxxx`.
 
-use henk_domain::run::RunId;
+use henk_domain::run::{EventId, RunId};
 use rand::Rng as _;
 use time::OffsetDateTime;
 
@@ -16,6 +16,21 @@ pub fn new_run_id() -> RunId {
     );
     RunId::parse(text).unwrap_or_else(|_| {
         RunId::parse("r-invalid").unwrap_or_else(|_| unreachable!("constant id is valid"))
+    })
+}
+
+/// A fresh event id: `e-YYYYMMDD-xxxxxxxx`.
+pub fn new_event_id() -> EventId {
+    let now = OffsetDateTime::now_utc();
+    let random: u32 = rand::rng().random();
+    let text = format!(
+        "e-{:04}{:02}{:02}-{random:08x}",
+        now.year(),
+        u8::from(now.month()),
+        now.day()
+    );
+    EventId::parse(text).unwrap_or_else(|_| {
+        EventId::parse("e-invalid").unwrap_or_else(|_| unreachable!("constant id is valid"))
     })
 }
 

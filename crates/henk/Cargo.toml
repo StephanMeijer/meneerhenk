@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 henk-domain = { workspace = true }
+henk-events = { workspace = true }
 henk-llm = { workspace = true }
 henk-mcp = { workspace = true }
 henk-agent = { workspace = true }

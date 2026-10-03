@@ -3,6 +3,19 @@
 
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
+use crate::allowlist::RepoRef;
+
+/// One issue.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IssueTarget {
+    /// Repository.
+    pub repo: RepoRef,
+    /// Number (GitLab: iid).
+    pub number: u64,
+}
+
 /// The heading of the folded plan section.
 pub const PLAN_HEADING: &str = "Execution Plan by Meneer Henk";
 

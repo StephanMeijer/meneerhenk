@@ -11,8 +11,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use henk_domain::run::RunId;
+use henk_events::{Event, EventKind, EventSource, parse_github, parse_gitlab};
 use henk_platform::webhook::{verify_github_signature, verify_gitlab_token};
-use henk_platform::{parse_github, parse_gitlab};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
 use crate::dispatch::{Dispatched, Dispatcher};
+use crate::ids::new_event_id;
 use crate::review::ReviewRequest;
 
 /// What every handler can reach.
@@ -174,9 +175,16 @@ async fn github_webhook(
             return (StatusCode::BAD_REQUEST, format!("not JSON: {error}")).into_response();
         }
     };
-    let parsed = parse_github(&event, &payload);
-    info!(%event, %delivery, ?parsed, "GitHub webhook");
-    dispatch_in_background(shared, parsed);
+    let kind = parse_github(&event, &payload);
+    let event = Event {
+        id: new_event_id(),
+        received_at: now_rfc3339(),
+        source: EventSource::GitHubWebhook { delivery },
+        kind,
+        payload: Some(payload),
+    };
+    info!(event = %event.id, kind = event.kind.name(), "GitHub webhook");
+    dispatch_in_background(shared, event);
     StatusCode::ACCEPTED.into_response()
 }
 
@@ -208,15 +216,29 @@ async fn gitlab_webhook(
             return (StatusCode::BAD_REQUEST, format!("not JSON: {error}")).into_response();
         }
     };
-    let parsed = parse_gitlab(&event, &payload);
-    info!(%event, ?parsed, "GitLab webhook");
-    dispatch_in_background(shared, parsed);
+    let kind = parse_gitlab(&event, &payload);
+    let event = Event {
+        id: new_event_id(),
+        received_at: now_rfc3339(),
+        source: EventSource::GitLabWebhook { event },
+        kind,
+        payload: Some(payload),
+    };
+    info!(event = %event.id, kind = event.kind.name(), "GitLab webhook");
+    dispatch_in_background(shared, event);
     StatusCode::ACCEPTED.into_response()
 }
 
-fn dispatch_in_background(shared: Arc<Shared>, event: henk_platform::IncomingEvent) {
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+fn dispatch_in_background(shared: Arc<Shared>, event: Event) {
     tokio::spawn(async move {
-        match shared.dispatcher.handle(event).await {
+        let kind: EventKind = event.kind;
+        match shared.dispatcher.handle(kind).await {
             Dispatched::Ignored(reason) => info!(%reason, "event ignored"),
             Dispatched::Review(decision) => info!(?decision, "review dispatched"),
             Dispatched::Greeted => info!("greeted"),
