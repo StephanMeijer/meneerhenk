@@ -583,6 +583,7 @@ dependencies = [
  "henk-llm",
  "henk-mcp",
  "henk-platform",
+ "henk-session",
  "henk-store",
  "hmac",
  "http-body-util",
@@ -629,6 +630,20 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "henk-events"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "henk-domain",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -684,6 +699,22 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "henk-session"
+version = "0.1.0"
+dependencies = [
+ "henk-agent",
+ "henk-domain",
+ "henk-llm",
+ "henk-mcp",
+ "henk-store",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

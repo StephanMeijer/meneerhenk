@@ -5,6 +5,8 @@ members = [
   "crates/henk-llm",
   "crates/henk-mcp",
   "crates/henk-agent",
+  "crates/henk-session",
+  "crates/henk-events",
   "crates/henk-platform",
   "crates/henk-store",
   "crates/henk",
@@ -23,6 +25,8 @@ henk-domain = { path = "crates/henk-domain" }
 henk-llm = { path = "crates/henk-llm" }
 henk-mcp = { path = "crates/henk-mcp" }
 henk-agent = { path = "crates/henk-agent" }
+henk-session = { path = "crates/henk-session" }
+henk-events = { path = "crates/henk-events" }
 henk-platform = { path = "crates/henk-platform" }
 henk-store = { path = "crates/henk-store" }
 
