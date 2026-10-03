@@ -190,7 +190,7 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
             }
             Rule::MergeRequestIid => {
                 if let Scope::Review { number, .. } = scope {
-                    args.insert("merge_request_iid".into(), json!(number));
+                    args.insert("merge_request_iid".into(), json!(number.to_string()));
                 } else if args.get("merge_request_iid").is_none() {
                     return Verdict::Deny(format!("{tool} needs merge_request_iid"));
                 }
@@ -371,7 +371,7 @@ mod tests {
                 &json!({"project_id": "1"}),
                 &scope
             ),
-            Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": 5}))
+            Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5"}))
         );
     }
 

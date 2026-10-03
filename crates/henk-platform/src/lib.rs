@@ -8,11 +8,14 @@
 pub mod error;
 pub mod events;
 pub mod github;
+pub mod gitlab;
 pub mod webhook;
 pub mod writer;
 
 pub use error::PlatformError;
-pub use events::{CommentKind, IncomingEvent, PullRequestAction, Sender};
+pub use events::{
+    CommentKind, IncomingEvent, PullRequestAction, Sender, parse_github, parse_gitlab,
+};
 pub use writer::{
     DiffSide, ExistingFinding, ExistingSummary, PlatformWriter, PostedComment, PullRequestInfo,
     PullRequestState, ReviewHandle, ReviewTarget,

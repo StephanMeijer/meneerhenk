@@ -27,6 +27,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+henk-mcp = { workspace = true, features = ["testing"] }
+rmcp = { workspace = true, features = ["server"] }
 tokio = { workspace = true }
 wiremock = { workspace = true }
 

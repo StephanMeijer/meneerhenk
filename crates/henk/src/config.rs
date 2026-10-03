@@ -769,6 +769,8 @@ github_owners = ["docspec"]
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(settings.lanes.len(), 2);
         assert!(settings.github.is_some());
+        assert!(settings.gitlab.is_some());
+        assert_eq!(settings.mcp.len(), 3);
         assert!(settings.models.contains_key("proxy-fast"));
         let scratch = RepoRef::parse(Platform::GitHub, "StephanMeijer/scratch-repo").unwrap();
         assert!(settings.allowlist.allows(&scratch));

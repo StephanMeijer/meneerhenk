@@ -43,6 +43,13 @@ private_key_path_env = "GITHUB_APP_PRIVATE_KEY_PATH"
 bot_login = "meneer-henk[bot]"
 mcp_server = "github"
 
+[gitlab]
+api_url = "https://gitlab.com/api/v4"
+username = "meneerhenk"
+token_env = "GITLAB_PERSONAL_ACCESS_TOKEN"
+mcp_server = "gitlab"
+write_mcp_server = "gitlab-write"
+
 # Models. Each lane and the planner refer to one of these by id.
 [models.proxy-fast]
 provider = "open_ai"
@@ -86,6 +93,22 @@ command = "github-mcp-server"
 args = ["stdio"]
 env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels", GITHUB_APP_ID = "123456", GITHUB_APP_INSTALLATION_ID = "7654321" }
 pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
+call_timeout_secs = 60
+
+# GitLab reads for lanes: read-only mode, no write tool exists in the session.
+[mcp.gitlab]
+command = "npx"
+args = ["-y", "@zereight/mcp-gitlab@2.1.68"]
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "readonly" }
+pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
+call_timeout_secs = 60
+
+# GitLab writes, driven by Henk's own code only (never by a model).
+[mcp.gitlab-write]
+command = "npx"
+args = ["-y", "@zereight/mcp-gitlab@2.1.68"]
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels" }
+pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
 call_timeout_secs = 60
 
 # People Henk knows by id (spec §2, "Known people").

@@ -158,7 +158,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
 async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
-    let app = App::build(settings, None)?;
+    let app = App::build(settings, None).await?;
     let target = parse_pull_request_url(url)?;
     let commit = commit
         .map(|c| henk_domain::review::CommitSha::parse(&c))
@@ -192,7 +192,7 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
 
 async fn cmd_llm_probe(config: &Path, model: &str, prompt: String) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
-    let app = App::build(settings, Some(Path::new(":memory:")))?;
+    let app = App::build(settings, Some(Path::new(":memory:"))).await?;
     let client = app.model(model)?;
     let completion = client
         .complete(&CompletionRequest {
@@ -257,23 +257,45 @@ async fn cmd_mcp_probe(config: &Path, server: &str, show: &[String]) -> anyhow::
     Ok(())
 }
 
-/// Parses `https://github.com/owner/repo/pull/7`.
+/// Parses `https://github.com/owner/repo/pull/7` or
+/// `https://gitlab.example/group/sub/project/-/merge_requests/5`.
 fn parse_pull_request_url(url: &str) -> anyhow::Result<ReviewTarget> {
-    let rest = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-        .ok_or_else(|| anyhow!("only github.com pull request URLs are supported for now"))?;
-    let mut parts = rest.trim_end_matches('/').split('/');
-    let (Some(owner), Some(repo), Some("pull"), Some(number)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(anyhow!("expected https://github.com/owner/repo/pull/N"));
-    };
-    let number: u64 = number.parse().context("pull request number")?;
-    Ok(ReviewTarget {
-        repo: RepoRef::parse(Platform::GitHub, &format!("{owner}/{repo}"))?,
-        number,
-    })
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| anyhow!("expected an https URL"))?;
+    let (host, path) = without_scheme
+        .split_once('/')
+        .ok_or_else(|| anyhow!("URL has no path"))?;
+    let path = path.trim_end_matches('/');
+    if host == "github.com" {
+        let mut parts = path.split('/');
+        let (Some(owner), Some(repo), Some("pull"), Some(number)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(anyhow!("expected https://github.com/owner/repo/pull/N"));
+        };
+        let number: u64 = number.parse().context("pull request number")?;
+        return Ok(ReviewTarget {
+            repo: RepoRef::parse(Platform::GitHub, &format!("{owner}/{repo}"))?,
+            number,
+        });
+    }
+    if let Some((project, number)) = path.split_once("/-/merge_requests/") {
+        let number: u64 = number
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .parse()
+            .context("merge request iid")?;
+        return Ok(ReviewTarget {
+            repo: RepoRef::parse(Platform::GitLab, project)?,
+            number,
+        });
+    }
+    Err(anyhow!(
+        "expected a GitHub pull request URL or a GitLab merge request URL"
+    ))
 }
 
 #[cfg(test)]
@@ -290,6 +312,11 @@ mod tests {
         assert_eq!(target.repo.path(), "StephanMeijer/scratch-repo");
         assert_eq!(target.number, 12);
         assert!(parse_pull_request_url("https://github.com/a/b/issues/1").is_err());
-        assert!(parse_pull_request_url("https://gitlab.com/a/b/-/merge_requests/1").is_err());
+        let mr = parse_pull_request_url("https://gitlab.com/9xxlab/tools/cli/-/merge_requests/5")
+            .unwrap();
+        assert_eq!(mr.repo.path(), "9xxlab/tools/cli");
+        assert_eq!(mr.repo.platform(), Platform::GitLab);
+        assert_eq!(mr.number, 5);
+        assert!(parse_pull_request_url("https://gitlab.com/a/b/-/issues/1").is_err());
     }
 }

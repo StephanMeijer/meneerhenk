@@ -9,6 +9,7 @@ use henk_llm::{ModelClient, client_for};
 use henk_mcp::{McpServerConfig, RmcpSession};
 use henk_platform::PlatformWriter;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
+use henk_platform::gitlab::GitLabWriter;
 use henk_store::RunStore;
 
 use crate::config::Settings;
@@ -23,6 +24,8 @@ pub struct App {
     pub models: BTreeMap<String, Arc<dyn ModelClient>>,
     /// The GitHub writer, when GitHub is configured.
     pub github: Option<Arc<GitHubWriter>>,
+    /// The GitLab writer over its write-mode MCP session, when configured.
+    pub gitlab: Option<Arc<GitLabWriter>>,
 }
 
 impl std::fmt::Debug for App {
@@ -46,7 +49,7 @@ impl App {
     /// # Errors
     ///
     /// Returns an error naming the first missing secret or unusable setting.
-    pub fn build(settings: Settings, database: Option<&Path>) -> anyhow::Result<Self> {
+    pub async fn build(settings: Settings, database: Option<&Path>) -> anyhow::Result<Self> {
         henk_llm::ensure_tls_provider();
         let store = match database {
             Some(path) => {
@@ -85,11 +88,28 @@ impl App {
             None => None,
         };
 
+        let gitlab = match &settings.gitlab {
+            Some(gitlab) => {
+                let config = settings.mcp.get(&gitlab.write_mcp_server).ok_or_else(|| {
+                    anyhow!("MCP server {:?} is not configured", gitlab.write_mcp_server)
+                })?;
+                let session = RmcpSession::connect(&gitlab.write_mcp_server, config, env_var)
+                    .await
+                    .with_context(|| format!("MCP server {}", gitlab.write_mcp_server))?;
+                Some(Arc::new(GitLabWriter::new(
+                    Arc::new(session),
+                    gitlab.username.clone(),
+                )))
+            }
+            None => None,
+        };
+
         Ok(Self {
             settings,
             store: Arc::new(store),
             models,
             github,
+            gitlab,
         })
     }
 
@@ -144,7 +164,11 @@ impl App {
                 .clone()
                 .map(|w| w as Arc<dyn PlatformWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
-            henk_domain::allowlist::Platform::GitLab => Err(anyhow!("GitLab is not configured")),
+            henk_domain::allowlist::Platform::GitLab => self
+                .gitlab
+                .clone()
+                .map(|w| w as Arc<dyn PlatformWriter>)
+                .ok_or_else(|| anyhow!("GitLab is not configured")),
         }
     }
 

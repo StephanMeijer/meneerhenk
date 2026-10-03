@@ -351,9 +351,12 @@ async fn spawn_lanes(
         let run_id = run.clone();
         let cancel = cancel.clone();
         let number = target.number;
+        let platform = target.platform();
         set.spawn(async move {
             let opening = ChatMessage::user(format!(
-                "Review pull request #{number} at commit {}. Read the diff first.",
+                "Review {} {} at commit {}. Read the diff first.",
+                kind_name(platform),
+                target_ref(platform, number),
                 commit_short(&run_id, &model_name)
             ));
             let outcome = agent.run(vec![opening], cancel).await;
@@ -427,6 +430,22 @@ async fn fold_outdated(
     }
 }
 
+/// "pull request" or "merge request".
+fn kind_name(platform: Platform) -> &'static str {
+    match platform {
+        Platform::GitHub => "pull request",
+        Platform::GitLab => "merge request",
+    }
+}
+
+/// "#7" or "!7".
+fn target_ref(platform: Platform, number: u64) -> String {
+    match platform {
+        Platform::GitHub => format!("#{number}"),
+        Platform::GitLab => format!("!{number}"),
+    }
+}
+
 fn commit_short(_run: &RunId, _model: &str) -> String {
     // Placeholder kept trivially simple; the commit is in the system prompt.
     "the reviewed commit".to_owned()
@@ -494,7 +513,8 @@ async fn build_lane(
         prompts::render(
             prompts::REVIEW_LANE,
             &[
-                ("number", &target.number.to_string()),
+                ("kind", kind_name(platform)),
+                ("ref", &target_ref(platform, target.number)),
                 ("repo", &target.repo.path()),
                 ("commit", commit.as_str()),
                 ("base", base_ref),

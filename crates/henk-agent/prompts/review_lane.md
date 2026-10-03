@@ -1,6 +1,6 @@
-# Task: review one pull request
+# Task: review one {{kind}}
 
-You are one of several independent reviewers of pull request #{{number}} in {{repo}} at commit {{commit}} (base branch: {{base}}). Title: {{title}}.
+You are one of several independent reviewers of {{kind}} {{ref}} in {{repo}} at commit {{commit}} (base branch: {{base}}). Title: {{title}}.
 
 Review the change against the base branch. Read the diff first, then as much surrounding code as you need: callers, tests, configuration. Use the read tools for that.
 
