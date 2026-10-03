@@ -59,7 +59,11 @@ impl GitLabWriter {
 
     /// Calls a tool and parses its text as JSON. A result the server flags
     /// as an error becomes [`PlatformError::ToolFailed`].
-    async fn call(&self, tool: &str, arguments: Value) -> Result<Value, PlatformError> {
+    pub(crate) async fn call_tool(
+        &self,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, PlatformError> {
         let outcome = self.session.call_tool(tool, arguments).await?;
         if outcome.is_error {
             return Err(PlatformError::ToolFailed {
@@ -81,7 +85,7 @@ impl GitLabWriter {
     }
 
     async fn merge_request(&self, target: &ReviewTarget) -> Result<Value, PlatformError> {
-        self.call("get_merge_request", Value::Object(Self::base_args(target)))
+        self.call_tool("get_merge_request", Value::Object(Self::base_args(target)))
             .await
     }
 
@@ -109,7 +113,9 @@ impl GitLabWriter {
             let mut args = Self::base_args(target);
             args.insert("per_page".into(), json!(100));
             args.insert("page".into(), json!(page));
-            let value = self.call("mr_discussions", Value::Object(args)).await?;
+            let value = self
+                .call_tool("mr_discussions", Value::Object(args))
+                .await?;
             let items: Vec<Value> = match value {
                 Value::Array(items) => items,
                 Value::Object(ref map) => map
@@ -200,7 +206,7 @@ impl PlatformWriter for GitLabWriter {
         let mut args = Self::base_args(target);
         args.insert("name".into(), json!("eyes"));
         if let Err(error) = self
-            .call("create_merge_request_emoji_reaction", Value::Object(args))
+            .call_tool("create_merge_request_emoji_reaction", Value::Object(args))
             .await
         {
             // Reacting twice is an error on GitLab; it is not worth failing a review over.
@@ -218,7 +224,7 @@ impl PlatformWriter for GitLabWriter {
         let mut args = Self::base_args(target);
         args.insert("note_id".into(), json!(comment_id));
         args.insert("name".into(), json!("eyes"));
-        self.call(
+        self.call_tool(
             "create_merge_request_note_emoji_reaction",
             Value::Object(args),
         )
@@ -353,7 +359,7 @@ impl PlatformWriter for GitLabWriter {
         args.insert("body".into(), json!(body));
         args.insert("position".into(), position);
         let created = self
-            .call("create_merge_request_thread", Value::Object(args))
+            .call_tool("create_merge_request_thread", Value::Object(args))
             .await?;
         let first = created.pointer("/notes/0").cloned().unwrap_or(Value::Null);
         let id = note_id(&first)
@@ -375,7 +381,7 @@ impl PlatformWriter for GitLabWriter {
         let mut args = Self::base_args(target);
         args.insert("note_id".into(), json!(comment_id));
         args.insert("body".into(), json!(body));
-        self.call("update_merge_request_note", Value::Object(args))
+        self.call_tool("update_merge_request_note", Value::Object(args))
             .await?;
         Ok(())
     }
@@ -388,7 +394,7 @@ impl PlatformWriter for GitLabWriter {
         let mut args = Self::base_args(target);
         args.insert("body".into(), json!(body));
         let created = self
-            .call("create_merge_request_note", Value::Object(args))
+            .call_tool("create_merge_request_note", Value::Object(args))
             .await?;
         let id =
             note_id(&created).ok_or_else(|| PlatformError::Decode("note without id".to_owned()))?;
@@ -412,7 +418,7 @@ impl PlatformWriter for GitLabWriter {
             args.insert("discussion_id".into(), json!(comment_id));
             args.insert("body".into(), json!(body));
             let created = self
-                .call("create_merge_request_discussion_note", Value::Object(args))
+                .call_tool("create_merge_request_discussion_note", Value::Object(args))
                 .await?;
             let id = note_id(&created)
                 .ok_or_else(|| PlatformError::Decode("reply without id".to_owned()))?;
@@ -464,7 +470,7 @@ impl PlatformWriter for GitLabWriter {
             "description": outcome.headline(),
             "target_url": run_link,
         });
-        self.call("create_commit_status", args).await?;
+        self.call_tool("create_commit_status", args).await?;
         Ok(())
     }
 }

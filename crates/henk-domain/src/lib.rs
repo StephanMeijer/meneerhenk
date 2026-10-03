@@ -13,6 +13,8 @@ pub mod finding;
 pub mod identity;
 pub mod mail;
 pub mod marker;
+pub mod plan;
+pub mod queue;
 pub mod review;
 pub mod run;
 pub mod scope;

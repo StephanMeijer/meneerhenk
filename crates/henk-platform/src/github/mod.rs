@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod app;
+pub mod issues;
 pub mod writer;
 
 pub use api::GitHubApi;
