@@ -9,11 +9,13 @@
 
 pub mod allowlist;
 pub mod discord;
+pub mod finding;
 pub mod identity;
 pub mod mail;
 pub mod marker;
 pub mod review;
 pub mod run;
+pub mod scope;
 pub mod text;
 
 /// Henk's full name as it appears in platform accounts and summaries.

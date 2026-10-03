@@ -1,8 +1,16 @@
 # Meneer Henk configuration. See docs/SPEC.md.
 #
-# No credential goes in this file (spec §8.4). Platform, mail and Discord
-# tokens are read from the environment by the tools that need them.
-# Identity is always an id, never a display name (spec §2).
+# No credential goes in this file (spec §8.4). Every secret is named by the
+# environment variable that holds it; the deployment fills those from
+# OpenBao. Identity is always an id, never a display name (spec §2).
+
+[server]
+bind = "127.0.0.1:8080"
+public_base_url = "https://henk.example.com"
+database_path = "/var/lib/henk/henk.db"
+github_webhook_secret_env = "HENK_GITHUB_WEBHOOK_SECRET"
+gitlab_webhook_token_env = "HENK_GITLAB_WEBHOOK_TOKEN"
+api_token_env = "HENK_API_TOKEN"
 
 [discord]
 # The one channel Henk works in.
@@ -26,6 +34,59 @@ github_repositories = ["StephanMeijer/scratch-repo"]
 github_owners = ["docspec", "NotedThat"]
 gitlab_projects = []
 gitlab_groups = ["9xxlab"]
+
+[github]
+# The GitHub App. Its private key path comes from the environment.
+app_id = 123456
+installation_id = 7654321
+private_key_path_env = "GITHUB_APP_PRIVATE_KEY_PATH"
+bot_login = "meneer-henk[bot]"
+mcp_server = "github"
+
+# Models. Each lane and the planner refer to one of these by id.
+[models.proxy-fast]
+provider = "open_ai"
+base_url = "https://llm3.9xx.nl/v1"
+api_key_env = "LLM3_API_KEY"
+model = "fast-model"
+max_tokens = 4096
+
+[models.claude]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-5-5"
+max_tokens = 4096
+
+[review]
+# Lanes are independent reviewers. Names appear in summaries when a lane
+# does not finish, so they must not name a model (spec §3.2).
+lanes = [
+  { name = "lane-a", model = "proxy-fast" },
+  { name = "lane-b", model = "claude" },
+]
+lane_timeout_secs = 600
+lane_max_turns = 40
+max_concurrent = 3
+github_drafts = false
+
+[planning]
+model = "claude"
+timeout_secs = 1200
+max_turns = 80
+change_budget = 20
+sub_issue_cap = 5
+# CLI and API plans run on behalf of this Team Lead.
+requester_id = 523456789012345678
+
+# External MCP servers. Henk is the client; nothing here is part of Henk.
+# The read session a lane sees: read-only toolsets, no write tool at all.
+[mcp.github]
+command = "github-mcp-server"
+args = ["stdio"]
+env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels", GITHUB_APP_ID = "123456", GITHUB_APP_INSTALLATION_ID = "7654321" }
+pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
+call_timeout_secs = 60
 
 # People Henk knows by id (spec §2, "Known people").
 [[people]]

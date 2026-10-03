@@ -57,6 +57,45 @@ impl fmt::Display for ModelId {
     }
 }
 
+/// What kind of comment a marker sits on (§3.3 folding rules depend on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerKind {
+    /// A line comment with one problem (§3.2).
+    Finding,
+    /// The comment that closes a review (§3.3). Only the latest counts.
+    Summary,
+    /// A conversational reply or greeting (§3.4). Never folded.
+    Reply,
+    /// The plan written into an issue (§4).
+    Plan,
+    /// A statement that a run failed (§8.8).
+    Failure,
+}
+
+impl MarkerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Finding => "finding",
+            Self::Summary => "summary",
+            Self::Reply => "reply",
+            Self::Plan => "plan",
+            Self::Failure => "failure",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "finding" => Self::Finding,
+            "summary" => Self::Summary,
+            "reply" => Self::Reply,
+            "plan" => Self::Plan,
+            "failure" => Self::Failure,
+            _ => return None,
+        })
+    }
+}
+
 const OPEN: &str = "<!-- meneer-henk";
 const CLOSE: &str = "-->";
 
@@ -69,6 +108,8 @@ pub struct Marker {
     pub model: ModelId,
     /// Who asked for it, when the write came from Discord (§5.3).
     pub requested_by: Option<DiscordUserId>,
+    /// What kind of comment this is. Older markers have none.
+    pub kind: Option<MarkerKind>,
 }
 
 impl Marker {
@@ -78,6 +119,9 @@ impl Marker {
         let mut out = format!("{OPEN} run={} model={}", self.run, self.model);
         if let Some(user) = self.requested_by {
             let _ = write!(out, " for={user}");
+        }
+        if let Some(kind) = self.kind {
+            let _ = write!(out, " kind={}", kind.as_str());
         }
         out.push(' ');
         out.push_str(CLOSE);
@@ -108,12 +152,14 @@ impl Marker {
         let mut run = None;
         let mut model = None;
         let mut requested_by = None;
+        let mut kind = None;
         for field in fields.split_whitespace() {
             let (key, value) = field.split_once('=')?;
             match key {
                 "run" => run = RunId::parse(value).ok(),
                 "model" => model = ModelId::parse(value).ok(),
                 "for" => requested_by = Some(DiscordUserId::new(value.parse().ok()?)),
+                "kind" => kind = MarkerKind::parse(value),
                 _ => {}
             }
         }
@@ -121,6 +167,7 @@ impl Marker {
             run: run?,
             model: model?,
             requested_by,
+            kind,
         })
     }
 
@@ -142,6 +189,7 @@ mod tests {
             run: RunId::parse("run-1").unwrap_or_else(|e| panic!("{e}")),
             model: ModelId::parse("lane-a/model-x").unwrap_or_else(|e| panic!("{e}")),
             requested_by: requested_by.map(DiscordUserId::new),
+            kind: None,
         }
     }
 
@@ -182,6 +230,23 @@ mod tests {
             Marker::parse("<!-- meneer-henk run=x model=y for=abc -->"),
             None,
             "bad id"
+        );
+    }
+
+    #[test]
+    fn kind_round_trips_and_old_markers_still_parse() {
+        let mut with_kind = marker(None);
+        with_kind.kind = Some(MarkerKind::Summary);
+        let rendered = with_kind.render();
+        assert!(rendered.ends_with("kind=summary -->"));
+        assert_eq!(Marker::parse(&rendered), Some(with_kind));
+        assert_eq!(
+            Marker::parse("<!-- meneer-henk run=run-1 model=lane-a/model-x -->"),
+            Some(marker(None))
+        );
+        assert_eq!(
+            Marker::parse("<!-- meneer-henk run=r model=m kind=bogus -->").and_then(|m| m.kind),
+            None
         );
     }
 

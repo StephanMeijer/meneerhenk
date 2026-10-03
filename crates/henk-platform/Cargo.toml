@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 henk-domain = { workspace = true }
+henk-llm = { workspace = true }
 henk-mcp = { workspace = true }
 async-trait = { workspace = true }
 hmac = { workspace = true }
@@ -26,6 +27,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

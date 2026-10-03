@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::allowlist::Platform;
 use crate::identity::Requester;
+use crate::marker::ModelId;
 use crate::{GITHUB_HANDLE, GITLAB_HANDLE};
 
 /// Why a commit sha was rejected.
@@ -115,6 +116,8 @@ pub enum ReviewTrigger {
     Command,
     /// A colleague asked in Discord.
     Discord(Requester),
+    /// A request through the CLI or the HTTP API, on behalf of a Team Lead.
+    Api(Requester),
 }
 
 /// One independent reviewer inside a review (§1.1, §3.2).
@@ -141,6 +144,15 @@ impl fmt::Display for LaneName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// A configured lane: a name the summary may show, and the model behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaneSpec {
+    /// Shown when the lane does not finish. Must not name the model (§3.2).
+    pub name: LaneName,
+    /// The configured model id this lane runs on.
+    pub model: ModelId,
 }
 
 /// How one lane ended (§3.3).

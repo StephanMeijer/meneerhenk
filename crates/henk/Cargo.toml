@@ -21,6 +21,7 @@ henk-platform = { workspace = true }
 henk-store = { workspace = true }
 
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 rand = { workspace = true }

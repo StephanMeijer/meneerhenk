@@ -575,6 +575,7 @@ name = "henk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "henk-agent",
@@ -620,6 +621,7 @@ name = "henk-domain"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -661,6 +663,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "henk-domain",
+ "henk-llm",
  "henk-mcp",
  "hmac",
  "reqwest",
