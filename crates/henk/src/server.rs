@@ -1,44 +1,50 @@
-//! The HTTP server: webhooks, the API for reviews and plans, run pages.
+//! The HTTP server: composition of hooks, listeners and the bus, plus the
+//! pages that make runs and events traceable (§8.6).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use axum::Router;
-use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
-use henk_domain::run::RunId;
-use henk_events::{Event, EventBus, EventSource, parse_github, parse_gitlab};
-use henk_platform::webhook::{verify_github_signature, verify_gitlab_token};
-use secrecy::{ExposeSecret as _, SecretString};
-use serde::Deserialize;
-use serde_json::{Value, json};
-use subtle::ConstantTimeEq as _;
+use axum::routing::get;
+use henk_domain::run::{EventId, RunId};
+use henk_events::{EventBus, Hook};
+use secrecy::SecretString;
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
-use crate::ids::new_event_id;
+use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
 use crate::listeners::{MentionListener, PlanListener, ReviewListener, Writers};
 use crate::recorder::StoreRecorder;
-use crate::review::ReviewRequest;
 
-/// What every handler can reach.
+/// What the server's own pages can reach.
 pub struct Shared {
     coordinator: Arc<Coordinator>,
     bus: Arc<EventBus>,
-    github_secret: Option<SecretString>,
-    gitlab_token: Option<SecretString>,
-    api_token: Option<SecretString>,
 }
 
-/// Builds the router. Secrets come from the environment variables the
-/// settings name; a missing one disables its route with a clear status.
-pub fn router(app: &Arc<App>) -> Router {
+/// The composed server: the router and the hooks that may need to run.
+pub struct Composed {
+    /// Every route.
+    pub router: Router,
+    /// The hooks, for their long-running parts.
+    pub hooks: Vec<Arc<dyn Hook>>,
+    /// The bus, for tests and probes.
+    pub bus: Arc<EventBus>,
+}
+
+/// Builds the server from the application. Secrets come from the
+/// environment variables the settings name; a missing one disables its
+/// routes with a clear status.
+#[must_use]
+pub fn compose(app: &Arc<App>) -> Composed {
     let server = &app.settings.server;
     let github_secret = env_var(&server.github_webhook_secret_env).map(SecretString::from);
     let gitlab_token = env_var(&server.gitlab_webhook_token_env).map(SecretString::from);
@@ -61,16 +67,17 @@ pub fn router(app: &Arc<App>) -> Router {
             );
         }
     }
-    router_with_secrets(app, github_secret, gitlab_token, api_token)
+    compose_with_secrets(app, github_secret, gitlab_token, api_token)
 }
 
-/// Builds the router with explicit secrets, for tests and for `router`.
-pub fn router_with_secrets(
+/// Builds the server with explicit secrets, for tests and for [`compose`].
+#[must_use]
+pub fn compose_with_secrets(
     app: &Arc<App>,
     github_secret: Option<SecretString>,
     gitlab_token: Option<SecretString>,
     api_token: Option<SecretString>,
-) -> Router {
+) -> Composed {
     let settings = Arc::new(app.settings.clone());
     let writers: Arc<dyn Writers> = Arc::clone(app) as Arc<dyn Writers>;
     let coordinator = Arc::new(Coordinator::new(Arc::clone(app)));
@@ -85,45 +92,57 @@ pub fn router_with_secrets(
             Arc::new(PlanListener::new(Arc::clone(&coordinator))),
         ],
     ));
+    let requester = app
+        .settings
+        .planning
+        .as_ref()
+        .map(|p| p.requester_id.to_string());
+    let github = Arc::new(GitHubHook::new(github_secret, Arc::clone(&bus)));
+    let gitlab = Arc::new(GitLabHook::new(gitlab_token, Arc::clone(&bus)));
+    let api = Arc::new(ApiHook::new(api_token, requester, Arc::clone(&bus)));
+
     let shared = Arc::new(Shared {
         coordinator,
-        bus,
-        github_secret,
-        gitlab_token,
-        api_token,
+        bus: Arc::clone(&bus),
     });
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/runs/{id}", get(run_page))
-        .route("/webhooks/github", post(github_webhook))
-        .route("/webhooks/gitlab", post(gitlab_webhook))
-        .route("/review", post(api_review))
-        .route("/plan", post(api_plan))
-        .layer(TraceLayer::new_for_http())
+        .route("/events/{id}", get(event_page))
         .with_state(shared)
+        .merge(Arc::clone(&github).routes())
+        .merge(Arc::clone(&gitlab).routes())
+        .merge(Arc::clone(&api).routes())
+        .layer(TraceLayer::new_for_http());
+    let hooks: Vec<Arc<dyn Hook>> = vec![github, gitlab, api];
+    Composed { router, hooks, bus }
 }
 
-async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
-    axum::Json(json!({"status": "ok", "active_reviews": shared.coordinator.active_reviews()}))
-        .into_response()
-}
-
-/// Serves until SIGINT or SIGTERM.
+/// Serves until SIGINT or SIGTERM. Hooks with long-running parts run
+/// alongside and are cancelled on shutdown.
 ///
 /// # Errors
 ///
 /// Returns an error when the bind address is unusable.
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let bind = app.settings.server.bind.clone();
-    let router = router(&app);
+    let composed = compose(&app);
+    let cancel = CancellationToken::new();
+    let mut hook_tasks = tokio::task::JoinSet::new();
+    for hook in composed.hooks {
+        info!(hook = hook.name(), "hook ready");
+        hook_tasks.spawn(hook.run(Arc::clone(&composed.bus), cancel.clone()));
+    }
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    info!(%bind, "listening");
-    axum::serve(listener, router)
+    info!(%bind, listeners = ?composed.bus.listeners().collect::<Vec<_>>(), "listening");
+    axum::serve(listener, composed.router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serving")?;
+    cancel.cancel();
+    while hook_tasks.join_next().await.is_some() {}
     info!("stopped");
     Ok(())
 }
@@ -152,212 +171,13 @@ async fn shutdown_signal() {
     }
 }
 
-fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok())
-}
-
-async fn github_webhook(
-    State(shared): State<Arc<Shared>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let Some(secret) = &shared.github_secret else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub webhook secret is not configured",
-        )
-            .into_response();
-    };
-    if !verify_github_signature(
-        secret.expose_secret().as_bytes(),
-        header_str(&headers, "x-hub-signature-256"),
-        &body,
-    ) {
-        warn!("GitHub webhook with a bad signature");
-        return (StatusCode::UNAUTHORIZED, "bad signature").into_response();
-    }
-    let event = header_str(&headers, "x-github-event")
-        .unwrap_or("")
-        .to_owned();
-    let delivery = header_str(&headers, "x-github-delivery")
-        .unwrap_or("")
-        .to_owned();
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, format!("not JSON: {error}")).into_response();
-        }
-    };
-    let kind = parse_github(&event, &payload);
-    let event = Event {
-        id: new_event_id(),
-        received_at: now_rfc3339(),
-        source: EventSource::GitHubWebhook { delivery },
-        kind,
-        payload: Some(payload),
-    };
-    info!(event = %event.id, kind = event.kind.name(), "GitHub webhook");
-    shared.bus.publish(event);
-    StatusCode::ACCEPTED.into_response()
-}
-
-async fn gitlab_webhook(
-    State(shared): State<Arc<Shared>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let Some(token) = &shared.gitlab_token else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitLab webhook token is not configured",
-        )
-            .into_response();
-    };
-    if !verify_gitlab_token(
-        token.expose_secret(),
-        header_str(&headers, "x-gitlab-token"),
-    ) {
-        warn!("GitLab webhook with a bad token");
-        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
-    let event = header_str(&headers, "x-gitlab-event")
-        .unwrap_or("")
-        .to_owned();
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(payload) => payload,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, format!("not JSON: {error}")).into_response();
-        }
-    };
-    let kind = parse_gitlab(&event, &payload);
-    let event = Event {
-        id: new_event_id(),
-        received_at: now_rfc3339(),
-        source: EventSource::GitLabWebhook { event },
-        kind,
-        payload: Some(payload),
-    };
-    info!(event = %event.id, kind = event.kind.name(), "GitLab webhook");
-    shared.bus.publish(event);
-    StatusCode::ACCEPTED.into_response()
-}
-
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
-
-fn unauthorized(shared: &Shared, headers: &HeaderMap) -> Option<Response> {
-    let Some(expected) = &shared.api_token else {
-        return Some(
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "API token is not configured",
-            )
-                .into_response(),
-        );
-    };
-    let given = header_str(headers, header::AUTHORIZATION.as_str())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if bool::from(given.as_bytes().ct_eq(expected.expose_secret().as_bytes())) {
-        None
-    } else {
-        Some((StatusCode::UNAUTHORIZED, "bad token").into_response())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ReviewBody {
-    url: String,
-    commit: Option<String>,
-}
-
-async fn api_review(
-    State(shared): State<Arc<Shared>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Some(response) = unauthorized(&shared, &headers) {
-        return response;
-    }
-    let request: ReviewBody = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, format!("bad body: {error}")).into_response();
-        }
-    };
-    let target = match crate::urls::parse_pull_request_url(&request.url) {
-        Ok(target) => target,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    let app = shared.coordinator.app();
-    let writer = match app.writer(target.platform()) {
-        Ok(writer) => writer,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    let commit = match request.commit {
-        Some(sha) => match henk_domain::review::CommitSha::parse(&sha) {
-            Ok(sha) => sha,
-            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-        },
-        None => match writer.pull_request(&target).await {
-            Ok(info) => info.head,
-            Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
-        },
-    };
-    let requester = app
-        .settings
-        .planning
-        .as_ref()
-        .map(|p| p.requester_id.to_string());
-    let (decision, run) = shared.coordinator.submit_review(
-        ReviewRequest {
-            target,
-            commit: Some(commit.clone()),
-            trigger: "api".to_owned(),
-            requester,
-            acknowledge: None,
-            run: None,
-        },
-        commit,
-    );
-    (
-        StatusCode::ACCEPTED,
-        axum::Json(json!({"decision": format!("{decision:?}"), "run": run.to_string()})),
-    )
-        .into_response()
-}
-
-#[derive(Debug, Deserialize)]
-struct PlanBody {
-    url: String,
-    note: Option<String>,
-}
-
-async fn api_plan(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Some(response) = unauthorized(&shared, &headers) {
-        return response;
-    }
-    let request: PlanBody = match serde_json::from_slice(&body) {
-        Ok(request) => request,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, format!("bad body: {error}")).into_response();
-        }
-    };
-    let target = match crate::urls::parse_issue_url(&request.url) {
-        Ok(target) => target,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    shared
-        .coordinator
-        .submit_plan(target, request.note, "api".to_owned());
-    (
-        StatusCode::ACCEPTED,
-        axum::Json(json!({"status": "planning"})),
-    )
-        .into_response()
+async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
+    axum::Json(json!({
+        "status": "ok",
+        "active_reviews": shared.coordinator.active_reviews(),
+        "listeners": shared.bus.listeners().collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 fn escape(text: &str) -> String {
@@ -367,8 +187,18 @@ fn escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
+const STYLE: &str = "body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#222}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .6rem;border-bottom:1px solid #ddd;vertical-align:top}code{background:#f3f3f3;padding:0 .2rem}pre{background:#f3f3f3;padding:.6rem;overflow:auto;max-height:30rem}";
+
+fn page(title: &str, body: &str) -> Response {
+    Html(format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title><style>{STYLE}</style></head><body>{body}</body></html>",
+        escape(title)
+    ))
+    .into_response()
+}
+
 async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
-    let Ok(run_id) = RunId::parse(id.clone()) else {
+    let Ok(run_id) = RunId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad run id").into_response();
     };
     let store = &shared.coordinator.app().store;
@@ -381,11 +211,9 @@ async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> 
     };
     let lanes = store.lanes(&run_id).unwrap_or_default();
     let events = store.events(&run_id).unwrap_or_default();
+    let inbound = store.inbound_events_for_run(&run_id).unwrap_or_default();
 
     let mut html = String::new();
-    html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Run ");
-    html.push_str(&escape(run.id.as_str()));
-    html.push_str("</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#222}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .6rem;border-bottom:1px solid #ddd}code{background:#f3f3f3;padding:0 .2rem}</style></head><body>");
     let _ = write!(
         html,
         "<h1>Meneer Henk: {} {}</h1><p><b>{}</b> {} #{} {}<br>Status: <b>{:?}</b><br>Started {}{}<br>Trigger: {}{}</p>",
@@ -415,6 +243,20 @@ async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> 
     }
     if let Some(error) = &run.error {
         let _ = write!(html, "<p><b>Error:</b> <code>{}</code></p>", escape(error));
+    }
+    if !inbound.is_empty() {
+        html.push_str("<h2>Events</h2><table><tr><th>Event</th><th>Received</th><th>Source</th><th>Kind</th></tr>");
+        for event in &inbound {
+            let _ = write!(
+                html,
+                "<tr><td><a href=\"/events/{0}\">{0}</a></td><td>{1}</td><td>{2}</td><td>{3}</td></tr>",
+                escape(event.id.as_str()),
+                escape(&event.received_at),
+                escape(&event.source),
+                escape(&event.kind)
+            );
+        }
+        html.push_str("</table>");
     }
     if !lanes.is_empty() {
         html.push_str("<h2>Lanes</h2><table><tr><th>Lane</th><th>Model</th><th>Status</th><th>Turns</th><th>Tokens in</th><th>Tokens out</th><th>Error</th></tr>");
@@ -446,18 +288,79 @@ async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> 
         }
         html.push_str("</table>");
     }
-    html.push_str("</body></html>");
-    Html(html).into_response()
+    page(&format!("Run {}", run.id), &html)
+}
+
+async fn event_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
+    let Ok(event_id) = EventId::parse(id) else {
+        return (StatusCode::BAD_REQUEST, "bad event id").into_response();
+    };
+    let store = &shared.coordinator.app().store;
+    let event = match store.inbound_event(&event_id) {
+        Ok(Some(event)) => event,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such event").into_response(),
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    let outcomes = store.outcomes(&event_id).unwrap_or_default();
+    let mut html = String::new();
+    let _ = write!(
+        html,
+        "<h1>Event {}</h1><p>Received {}<br>Source: <b>{}</b><br>Kind: <b>{}</b>{}</p>",
+        escape(event.id.as_str()),
+        escape(&event.received_at),
+        escape(&event.source),
+        escape(&event.kind),
+        match (&event.repo, event.target) {
+            (Some(repo), Some(target)) => format!("<br>About: {} #{target}", escape(repo)),
+            (Some(repo), None) => format!("<br>About: {}", escape(repo)),
+            _ => String::new(),
+        }
+    );
+    html.push_str("<h2>What the listeners did</h2><table><tr><th>Listener</th><th>Outcome</th><th>Detail</th><th>Run</th><th>At</th></tr>");
+    for outcome in &outcomes {
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape(&outcome.listener),
+            escape(&outcome.outcome),
+            escape(&outcome.detail),
+            outcome
+                .run_id
+                .as_deref()
+                .map(|r| format!("<a href=\"/runs/{0}\">{0}</a>", escape(r)))
+                .unwrap_or_default(),
+            escape(&outcome.at)
+        );
+    }
+    html.push_str("</table>");
+    if let Some(payload) = &event.payload {
+        let _ = write!(
+            html,
+            "<h2>Payload as received</h2><pre>{}</pre>",
+            escape(payload)
+        );
+    }
+    page(&format!("Event {}", event.id), &html)
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::Request;
     use hmac::{Hmac, KeyInit as _, Mac as _};
     use http_body_util::BodyExt as _;
+    use serde_json::Value;
     use sha2::Sha256;
     use tower::ServiceExt as _;
 
@@ -475,15 +378,18 @@ address = "henk@example.com"
 github_owners = ["docspec"]
 "#;
 
-    async fn test_router() -> Router {
+    async fn test_app() -> Arc<App> {
         let settings = Config::parse(MINIMAL).unwrap().into_settings().unwrap();
-        let app = Arc::new(
+        Arc::new(
             App::build(settings, Some(std::path::Path::new(":memory:")))
                 .await
                 .unwrap(),
-        );
-        router_with_secrets(
-            &app,
+        )
+    }
+
+    fn composed(app: &Arc<App>) -> Composed {
+        compose_with_secrets(
+            app,
             Some(SecretString::from("whsec".to_owned())),
             Some(SecretString::from("gltok".to_owned())),
             Some(SecretString::from("apitok".to_owned())),
@@ -493,33 +399,50 @@ github_owners = ["docspec"]
     fn sign(secret: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
-        let bytes = mac.finalize().into_bytes();
-        bytes.iter().fold("sha256=".to_owned(), |mut acc, b| {
-            let _ = write!(acc, "{b:02x}");
-            acc
-        })
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .fold("sha256=".to_owned(), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            })
     }
 
-    async fn status_and_body(router: Router, request: Request<Body>) -> (StatusCode, String) {
+    async fn call(router: Router, request: Request<Body>) -> (StatusCode, String) {
         let response = router.oneshot(request).await.unwrap();
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&body).into_owned())
     }
 
+    async fn wait_for_outcomes(app: &Arc<App>, event: &str) -> usize {
+        let id = EventId::parse(event).unwrap();
+        for _ in 0..100 {
+            let n = app.store.outcomes(&id).map(|o| o.len()).unwrap_or(0);
+            if n >= 3 {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        0
+    }
+
     #[tokio::test]
-    async fn healthz_reports_ok() {
-        let (status, body) = status_and_body(
-            test_router().await,
+    async fn healthz_reports_listeners() {
+        let app = test_app().await;
+        let (status, body) = call(
+            composed(&app).router,
             Request::get("/healthz").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"active_reviews\":0"));
+        assert!(body.contains("\"review\""));
     }
 
     #[tokio::test]
-    async fn github_webhook_checks_the_signature() {
+    async fn github_webhook_checks_the_signature_and_records_the_event() {
+        let app = test_app().await;
         let payload = br#"{"zen":"keep it simple","repository":{"full_name":"docspec/app"},"sender":{"login":"a","type":"User"}}"#;
         let bad = Request::post("/webhooks/github")
             .header("x-github-event", "ping")
@@ -527,30 +450,63 @@ github_owners = ["docspec"]
             .body(Body::from(payload.to_vec()))
             .unwrap();
         assert_eq!(
-            status_and_body(test_router().await, bad).await.0,
+            call(composed(&app).router, bad).await.0,
             StatusCode::UNAUTHORIZED
         );
 
         let good = Request::post("/webhooks/github")
             .header("x-github-event", "ping")
+            .header("x-github-delivery", "d-1")
             .header("x-hub-signature-256", sign("whsec", payload))
             .body(Body::from(payload.to_vec()))
             .unwrap();
+        let (status, body) = call(composed(&app).router, good).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(
-            status_and_body(test_router().await, good).await.0,
-            StatusCode::ACCEPTED
+            wait_for_outcomes(&app, &event).await,
+            3,
+            "every listener recorded an outcome"
         );
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event.clone()).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "unmodelled");
+        assert_eq!(recorded.source, "github_webhook");
+        assert!(
+            recorded
+                .payload
+                .as_deref()
+                .unwrap_or("")
+                .contains("keep it simple")
+        );
+
+        let (status, page) = call(
+            composed(&app).router,
+            Request::get(format!("/events/{event}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("unmodelled") && page.contains("keep it simple"));
     }
 
     #[tokio::test]
     async fn gitlab_webhook_checks_the_token() {
+        let app = test_app().await;
         let payload = br#"{"object_kind":"push","project":{"path_with_namespace":"9xxlab/app"}}"#;
         let bad = Request::post("/webhooks/gitlab")
             .header("x-gitlab-token", "nope")
             .body(Body::from(payload.to_vec()))
             .unwrap();
         assert_eq!(
-            status_and_body(test_router().await, bad).await.0,
+            call(composed(&app).router, bad).await.0,
             StatusCode::UNAUTHORIZED
         );
         let good = Request::post("/webhooks/gitlab")
@@ -558,20 +514,21 @@ github_owners = ["docspec"]
             .body(Body::from(payload.to_vec()))
             .unwrap();
         assert_eq!(
-            status_and_body(test_router().await, good).await.0,
+            call(composed(&app).router, good).await.0,
             StatusCode::ACCEPTED
         );
     }
 
     #[tokio::test]
-    async fn api_requires_the_bearer_token_and_a_valid_url() {
+    async fn api_publishes_requests_as_events() {
+        let app = test_app().await;
         let no_token = Request::post("/review")
             .body(Body::from(
                 r#"{"url":"https://github.com/docspec/app/pull/1"}"#,
             ))
             .unwrap();
         assert_eq!(
-            status_and_body(test_router().await, no_token).await.0,
+            call(composed(&app).router, no_token).await.0,
             StatusCode::UNAUTHORIZED
         );
         let bad_url = Request::post("/plan")
@@ -579,21 +536,49 @@ github_owners = ["docspec"]
             .body(Body::from(r#"{"url":"https://example.com/x"}"#))
             .unwrap();
         assert_eq!(
-            status_and_body(test_router().await, bad_url).await.0,
+            call(composed(&app).router, bad_url).await.0,
             StatusCode::BAD_REQUEST
         );
+
+        let good = Request::post("/plan")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/issues/9","note":"small"}"#,
+            ))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, good).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event).await, 3);
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "plan_requested");
+        assert_eq!(recorded.source, "api");
     }
 
     #[tokio::test]
-    async fn unknown_runs_are_not_found() {
-        let (status, _) = status_and_body(
-            test_router().await,
+    async fn unknown_runs_and_events_are_not_found() {
+        let app = test_app().await;
+        let (status, _) = call(
+            composed(&app).router,
             Request::get("/runs/r-nope").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = status_and_body(
-            test_router().await,
+        let (status, _) = call(
+            composed(&app).router,
+            Request::get("/events/e-nope").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = call(
+            composed(&app).router,
             Request::get("/runs/bad%20id").body(Body::empty()).unwrap(),
         )
         .await;

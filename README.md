@@ -47,9 +47,11 @@ Anthropic Messages API. Lanes and their models are configuration.
 | `henk-llm` | `ModelClient` with the OpenAI-compatible and Anthropic adapters, retries, schema cleaning |
 | `henk-mcp` | MCP sessions over stdio child processes or streamable HTTP, tool-name mapping, an in-process fake server for tests |
 | `henk-agent` | The tool-calling loop with turn limit, deadline and cancellation; prompts |
+| `henk-session` | One way to run a model session: `SessionSpec`, `run_session` with run bookkeeping, scope-guarded platform tools |
+| `henk-events` | The event model, the webhook parsers, the bus that delivers events to listeners, and the local record of both |
 | `henk-platform` | Webhook verification and parsing, GitHub App auth and API, the GitHub and GitLab writers for pull requests and issues |
 | `henk-store` | SQLite run records: runs, lanes, findings, events |
-| `henk` | The binary: configuration, review and planning orchestration, coordinator, HTTP server, CLI |
+| `henk` | The binary: configuration, hooks, listeners, review and planning orchestration, coordinator, HTTP server, CLI |
 
 ## Build and test
 
@@ -132,10 +134,19 @@ henk llm probe --model proxy-fast                  # one prompt to a model
 henk mcp probe --server github --show pull_request_read
 ```
 
-Webhooks: GitHub sends `pull_request`, `issue_comment` and
+In serve mode everything is an event. Hooks receive and publish; listeners
+decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
-proxy that terminates TLS. Run links go to `{public_base_url}/runs/{id}`.
+proxy that terminates TLS. `POST /review {"url", "commit"?}` and
+`POST /plan {"url", "note"?}` with `Authorization: Bearer $HENK_API_TOKEN`
+publish events too and answer `202 {"event": id}`.
+
+Every inbound event is recorded in Henk's own SQLite with what each listener
+did with it, and the payload as received (up to 256 KB). Recordings stay in
+the service; nothing is sent anywhere. `GET /events/{id}` shows an event and
+its outcomes, `GET /runs/{id}` a run and the events that led to it. Pruning
+old recordings is a follow-up.
 
 ## Decisions taken for this version
 

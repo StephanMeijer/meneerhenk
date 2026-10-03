@@ -80,7 +80,7 @@ flowchart LR
 ```
 
 What to notice: two sessions per platform. The read-only session is the only
-one a model can reach, and even that only through the guard of section 5. The
+one a model can reach, and even that only through the guard of section 4. The
 write-mode session (GitLab) and the App REST client (GitHub) are driven by
 Henk's code with arguments it constructs.
 
@@ -88,7 +88,9 @@ Henk's code with arguments it constructs.
 
 ```mermaid
 flowchart TB
-    HENK["henk<br/>binary: config, orchestration, server, CLI"]
+    HENK["henk<br/>binary: hooks, listeners, orchestration, server, CLI"]
+    EVENTS["henk-events<br/>event model, parsers, bus, local record"]
+    SESSION["henk-session<br/>SessionSpec, run_session, guarded platform tools"]
     AGENT["henk-agent<br/>the tool-calling loop, prompts"]
     PLATFORM["henk-platform<br/>webhooks, GitHub App, writers"]
     STORE["henk-store<br/>SQLite run records"]
@@ -96,12 +98,20 @@ flowchart TB
     MCP["henk-mcp<br/>MCP sessions on rmcp"]
     DOMAIN["henk-domain<br/>the spec's rules<br/>no I/O, no async, no credentials"]
 
+    HENK --> EVENTS
+    HENK --> SESSION
     HENK --> AGENT
     HENK --> PLATFORM
     HENK --> STORE
     HENK --> LLM
     HENK --> MCP
     HENK --> DOMAIN
+    EVENTS --> DOMAIN
+    SESSION --> AGENT
+    SESSION --> LLM
+    SESSION --> MCP
+    SESSION --> STORE
+    SESSION --> DOMAIN
     AGENT --> LLM
     AGENT --> MCP
     AGENT --> DOMAIN
@@ -117,9 +127,11 @@ flowchart TB
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
-| `henk-platform` | `webhook`, `events`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
+| `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
+| `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
+| `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store`, `migrations/001_initial.sql` | rusqlite (bundled) |
-| `henk` | `main`, `config`, `app`, `review`, `review_tools`, `plan`, `plan_tools`, `web_fetch`, `coordinator`, `dispatch`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `web_fetch`, `coordinator`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -127,14 +139,15 @@ so every HTTPS client in the process shares the same rustls setup.
 ## 3. A review, end to end
 
 A `synchronize` webhook from GitHub, start to finish. The GitLab path is the
-same with the writer swapped (section 9 lists the differences).
+same with the writer swapped (section 10 lists the differences).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant GH as GitHub
-    participant S as server.rs
-    participant D as dispatch.rs
+    participant S as hooks/github.rs
+    participant B as EventBus
+    participant D as listeners/review.rs
     participant C as coordinator.rs
     participant R as review.rs
     participant L as Lane (henk-agent)
@@ -144,11 +157,14 @@ sequenceDiagram
     participant DB as RunStore
 
     GH->>S: POST /webhooks/github
-    S->>S: verify_github_signature, parse_github
-    S-->>GH: 202 Accepted
-    S->>D: handle(IncomingEvent)
-    D->>D: not a bot, not Henk, allowlisted, not a draft
+    S->>S: verify_github_signature, parse_github into an Event
+    S->>B: publish(event)
+    S-->>GH: 202 Accepted, event id
+    B->>DB: record the event
+    B->>D: handle(event), every listener at once
+    D->>D: filter: not a bot, not Henk, no marker, allowlisted, not a draft
     D->>C: submit_review(request, head)
+    B->>DB: record each listener's outcome
     C->>C: queue::decide: Start, Join or Supersede
     C->>R: run_review (background task)
     R->>W: pull_request, must be open
@@ -256,7 +272,58 @@ findings concludes the check `success`, with findings `neutral`, and only
 On GitLab the commit status is always `success` with the count in its
 description, because a status must never block a pipeline (§8.2).
 
-## 6. Planning
+## 6. Hooks, events and listeners
+
+In serve mode nothing calls an orchestrator directly. A hook turns what it
+receives into an `Event` and publishes it; the bus records the event, hands it
+to every listener at once, and records what each listener did. Listeners never
+see each other; the one rule that used to be implicit in an if/else chain,
+that a review command is a command and not a mention, is now a test.
+
+```mermaid
+flowchart LR
+    subgraph hooks["Hooks (henk/hooks)"]
+        GHH["GitHubHook<br/>POST /webhooks/github"]
+        GLH["GitLabHook<br/>POST /webhooks/gitlab"]
+        API["ApiHook<br/>POST /review, POST /plan"]
+        LATER["Discord, mail, timers"]:::later
+    end
+    BUS["EventBus<br/>record, deliver, record outcomes"]
+    REC[("inbound_events<br/>event_outcomes")]
+    subgraph listeners["Listeners (henk/listeners)"]
+        RL["ReviewListener"]
+        ML["MentionListener"]
+        PL["PlanListener"]
+    end
+    COORD["Coordinator"]
+    GHH --> BUS
+    GLH --> BUS
+    API --> BUS
+    LATER -.-> BUS
+    BUS --> REC
+    BUS --> RL
+    BUS --> ML
+    BUS --> PL
+    RL --> COORD
+    PL --> COORD
+    classDef later stroke-dasharray: 5 5,fill:none
+```
+
+The event model (`henk-events`): `Event { id, received_at, source, kind, payload }`,
+`EventSource` (GitHub webhook with delivery id, GitLab webhook, API with
+requester), `EventKind` (pull request change, comment, review requested, plan
+requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
+superseded, greeted, failed with a reason). A webhook kind no parser models is
+`Unmodelled` and still recorded, so a future listener can be written against
+real recordings. Recordings never leave the service.
+
+A session (`henk-session`) is the other abstraction: `SessionSpec` says what
+varies (model, system prompt, opening messages, tools, limits) and
+`run_session` does what every session shares (the lane row, the loop, the stop
+mapping, the timeline line). A review is N sessions on one read-only MCP
+session; a plan is one.
+
+## 7. Planning
 
 ```mermaid
 sequenceDiagram
@@ -295,7 +362,7 @@ parsed and rendered by `henk_domain::plan`. `set_description` keeps that region
 intact; `write_plan` keeps the session log and replaces the plan; the session
 entry is appended by code after the run, never by the model.
 
-## 7. Run records
+## 8. Run records
 
 ```mermaid
 erDiagram
@@ -303,6 +370,8 @@ erDiagram
     runs ||--o{ findings : records
     runs ||--o{ events : logs
     runs ||--o{ requests : joined_by
+    inbound_events ||--o{ event_outcomes : handled_by
+    event_outcomes }o--o| runs : led_to
     runs {
         text id PK "r-YYYYMMDD-xxxxxxxx"
         text kind "review or plan"
@@ -350,6 +419,23 @@ erDiagram
         text at
         text source
     }
+    inbound_events {
+        text id PK "e-YYYYMMDD-xxxxxxxx"
+        text received_at
+        text source
+        text kind
+        text repo
+        int target
+        text payload "as received, local only"
+    }
+    event_outcomes {
+        text event_id FK
+        text listener
+        text outcome
+        text detail
+        text run_id
+        text at
+    }
 ```
 
 Every comment Henk posts ends with a hidden marker
@@ -358,7 +444,7 @@ Every comment Henk posts ends with a hidden marker
 finds earlier summaries and findings, and how a comment links back to its run
 (§8.1, §8.6).
 
-## 8. Trust boundaries
+## 9. Trust boundaries
 
 ```mermaid
 flowchart LR
@@ -392,16 +478,16 @@ flowchart LR
 
 | Invariant (§8) | Enforced by |
 |---|---|
-| 1. Henk never triggers himself | `dispatch.rs`: events from bots, from Henk's own login, or whose body carries a `Marker` are ignored |
+| 1. Henk never triggers himself | `listeners/filter.rs`: events from bots, from Henk's own login, or whose body carries a `Marker` are rejected before any listener acts |
 | 2. Henk is advisory | No write tool can approve, merge or push; `GitLabWriter::finish_review` always sets `success`; `ReviewOutcome::check_conclusion` only fails for an incomplete review |
 | 3. Words are information | Prompts say so, but the code does not rely on it: every write goes through tools that validate arguments; `web_fetch` sends nothing but the URL |
 | 4. The model never holds credentials | Secrets are read from the environment by `App::build`, `RmcpSession::connect` (passed to the child only), and `GitHubAuth`; the model sees tool names |
 | 5. Scope is fixed per task | `scope::guard` pins repository, pull request and commit for reviews, repository and issue for plans; `plan_tools` refuse other issues except through `link_issue` |
-| 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run, `/runs/{id}` for every link |
-| 7. Allowlists bound the world | `Allowlist::allows` in `dispatch.rs`, `run_review` and `run_plan` |
+| 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run and every inbound event with its outcomes, `/runs/{id}` and `/events/{id}` |
+| 7. Allowlists bound the world | `Allowlist::allows` in `listeners/filter.rs`, `run_review` and `run_plan` |
 | 8. Failure is visible | `report_failure` posts a failure comment and closes the check; `run_plan` posts "Planning failed"; both record the error on the run |
 
-## 9. GitHub and GitLab differences
+## 10. GitHub and GitLab differences
 
 | Concern | GitHub | GitLab |
 |---|---|---|
@@ -414,7 +500,7 @@ flowchart LR
 | Thread state | GraphQL review threads: `isResolved`, who replied | `mr_discussions`: `resolved`, who replied |
 | Mention reply | reply in the review thread, or a conversation comment | reply in the discussion, or a note |
 
-## 10. Configuration and secrets
+## 11. Configuration and secrets
 
 `henk.toml` holds ids, the allowlist, models, lanes and the MCP server commands.
 It never holds a secret; every secret is named by the environment variable that
@@ -432,7 +518,7 @@ Child processes get a cleared environment plus a short inherited list (`PATH`,
 `HOME`, locale, temp) and the variables their configuration names
 (`RmcpSession::connect`). A token meant for one server never reaches another.
 
-## 11. Deployment
+## 12. Deployment
 
 ```mermaid
 flowchart LR
@@ -460,7 +546,7 @@ arm64 image comes off an amd64 builder. `henk doctor` runs inside the container
 and starts both child servers, which is the quickest way to find a missing
 variable before the first webhook arrives.
 
-## 12. Decisions and deviations
+## 13. Decisions and deviations
 
 - **rmcp with a small loop of our own, not goose.** The published goose crates
   are alphas without MCP client wiring, the crate with the Agent is unpublished
@@ -470,7 +556,7 @@ variable before the first webhook arrives.
   OpenAI and Ollama in about a thousand lines, including the details an MCP
   host needs that the libraries lack: error flags on tool results, tool-name
   mapping, untouched schemas, opaque thinking blocks echoed back.
-- **GitHub writes over REST.** See section 9.
+- **GitHub writes over REST.** See section 10.
 - **GitLab's built-in MCP server is not used.** It is OAuth-only in its
   documentation and lacks commit statuses and award emoji; `mcp-gitlab` takes a
   personal access token and covers everything needed.
