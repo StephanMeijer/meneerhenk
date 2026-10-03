@@ -1,0 +1,32 @@
+[package]
+name = "henk-platform"
+description = "GitHub and GitLab: webhook parsing and verification, and the writer that posts Henk's output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+henk-domain = { workspace = true }
+henk-mcp = { workspace = true }
+async-trait = { workspace = true }
+hmac = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+ring = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

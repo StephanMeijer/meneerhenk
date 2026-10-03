@@ -1,0 +1,9 @@
+{
+  "id": "msg_2",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-x",
+  "content": [{"type": "text", "text": "No issues found."}],
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 50, "output_tokens": 5}
+}

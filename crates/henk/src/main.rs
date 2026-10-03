@@ -46,6 +46,11 @@ enum ConfigCommand {
 }
 
 fn main() -> ExitCode {
+    // Every HTTPS client in the process (model APIs, MCP over HTTP, GitHub)
+    // shares rustls with the ring provider. Installing it once here avoids
+    // a panic inside the first client that needs a provider. A second
+    // install attempt only reports that one is already set.
+    let _already_installed = rustls::crypto::ring::default_provider().install_default();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

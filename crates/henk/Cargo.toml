@@ -14,12 +14,28 @@ path = "src/main.rs"
 
 [dependencies]
 henk-domain = { workspace = true }
+henk-llm = { workspace = true }
+henk-mcp = { workspace = true }
+henk-agent = { workspace = true }
+henk-platform = { workspace = true }
+henk-store = { workspace = true }
 
 anyhow = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
+rand = { workspace = true }
+rustls = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

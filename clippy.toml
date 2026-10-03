@@ -1,0 +1,2 @@
+# Product names that appear in doc comments without backticks.
+doc-valid-idents = ["OpenAI", "OpenRouter", "GitHub", "GitLab", "GraphQL", "SQLite", "OAuth", "Fastmail", "Ollama", "LiteLLM", "OpenBao", ".."]

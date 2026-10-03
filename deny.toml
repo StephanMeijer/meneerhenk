@@ -1,5 +1,7 @@
 [graph]
 all-features = true
+# Henk is deployed on Linux. Other targets pull in different TLS roots.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 version = 2
@@ -14,6 +16,9 @@ allow = [
   "MIT",
   "Apache-2.0",
   "Unicode-3.0",
+  "ISC",
+  "BSD-3-Clause",
+  "Zlib",
 ]
 confidence-threshold = 0.9
 
@@ -21,7 +26,15 @@ confidence-threshold = 0.9
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
-deny = []
+# TLS must stay on rustls with the ring provider and the platform's own
+# certificate store. These crates appearing means a feature flag regressed.
+deny = [
+  { crate = "aws-lc-sys", reason = "TLS provider is ring; see README" },
+  { crate = "aws-lc-rs", reason = "TLS provider is ring; see README" },
+  { crate = "webpki-roots", reason = "certificates come from the platform store" },
+  { crate = "webpki-root-certs", reason = "certificates come from the platform store" },
+  { crate = "openssl-sys", reason = "TLS is rustls" },
+]
 
 [sources]
 unknown-registry = "deny"
