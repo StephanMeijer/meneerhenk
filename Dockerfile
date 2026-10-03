@@ -49,13 +49,19 @@ RUN --mount=type=cache,target=/root/.npm \
 
 FROM ghcr.io/github/github-mcp-server:v1.14.0@sha256:7aaeeec9ae4fe9a736d100c1ff0798f3c219b5009e05f5d3945fcacb13cc196b AS mcp-github
 
-# Distroless with Node: Henk needs glibc, CA certificates and a node binary
-# for the GitLab MCP server, and nothing else. No shell, no package manager.
-FROM gcr.io/distroless/nodejs22-debian12:nonroot@sha256:13593b7570658e8477de39e2f4a1dd25db2f836d68a0ba771251572d23bb4f8e AS runtime
+# The target platform's Node binary, copied rather than installed. This stage
+# only serves COPY, so it needs no emulation on a cross builder.
+FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node-runtime
+
+# Distroless cc: glibc, libstdc++ (Node needs it), CA certificates, tzdata and
+# a non-root user, nothing else. Chosen over distroless/nodejs because its
+# Debian packages are newer and Node brings its own OpenSSL anyway.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
 LABEL org.opencontainers.image.source="https://github.com/StephanMeijer/HenkBot" \
       org.opencontainers.image.title="Meneer Henk" \
       org.opencontainers.image.description="Advisory code reviewer and issue planner for GitHub and GitLab"
 COPY --from=build /out/ /
+COPY --from=node-runtime /usr/local/bin/node /nodejs/bin/node
 COPY --from=mcp-github /server/github-mcp-server /usr/local/bin/github-mcp-server
 COPY --from=mcp-gitlab /opt/mcp-gitlab /opt/mcp-gitlab
 # Child servers are found on PATH; the GitLab server is started as
