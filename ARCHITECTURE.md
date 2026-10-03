@@ -278,7 +278,7 @@ sequenceDiagram
         A->>X: guarded reads of issue, code, related items
         A->>WEB: documentation
         A->>I: set_title, add_labels, link_issue, create_sub_issue, ask_questions
-        Note over A,I: each spends ChangeBudget; sub-issues capped
+        Note over A,I: each spends ChangeBudget, sub-issues are capped
         A->>I: write_plan: with_plan_section replaces the folded section
     end
     alt plan written
