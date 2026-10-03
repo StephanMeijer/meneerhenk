@@ -40,7 +40,7 @@ pub struct ThreadComment {
     pub is_bot: bool,
 }
 
-const USER_AGENT: &str = "meneer-henk (https://github.com/StephanMeijer/HenkBot)";
+const USER_AGENT: &str = "meneer-henk (https://github.com/StephanMeijer/meneerhenk)";
 
 impl GitHubApi {
     /// Builds a client for `api_base` (normally `https://api.github.com`).

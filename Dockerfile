@@ -57,7 +57,7 @@ FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce9
 # a non-root user, nothing else. Chosen over distroless/nodejs because its
 # Debian packages are newer and Node brings its own OpenSSL anyway.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
-LABEL org.opencontainers.image.source="https://github.com/StephanMeijer/HenkBot" \
+LABEL org.opencontainers.image.source="https://github.com/StephanMeijer/meneerhenk" \
       org.opencontainers.image.title="Meneer Henk" \
       org.opencontainers.image.description="Advisory code reviewer and issue planner for GitHub and GitLab"
 COPY --from=build /out/ /
