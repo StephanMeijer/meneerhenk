@@ -18,6 +18,7 @@ mod plan;
 mod plan_tools;
 mod recorder;
 mod review;
+mod review_many;
 mod review_tools;
 mod runs;
 mod server;
@@ -27,7 +28,7 @@ mod web_fetch;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::urls::{parse_issue_url, parse_pull_request_url};
+use crate::urls::parse_issue_url;
 use anyhow::{Context as _, anyhow};
 use clap::{Parser, Subcommand};
 use henk_domain::allowlist::Platform;
@@ -66,11 +67,13 @@ enum Command {
     },
     /// Serve webhooks, the API and run pages until stopped.
     Serve,
-    /// Review one pull request now, from the command line.
+    /// Review pull requests now, from the command line: at most 50, and at
+    /// most `review.max_concurrent` at a time.
     Review {
-        /// Pull request URL, such as <https://github.com/owner/repo/pull/7>
-        url: String,
-        /// Review this commit instead of the current head.
+        /// Pull or merge request URLs, such as <https://github.com/owner/repo/pull/7>
+        #[arg(required = true, num_args = 1..)]
+        urls: Vec<String>,
+        /// Review this commit instead of the current head (one URL only).
         #[arg(long)]
         commit: Option<String>,
     },
@@ -213,7 +216,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let app = Arc::new(App::build(settings, None).await?);
             server::serve(app).await
         }
-        Command::Review { url, commit } => cmd_review(&cli.config, &url, commit).await,
+        Command::Review { urls, commit } => cmd_review(&cli.config, &urls, commit).await,
         Command::Plan { url, note } => cmd_plan(&cli.config, &url, note).await,
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
@@ -250,40 +253,77 @@ fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow::Result<()> {
-    let settings = load_settings(config)?;
-    let app = App::build(settings, None).await?;
-    let target = parse_pull_request_url(url)?;
+async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> anyhow::Result<()> {
+    let targets = urls::parse_review_targets(urls, commit.as_deref())?;
     let commit = commit
         .map(|c| henk_domain::review::CommitSha::parse(&c))
         .transpose()?;
+    let settings = load_settings(config)?;
+    let app = Arc::new(App::build(settings, None).await?);
     let requester = app
         .settings
         .planning
         .as_ref()
         .map(|p| p.requester_id.to_string());
-    let run = ids::new_run_id();
-    println!("run {run}");
-    let report = review::run_review(
-        &app,
-        review::ReviewRequest {
+    let single = targets.len() == 1;
+    let jobs: Vec<(String, henk_platform::ReviewTarget, henk_domain::run::RunId)> = targets
+        .into_iter()
+        .map(|(url, target)| (url, target, ids::new_run_id()))
+        .collect();
+    for (url, _, run) in &jobs {
+        if single {
+            println!("run {run}");
+        } else {
+            println!("run {run} {url}");
+        }
+    }
+    let limit = app.settings.review.max_concurrent;
+    let results = review_many::review_all(jobs, limit, |(_, target, run)| {
+        let app = Arc::clone(&app);
+        let request = review::ReviewRequest {
             target,
-            commit,
+            commit: commit.clone(),
             trigger: "cli".to_owned(),
-            requester,
+            requester: requester.clone(),
             acknowledge: None,
             run: Some(run.clone()),
-        },
-        CancellationToken::new(),
-    )
-    .await
-    .with_context(|| format!("run {run}"))?;
-    debug_assert_eq!(report.run, run);
-    if let Some(summary) = report.summary {
-        println!("{summary}");
+        };
+        async move {
+            review::run_review(&app, request, CancellationToken::new())
+                .await
+                .with_context(|| format!("run {run}"))
+        }
+    })
+    .await;
+
+    let mut results = results;
+    if single && let Some((_, result)) = results.pop() {
+        let report = result?;
+        if let Some(summary) = report.summary {
+            println!("{summary}");
+        }
+        if let Some(outcome) = report.outcome {
+            println!("check conclusion: {:?}", outcome.check_conclusion());
+        }
+        return Ok(());
     }
-    if let Some(outcome) = report.outcome {
-        println!("check conclusion: {:?}", outcome.check_conclusion());
+    let total = results.len();
+    let mut failed = 0;
+    for ((url, _, run), result) in results {
+        match result {
+            Ok(report) => println!(
+                "{url} run {}: {}",
+                report.run,
+                report.summary.as_deref().unwrap_or("finished")
+            ),
+            Err(error) => {
+                failed += 1;
+                println!("{url} run {run}: failed: {error:#}");
+            }
+        }
+    }
+    if failed > 0 {
+        return Err(anyhow!("{failed} of {total} reviews failed"));
     }
     Ok(())
 }
@@ -393,4 +433,32 @@ async fn cmd_mcp_probe(config: &Path, server: &str, show: &[String]) -> anyhow::
     }
     session.close().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn review_takes_one_or_more_urls() {
+        assert!(
+            Cli::try_parse_from(["henk", "review"]).is_err(),
+            "at least one"
+        );
+        let cli = Cli::try_parse_from([
+            "henk",
+            "review",
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+            "https://github.com/o/r/pull/3",
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Command::Review { urls, commit } = cli.command else {
+            panic!("not a review");
+        };
+        assert_eq!(urls.len(), 3);
+        assert_eq!(commit, None);
+    }
 }

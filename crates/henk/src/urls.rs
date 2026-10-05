@@ -49,6 +49,51 @@ pub fn parse_pull_request_url(url: &str) -> anyhow::Result<ReviewTarget> {
     ))
 }
 
+/// The most pull/merge requests one command reviews (§3.1).
+pub const MAX_REVIEW_TARGETS: usize = 50;
+
+/// Parses the pull/merge request URLs of one `henk review`: 1 to
+/// [`MAX_REVIEW_TARGETS`], every one valid, each target once (first seen
+/// first). `--commit` names one commit, so it goes with one target only.
+///
+/// # Errors
+///
+/// Too few or too many URLs, any URL that does not parse (all of them
+/// named), or a commit with more than one target.
+pub fn parse_review_targets(
+    urls: &[String],
+    commit: Option<&str>,
+) -> anyhow::Result<Vec<(String, ReviewTarget)>> {
+    if urls.is_empty() {
+        return Err(anyhow!("give at least one pull or merge request URL"));
+    }
+    if urls.len() > MAX_REVIEW_TARGETS {
+        return Err(anyhow!(
+            "at most {MAX_REVIEW_TARGETS} pull or merge requests at once, not {}",
+            urls.len()
+        ));
+    }
+    let mut targets: Vec<(String, ReviewTarget)> = Vec::new();
+    let mut bad = Vec::new();
+    for url in urls {
+        match parse_pull_request_url(url) {
+            Ok(target) => {
+                if !targets.iter().any(|(_, known)| *known == target) {
+                    targets.push((url.clone(), target));
+                }
+            }
+            Err(error) => bad.push(format!("{url}: {error:#}")),
+        }
+    }
+    if !bad.is_empty() {
+        return Err(anyhow!("cannot read {}", bad.join("; ")));
+    }
+    if commit.is_some() && targets.len() > 1 {
+        return Err(anyhow!("--commit applies to one pull request"));
+    }
+    Ok(targets)
+}
+
 /// Parses `https://github.com/owner/repo/issues/9` or
 /// `https://gitlab.example/group/project/-/issues/9`.
 pub fn parse_issue_url(url: &str) -> anyhow::Result<IssueTarget> {
@@ -86,6 +131,62 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    fn urls(list: &[&str]) -> Vec<String> {
+        list.iter().map(|u| (*u).to_owned()).collect()
+    }
+
+    #[test]
+    fn review_targets_are_counted_checked_and_deduplicated() {
+        assert!(parse_review_targets(&[], None).is_err());
+        let many: Vec<String> = (1..=51)
+            .map(|n| format!("https://github.com/o/r/pull/{n}"))
+            .collect();
+        let error = parse_review_targets(&many, None).unwrap_err().to_string();
+        assert!(error.contains("at most 50"), "{error}");
+
+        let error = parse_review_targets(
+            &urls(&[
+                "https://github.com/o/r/pull/1",
+                "https://github.com/o/r/issues/2",
+                "not a url",
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("https://github.com/o/r/issues/2"), "{error}");
+        assert!(
+            error.contains("not a url"),
+            "every bad URL is named: {error}"
+        );
+
+        let targets = parse_review_targets(
+            &urls(&[
+                "https://github.com/o/r/pull/7",
+                "https://github.com/o/r/pull/8",
+                "https://github.com/o/r/pull/7/files",
+            ]),
+            None,
+        )
+        .unwrap();
+        let numbers: Vec<u64> = targets.iter().map(|(_, t)| t.number).collect();
+        assert_eq!(
+            numbers,
+            vec![7, 8],
+            "the same pull request once, first seen first"
+        );
+    }
+
+    #[test]
+    fn a_commit_goes_with_one_target_only() {
+        let two = urls(&[
+            "https://github.com/o/r/pull/1",
+            "https://github.com/o/r/pull/2",
+        ]);
+        assert!(parse_review_targets(&two, Some("abc")).is_err());
+        assert!(parse_review_targets(two.get(..1).unwrap(), Some("abc")).is_ok());
+    }
 
     #[test]
     fn pull_request_urls_are_parsed() {

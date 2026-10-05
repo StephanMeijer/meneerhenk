@@ -224,6 +224,7 @@ release is cut and how to verify one.
 ```sh
 henk serve                                        # webhooks, API, run pages
 henk review https://github.com/owner/repo/pull/7  # one review, now
+henk review URL1 URL2 URL3                        # several: at most 50, max_concurrent at a time
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk llm probe --model proxy-fast                  # one prompt to a model
