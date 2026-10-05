@@ -192,7 +192,10 @@ async fn preflight(
     Ok((info, commit))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "until #14 bundles these into a ReviewScope"
+)]
 async fn report_failure(
     app: &App,
     writer: &Arc<dyn PlatformWriter>,
@@ -234,7 +237,10 @@ async fn report_failure(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "until #14 bundles these into a ReviewScope"
+)]
 async fn review_body(
     app: &App,
     writer: &Arc<dyn PlatformWriter>,
@@ -415,7 +421,10 @@ async fn fetch_diff(
     Ok(Arc::new(diff))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "until #14 bundles these into a ReviewScope"
+)]
 async fn spawn_lanes(
     app: &App,
     session: &Arc<dyn McpSession>,
@@ -525,7 +534,10 @@ fn target_ref(platform: Platform, number: u64) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "until #14 bundles these into a ReviewScope"
+)]
 async fn build_lane(
     app: &App,
     lane: &LaneSpec,
@@ -630,7 +642,10 @@ async fn build_lane(
 
 /// The fact-check every lane's writes pass, when one is configured (§3.2).
 /// It reads the same diff and the same guarded file read as the lanes.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "until #14 bundles these into a ReviewScope"
+)]
 async fn build_fact_check(
     app: &App,
     session: &Arc<dyn McpSession>,

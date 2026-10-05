@@ -428,7 +428,10 @@ impl RunStore {
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per column of a single UPDATE"
+    )]
     pub fn finish_lane(
         &self,
         run: &RunId,

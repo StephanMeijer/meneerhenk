@@ -1,6 +1,10 @@
 //! The `henk` binary.
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI's output is stdout and stderr"
+)]
 
 mod app;
 mod config;

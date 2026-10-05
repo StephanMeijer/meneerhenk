@@ -269,7 +269,10 @@ impl GitHubApi {
     /// # Errors
     ///
     /// Returns [`PlatformError`] on failure.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the fields of the check-run API"
+    )]
     pub async fn complete_check_run(
         &self,
         owner: &str,
