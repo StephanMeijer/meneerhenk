@@ -1,6 +1,7 @@
 //! A scripted [`ModelClient`] for tests of callers.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::client::ModelClient;
 use crate::error::LlmError;
@@ -15,6 +16,7 @@ pub struct ScriptedClient {
     model: String,
     script: Mutex<std::collections::VecDeque<Result<Completion, LlmError>>>,
     requests: Mutex<Vec<CompletionRequest>>,
+    delay: Duration,
 }
 
 impl ScriptedClient {
@@ -28,7 +30,15 @@ impl ScriptedClient {
             model: model.into(),
             script: Mutex::new(completions.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// Makes every call take `delay` before answering, for deadline tests.
+    #[must_use]
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     /// Every request seen so far.
@@ -47,6 +57,9 @@ impl ModelClient for ScriptedClient {
     async fn complete(&self, request: &CompletionRequest) -> Result<Completion, LlmError> {
         if let Ok(mut requests) = self.requests.lock() {
             requests.push(request.clone());
+        }
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
         }
         let next = self
             .script

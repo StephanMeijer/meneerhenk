@@ -188,7 +188,7 @@ sequenceDiagram
                 L->>DB: record_finding
             end
         end
-        L-->>R: LaneResult Finished or Dropped
+        L-->>R: LaneResult Finished, Stopped or Dropped
     end
     R->>W: existing_findings again
     R->>R: open = in diff and not resolved
@@ -202,8 +202,9 @@ Three details carry the spec's weight. The count comes from the second
 `existing_findings` call, what the platform reports rather than memory, so
 findings of earlier reviews whose line is still in the diff count too (§3.3).
 Findings are posted inside the loop by `post_finding`, not collected until the
-end (§3.2). A lane that fails or
-hangs comes back as `Dropped` and the review stands on the others (§3.3).
+end (§3.2). A lane that fails comes back as `Dropped` and the review stands on
+the others (§3.3). A lane that reaches its time limit comes back as `Stopped`:
+what it posted stands, it posts nothing more, and the review completes.
 
 ## 4. Where a tool call goes
 
@@ -254,10 +255,10 @@ stateDiagram-v2
     Joined --> [*]
     state Running {
         [*] --> Lanes
-        Lanes --> Summarising: every lane Finished or Dropped
+        Lanes --> Summarising: every lane Finished, Stopped or Dropped
     }
     Running --> Cancelled: a newer commit arrived
-    Summarising --> Finished: at least one lane finished
+    Summarising --> Finished: at least one lane finished or stopped
     Summarising --> Failed: no lane finished, or a platform write failed
     Cancelled --> [*]: check closed, no comment
     Finished --> [*]: summary posted, check success or neutral

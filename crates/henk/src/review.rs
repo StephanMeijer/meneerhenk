@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_agent::{AgentConfig, ToolSet, prompts};
+use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::allowlist::Platform;
 use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
@@ -361,10 +361,10 @@ async fn spawn_lanes(
         let cancel = cancel.clone();
         set.spawn(async move {
             let outcome = run_session(&store, &run_id, spec, cancel).await;
-            let lane_outcome = if outcome.finished() {
-                LaneOutcome::Finished
-            } else {
-                LaneOutcome::Dropped
+            let lane_outcome = match outcome.stop {
+                StopCause::Timeout => LaneOutcome::Stopped,
+                _ if outcome.finished() => LaneOutcome::Finished,
+                _ => LaneOutcome::Dropped,
             };
             LaneResult {
                 lane: lane_name,

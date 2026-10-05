@@ -280,6 +280,33 @@ async fn times_out_during_a_slow_tool() {
         .await;
     assert!(matches!(outcome.stop, StopCause::Timeout));
     assert_eq!(outcome.turns, 1);
+    // The slow tool was allowed to finish; its result is in the conversation
+    // and no second model call was made.
+    let last = outcome.messages.last().unwrap();
+    assert!(matches!(
+        last.blocks.first(),
+        Some(Block::ToolResult(result)) if result.content == "woke"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_model_call_is_abandoned_at_the_deadline() {
+    let model = Arc::new(ScriptedClient::new("m", []).with_delay(Duration::from_secs(30)));
+    let agent = Agent::new(
+        model,
+        ToolSet::new(),
+        "s",
+        AgentConfig {
+            timeout: Duration::from_millis(50),
+            ..config()
+        },
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::Timeout));
+    assert_eq!(outcome.turns, 1);
+    assert_eq!(outcome.messages.len(), 1, "no answer was recorded");
 }
 
 #[tokio::test]

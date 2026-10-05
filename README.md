@@ -225,6 +225,10 @@ line in `docs/SPEC.md` once the team confirms it.
   the running review, a newer commit supersedes it.
 - §3.2 When two lanes claim the same line, the first claim posts.
 - §3.3 Dropped lanes are named by their configured lane name, never a model.
+- §3.3 A lane that reaches its time limit stops: a tool call in flight
+  finishes, no new model turn starts, what it posted stands, and the
+  review completes on it. The summary says the lane stopped at the time
+  limit. A plan that reaches its time limit still fails (§4).
 - §3.3 Findings in resolved threads do not count towards N.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
 - §4 On GitLab, triage sets labels, type and links; parent and child

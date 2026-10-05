@@ -56,7 +56,7 @@ impl std::fmt::Debug for SessionSpec {
     }
 }
 
-/// How a session ended.
+/// How a session ended. `stop` says whether the time limit ended it.
 #[derive(Debug)]
 pub struct SessionOutcome {
     /// Why the loop stopped.
@@ -109,9 +109,13 @@ pub async fn run_session(
         }
     }
 
+    // A session that reaches its time limit is finished, not dropped: what
+    // it posted stands, and it posts nothing more. Callers that need a
+    // complete result (the planner) read `stop` and decide for themselves.
     let (status, error) = match &outcome.stop {
-        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
-        StopCause::Timeout => (LaneStatus::Dropped, Some("timed out".to_owned())),
+        StopCause::EndTurn | StopCause::MaxTurns | StopCause::Timeout => {
+            (LaneStatus::Finished, None)
+        }
         StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
         StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
     };
@@ -127,9 +131,14 @@ pub async fn run_session(
         tracing::warn!(error = %store_error, "could not record the lane end");
     }
     let last_words: String = outcome.final_text.chars().take(200).collect();
+    let level = if error.is_some() || matches!(outcome.stop, StopCause::Timeout) {
+        "warn"
+    } else {
+        "info"
+    };
     let _ = store.event(
         run,
-        if error.is_some() { "warn" } else { "info" },
+        level,
         &format!(
             "{}: {:?} after {} turns; last words: {last_words}",
             spec.name, outcome.stop, outcome.turns
@@ -264,6 +273,28 @@ mod tests {
         assert_eq!(lanes[0].status, LaneStatus::Finished);
         assert_eq!(lanes[0].input_tokens, 12);
         assert_eq!(store.events(&run_id()).unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_time_limit_finishes_the_session_instead_of_dropping_it() {
+        let store = store_with_run();
+        let model: Arc<dyn ModelClient> =
+            Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
+        let mut spec = spec(model);
+        spec.limits.timeout = Duration::from_millis(50);
+        let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
+        assert!(matches!(outcome.stop, StopCause::Timeout));
+        assert!(outcome.finished());
+        assert_eq!(outcome.error, None);
+        let lanes = store.lanes(&run_id()).unwrap();
+        assert_eq!(lanes[0].status, LaneStatus::Finished);
+        let events = store.events(&run_id()).unwrap();
+        assert_eq!(events[0].level, "warn");
+        assert!(
+            events[0].message.contains("Timeout"),
+            "{}",
+            events[0].message
+        );
     }
 
     #[tokio::test]

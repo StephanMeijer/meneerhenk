@@ -177,6 +177,9 @@ pub struct LaneSpec {
 pub enum LaneOutcome {
     /// The lane read the change and posted what it found.
     Finished,
+    /// The lane reached its time limit. What it posted stands; it posts
+    /// nothing more. The review completes on it like on a finished lane.
+    Stopped,
     /// The lane failed after retries or hung, and was dropped.
     Dropped,
 }
@@ -228,7 +231,15 @@ impl ReviewOutcome {
     pub fn completed(&self) -> bool {
         self.lanes
             .iter()
-            .any(|lane| lane.outcome == LaneOutcome::Finished)
+            .any(|lane| matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped))
+    }
+
+    /// The lanes that reached their time limit, in order.
+    pub fn stopped_lanes(&self) -> impl Iterator<Item = &LaneName> + '_ {
+        self.lanes
+            .iter()
+            .filter(|lane| lane.outcome == LaneOutcome::Stopped)
+            .map(|lane| &lane.lane)
     }
 
     /// The lanes that were dropped, in order.
@@ -285,6 +296,20 @@ impl ReviewOutcome {
             }
             many => {
                 let _ = write!(text, " Lanes {} did not finish.", many.join(", "));
+            }
+        }
+        let stopped: Vec<&str> = self.stopped_lanes().map(LaneName::as_str).collect();
+        match stopped.as_slice() {
+            [] => {}
+            [one] => {
+                let _ = write!(text, " Lane {one} stopped at the time limit.");
+            }
+            many => {
+                let _ = write!(
+                    text,
+                    " Lanes {} stopped at the time limit.",
+                    many.join(", ")
+                );
             }
         }
         text
@@ -404,6 +429,26 @@ mod tests {
 
     #[test]
     fn no_lane_finished_is_henks_failure() {
+        let stopped = outcome(&[("a", LaneOutcome::Stopped)], 2);
+        assert!(stopped.completed());
+        assert_eq!(stopped.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(
+            stopped.summary(),
+            "2 issues found. Lane a stopped at the time limit."
+        );
+        let mixed = outcome(
+            &[
+                ("a", LaneOutcome::Stopped),
+                ("b", LaneOutcome::Dropped),
+                ("c", LaneOutcome::Stopped),
+            ],
+            0,
+        );
+        assert_eq!(mixed.check_conclusion(), CheckConclusion::Success);
+        assert_eq!(
+            mixed.summary(),
+            "No issues found. Lane b did not finish. Lanes a, c stopped at the time limit."
+        );
         let outcome = outcome(&[("a", LaneOutcome::Dropped)], 0);
         assert!(!outcome.completed());
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Failure);

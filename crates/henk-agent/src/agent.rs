@@ -18,7 +18,9 @@ use crate::tool::{ToolOutput, ToolSet};
 pub struct AgentConfig {
     /// Model calls allowed. Each turn is one call plus its tool calls.
     pub max_turns: u32,
-    /// Wall-clock limit for the whole run.
+    /// Wall-clock limit for the whole run. When it passes, a model call in
+    /// flight is abandoned, tool calls in flight finish, and no new turn
+    /// starts; the run ends with [`StopCause::Timeout`].
     pub timeout: Duration,
     /// Tool output longer than this is cut, with a note, before the model
     /// sees it. Keeps one huge diff from eating the context.
@@ -201,13 +203,16 @@ impl Agent {
                 break StopCause::EndTurn;
             }
 
+            // Tool calls run to completion even past the deadline: a finding
+            // being posted lands, and nothing is left half done. Only a
+            // cancel interrupts them. The deadline is checked again before
+            // the next model call.
             let mut results = Vec::with_capacity(calls.len());
             for call in calls {
                 let started = Instant::now();
                 let output = tokio::select! {
                     biased;
                     () = cancel.cancelled() => return Self::finish(messages, turns, usage, StopCause::Cancelled),
-                    () = tokio::time::sleep_until(deadline) => return Self::finish(messages, turns, usage, StopCause::Timeout),
                     output = self.dispatch(&call.name, &call.arguments) => output,
                 };
                 let elapsed = started.elapsed();
@@ -232,6 +237,9 @@ impl Agent {
                 });
             }
             messages.push(ChatMessage::tool_results(results));
+            if tokio::time::Instant::now() >= deadline {
+                break StopCause::Timeout;
+            }
         };
         Self::finish(messages, turns, usage, stop)
     }
