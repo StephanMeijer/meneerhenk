@@ -40,8 +40,8 @@ rand = { version = "0.9", default-features = false, features = ["std", "std_rng"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 ring = "0.17"
 rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
-rusqlite_migration = "2.5"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 secrecy = "0.10"
 serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
