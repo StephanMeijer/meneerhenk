@@ -110,6 +110,8 @@ mod tests {
             link: "http://x/runs/r-1".into(),
             summary: Some("Review of abc: 1 finding.\nSecond line.".into()),
             error: None,
+            heartbeat_at: None,
+            check_id: None,
         };
         let lanes = vec![LaneRecord {
             name: "lane-a".into(),

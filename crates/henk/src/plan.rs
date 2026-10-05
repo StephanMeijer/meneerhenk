@@ -19,10 +19,12 @@ use tracing::{error, info, instrument, warn};
 
 use crate::app::App;
 use crate::ids::new_run_id;
+use crate::liveness::KeepAlive;
 use crate::plan_tools::{
     AddLabels, AskQuestions, CreateSubIssue, LinkIssue, PlanContext, PlanState, SetDescription,
     SetIssueType, SetTitle, WritePlan,
 };
+use crate::review::Interrupted;
 use crate::web_fetch::WebFetch;
 
 /// A request to plan one issue.
@@ -100,6 +102,7 @@ pub async fn run_plan(
         link: link.clone(),
     })?;
     info!(run = %run, "planning started");
+    let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
 
     let model = app.model(&planning.model)?;
     let context = Arc::new(PlanContext {
@@ -128,6 +131,10 @@ pub async fn run_plan(
         cancel,
     )
     .await;
+
+    if result.is_err() && app.shutdown.is_cancelled() {
+        return end_interrupted(app, &run);
+    }
 
     let (plan, changes) = match context.state.lock() {
         Ok(state) => (state.plan.clone(), state.changes.clone()),
@@ -239,6 +246,15 @@ async fn finish_plan(
             Err(anyhow!("planning failed: {reason}"))
         }
     }
+}
+
+/// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
+/// posted; the run ends with the reason (#7).
+fn end_interrupted(app: &App, run: &RunId) -> anyhow::Result<PlanReport> {
+    warn!(run = %run, "planning interrupted");
+    app.store
+        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))?;
+    Err(Interrupted.into())
 }
 
 async fn planner_tools(

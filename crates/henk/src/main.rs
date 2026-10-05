@@ -14,6 +14,7 @@ mod fact_check;
 mod hooks;
 mod ids;
 mod listeners;
+mod liveness;
 mod plan;
 mod plan_tools;
 mod recorder;
@@ -260,6 +261,8 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
         .transpose()?;
     let settings = load_settings(config)?;
     let app = Arc::new(App::build(settings, None).await?);
+    liveness::reap_orphans(&app).await;
+    interrupt_on_ctrl_c(app.shutdown.clone());
     let requester = app
         .settings
         .planning
@@ -289,7 +292,7 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
             run: Some(run.clone()),
         };
         async move {
-            review::run_review(&app, request, CancellationToken::new())
+            review::run_review(&app, request, app.shutdown.child_token())
                 .await
                 .with_context(|| format!("run {run}"))
         }
@@ -332,9 +335,26 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
     Ok(())
 }
 
+/// The first Ctrl-C stops the runs in flight, which close their checks and
+/// end; the second quits at once (#7).
+fn interrupt_on_ctrl_c(shutdown: CancellationToken) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        eprintln!("Interrupting; the review closes its check. Press Ctrl-C again to quit at once.");
+        shutdown.cancel();
+        if tokio::signal::ctrl_c().await.is_ok() {
+            std::process::exit(130);
+        }
+    });
+}
+
 async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
     let app = App::build(settings, None).await?;
+    liveness::reap_orphans(&app).await;
+    interrupt_on_ctrl_c(app.shutdown.clone());
     let target = parse_issue_url(url)?;
     let report = plan::run_plan(
         &app,
@@ -344,7 +364,7 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
             trigger: "cli".to_owned(),
             run: None,
         },
-        CancellationToken::new(),
+        app.shutdown.child_token(),
     )
     .await?;
     println!("run {}", report.run);

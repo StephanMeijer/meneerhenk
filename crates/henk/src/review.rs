@@ -16,7 +16,7 @@ use henk_domain::run::{RunId, RunKind};
 use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
 use henk_mcp::McpSession;
-use henk_platform::{PlatformWriter, PullRequestState, ReviewTarget};
+use henk_platform::{PlatformWriter, PullRequestState, ReviewHandle, ReviewTarget};
 use henk_session::{SessionSpec, model_id, platform_tools, run_session};
 use henk_store::{NewRun, RunStatus};
 use tokio::task::JoinSet;
@@ -26,6 +26,7 @@ use tracing::{error, info, instrument, warn};
 use crate::app::App;
 use crate::fact_check::{FactCheck, SessionFactCheck};
 use crate::ids::new_run_id;
+use crate::liveness::KeepAlive;
 use crate::review_tools::{
     DiffFiles, GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings,
     PostFinding, ReadFile, WithdrawFinding, lane_continuation,
@@ -35,6 +36,11 @@ use crate::review_tools::{
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
+
+/// The review was cancelled because Henk was told to stop.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("interrupted")]
+pub struct Interrupted;
 
 /// Turns left when a lane is told to wrap up (#12).
 const LANE_TURN_WARNING_AT: u32 = 3;
@@ -123,6 +129,7 @@ pub async fn run_review(
         link: link.clone(),
     })?;
     info!(run = %run, commit = %commit.short(), "review started");
+    let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
 
     if let Some((comment_id, is_review_comment)) = &request.acknowledge
         && let Err(error) = writer
@@ -133,7 +140,14 @@ pub async fn run_review(
     }
 
     let handle = match writer.start_review(&request.target, &commit, &link).await {
-        Ok(handle) => handle,
+        Ok(handle) => {
+            if let Some(ReviewHandle(check_id)) = &handle
+                && let Err(error) = app.store.set_check(&run, check_id)
+            {
+                warn!(%error, "could not store the check id");
+            }
+            handle
+        }
         Err(error) => {
             warn!(%error, "could not mark the review as started");
             None
@@ -170,6 +184,10 @@ pub async fn run_review(
                 outcome: Some(outcome),
                 summary: Some(summary),
             })
+        }
+        Err(error) if error.is::<Interrupted>() => {
+            report_interrupted(review, handle.as_ref()).await?;
+            Err(error)
         }
         Err(error) if error.is::<Superseded>() => {
             report_superseded(review, handle.as_ref()).await?;
@@ -243,6 +261,33 @@ async fn report_superseded(
     Ok(())
 }
 
+/// Henk was told to stop: the check completes as interrupted, the run
+/// ends `failed`, and nothing is posted; the next review posts (§3.3).
+async fn report_interrupted(
+    review: ReviewRun<'_>,
+    handle: Option<&henk_platform::ReviewHandle>,
+) -> anyhow::Result<()> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        link,
+    } = review;
+    warn!(run = %run, "review interrupted");
+    let outcome = ReviewOutcome::interrupted(commit.clone());
+    if let Err(finish_error) = writer
+        .finish_review(target, commit, handle, &outcome, link)
+        .await
+    {
+        error!(%finish_error, "could not finish the check of an interrupted review");
+    }
+    app.store
+        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))?;
+    Ok(())
+}
+
 async fn report_failure(
     review: ReviewRun<'_>,
     handle: Option<&henk_platform::ReviewHandle>,
@@ -264,6 +309,7 @@ async fn report_failure(
         open_findings: 0,
         nothing_to_review: false,
         superseded: false,
+        interrupted: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -335,7 +381,12 @@ async fn review_body(
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
     };
     if cancel.is_cancelled() {
-        return Err(Superseded.into());
+        // A shutdown cancels every review; superseding cancels only one.
+        return Err(if review.app.shutdown.is_cancelled() {
+            Interrupted.into()
+        } else {
+            Superseded.into()
+        });
     }
 
     // The count comes from the platform, not from memory (§3.3).
@@ -353,6 +404,7 @@ async fn review_body(
         open_findings,
         nothing_to_review,
         superseded: false,
+        interrupted: false,
     };
 
     fold_outdated(writer, target, &after).await;
@@ -883,6 +935,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 models,
                 github: None,
                 gitlab: None,
+                shutdown: CancellationToken::new(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
             },
@@ -955,12 +1008,21 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     /// A review cancelled while its lane waits on the model.
-    async fn cancelled_review(run: &RunId) -> (Fixture, anyhow::Result<ReviewReport>) {
+    /// `shutdown` stops Henk as Ctrl-C does; otherwise only this review is
+    /// cancelled, as superseding does.
+    async fn cancelled_review(
+        run: &RunId,
+        shutdown: bool,
+    ) -> (Fixture, anyhow::Result<ReviewReport>) {
         let model =
             ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
         let f = fixture(DIFF, model).await;
-        let cancel = CancellationToken::new();
-        let trigger = cancel.clone();
+        let cancel = f.app.shutdown.child_token();
+        let trigger = if shutdown {
+            f.app.shutdown.clone()
+        } else {
+            cancel.clone()
+        };
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
             trigger.cancel();
@@ -979,7 +1041,7 @@ lanes = [{ name = "lane-a", model = "m" }]
     #[tokio::test]
     async fn a_cancelled_review_closes_its_check_and_leaves_nothing_running() {
         let run = RunId::parse("r-cancel").unwrap();
-        let (f, result) = cancelled_review(&run).await;
+        let (f, result) = cancelled_review(&run, false).await;
         assert!(result.is_err());
         assert_eq!(
             f.writer.finished.lock().unwrap().len(),
@@ -993,12 +1055,96 @@ lanes = [{ name = "lane-a", model = "m" }]
         }
     }
 
+    /// #7: Ctrl-C or a shutdown closes the check as interrupted, posts
+    /// nothing and leaves nothing running.
+    #[tokio::test]
+    async fn an_interrupted_review_closes_its_check_and_posts_nothing() {
+        let run = RunId::parse("r-interrupted").unwrap();
+        let (f, result) = cancelled_review(&run, true).await;
+        assert!(result.is_err_and(|e| e.is::<Interrupted>()));
+        assert!(
+            f.writer.replies.lock().unwrap().is_empty(),
+            "nothing posted"
+        );
+        let finished = f.writer.finished.lock().unwrap();
+        assert_eq!(finished.len(), 1, "the check is closed");
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
+        assert_eq!(finished[0].headline(), "Review interrupted.");
+        let record = f.app.store.run(&run).unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(record.error.as_deref(), Some("interrupted"));
+        for lane in f.app.store.lanes(&run).unwrap() {
+            assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
+        }
+    }
+
+    fn new_run(id: &RunId) -> henk_store::NewRun {
+        henk_store::NewRun {
+            id: id.clone(),
+            kind: henk_domain::run::RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "o/r".to_owned(),
+            target: 7,
+            commit: Some(SHA.to_owned()),
+            requester: None,
+            trigger: "cli".to_owned(),
+            link: "http://henk/runs/x".to_owned(),
+        }
+    }
+
+    /// #7: a run a dead process left is closed with its check; a run a
+    /// live process is still working on is left alone.
+    #[tokio::test]
+    async fn the_reaper_closes_runs_whose_heartbeat_stopped_and_only_those() {
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done()])).await;
+        let (dead, live) = (
+            RunId::parse("r-dead").unwrap(),
+            RunId::parse("r-live").unwrap(),
+        );
+        f.app.store.create_run(&new_run(&dead)).unwrap();
+        f.app.store.set_check(&dead, "4242").unwrap();
+        f.app.store.start_lane(&dead, "lane-a", "m").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let cutoff = time::OffsetDateTime::now_utc();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        f.app.store.create_run(&new_run(&live)).unwrap();
+        f.app.store.start_lane(&live, "lane-a", "m").unwrap();
+
+        assert_eq!(crate::liveness::reap_silent_since(&f.app, cutoff).await, 1);
+
+        let record = f.app.store.run(&dead).unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("interrupted: the process ended")
+        );
+        assert_eq!(
+            f.app.store.lanes(&dead).unwrap()[0].status,
+            LaneStatus::Dropped
+        );
+        assert_eq!(
+            *f.writer.finished_checks.lock().unwrap(),
+            [Some("4242".to_owned())]
+        );
+        assert_eq!(
+            f.writer.finished.lock().unwrap()[0].headline(),
+            "Review interrupted."
+        );
+
+        let untouched = f.app.store.run(&live).unwrap().unwrap();
+        assert_eq!(untouched.status, RunStatus::Running);
+        assert_eq!(
+            f.app.store.lanes(&live).unwrap()[0].status,
+            LaneStatus::Running
+        );
+    }
+
     /// #8: a review superseded by a newer commit is not Henk's failure. It
     /// must not post the failure comment, and its check is neutral.
     #[tokio::test]
     async fn a_superseded_review_posts_no_failure() {
         let run = RunId::parse("r-superseded").unwrap();
-        let (f, result) = cancelled_review(&run).await;
+        let (f, result) = cancelled_review(&run, false).await;
         assert!(result.is_err_and(|e| e.is::<Superseded>()));
         assert!(
             !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),

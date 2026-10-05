@@ -78,6 +78,8 @@ pub(crate) mod testing {
         pub patches: Vec<henk_platform::FilePatch>,
         /// Every outcome `finish_review` was given.
         pub finished: Mutex<Vec<ReviewOutcome>>,
+        /// The check id each `finish_review` closed, in order.
+        pub finished_checks: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -237,11 +239,15 @@ pub(crate) mod testing {
             &self,
             _: &ReviewTarget,
             _: &CommitSha,
-            _: Option<&ReviewHandle>,
+            handle: Option<&ReviewHandle>,
             outcome: &ReviewOutcome,
             _: &str,
         ) -> Result<(), PlatformError> {
             self.finished.lock().unwrap().push(outcome.clone());
+            self.finished_checks
+                .lock()
+                .unwrap()
+                .push(handle.map(|h| h.0.clone()));
             Ok(())
         }
     }
