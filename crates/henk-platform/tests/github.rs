@@ -41,6 +41,7 @@ fn marker(kind: MarkerKind) -> String {
         model: ModelId::parse("m").unwrap(),
         requested_by: None,
         kind: Some(kind),
+        checked_by: None,
     }
     .render()
 }

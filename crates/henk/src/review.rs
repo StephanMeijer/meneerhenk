@@ -215,6 +215,7 @@ async fn report_failure(
         model: ModelId::parse("none").unwrap_or_else(|_| unreachable!("constant")),
         requested_by: None,
         kind: Some(MarkerKind::Failure),
+        checked_by: None,
     }
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
@@ -330,6 +331,7 @@ async fn review_body(
         model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
         requested_by: None,
         kind: Some(MarkerKind::Summary),
+        checked_by: None,
     }
     .attach(&format!("{summary_text}\n\nRun: {link}"));
     writer

@@ -386,7 +386,8 @@ These hold everywhere:
    - An email reply can go only to that mail's correspondents.
 6. **Every visible action is traceable.** Each review, plan and mail links
    back to its run. Each comment carries hidden markers saying who wrote it,
-   which model and, when someone asked for it, for whom.
+   which model, which model fact-checked it when one did and, when someone
+   asked for it, for whom.
 7. **Allowlists bound the world.** Henk acts only in allowlisted repositories
    and his own Discord channel, and as his own accounts. He reads the web
    freely; he writes nowhere else.

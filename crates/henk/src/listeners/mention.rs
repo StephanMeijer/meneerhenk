@@ -81,6 +81,7 @@ impl Listener for MentionListener {
             model: ModelId::parse("none").unwrap_or_else(|_| unreachable!("constant")),
             requested_by: None,
             kind: Some(MarkerKind::Reply),
+            checked_by: None,
         }
         .attach(&text);
         // On GitLab a diff note reply goes to its discussion id, which the

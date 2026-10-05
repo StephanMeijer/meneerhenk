@@ -90,8 +90,13 @@ impl LaneContext {
 
 /// What the fact-check decided for one write.
 enum Gate {
-    /// Go ahead. `Some` when the check could not run, with why.
-    Pass(Option<String>),
+    /// Go ahead.
+    Pass {
+        /// The model that confirmed the write, for its marker.
+        checked_by: Option<ModelId>,
+        /// Why no check could be made, when none was.
+        unchecked: Option<String>,
+    },
     /// Do not write; tell the lane this.
     Stop(ToolOutput),
 }
@@ -112,7 +117,10 @@ impl LaneContext {
         what: &str,
     ) -> Gate {
         let Some(checker) = &self.fact_check else {
-            return Gate::Pass(None);
+            return Gate::Pass {
+                checked_by: None,
+                unchecked: None,
+            };
         };
         let earlier = self
             .rejections
@@ -135,8 +143,14 @@ impl LaneContext {
             text: text.to_owned(),
         };
         match checker.check(&request).await {
-            CheckVerdict::Confirmed { .. } => Gate::Pass(None),
-            CheckVerdict::Unavailable { why } => Gate::Pass(Some(why)),
+            CheckVerdict::Confirmed { by, .. } => Gate::Pass {
+                checked_by: Some(by),
+                unchecked: None,
+            },
+            CheckVerdict::Unavailable { why } => Gate::Pass {
+                checked_by: None,
+                unchecked: Some(why),
+            },
             CheckVerdict::Rejected { reason, .. } => {
                 let count = self
                     .rejections
@@ -404,12 +418,15 @@ fn number_lines(content: &str, start: usize, end: usize) -> String {
 }
 
 impl LaneContext {
-    fn marker(&self) -> Marker {
+    /// The marker of a finding this lane writes, naming the model that
+    /// fact-checked it, when one did.
+    fn marker(&self, checked_by: Option<ModelId>) -> Marker {
         Marker {
             run: self.run.clone(),
             model: self.model.clone(),
             requested_by: None,
             kind: Some(MarkerKind::Finding),
+            checked_by,
         }
     }
 
@@ -532,15 +549,18 @@ impl Tool for PostFinding {
             return refusal;
         }
 
-        let unchecked = match ctx
+        let (checked_by, unchecked) = match ctx
             .gate(CheckKind::NewFinding, &key, side, body, None, "posted")
             .await
         {
-            Gate::Pass(unchecked) => unchecked,
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
             Gate::Stop(output) => return output,
         };
 
-        let full_body = ctx.marker().attach(body);
+        let full_body = ctx.marker(checked_by).attach(body);
         let posted = match ctx
             .writer
             .post_finding(&ctx.target, &ctx.commit, path, line, side, &full_body)
@@ -632,7 +652,7 @@ impl Tool for ImproveFinding {
             return ToolOutput::error("A person has answered that finding; it stays as it is.");
         }
         let current = visible_text(&existing.body).to_owned();
-        let unchecked = match ctx
+        let (checked_by, unchecked) = match ctx
             .gate(
                 CheckKind::Rewrite { current },
                 &existing.key,
@@ -643,10 +663,13 @@ impl Tool for ImproveFinding {
             )
             .await
         {
-            Gate::Pass(unchecked) => unchecked,
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
             Gate::Stop(output) => return output,
         };
-        let full_body = ctx.marker().attach(body);
+        let full_body = ctx.marker(checked_by).attach(body);
         if let Err(error) = ctx
             .writer
             .update_finding(&ctx.target, comment_id, &full_body)
@@ -724,7 +747,7 @@ impl Tool for WithdrawFinding {
             return ToolOutput::error(format!("Finding {comment_id} is already resolved."));
         }
         let finding = visible_text(&existing.body).to_owned();
-        let unchecked = match ctx
+        let (checked_by, unchecked) = match ctx
             .gate(
                 CheckKind::Withdrawal { finding },
                 &existing.key,
@@ -735,11 +758,14 @@ impl Tool for WithdrawFinding {
             )
             .await
         {
-            Gate::Pass(unchecked) => unchecked,
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
             Gate::Stop(output) => return output,
         };
         let full_body = ctx
-            .marker()
+            .marker(checked_by)
             .attach(&format!("Withdrawn: this finding was wrong. {reason}"));
         if let Err(error) = ctx
             .writer
@@ -1062,7 +1088,10 @@ mod gate_tests {
         let (ctx, writer, checker) = setup([confirmed()]);
         let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
         assert!(!out.is_error, "{out:?}");
-        assert_eq!(writer.posts.lock().unwrap().len(), 1);
+        let posts = writer.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        let marker = Marker::parse(&posts[0].2).unwrap();
+        assert_eq!(marker.checked_by.unwrap().as_str(), "opus");
         let seen = checker.seen.lock().unwrap();
         assert_eq!(seen[0].text, "x is never set.");
         assert_eq!(seen[0].lane_model.as_str(), "m");
@@ -1108,7 +1137,9 @@ mod gate_tests {
             "{}",
             out.content
         );
-        assert_eq!(writer.posts.lock().unwrap().len(), 1);
+        let posts = writer.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(Marker::parse(&posts[0].2).unwrap().checked_by, None);
         assert_eq!(actions(&ctx), vec!["posted", "unverified"]);
     }
 
