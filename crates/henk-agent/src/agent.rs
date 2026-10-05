@@ -214,7 +214,7 @@ impl Agent {
                 debug!(
                     turn = turns,
                     tool = %call.name,
-                    args = %truncate_chars(&arguments_text(&call.arguments), 300),
+                    args = %one_line(&arguments_text(&call.arguments), 300),
                     result_chars = output.content.chars().count(),
                     is_error = output.is_error,
                     elapsed_ms = elapsed.as_millis(),
@@ -277,7 +277,7 @@ impl Agent {
             .map(ChatMessage::text)
             .unwrap_or_default();
         info!(turns, input_tokens = usage.input_tokens, output_tokens = usage.output_tokens, stop = ?stop, "agent run ended");
-        debug!(final_text = %truncate_chars(&final_text, 300), "last assistant text");
+        debug!(final_text = %one_line(&final_text, 300), "last assistant text");
         AgentOutcome {
             final_text,
             turns,
@@ -290,6 +290,11 @@ impl Agent {
 
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// Text cut to `max` characters with line breaks flattened, for one log line.
+fn one_line(text: &str, max: usize) -> String {
+    truncate_chars(text, max).replace(['\n', '\r'], " ")
 }
 
 /// The arguments as one line of text, for logs.
