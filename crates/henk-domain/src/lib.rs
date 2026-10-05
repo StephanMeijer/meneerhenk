@@ -8,6 +8,7 @@
 //! The crate is deliberately free of I/O, async and credentials (§8.4).
 
 pub mod allowlist;
+pub mod diff;
 pub mod discord;
 pub mod finding;
 pub mod identity;

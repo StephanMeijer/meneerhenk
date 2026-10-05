@@ -32,14 +32,7 @@ pub struct PullRequestInfo {
     pub state: PullRequestState,
 }
 
-/// Which side of the diff a line comment sits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffSide {
-    /// The old version.
-    Left,
-    /// The new version.
-    Right,
-}
+pub use henk_domain::diff::DiffSide;
 
 /// A comment Henk posted.
 #[derive(Debug, Clone, PartialEq, Eq)]

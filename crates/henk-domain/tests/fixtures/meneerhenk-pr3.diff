@@ -1,0 +1,1785 @@
+diff --git a/.gitignore b/.gitignore
+index ae47eef..48e623f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,3 +5,7 @@
+ .env
+ .env.*
+ henk.toml
++henk.db*
++transcripts/
++scripts/henk-env.sh
++.henk-bao
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index b38a23a..c03a815 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -188,7 +188,7 @@ sequenceDiagram
+                 L->>DB: record_finding
+             end
+         end
+-        L-->>R: LaneResult Finished or Dropped
++        L-->>R: LaneResult Finished, Stopped or Dropped
+     end
+     R->>W: existing_findings again
+     R->>R: open = in diff and not resolved
+@@ -202,8 +202,9 @@ Three details carry the spec's weight. The count comes from the second
+ `existing_findings` call, what the platform reports rather than memory, so
+ findings of earlier reviews whose line is still in the diff count too (§3.3).
+ Findings are posted inside the loop by `post_finding`, not collected until the
+-end (§3.2). A lane that fails or
+-hangs comes back as `Dropped` and the review stands on the others (§3.3).
++end (§3.2). A lane that fails comes back as `Dropped` and the review stands on
++the others (§3.3). A lane that reaches its time limit comes back as `Stopped`:
++what it posted stands, it posts nothing more, and the review completes.
+ 
+ ## 4. Where a tool call goes
+ 
+@@ -254,10 +255,10 @@ stateDiagram-v2
+     Joined --> [*]
+     state Running {
+         [*] --> Lanes
+-        Lanes --> Summarising: every lane Finished or Dropped
++        Lanes --> Summarising: every lane Finished, Stopped or Dropped
+     }
+     Running --> Cancelled: a newer commit arrived
+-    Summarising --> Finished: at least one lane finished
++    Summarising --> Finished: at least one lane finished or stopped
+     Summarising --> Failed: no lane finished, or a platform write failed
+     Cancelled --> [*]: check closed, no comment
+     Finished --> [*]: summary posted, check success or neutral
+diff --git a/Cargo.lock b/Cargo.lock
+index 890bfe3..25ca6f7 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -712,6 +712,7 @@ dependencies = [
+  "henk-mcp",
+  "henk-store",
+  "rmcp",
++ "serde",
+  "serde_json",
+  "tokio",
+  "tokio-util",
+diff --git a/README.md b/README.md
+index 6795d3a..ecdd745 100644
+--- a/README.md
++++ b/README.md
+@@ -85,6 +85,7 @@ OpenBao.
+ | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
+ | `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
+ | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
++| `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
+ 
+ The external servers must be installed where Henk runs: the
+ `github-mcp-server` binary (or Docker, see the example config) and Node
+@@ -98,7 +99,71 @@ henk doctor --probe    # also one short prompt to every model
+ ```
+ 
+ Every check is reported on its own line; the command fails when any
+-check fails.
++check fails. With `installation_id = 0`, or when the installation token
++is refused, the GitHub check lists the App's installations so the right
++id can be copied into the config.
++
++## First live run
++
++The order that gets Henk from a fresh checkout to his first real review,
++on one machine, with one lane:
++
++1. Install the external servers: the `github-mcp-server` release binary
++   (the version the `Dockerfile` pins; verify the release checksum) on the
++   `PATH`, and Node for `npx @zereight/mcp-gitlab` if GitLab is in play.
++2. Export the secrets named in `henk.toml` in the shell that runs Henk:
++   at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
++   reads them; they are never written anywhere.
++3. `henk llm models --model <id>` lists what the endpoint serves; put the
++   chosen name in `[models.<id>].model`.
++4. `henk doctor --probe` until it reports `0 failing check(s)`.
++5. `henk mcp probe --server github --show pull_request_read` shows what a
++   lane will see.
++6. `RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts henk review <url>`
++   on a pull request in an allowlisted repository. The run id is printed
++   first; `henk runs show <id>` prints the run, lanes, findings and
++   timeline afterwards, and `transcripts/<run>/<lane>.json` holds what the
++   model saw and said.
++
++### Reviewing a pull request from a laptop
++
++With the setup above done once, a review is three commands. The secrets
++come from OpenBao at the moment they are needed: `.env` (gitignored) holds
++only `bao kv get` calls, never a value, and `source .env` runs them in the
++current shell.
++
++```sh
++cd /path/to/meneerhenk
++source .env                      # secrets into this shell; the App key becomes a 0600 file under $XDG_RUNTIME_DIR
++cargo run -q -- doctor           # optional; every line should say ok
++cargo run -q -- review https://github.com/owner/repo/pull/7
++```
++
++An `.env` for this looks like:
++
++```sh
++export LLM3_API_KEY="$(bao kv get -field=proxy-token secret/<path to the proxy token>)"
++umask 077
++mkdir -p "${XDG_RUNTIME_DIR:-/tmp}/henk"
++bao kv get -field=github_app_private_key secret/<path to the App secret> > "${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
++export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
++```
++
++The first line of `henk review`'s output is the run id. The repository must
++be on the allowlist; the App must be installed on it (`doctor` lists the
++installations when the token is refused). Variants:
++
++```sh
++RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
++cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head
++cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, lanes, findings, timeline
++cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
++```
++
++Another model is a name from `llm models` in `[models.<id>].model`, or a
++second `[models.*]` block and a second lane under `[review].lanes`; lane
++names must not equal a model name. Another repository is one more entry in
++`[allowlist].github_repositories`.
+ 
+ ## Container image
+ 
+@@ -131,7 +196,9 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
+ henk review https://gitlab.example/group/project/-/merge_requests/5
+ henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
+ henk llm probe --model proxy-fast                  # one prompt to a model
++henk llm models --model proxy-fast                 # what that endpoint serves
+ henk mcp probe --server github --show pull_request_read
++henk runs show r-20261005-1a2b3c4d                 # a run from the local database
+ ```
+ 
+ In serve mode everything is an event. Hooks receive and publish; listeners
+@@ -158,6 +225,10 @@ line in `docs/SPEC.md` once the team confirms it.
+   the running review, a newer commit supersedes it.
+ - §3.2 When two lanes claim the same line, the first claim posts.
+ - §3.3 Dropped lanes are named by their configured lane name, never a model.
++- §3.3 A lane that reaches its time limit stops: a tool call in flight
++  finishes, no new model turn starts, what it posted stands, and the
++  review completes on it. The summary says the lane stopped at the time
++  limit. A plan that reaches its time limit still fails (§4).
+ - §3.3 Findings in resolved threads do not count towards N.
+ - §4 A plan has 20 minutes (`planning.timeout_secs`).
+ - §4 On GitLab, triage sets labels, type and links; parent and child
+diff --git a/crates/henk-agent/prompts/review_lane.md b/crates/henk-agent/prompts/review_lane.md
+index c7bd3e1..d5bce49 100644
+--- a/crates/henk-agent/prompts/review_lane.md
++++ b/crates/henk-agent/prompts/review_lane.md
+@@ -2,7 +2,7 @@
+ 
+ You are one of several independent reviewers of {{kind}} {{ref}} in {{repo}} at commit {{commit}} (base branch: {{base}}). Title: {{title}}.
+ 
+-Review the change against the base branch. Read the diff first, then as much surrounding code as you need: callers, tests, configuration. Use the read tools for that.
++Review the change against the base branch. Read the diff first, then as much surrounding code as you need: callers, tests, configuration. Use the read tools for that: the diff comes from `pull_request_read` with `method: "get_diff"`, the list of changed files from `method: "get_files"`, and a whole file at the reviewed commit from `get_file_contents`.
+ 
+ Report only real problems that this change introduces: bugs, security issues, broken behaviour, missing or wrong tests for changed behaviour. No style remarks, no nitpicks, no praise. If the change is fine, say nothing and end your turn.
+ 
+diff --git a/crates/henk-agent/src/agent.rs b/crates/henk-agent/src/agent.rs
+index 8b7ee9a..507c9f6 100644
+--- a/crates/henk-agent/src/agent.rs
++++ b/crates/henk-agent/src/agent.rs
+@@ -18,7 +18,9 @@ use crate::tool::{ToolOutput, ToolSet};
+ pub struct AgentConfig {
+     /// Model calls allowed. Each turn is one call plus its tool calls.
+     pub max_turns: u32,
+-    /// Wall-clock limit for the whole run.
++    /// Wall-clock limit for the whole run. When it passes, a model call in
++    /// flight is abandoned, tool calls in flight finish, and no new turn
++    /// starts; the run ends with [`StopCause::Timeout`].
+     pub timeout: Duration,
+     /// Tool output longer than this is cut, with a note, before the model
+     /// sees it. Keeps one huge diff from eating the context.
+@@ -201,19 +203,32 @@ impl Agent {
+                 break StopCause::EndTurn;
+             }
+ 
++            // Tool calls run to completion even past the deadline: a finding
++            // being posted lands, and nothing is left half done. Only a
++            // cancel interrupts them. The deadline is checked again before
++            // the next model call.
+             let mut results = Vec::with_capacity(calls.len());
+             for call in calls {
+                 let started = Instant::now();
+                 let output = tokio::select! {
+                     biased;
+                     () = cancel.cancelled() => return Self::finish(messages, turns, usage, StopCause::Cancelled),
+-                    () = tokio::time::sleep_until(deadline) => return Self::finish(messages, turns, usage, StopCause::Timeout),
+                     output = self.dispatch(&call.name, &call.arguments) => output,
+                 };
++                let elapsed = started.elapsed();
++                debug!(
++                    turn = turns,
++                    tool = %call.name,
++                    args = %one_line(&arguments_text(&call.arguments), 300),
++                    result_chars = output.content.chars().count(),
++                    is_error = output.is_error,
++                    elapsed_ms = elapsed.as_millis(),
++                    "tool called"
++                );
+                 self.emit(AgentEvent::ToolCalled {
+                     name: call.name.clone(),
+                     is_error: output.is_error,
+-                    elapsed: started.elapsed(),
++                    elapsed,
+                 });
+                 results.push(ToolResult {
+                     call_id: call.id,
+@@ -222,6 +237,9 @@ impl Agent {
+                 });
+             }
+             messages.push(ChatMessage::tool_results(results));
++            if tokio::time::Instant::now() >= deadline {
++                break StopCause::Timeout;
++            }
+         };
+         Self::finish(messages, turns, usage, stop)
+     }
+@@ -267,6 +285,7 @@ impl Agent {
+             .map(ChatMessage::text)
+             .unwrap_or_default();
+         info!(turns, input_tokens = usage.input_tokens, output_tokens = usage.output_tokens, stop = ?stop, "agent run ended");
++        debug!(final_text = %one_line(&final_text, 300), "last assistant text");
+         AgentOutcome {
+             final_text,
+             turns,
+@@ -280,3 +299,16 @@ impl Agent {
+ fn truncate_chars(text: &str, max: usize) -> String {
+     text.chars().take(max).collect()
+ }
++
++/// Text cut to `max` characters with line breaks flattened, for one log line.
++fn one_line(text: &str, max: usize) -> String {
++    truncate_chars(text, max).replace(['\n', '\r'], " ")
++}
++
++/// The arguments as one line of text, for logs.
++fn arguments_text(arguments: &ToolArguments) -> String {
++    match arguments {
++        ToolArguments::Parsed(value) => value.to_string(),
++        ToolArguments::Malformed(raw) => format!("(malformed) {raw}"),
++    }
++}
+diff --git a/crates/henk-agent/tests/loop.rs b/crates/henk-agent/tests/loop.rs
+index 8020762..681e2a4 100644
+--- a/crates/henk-agent/tests/loop.rs
++++ b/crates/henk-agent/tests/loop.rs
+@@ -280,6 +280,33 @@ async fn times_out_during_a_slow_tool() {
+         .await;
+     assert!(matches!(outcome.stop, StopCause::Timeout));
+     assert_eq!(outcome.turns, 1);
++    // The slow tool was allowed to finish; its result is in the conversation
++    // and no second model call was made.
++    let last = outcome.messages.last().unwrap();
++    assert!(matches!(
++        last.blocks.first(),
++        Some(Block::ToolResult(result)) if result.content == "woke"
++    ));
++}
++
++#[tokio::test(start_paused = true)]
++async fn a_slow_model_call_is_abandoned_at_the_deadline() {
++    let model = Arc::new(ScriptedClient::new("m", []).with_delay(Duration::from_secs(30)));
++    let agent = Agent::new(
++        model,
++        ToolSet::new(),
++        "s",
++        AgentConfig {
++            timeout: Duration::from_millis(50),
++            ..config()
++        },
++    );
++    let outcome = agent
++        .run(vec![ChatMessage::user("go")], CancellationToken::new())
++        .await;
++    assert!(matches!(outcome.stop, StopCause::Timeout));
++    assert_eq!(outcome.turns, 1);
++    assert_eq!(outcome.messages.len(), 1, "no answer was recorded");
+ }
+ 
+ #[tokio::test]
+diff --git a/crates/henk-domain/src/review.rs b/crates/henk-domain/src/review.rs
+index 6ae3b6b..4ad8112 100644
+--- a/crates/henk-domain/src/review.rs
++++ b/crates/henk-domain/src/review.rs
+@@ -177,6 +177,9 @@ pub struct LaneSpec {
+ pub enum LaneOutcome {
+     /// The lane read the change and posted what it found.
+     Finished,
++    /// The lane reached its time limit. What it posted stands; it posts
++    /// nothing more. The review completes on it like on a finished lane.
++    Stopped,
+     /// The lane failed after retries or hung, and was dropped.
+     Dropped,
+ }
+@@ -228,7 +231,15 @@ impl ReviewOutcome {
+     pub fn completed(&self) -> bool {
+         self.lanes
+             .iter()
+-            .any(|lane| lane.outcome == LaneOutcome::Finished)
++            .any(|lane| matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped))
++    }
++
++    /// The lanes that reached their time limit, in order.
++    pub fn stopped_lanes(&self) -> impl Iterator<Item = &LaneName> + '_ {
++        self.lanes
++            .iter()
++            .filter(|lane| lane.outcome == LaneOutcome::Stopped)
++            .map(|lane| &lane.lane)
+     }
+ 
+     /// The lanes that were dropped, in order.
+@@ -287,6 +298,20 @@ impl ReviewOutcome {
+                 let _ = write!(text, " Lanes {} did not finish.", many.join(", "));
+             }
+         }
++        let stopped: Vec<&str> = self.stopped_lanes().map(LaneName::as_str).collect();
++        match stopped.as_slice() {
++            [] => {}
++            [one] => {
++                let _ = write!(text, " Lane {one} stopped at the time limit.");
++            }
++            many => {
++                let _ = write!(
++                    text,
++                    " Lanes {} stopped at the time limit.",
++                    many.join(", ")
++                );
++            }
++        }
+         text
+     }
+ }
+@@ -404,6 +429,26 @@ mod tests {
+ 
+     #[test]
+     fn no_lane_finished_is_henks_failure() {
++        let stopped = outcome(&[("a", LaneOutcome::Stopped)], 2);
++        assert!(stopped.completed());
++        assert_eq!(stopped.check_conclusion(), CheckConclusion::Neutral);
++        assert_eq!(
++            stopped.summary(),
++            "2 issues found. Lane a stopped at the time limit."
++        );
++        let mixed = outcome(
++            &[
++                ("a", LaneOutcome::Stopped),
++                ("b", LaneOutcome::Dropped),
++                ("c", LaneOutcome::Stopped),
++            ],
++            0,
++        );
++        assert_eq!(mixed.check_conclusion(), CheckConclusion::Success);
++        assert_eq!(
++            mixed.summary(),
++            "No issues found. Lane b did not finish. Lanes a, c stopped at the time limit."
++        );
+         let outcome = outcome(&[("a", LaneOutcome::Dropped)], 0);
+         assert!(!outcome.completed());
+         assert_eq!(outcome.check_conclusion(), CheckConclusion::Failure);
+diff --git a/crates/henk-llm/src/anthropic.rs b/crates/henk-llm/src/anthropic.rs
+index 9643b85..9bd44b1 100644
+--- a/crates/henk-llm/src/anthropic.rs
++++ b/crates/henk-llm/src/anthropic.rs
+@@ -13,7 +13,7 @@ use crate::types::{
+     ToolChoice, Usage,
+ };
+ 
+-const API_VERSION: &str = "2023-06-01";
++pub(crate) const API_VERSION: &str = "2023-06-01";
+ 
+ /// A client for one model on an Anthropic-style endpoint.
+ #[derive(Debug)]
+@@ -61,7 +61,7 @@ impl AnthropicClient {
+                 .map(|tool| {
+                     json!({
+                         "name": tool.name.as_str(),
+-                        "description": tool.description,
++                        "description": schema::cap_description(&tool.description),
+                         "input_schema": schema::clean(&tool.input_schema),
+                     })
+                 })
+diff --git a/crates/henk-llm/src/http.rs b/crates/henk-llm/src/http.rs
+index 0359ce0..34db7d7 100644
+--- a/crates/henk-llm/src/http.rs
++++ b/crates/henk-llm/src/http.rs
+@@ -168,6 +168,20 @@ pub async fn post_json(
+         .send()
+         .await
+         .map_err(LlmError::Transport)?;
++    read_json(response).await
++}
++
++/// Sends a GET and returns the decoded JSON body of a 2xx response.
++///
++/// # Errors
++///
++/// As [`post_json`].
++pub async fn get_json(request: reqwest::RequestBuilder) -> Result<serde_json::Value, LlmError> {
++    let response = request.send().await.map_err(LlmError::Transport)?;
++    read_json(response).await
++}
++
++async fn read_json(response: reqwest::Response) -> Result<serde_json::Value, LlmError> {
+     let status = response.status();
+     let headers = response.headers().clone();
+     let text = response.text().await.map_err(LlmError::Transport)?;
+diff --git a/crates/henk-llm/src/lib.rs b/crates/henk-llm/src/lib.rs
+index d342262..5ee780c 100644
+--- a/crates/henk-llm/src/lib.rs
++++ b/crates/henk-llm/src/lib.rs
+@@ -15,6 +15,7 @@ pub mod anthropic;
+ pub mod client;
+ pub mod error;
+ pub mod http;
++pub mod models;
+ pub mod openai;
+ pub mod schema;
+ #[cfg(any(test, feature = "testing"))]
+@@ -24,6 +25,7 @@ pub mod types;
+ pub use client::{MaxTokensParam, ModelClient, ModelConfig, Provider, client_for};
+ pub use error::LlmError;
+ pub use http::{RetryPolicy, ensure_tls_provider};
++pub use models::list_models;
+ pub use types::{
+     Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
+     ToolChoice, ToolDef, ToolName, ToolResult, Usage,
+diff --git a/crates/henk-llm/src/models.rs b/crates/henk-llm/src/models.rs
+new file mode 100644
+index 0000000..7c3bb12
+--- /dev/null
++++ b/crates/henk-llm/src/models.rs
+@@ -0,0 +1,79 @@
++//! Listing the models an endpoint serves, for setup and `henk doctor`.
++
++use secrecy::ExposeSecret as _;
++use serde_json::Value;
++
++use crate::client::{ModelConfig, Provider};
++use crate::error::{LlmError, truncate_body};
++use crate::http::{build_client, get_json, with_retry};
++
++/// Lists the model ids the endpoint of `config` serves. The configured model
++/// name itself is ignored; only the base URL, provider and key are used.
++///
++/// # Errors
++///
++/// Returns [`LlmError::InvalidConfig`] when no HTTP client can be built, the
++/// usual HTTP errors from the endpoint, and [`LlmError::Decode`] when the
++/// answer has no `data` array of objects with an `id`.
++pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, LlmError> {
++    let http = build_client(config.timeout)?;
++    let url = match config.provider {
++        Provider::OpenAi => format!("{}/models", config.base_url()),
++        Provider::Anthropic => format!("{}/v1/models", config.base_url()),
++    };
++    with_retry(config.retry, |_| async {
++        let builder = match config.provider {
++            Provider::OpenAi => http.get(&url).bearer_auth(config.api_key.expose_secret()),
++            Provider::Anthropic => http
++                .get(&url)
++                .header("x-api-key", config.api_key.expose_secret())
++                .header("anthropic-version", crate::anthropic::API_VERSION),
++        };
++        let response = get_json(builder).await?;
++        decode(&response)
++    })
++    .await
++}
++
++/// Both wire formats answer `{"data": [{"id": ...}, ...]}`.
++fn decode(response: &Value) -> Result<Vec<String>, LlmError> {
++    let data = response
++        .get("data")
++        .and_then(Value::as_array)
++        .ok_or_else(|| {
++            LlmError::Decode(format!(
++                "no data array in model list: {}",
++                truncate_body(&response.to_string())
++            ))
++        })?;
++    let mut ids: Vec<String> = data
++        .iter()
++        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
++        .map(str::to_owned)
++        .collect();
++    ids.sort();
++    ids.dedup();
++    Ok(ids)
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
++
++    use serde_json::json;
++
++    use super::*;
++
++    #[test]
++    fn decodes_sorted_unique_ids() {
++        let ids =
++            decode(&json!({"data": [{"id": "b"}, {"id": "a"}, {"id": "b"}, {"x": 1}]})).unwrap();
++        assert_eq!(ids, vec!["a", "b"]);
++    }
++
++    #[test]
++    fn missing_data_is_a_decode_error_with_body() {
++        let error = decode(&json!({"error": "nope"})).unwrap_err();
++        assert!(error.to_string().contains("nope"), "{error}");
++    }
++}
+diff --git a/crates/henk-llm/src/openai.rs b/crates/henk-llm/src/openai.rs
+index c408bf2..af8202a 100644
+--- a/crates/henk-llm/src/openai.rs
++++ b/crates/henk-llm/src/openai.rs
+@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
+ use tracing::instrument;
+ 
+ use crate::client::{MaxTokensParam, ModelClient, ModelConfig};
+-use crate::error::LlmError;
++use crate::error::{LlmError, truncate_body};
+ use crate::http::{build_client, post_json, with_retry};
+ use crate::schema;
+ use crate::types::{
+@@ -67,7 +67,7 @@ impl OpenAiClient {
+                         "type": "function",
+                         "function": {
+                             "name": tool.name.as_str(),
+-                            "description": tool.description,
++                            "description": schema::cap_description(&tool.description),
+                             "parameters": schema::clean(&tool.input_schema),
+                         }
+                     })
+@@ -157,16 +157,25 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
+ /// # Errors
+ ///
+ /// Returns [`LlmError::Decode`] when the response has no choice or an
+-/// unreadable message.
++/// unreadable message. The error carries the (truncated) body, because a
++/// proxy that answers 200 with an error object lands here.
+ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
+     let choice = response
+         .get("choices")
+         .and_then(Value::as_array)
+         .and_then(|choices| choices.first())
+-        .ok_or_else(|| LlmError::Decode("no choices in response".to_owned()))?;
+-    let message = choice
+-        .get("message")
+-        .ok_or_else(|| LlmError::Decode("choice without message".to_owned()))?;
++        .ok_or_else(|| {
++            LlmError::Decode(format!(
++                "no choices in response: {}",
++                truncate_body(&response.to_string())
++            ))
++        })?;
++    let message = choice.get("message").ok_or_else(|| {
++        LlmError::Decode(format!(
++            "choice without message: {}",
++            truncate_body(&choice.to_string())
++        ))
++    })?;
+ 
+     let mut blocks = Vec::new();
+     match message.get("content") {
+@@ -198,6 +207,11 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
+                 .and_then(Value::as_str)
+                 .map_or_else(|| synthetic_id(index), str::to_owned);
+             let arguments = match function.get("arguments") {
++                // Proxies and some models send "" for a tool without
++                // parameters; that is an empty object, not malformed JSON.
++                Some(Value::String(raw)) if raw.trim().is_empty() => {
++                    ToolArguments::Parsed(json!({}))
++                }
+                 Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).map_or_else(
+                     |_| ToolArguments::Malformed(raw.clone()),
+                     ToolArguments::Parsed,
+diff --git a/crates/henk-llm/src/schema.rs b/crates/henk-llm/src/schema.rs
+index 49302fb..52e3daf 100644
+--- a/crates/henk-llm/src/schema.rs
++++ b/crates/henk-llm/src/schema.rs
+@@ -29,6 +29,19 @@ pub fn clean(schema: &Value) -> Value {
+     Value::Object(object)
+ }
+ 
++/// OpenAI rejects a function description over 1024 characters, and several
++/// MCP servers ship longer ones. Cuts at a character boundary with a marker.
++#[must_use]
++pub fn cap_description(description: &str) -> String {
++    const LIMIT: usize = 1024;
++    const MARKER: &str = " [...]";
++    if description.chars().count() <= LIMIT {
++        return description.to_owned();
++    }
++    let keep: String = description.chars().take(LIMIT - MARKER.len()).collect();
++    format!("{}{MARKER}", keep.trim_end())
++}
++
+ #[cfg(test)]
+ mod tests {
+     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+diff --git a/crates/henk-llm/src/testing.rs b/crates/henk-llm/src/testing.rs
+index 7d36535..833d6c5 100644
+--- a/crates/henk-llm/src/testing.rs
++++ b/crates/henk-llm/src/testing.rs
+@@ -1,6 +1,7 @@
+ //! A scripted [`ModelClient`] for tests of callers.
+ 
+ use std::sync::Mutex;
++use std::time::Duration;
+ 
+ use crate::client::ModelClient;
+ use crate::error::LlmError;
+@@ -15,6 +16,7 @@ pub struct ScriptedClient {
+     model: String,
+     script: Mutex<std::collections::VecDeque<Result<Completion, LlmError>>>,
+     requests: Mutex<Vec<CompletionRequest>>,
++    delay: Duration,
+ }
+ 
+ impl ScriptedClient {
+@@ -28,9 +30,17 @@ impl ScriptedClient {
+             model: model.into(),
+             script: Mutex::new(completions.into_iter().collect()),
+             requests: Mutex::new(Vec::new()),
++            delay: Duration::ZERO,
+         }
+     }
+ 
++    /// Makes every call take `delay` before answering, for deadline tests.
++    #[must_use]
++    pub fn with_delay(mut self, delay: Duration) -> Self {
++        self.delay = delay;
++        self
++    }
++
+     /// Every request seen so far.
+     #[must_use]
+     pub fn requests(&self) -> Vec<CompletionRequest> {
+@@ -48,6 +58,9 @@ impl ModelClient for ScriptedClient {
+         if let Ok(mut requests) = self.requests.lock() {
+             requests.push(request.clone());
+         }
++        if !self.delay.is_zero() {
++            tokio::time::sleep(self.delay).await;
++        }
+         let next = self
+             .script
+             .lock()
+diff --git a/crates/henk-llm/src/types.rs b/crates/henk-llm/src/types.rs
+index 176e138..d6700b4 100644
+--- a/crates/henk-llm/src/types.rs
++++ b/crates/henk-llm/src/types.rs
+@@ -87,7 +87,8 @@ pub struct ToolDef {
+ }
+ 
+ /// The arguments of a tool call as the model produced them.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
+ pub enum ToolArguments {
+     /// Valid JSON.
+     Parsed(Value),
+@@ -97,7 +98,7 @@ pub enum ToolArguments {
+ }
+ 
+ /// One tool call in an assistant message.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+ pub struct ToolCall {
+     /// The provider's id for this call; tool results refer to it.
+     pub id: String,
+@@ -108,7 +109,7 @@ pub struct ToolCall {
+ }
+ 
+ /// The result of one tool call, sent back in a user message.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+ pub struct ToolResult {
+     /// The id of the call this answers.
+     pub call_id: String,
+@@ -120,7 +121,8 @@ pub struct ToolResult {
+ }
+ 
+ /// One block of a message.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
+ pub enum Block {
+     /// Plain text.
+     Text(String),
+@@ -133,8 +135,8 @@ pub enum Block {
+     Opaque(Value),
+ }
+ 
+-/// One message in the conversation.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++/// One message in the conversation. Serialises for local transcripts.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+ pub struct ChatMessage {
+     /// Who wrote it.
+     pub role: Role,
+@@ -225,7 +227,8 @@ pub struct CompletionRequest {
+ }
+ 
+ /// Why the model stopped.
+-#[derive(Debug, Clone, PartialEq, Eq)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
+ pub enum StopReason {
+     /// A normal end of turn.
+     EndTurn,
+@@ -238,7 +241,7 @@ pub enum StopReason {
+ }
+ 
+ /// Token usage of one completion.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+ pub struct Usage {
+     /// Tokens in the prompt.
+     pub input_tokens: u64,
+diff --git a/crates/henk-llm/tests/adapters.rs b/crates/henk-llm/tests/adapters.rs
+index 82b6dbc..e19a981 100644
+--- a/crates/henk-llm/tests/adapters.rs
++++ b/crates/henk-llm/tests/adapters.rs
+@@ -79,6 +79,126 @@ fn conversation() -> Vec<ChatMessage> {
+ 
+ // ---- OpenAI ----------------------------------------------------------------
+ 
++#[test]
++fn openai_treats_empty_arguments_as_an_empty_object() {
++    let response = json!({
++        "choices": [{
++            "finish_reason": "tool_calls",
++            "message": {
++                "role": "assistant",
++                "content": null,
++                "tool_calls": [
++                    {"id": "c1", "type": "function", "function": {"name": "list_existing_findings", "arguments": ""}},
++                    {"id": "c2", "type": "function", "function": {"name": "list_existing_findings", "arguments": "  \n"}}
++                ]
++            }
++        }]
++    });
++    let completion = openai::decode(&response).unwrap();
++    let calls: Vec<_> = completion.message.tool_calls().collect();
++    assert_eq!(calls.len(), 2);
++    assert_eq!(calls[0].arguments, ToolArguments::Parsed(json!({})));
++    assert_eq!(calls[1].arguments, ToolArguments::Parsed(json!({})));
++}
++
++#[test]
++fn openai_decode_errors_carry_the_body() {
++    let error = openai::decode(&json!({"error": {"message": "model not found"}})).unwrap_err();
++    assert!(matches!(error, LlmError::Decode(_)));
++    assert!(error.to_string().contains("model not found"), "{error}");
++    let error = openai::decode(&json!({"choices": [{"delta": {}}]})).unwrap_err();
++    assert!(error.to_string().contains("delta"), "{error}");
++}
++
++#[test]
++fn tool_descriptions_are_capped_for_both_adapters() {
++    let mut long = tool();
++    long.description = "x".repeat(3000);
++    let request = CompletionRequest {
++        tools: vec![long],
++        ..Default::default()
++    };
++    let openai_body = openai::OpenAiClient::new(config(Provider::OpenAi, "http://x/v1"))
++        .unwrap()
++        .body(&request);
++    let description = openai_body["tools"][0]["function"]["description"]
++        .as_str()
++        .unwrap();
++    assert!(description.chars().count() <= 1024, "{}", description.len());
++    assert!(description.ends_with("[...]"));
++    let anthropic_body = anthropic::AnthropicClient::new(config(Provider::Anthropic, "http://x"))
++        .unwrap()
++        .body(&request);
++    let description = anthropic_body["tools"][0]["description"].as_str().unwrap();
++    assert!(description.chars().count() <= 1024);
++
++    let short = openai::OpenAiClient::new(config(Provider::OpenAi, "http://x/v1"))
++        .unwrap()
++        .body(&CompletionRequest {
++            tools: vec![tool()],
++            ..Default::default()
++        });
++    assert_eq!(
++        short["tools"][0]["function"]["description"],
++        "Reads a pull request."
++    );
++}
++
++#[test]
++fn transcripts_serialise() {
++    let text = serde_json::to_string(&conversation()).unwrap();
++    assert!(text.contains("\"tool_call\""), "{text}");
++    assert!(text.contains("\"parsed\""), "{text}");
++    assert!(text.contains("\"tool_result\""), "{text}");
++}
++
++#[tokio::test]
++async fn list_models_openai_and_anthropic() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/v1/models"))
++        .and(header("authorization", "Bearer secret-key"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "object": "list",
++            "data": [{"id": "fast-model", "object": "model"}, {"id": "big-model"}]
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let ids = henk_llm::list_models(&config(Provider::OpenAi, &format!("{}/v1", server.uri())))
++        .await
++        .unwrap();
++    assert_eq!(ids, vec!["big-model", "fast-model"]);
++
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/v1/models"))
++        .and(header("x-api-key", "secret-key"))
++        .and(header("anthropic-version", "2023-06-01"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "data": [{"id": "claude-sonnet-5-5", "type": "model"}],
++            "has_more": false
++        })))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let ids = henk_llm::list_models(&config(Provider::Anthropic, &server.uri()))
++        .await
++        .unwrap();
++    assert_eq!(ids, vec!["claude-sonnet-5-5"]);
++
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .respond_with(ResponseTemplate::new(401).set_body_string("no key"))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let error = henk_llm::list_models(&config(Provider::OpenAi, &format!("{}/v1", server.uri())))
++        .await
++        .unwrap_err();
++    assert!(matches!(error, LlmError::Unauthorized { status: 401, .. }));
++}
++
+ #[test]
+ fn openai_decodes_tool_calls_including_malformed_arguments() {
+     let completion = openai::decode(&fixture("openai/tool_call.json")).unwrap();
+diff --git a/crates/henk-platform/src/github/api.rs b/crates/henk-platform/src/github/api.rs
+index 0e12969..3ef5867 100644
+--- a/crates/henk-platform/src/github/api.rs
++++ b/crates/henk-platform/src/github/api.rs
+@@ -108,6 +108,27 @@ impl GitHubApi {
+         self.send(builder).await
+     }
+ 
++    /// `GET` a REST path authenticated as the App itself (JWT), not as an
++    /// installation. Only `/app` and `/app/installations` need this.
++    ///
++    /// # Errors
++    ///
++    /// Returns [`PlatformError::Auth`] when the client has no App
++    /// credentials, otherwise as [`Self::get`].
++    pub async fn get_as_app(&self, path: &str) -> Result<Value, PlatformError> {
++        let jwt = self
++            .auth
++            .app_jwt()
++            .ok_or_else(|| PlatformError::Auth("no App credentials configured".to_owned()))??;
++        let builder = self
++            .http
++            .get(format!("{}{path}", self.api_base))
++            .bearer_auth(jwt.expose_secret())
++            .header("Accept", "application/vnd.github+json")
++            .header("X-GitHub-Api-Version", "2022-11-28");
++        self.send(builder).await
++    }
++
+     /// `GET` every page of a REST list (up to ten pages of 100).
+     ///
+     /// # Errors
+diff --git a/crates/henk-platform/src/github/app.rs b/crates/henk-platform/src/github/app.rs
+index b92f066..9d482ce 100644
+--- a/crates/henk-platform/src/github/app.rs
++++ b/crates/henk-platform/src/github/app.rs
+@@ -166,6 +166,22 @@ impl GitHubAuth {
+         Self::Token(token)
+     }
+ 
++    /// A signed App JWT, for the few endpoints that authenticate as the App
++    /// itself rather than as an installation (`GET /app`,
++    /// `GET /app/installations`). `None` for a fixed token.
++    ///
++    /// # Errors
++    ///
++    /// Returns [`PlatformError::Auth`] when signing fails.
++    pub fn app_jwt(&self) -> Option<Result<SecretString, PlatformError>> {
++        match self {
++            Self::Token(_) => None,
++            Self::App { credentials, .. } => {
++                Some(credentials.jwt(SystemTime::now()).map(SecretString::from))
++            }
++        }
++    }
++
+     /// A bearer token for API calls, minting an installation token when the
+     /// cached one is missing or within two minutes of expiry.
+     ///
+diff --git a/crates/henk-platform/tests/github.rs b/crates/henk-platform/tests/github.rs
+index 951adbe..12893d5 100644
+--- a/crates/henk-platform/tests/github.rs
++++ b/crates/henk-platform/tests/github.rs
+@@ -281,3 +281,38 @@ async fn api_errors_carry_status_and_body() {
+         "{error}"
+     );
+ }
++
++#[tokio::test]
++async fn get_as_app_uses_the_jwt_not_an_installation_token() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/app/installations"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
++            {"id": 678, "account": {"login": "docspec", "type": "User"}, "repository_selection": "selected"}
++        ])))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let api = GitHubApi::new(
++        &server.uri(),
++        GitHubAuth::app(AppCredentials::from_pem(12345, 678, KEY).unwrap()),
++    )
++    .unwrap();
++    let value = api.get_as_app("/app/installations").await.unwrap();
++    assert_eq!(value[0]["id"], 678);
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(requests.len(), 1, "no token was minted");
++    let auth = requests[0].headers["authorization"].to_str().unwrap();
++    let jwt = auth.strip_prefix("Bearer ").unwrap();
++    assert_eq!(
++        jwt.split('.').count(),
++        3,
++        "a JWT, not an installation token"
++    );
++
++    let fixed = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
++    assert!(matches!(
++        fixed.get_as_app("/app").await,
++        Err(henk_platform::PlatformError::Auth(_))
++    ));
++}
+diff --git a/crates/henk-session/Cargo.toml b/crates/henk-session/Cargo.toml
+index 6ec1ec3..76e094a 100644
+--- a/crates/henk-session/Cargo.toml
++++ b/crates/henk-session/Cargo.toml
+@@ -14,6 +14,7 @@ henk-domain = { workspace = true }
+ henk-llm = { workspace = true }
+ henk-mcp = { workspace = true }
+ henk-store = { workspace = true }
++serde = { workspace = true }
+ serde_json = { workspace = true }
+ tokio = { workspace = true }
+ tokio-util = { workspace = true }
+diff --git a/crates/henk-session/src/lib.rs b/crates/henk-session/src/lib.rs
+index e7514e0..87656a5 100644
+--- a/crates/henk-session/src/lib.rs
++++ b/crates/henk-session/src/lib.rs
+@@ -8,6 +8,12 @@
+ //!
+ //! [`platform_tools`] is the one place where a platform's MCP read tools are
+ //! filtered and guarded by scope (spec §8.5) before a model may call them.
++//!
++//! When `HENK_TRANSCRIPT_DIR` names a directory, every session also writes
++//! its full conversation there as JSON. That is a local diagnostic file for
++//! the operator; nothing reads it back and nothing sends it anywhere.
++
++pub mod transcript;
+ 
+ use std::sync::Arc;
+ 
+@@ -50,7 +56,7 @@ impl std::fmt::Debug for SessionSpec {
+     }
+ }
+ 
+-/// How a session ended.
++/// How a session ended. `stop` says whether the time limit ended it.
+ #[derive(Debug)]
+ pub struct SessionOutcome {
+     /// Why the loop stopped.
+@@ -88,17 +94,28 @@ pub async fn run_session(
+     if let Err(error) = store.start_lane(run, &spec.name, &model_name) {
+         tracing::warn!(%error, "could not record the lane start");
+     }
++    let system = spec.system;
+     let agent = Agent::new(
+         Arc::clone(&spec.model),
+         spec.tools,
+-        spec.system,
++        system.clone(),
+         spec.limits,
+     );
+     let outcome = agent.run(spec.opening, cancel).await;
++    if let Some(dir) = transcript::directory_from_env() {
++        match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
++            Ok(path) => info!(path = %path.display(), "transcript written"),
++            Err(error) => tracing::warn!(%error, "could not write the transcript"),
++        }
++    }
+ 
++    // A session that reaches its time limit is finished, not dropped: what
++    // it posted stands, and it posts nothing more. Callers that need a
++    // complete result (the planner) read `stop` and decide for themselves.
+     let (status, error) = match &outcome.stop {
+-        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
+-        StopCause::Timeout => (LaneStatus::Dropped, Some("timed out".to_owned())),
++        StopCause::EndTurn | StopCause::MaxTurns | StopCause::Timeout => {
++            (LaneStatus::Finished, None)
++        }
+         StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
+         StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
+     };
+@@ -114,9 +131,14 @@ pub async fn run_session(
+         tracing::warn!(error = %store_error, "could not record the lane end");
+     }
+     let last_words: String = outcome.final_text.chars().take(200).collect();
++    let level = if error.is_some() || matches!(outcome.stop, StopCause::Timeout) {
++        "warn"
++    } else {
++        "info"
++    };
+     let _ = store.event(
+         run,
+-        if error.is_some() { "warn" } else { "info" },
++        level,
+         &format!(
+             "{}: {:?} after {} turns; last words: {last_words}",
+             spec.name, outcome.stop, outcome.turns
+@@ -253,6 +275,28 @@ mod tests {
+         assert_eq!(store.events(&run_id()).unwrap().len(), 1);
+     }
+ 
++    #[tokio::test(start_paused = true)]
++    async fn a_time_limit_finishes_the_session_instead_of_dropping_it() {
++        let store = store_with_run();
++        let model: Arc<dyn ModelClient> =
++            Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
++        let mut spec = spec(model);
++        spec.limits.timeout = Duration::from_millis(50);
++        let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
++        assert!(matches!(outcome.stop, StopCause::Timeout));
++        assert!(outcome.finished());
++        assert_eq!(outcome.error, None);
++        let lanes = store.lanes(&run_id()).unwrap();
++        assert_eq!(lanes[0].status, LaneStatus::Finished);
++        let events = store.events(&run_id()).unwrap();
++        assert_eq!(events[0].level, "warn");
++        assert!(
++            events[0].message.contains("Timeout"),
++            "{}",
++            events[0].message
++        );
++    }
++
+     #[tokio::test]
+     async fn a_model_error_drops_the_session_with_the_error_text() {
+         let store = store_with_run();
+diff --git a/crates/henk-session/src/transcript.rs b/crates/henk-session/src/transcript.rs
+new file mode 100644
+index 0000000..1a90ee2
+--- /dev/null
++++ b/crates/henk-session/src/transcript.rs
+@@ -0,0 +1,136 @@
++//! Local transcripts of sessions, for diagnosing a run on the machine that
++//! ran it. Written only when `HENK_TRANSCRIPT_DIR` is set; never shipped.
++
++use std::path::{Path, PathBuf};
++
++use henk_agent::AgentOutcome;
++use henk_domain::run::RunId;
++use serde::Serialize;
++
++/// The environment variable naming the directory.
++pub const ENV_VAR: &str = "HENK_TRANSCRIPT_DIR";
++
++/// The directory from the environment, when set and not empty.
++#[must_use]
++pub fn directory_from_env() -> Option<PathBuf> {
++    std::env::var_os(ENV_VAR)
++        .filter(|value| !value.is_empty())
++        .map(PathBuf::from)
++}
++
++/// What a transcript file holds.
++#[derive(Debug, Serialize)]
++struct Transcript<'a> {
++    run: &'a str,
++    session: &'a str,
++    model: &'a str,
++    stop: String,
++    turns: u32,
++    usage: henk_llm::Usage,
++    system: &'a str,
++    messages: &'a [henk_llm::ChatMessage],
++}
++
++/// Writes `<dir>/<run>/<session>.json` and returns its path.
++///
++/// # Errors
++///
++/// Returns the I/O or serialisation error.
++pub fn write(
++    dir: &Path,
++    run: &RunId,
++    session: &str,
++    model: &str,
++    system: &str,
++    outcome: &AgentOutcome,
++) -> Result<PathBuf, std::io::Error> {
++    let run_dir = dir.join(run.as_str());
++    std::fs::create_dir_all(&run_dir)?;
++    let path = run_dir.join(format!("{}.json", file_safe(session)));
++    let transcript = Transcript {
++        run: run.as_str(),
++        session,
++        model,
++        stop: format!("{:?}", outcome.stop),
++        turns: outcome.turns,
++        usage: outcome.usage,
++        system,
++        messages: &outcome.messages,
++    };
++    let text = serde_json::to_string_pretty(&transcript).map_err(std::io::Error::other)?;
++    std::fs::write(&path, text)?;
++    Ok(path)
++}
++
++/// Lane names are configuration, but a file name must not be a path.
++fn file_safe(name: &str) -> String {
++    let safe: String = name
++        .chars()
++        .map(|c| {
++            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .collect();
++    if safe.is_empty() {
++        "session".to_owned()
++    } else {
++        safe
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(
++        clippy::panic,
++        clippy::unwrap_used,
++        clippy::expect_used,
++        clippy::indexing_slicing
++    )]
++
++    use henk_agent::StopCause;
++    use henk_llm::{ChatMessage, Usage};
++
++    use super::*;
++
++    #[test]
++    fn writes_one_json_file_per_session_under_the_run() {
++        let dir = std::env::temp_dir().join(format!(
++            "henk-transcript-test-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        let outcome = AgentOutcome {
++            final_text: "done".into(),
++            turns: 2,
++            usage: Usage {
++                input_tokens: 10,
++                output_tokens: 4,
++            },
++            stop: StopCause::EndTurn,
++            messages: vec![ChatMessage::user("go"), ChatMessage::assistant("done")],
++        };
++        let run = RunId::parse("r-1").unwrap();
++        let path = write(&dir, &run, "lane a/../x", "m", "system prompt", &outcome).unwrap();
++        assert_eq!(path, dir.join("r-1").join("lane_a____x.json"));
++        let text = std::fs::read_to_string(&path).unwrap();
++        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
++        assert_eq!(value["stop"], "EndTurn");
++        assert_eq!(value["turns"], 2);
++        assert_eq!(value["system"], "system prompt");
++        assert_eq!(value["messages"].as_array().unwrap().len(), 2);
++        std::fs::remove_dir_all(&dir).unwrap();
++    }
++
++    #[test]
++    fn file_names_are_sanitised() {
++        assert_eq!(file_safe("lane-a"), "lane-a");
++        assert_eq!(file_safe("../etc"), "___etc");
++        assert_eq!(file_safe(""), "session");
++    }
++}
+diff --git a/crates/henk-store/src/lib.rs b/crates/henk-store/src/lib.rs
+index e673291..0b0e0c1 100644
+--- a/crates/henk-store/src/lib.rs
++++ b/crates/henk-store/src/lib.rs
+@@ -7,6 +7,6 @@
+ pub mod store;
+ 
+ pub use store::{
+-    EventRecord, FindingAction, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
+-    OutcomeRecord, RunRecord, RunStatus, RunStore, StoreError,
++    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
++    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RunRecord, RunStatus, RunStore, StoreError,
+ };
+diff --git a/crates/henk-store/src/store.rs b/crates/henk-store/src/store.rs
+index 39e03da..6a2e692 100644
+--- a/crates/henk-store/src/store.rs
++++ b/crates/henk-store/src/store.rs
+@@ -192,6 +192,23 @@ pub struct LaneRecord {
+     pub error: Option<String>,
+ }
+ 
++/// One recorded finding action.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct FindingRecord {
++    /// RFC 3339.
++    pub at: String,
++    /// The lane.
++    pub lane: String,
++    /// File path.
++    pub path: String,
++    /// Line number.
++    pub line: u32,
++    /// The platform comment id.
++    pub comment_id: String,
++    /// `posted`, `improved` or `refused`.
++    pub action: String,
++}
++
+ /// One event on a run's timeline.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct EventRecord {
+@@ -495,6 +512,31 @@ impl RunStore {
+         })
+     }
+ 
++    /// The finding actions of a run, oldest first.
++    ///
++    /// # Errors
++    ///
++    /// Returns [`StoreError`] on a database failure.
++    pub fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
++        self.with(|c| {
++            let mut statement = c.prepare(
++                "SELECT created_at, lane, path, line, comment_id, action FROM findings WHERE run_id = ?1 ORDER BY id",
++            )?;
++            let rows = statement.query_map(params![run.as_str()], |row| {
++                Ok(FindingRecord {
++                    at: row.get(0)?,
++                    lane: row.get(1)?,
++                    path: row.get(2)?,
++                    line: row.get(3)?,
++                    comment_id: row.get(4)?,
++                    action: row.get(5)?,
++                })
++            })?;
++            rows.collect::<Result<Vec<_>, _>>()
++                .map_err(StoreError::from)
++        })
++    }
++
+     /// Adds a line to a run's timeline.
+     ///
+     /// # Errors
+@@ -877,6 +919,19 @@ mod tests {
+         assert_eq!(lanes[0].input_tokens, 1000);
+         assert_eq!(lanes[1].error.as_deref(), Some("timeout"));
+         assert_eq!(store.events(&run.id).unwrap()[0].message, "started");
++        let findings = store.findings(&run.id).unwrap();
++        assert_eq!(findings.len(), 1);
++        assert_eq!(findings[0].lane, "a");
++        assert_eq!(findings[0].path, "src/x.rs");
++        assert_eq!(findings[0].line, 12);
++        assert_eq!(findings[0].comment_id, "c1");
++        assert_eq!(findings[0].action, "posted");
++        assert!(
++            store
++                .findings(&RunId::parse("r-none").unwrap())
++                .unwrap()
++                .is_empty()
++        );
+     }
+ 
+     #[test]
+diff --git a/crates/henk/src/doctor.rs b/crates/henk/src/doctor.rs
+index c37fd75..127336e 100644
+--- a/crates/henk/src/doctor.rs
++++ b/crates/henk/src/doctor.rs
+@@ -216,6 +216,17 @@ async fn check_github(settings: &Settings) -> Vec<Check> {
+         Ok(api) => api,
+         Err(error) => return vec![Check::fail("GitHub client", error.to_string())],
+     };
++    let mut checks = vec![check_app_identity(&api, &github.bot_login).await];
++    if github.installation_id == 0 {
++        checks.push(Check::fail(
++            "GitHub App installation",
++            format!(
++                "installation_id is 0; set it to one of these: {}",
++                list_installations(&api).await
++            ),
++        ));
++        return checks;
++    }
+     match tokio::time::timeout(
+         Duration::from_secs(30),
+         api.get("/installation/repositories?per_page=1"),
+@@ -227,16 +238,89 @@ async fn check_github(settings: &Settings) -> Vec<Check> {
+                 .get("total_count")
+                 .and_then(serde_json::Value::as_u64)
+                 .unwrap_or(0);
+-            vec![Check::ok(
+-                "GitHub App",
+-                format!("installation token works; {total} repositories visible"),
+-            )]
++            checks.push(Check::ok(
++                "GitHub App installation",
++                format!(
++                    "installation {} token works; {total} repositories visible",
++                    github.installation_id
++                ),
++            ));
++        }
++        Ok(Err(error)) => checks.push(Check::fail(
++            "GitHub App installation",
++            format!(
++                "installation {} token failed: {error}; the App is installed as: {}",
++                github.installation_id,
++                list_installations(&api).await
++            ),
++        )),
++        Err(_) => checks.push(Check::fail(
++            "GitHub App installation",
++            "no answer within 30s",
++        )),
++    }
++    checks
++}
++
++/// `GET /app` as the App: proves the key and id match and that `bot_login`
++/// is the App's slug.
++async fn check_app_identity(api: &GitHubApi, bot_login: &str) -> Check {
++    match tokio::time::timeout(Duration::from_secs(30), api.get_as_app("/app")).await {
++        Ok(Ok(app)) => {
++            let slug = app.get("slug").and_then(serde_json::Value::as_str);
++            let name = app
++                .get("name")
++                .and_then(serde_json::Value::as_str)
++                .unwrap_or("?");
++            match slug {
++                Some(slug) if format!("{slug}[bot]") == bot_login => Check::ok(
++                    "GitHub App",
++                    format!("{name} ({slug}); key and app_id match; bot_login matches"),
++                ),
++                Some(slug) => Check::warn(
++                    "GitHub App",
++                    format!(
++                        "{name} ({slug}); bot_login is {bot_login:?} but the App's login is \"{slug}[bot]\""
++                    ),
++                ),
++                None => Check::warn("GitHub App", format!("{name}; no slug in the answer")),
++            }
++        }
++        Ok(Err(error)) => Check::fail("GitHub App", format!("GET /app as the App failed: {error}")),
++        Err(_) => Check::fail("GitHub App", "no answer within 30s"),
++    }
++}
++
++/// The installations of the App, as text for a check detail.
++async fn list_installations(api: &GitHubApi) -> String {
++    match tokio::time::timeout(
++        Duration::from_secs(30),
++        api.get_as_app("/app/installations"),
++    )
++    .await
++    {
++        Ok(Ok(serde_json::Value::Array(installations))) if !installations.is_empty() => {
++            installations
++                .iter()
++                .map(|i| {
++                    let id = i.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
++                    let account = i
++                        .get("account")
++                        .and_then(|a| a.get("login"))
++                        .and_then(serde_json::Value::as_str)
++                        .unwrap_or("?");
++                    let selection = i
++                        .get("repository_selection")
++                        .and_then(serde_json::Value::as_str)
++                        .unwrap_or("?");
++                    format!("{id} ({account}, {selection} repositories)")
++                })
++                .collect::<Vec<_>>()
++                .join(", ")
+         }
+-        Ok(Err(error)) => vec![Check::fail(
+-            "GitHub App",
+-            format!("installation token failed: {error}"),
+-        )],
+-        Err(_) => vec![Check::fail("GitHub App", "no answer within 30s")],
++        Ok(Ok(_)) => "none; install the App on an account first".to_owned(),
++        Ok(Err(error)) => format!("could not list installations: {error}"),
++        Err(_) => "could not list installations within 30s".to_owned(),
+     }
+ }
+ 
+diff --git a/crates/henk/src/main.rs b/crates/henk/src/main.rs
+index 33906f1..04ca89c 100644
+--- a/crates/henk/src/main.rs
++++ b/crates/henk/src/main.rs
+@@ -14,6 +14,7 @@ mod plan_tools;
+ mod recorder;
+ mod review;
+ mod review_tools;
++mod runs;
+ mod server;
+ mod urls;
+ mod web_fetch;
+@@ -86,6 +87,20 @@ enum Command {
+         #[command(subcommand)]
+         command: McpCommand,
+     },
++    /// Read run records from the local database.
++    Runs {
++        #[command(subcommand)]
++        command: RunsCommand,
++    },
++}
++
++#[derive(Debug, Subcommand)]
++enum RunsCommand {
++    /// Print one run: lanes, findings and timeline.
++    Show {
++        /// The run id, such as `r-20261005-1a2b3c4d`.
++        run: String,
++    },
+ }
+ 
+ #[derive(Debug, Subcommand)]
+@@ -107,6 +122,12 @@ enum LlmCommand {
+         #[arg(long, default_value = "Say 'Not bad.' and nothing else.")]
+         prompt: String,
+     },
++    /// List the models the endpoint of a configured model serves.
++    Models {
++        /// Model id from `[models]`; its base URL, provider and key are used.
++        #[arg(long)]
++        model: String,
++    },
+ }
+ 
+ #[derive(Debug, Subcommand)]
+@@ -192,12 +213,38 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
+         Command::Llm {
+             command: LlmCommand::Probe { model, prompt },
+         } => cmd_llm_probe(&cli.config, &model, prompt).await,
++        Command::Llm {
++            command: LlmCommand::Models { model },
++        } => cmd_llm_models(&cli.config, &model).await,
+         Command::Mcp {
+             command: McpCommand::Probe { server, show },
+         } => cmd_mcp_probe(&cli.config, &server, &show).await,
++        Command::Runs {
++            command: RunsCommand::Show { run },
++        } => cmd_runs_show(&cli.config, &run),
+     }
+ }
+ 
++fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
++    let settings = load_settings(config)?;
++    let store = henk_store::RunStore::open(Path::new(&settings.server.database_path))?;
++    let id = henk_domain::run::RunId::parse(run)?;
++    let record = store
++        .run(&id)
++        .map_err(anyhow::Error::from)?
++        .ok_or_else(|| anyhow!("no run {run} in {}", settings.server.database_path))?;
++    print!(
++        "{}",
++        runs::render(
++            &record,
++            &store.lanes(&id)?,
++            &store.findings(&id)?,
++            &store.events(&id)?
++        )
++    );
++    Ok(())
++}
++
+ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow::Result<()> {
+     let settings = load_settings(config)?;
+     let app = App::build(settings, None).await?;
+@@ -210,6 +257,8 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
+         .planning
+         .as_ref()
+         .map(|p| p.requester_id.to_string());
++    let run = ids::new_run_id();
++    println!("run {run}");
+     let report = review::run_review(
+         &app,
+         review::ReviewRequest {
+@@ -218,12 +267,13 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
+             trigger: "cli".to_owned(),
+             requester,
+             acknowledge: None,
+-            run: None,
++            run: Some(run.clone()),
+         },
+         CancellationToken::new(),
+     )
+-    .await?;
+-    println!("run {}", report.run);
++    .await
++    .with_context(|| format!("run {run}"))?;
++    debug_assert_eq!(report.run, run);
+     if let Some(summary) = report.summary {
+         println!("{summary}");
+     }
+@@ -275,6 +325,23 @@ async fn cmd_llm_probe(config: &Path, model: &str, prompt: String) -> anyhow::Re
+     Ok(())
+ }
+ 
++async fn cmd_llm_models(config: &Path, model: &str) -> anyhow::Result<()> {
++    let settings = load_settings(config)?;
++    let entry = settings
++        .models
++        .get(model)
++        .ok_or_else(|| anyhow!("model {model:?} is not configured"))?;
++    let client_config = entry
++        .to_client_config(app::env_var)
++        .map_err(|variable| anyhow!("environment variable {variable} is not set"))?;
++    let ids = henk_llm::list_models(&client_config).await?;
++    eprintln!("{} models at {}:", ids.len(), entry.base_url);
++    for id in ids {
++        println!("{id}");
++    }
++    Ok(())
++}
++
+ async fn cmd_mcp_probe(config: &Path, server: &str, show: &[String]) -> anyhow::Result<()> {
+     let settings = load_settings(config)?;
+     let server_config = settings
+diff --git a/crates/henk/src/review.rs b/crates/henk/src/review.rs
+index fe13067..b9152f2 100644
+--- a/crates/henk/src/review.rs
++++ b/crates/henk/src/review.rs
+@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ 
+ use anyhow::{Context as _, anyhow};
+-use henk_agent::{AgentConfig, ToolSet, prompts};
++use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
+ use henk_domain::allowlist::Platform;
+ use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
+ use henk_domain::marker::{Marker, MarkerKind, ModelId};
+@@ -361,10 +361,10 @@ async fn spawn_lanes(
+         let cancel = cancel.clone();
+         set.spawn(async move {
+             let outcome = run_session(&store, &run_id, spec, cancel).await;
+-            let lane_outcome = if outcome.finished() {
+-                LaneOutcome::Finished
+-            } else {
+-                LaneOutcome::Dropped
++            let lane_outcome = match outcome.stop {
++                StopCause::Timeout => LaneOutcome::Stopped,
++                _ if outcome.finished() => LaneOutcome::Finished,
++                _ => LaneOutcome::Dropped,
+             };
+             LaneResult {
+                 lane: lane_name,
+diff --git a/crates/henk/src/review_tools.rs b/crates/henk/src/review_tools.rs
+index 854b084..2a4d8af 100644
+--- a/crates/henk/src/review_tools.rs
++++ b/crates/henk/src/review_tools.rs
+@@ -192,6 +192,16 @@ impl Tool for PostFinding {
+             Ok(posted) => posted,
+             Err(error) => {
+                 warn!(%error, path, line, "posting a finding failed");
++                // On the timeline too, so a lane whose every post failed does
++                // not look like a lane that found nothing.
++                let _ = ctx.store.event(
++                    &ctx.run,
++                    "warn",
++                    &format!(
++                        "{}: could not post a finding on {path}:{line}: {error}",
++                        ctx.lane
++                    ),
++                );
+                 return ToolOutput::error(format!(
+                     "Could not post on {path}:{line}: {error}. If the line is not part of the diff, pick a line that is."
+                 ));
+diff --git a/crates/henk/src/runs.rs b/crates/henk/src/runs.rs
+new file mode 100644
+index 0000000..ac36312
+--- /dev/null
++++ b/crates/henk/src/runs.rs
+@@ -0,0 +1,147 @@
++//! `henk runs show`: a run record as text, read from the local database.
++
++use std::fmt::Write as _;
++
++use henk_store::{EventRecord, FindingRecord, LaneRecord, RunRecord};
++
++/// Renders one run with its lanes, findings and timeline.
++#[must_use]
++pub fn render(
++    run: &RunRecord,
++    lanes: &[LaneRecord],
++    findings: &[FindingRecord],
++    events: &[EventRecord],
++) -> String {
++    let mut out = String::new();
++    let _ = writeln!(out, "run {}", run.id);
++    let _ = writeln!(
++        out,
++        "  {:?} of {} {} #{} ({:?})",
++        run.kind, run.platform, run.repo, run.target, run.status
++    );
++    if let Some(commit) = &run.commit {
++        let _ = writeln!(out, "  commit     {commit}");
++    }
++    let _ = writeln!(out, "  trigger    {}", run.trigger);
++    if let Some(requester) = &run.requester {
++        let _ = writeln!(out, "  requester  {requester}");
++    }
++    let _ = writeln!(out, "  started    {}", run.started_at);
++    if let Some(finished) = &run.finished_at {
++        let _ = writeln!(out, "  finished   {finished}");
++    }
++    let _ = writeln!(out, "  link       {}", run.link);
++    if let Some(summary) = &run.summary {
++        let _ = writeln!(
++            out,
++            "  summary    {}",
++            summary.replace('\n', "\n             ")
++        );
++    }
++    if let Some(error) = &run.error {
++        let _ = writeln!(out, "  error      {error}");
++    }
++
++    let _ = writeln!(out, "\nlanes ({})", lanes.len());
++    for lane in lanes {
++        let _ = write!(
++            out,
++            "  {:<12} {:<9} {:<10} turns {:>3}  tokens in {:>7} out {:>6}",
++            lane.name,
++            format!("{:?}", lane.status).to_lowercase(),
++            lane.model,
++            lane.turns,
++            lane.input_tokens,
++            lane.output_tokens
++        );
++        match &lane.error {
++            Some(error) => {
++                let _ = writeln!(out, "  {error}");
++            }
++            None => out.push('\n'),
++        }
++    }
++
++    let _ = writeln!(out, "\nfindings ({})", findings.len());
++    for finding in findings {
++        let _ = writeln!(
++            out,
++            "  {} {:<8} {:<12} {}:{} comment {}",
++            finding.at,
++            finding.action,
++            finding.lane,
++            finding.path,
++            finding.line,
++            finding.comment_id
++        );
++    }
++
++    let _ = writeln!(out, "\ntimeline ({})", events.len());
++    for event in events {
++        let _ = writeln!(out, "  {} {:<5} {}", event.at, event.level, event.message);
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
++
++    use henk_domain::allowlist::Platform;
++    use henk_domain::run::{RunId, RunKind};
++    use henk_store::{LaneStatus, RunStatus};
++
++    use super::*;
++
++    #[test]
++    fn renders_every_section() {
++        let run = RunRecord {
++            id: RunId::parse("r-1").unwrap(),
++            kind: RunKind::Review,
++            platform: Platform::GitHub,
++            repo: "o/r".into(),
++            target: 7,
++            commit: Some("abc".into()),
++            requester: None,
++            trigger: "cli".into(),
++            status: RunStatus::Finished,
++            started_at: "t0".into(),
++            finished_at: Some("t1".into()),
++            link: "http://x/runs/r-1".into(),
++            summary: Some("Review of abc: 1 finding.\nSecond line.".into()),
++            error: None,
++        };
++        let lanes = vec![LaneRecord {
++            name: "lane-a".into(),
++            model: "m".into(),
++            status: LaneStatus::Dropped,
++            turns: 3,
++            input_tokens: 100,
++            output_tokens: 20,
++            error: Some("timed out".into()),
++        }];
++        let findings = vec![FindingRecord {
++            at: "t".into(),
++            lane: "lane-a".into(),
++            path: "src/x.rs".into(),
++            line: 12,
++            comment_id: "c1".into(),
++            action: "posted".into(),
++        }];
++        let events = vec![EventRecord {
++            at: "t".into(),
++            level: "warn".into(),
++            message: "lane-a: could not post".into(),
++        }];
++        let text = render(&run, &lanes, &findings, &events);
++        assert!(text.starts_with("run r-1\n"));
++        assert!(text.contains("commit     abc"));
++        assert!(text.contains("lanes (1)"));
++        assert!(text.contains("lane-a       dropped"));
++        assert!(text.contains("timed out"));
++        assert!(text.contains("src/x.rs:12 comment c1"));
++        assert!(text.contains("timeline (1)"));
++        assert!(text.contains("warn  lane-a: could not post"));
++        assert!(text.contains("             Second line."), "{text}");
++    }
++}
