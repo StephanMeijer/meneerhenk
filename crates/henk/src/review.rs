@@ -603,11 +603,14 @@ async fn build_lane(
         keep_recent_turns: app.settings.review.keep_recent_turns,
         ..AgentConfig::default()
     };
+    // The file list up front saves a turn, and the hint to read several
+    // diffs per call saves one per file for models that never batch calls.
     let opening = ChatMessage::user(format!(
-        "Review {} {} at commit {}. Read the diff first.",
+        "Review {} {} at commit {}. The changed files:\n{}\nRead their diffs with get_file_diff, several paths per call.",
         kind_name(platform),
         target_ref(platform, target.number),
-        commit.short()
+        commit.short(),
+        context.files.diff.render_list().trim_end()
     ));
     Ok(Lane {
         session: SessionSpec {
