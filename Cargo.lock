@@ -615,9 +615,7 @@ dependencies = [
  "henk-llm",
  "henk-mcp",
  "rmcp",
- "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -640,7 +638,6 @@ dependencies = [
  "henk-domain",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -691,7 +688,6 @@ dependencies = [
  "ring",
  "rmcp",
  "secrecy",
- "serde",
  "serde_json",
  "sha2",
  "subtle",
@@ -727,7 +723,6 @@ dependencies = [
  "rusqlite_migration",
  "thiserror",
  "time",
- "tracing",
 ]
 
 [[package]]
