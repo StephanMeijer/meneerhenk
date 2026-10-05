@@ -549,7 +549,7 @@ async fn live_smoke() {
     let mut cfg = config(provider, &base_url);
     cfg.api_key = api_key.into();
     cfg.model = model;
-    cfg.timeout = Duration::from_secs(120);
+    cfg.timeout = Duration::from_mins(2);
     let client = client_for(cfg).unwrap();
     let request = CompletionRequest {
         system: Some(

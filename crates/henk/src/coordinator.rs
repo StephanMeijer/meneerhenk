@@ -79,7 +79,7 @@ impl Coordinator {
     /// Reviews running right now.
     #[must_use]
     pub fn active_reviews(&self) -> usize {
-        self.active.lock().map(|m| m.len()).unwrap_or(0)
+        self.active.lock().map_or(0, |m| m.len())
     }
 
     /// Decides what to do with a review request for `commit` and acts on it.

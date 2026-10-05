@@ -48,8 +48,7 @@ impl RetryPolicy {
 fn jitter(base: Duration) -> Duration {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     let quarter = base / 4;
     quarter.mul_f64(f64::from(nanos % 1000) / 1000.0)
 }
@@ -275,7 +274,7 @@ mod tests {
             Duration::from_secs(3)
         );
         assert_eq!(
-            policy.delay_before(2, Some(Duration::from_secs(60))),
+            policy.delay_before(2, Some(Duration::from_mins(1))),
             Duration::from_secs(10)
         );
         let backoff = policy.delay_before(3, None);

@@ -73,7 +73,7 @@ Anthropic Messages API. Lanes and their models are configuration.
 
 ## Build and test
 
-Requires Rust 1.93 (pinned in `rust-toolchain.toml`).
+Requires Rust 1.95 (pinned in `rust-toolchain.toml`).
 
 ```sh
 cargo fmt --all --check

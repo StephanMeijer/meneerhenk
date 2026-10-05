@@ -199,7 +199,7 @@ impl GitHubAuth {
                 let now = SystemTime::now();
                 if let Ok(cache) = cache.lock()
                     && let Some(cached) = cache.as_ref()
-                    && cached.expires_at > now + Duration::from_secs(120)
+                    && cached.expires_at > now + Duration::from_mins(2)
                 {
                     return Ok(cached.token.clone());
                 }
@@ -252,7 +252,7 @@ async fn mint_installation_token(
     );
     Ok(CachedToken {
         token: SecretString::from(token.to_owned()),
-        expires_at: now + Duration::from_secs(55 * 60),
+        expires_at: now + Duration::from_mins(55),
     })
 }
 

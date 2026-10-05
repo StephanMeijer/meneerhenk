@@ -134,7 +134,7 @@ pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
             stdio.transport("github").unwrap(),
             McpTransport::Stdio { ref command, .. } if command == "github-mcp-server"
         ));
-        assert_eq!(stdio.call_timeout(), Duration::from_secs(60));
+        assert_eq!(stdio.call_timeout(), Duration::from_mins(1));
 
         let http: McpServerConfig = toml::from_str(
             r#"

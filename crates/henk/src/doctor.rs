@@ -149,7 +149,7 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
             max_tokens: model.effort.is_none().then_some(16),
             ..Default::default()
         };
-        match tokio::time::timeout(Duration::from_secs(60), client.complete(&request)).await {
+        match tokio::time::timeout(Duration::from_mins(1), client.complete(&request)).await {
             Ok(Ok(completion)) => checks.push(Check::ok(
                 name,
                 format!("answered: {:?}", completion.message.text().trim()),
@@ -349,7 +349,7 @@ async fn check_mcp(settings: &Settings) -> Vec<Check> {
             continue;
         }
         match tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             RmcpSession::connect(alias, config, env_var),
         )
         .await

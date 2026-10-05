@@ -52,7 +52,7 @@ impl GitHubApi {
         henk_llm::ensure_tls_provider();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_mins(1))
             .build()
             .map_err(|e| PlatformError::Auth(format!("http client: {e}")))?;
         let api_base = api_base.trim_end_matches('/').to_owned();
