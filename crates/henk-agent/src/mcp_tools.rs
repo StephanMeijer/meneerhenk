@@ -36,6 +36,14 @@ pub struct McpTool {
     guard: Guard,
 }
 
+impl McpTool {
+    /// The server's own name for this tool.
+    #[must_use]
+    pub fn server_tool(&self) -> &str {
+        &self.server_tool
+    }
+}
+
 impl std::fmt::Debug for McpTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpTool")
