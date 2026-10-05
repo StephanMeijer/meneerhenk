@@ -1,13 +1,25 @@
 //! Run ids: `r-YYYYMMDD-xxxxxxxx`.
 
 use henk_domain::run::{EventId, RunId};
-use rand::Rng as _;
+use ring::rand::{SecureRandom as _, SystemRandom};
 use time::OffsetDateTime;
+
+/// Four random bytes from the operating system, through ring (already in the
+/// tree for the GitHub App's JWT). Ids only need to be unique, not secret, so
+/// if the OS cannot provide randomness the clock's nanoseconds stand in.
+fn random_u32() -> u32 {
+    let mut bytes = [0_u8; 4];
+    if SystemRandom::new().fill(&mut bytes).is_ok() {
+        u32::from_le_bytes(bytes)
+    } else {
+        OffsetDateTime::now_utc().nanosecond()
+    }
+}
 
 /// A fresh run id. Sortable by day, unique enough by eight random hex digits.
 pub fn new_run_id() -> RunId {
     let now = OffsetDateTime::now_utc();
-    let random: u32 = rand::rng().random();
+    let random = random_u32();
     let text = format!(
         "r-{:04}{:02}{:02}-{random:08x}",
         now.year(),
@@ -22,7 +34,7 @@ pub fn new_run_id() -> RunId {
 /// A fresh event id: `e-YYYYMMDD-xxxxxxxx`.
 pub fn new_event_id() -> EventId {
     let now = OffsetDateTime::now_utc();
-    let random: u32 = rand::rng().random();
+    let random = random_u32();
     let text = format!(
         "e-{:04}{:02}{:02}-{random:08x}",
         now.year(),
