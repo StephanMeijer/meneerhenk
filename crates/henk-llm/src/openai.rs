@@ -236,18 +236,13 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
         Some("length") => StopReason::MaxTokens,
         Some(other) => StopReason::Other(other.to_owned()),
     };
-    let usage = response
-        .get("usage")
-        .map_or_else(Usage::default, |usage| Usage {
-            input_tokens: usage
-                .get("prompt_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            output_tokens: usage
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        });
+    let usage = response.get("usage").map_or_else(
+        || {
+            tracing::debug!("response carries no usage; counting zero tokens");
+            Usage::default()
+        },
+        decode_usage,
+    );
     Ok(Completion {
         message: ChatMessage {
             role: Role::Assistant,
@@ -285,5 +280,20 @@ impl ModelClient for OpenAiClient {
             decode(&response)
         })
         .await
+    }
+}
+
+/// Reads token counts. OpenAI names them `prompt_tokens` and
+/// `completion_tokens`; some proxies pass the Anthropic-style
+/// `input_tokens` and `output_tokens` through instead.
+fn decode_usage(usage: &Value) -> Usage {
+    let count = |keys: [&str; 2]| {
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+            .unwrap_or(0)
+    };
+    Usage {
+        input_tokens: count(["prompt_tokens", "input_tokens"]),
+        output_tokens: count(["completion_tokens", "output_tokens"]),
     }
 }

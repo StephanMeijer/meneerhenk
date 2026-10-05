@@ -47,7 +47,12 @@ impl AnthropicClient {
         if let Some(system) = &request.system {
             body.insert("system".into(), json!(system));
         }
-        if let Some(temperature) = request.temperature {
+        if let Some(effort) = self.config.effort {
+            // Thinking models reject sampling parameters, so temperature is
+            // never sent alongside effort.
+            body.insert("thinking".into(), json!({"type": "adaptive"}));
+            body.insert("output_config".into(), json!({"effort": effort.as_str()}));
+        } else if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
         body.insert(

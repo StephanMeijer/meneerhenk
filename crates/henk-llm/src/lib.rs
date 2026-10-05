@@ -22,7 +22,7 @@ pub mod schema;
 pub mod testing;
 pub mod types;
 
-pub use client::{MaxTokensParam, ModelClient, ModelConfig, Provider, client_for};
+pub use client::{Effort, MaxTokensParam, ModelClient, ModelConfig, Provider, client_for};
 pub use error::LlmError;
 pub use http::{RetryPolicy, ensure_tls_provider};
 pub use models::list_models;
