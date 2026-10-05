@@ -154,7 +154,10 @@ pub async fn run_plan(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "everything the plan session produced, recorded in one place"
+)]
 async fn finish_plan(
     app: &App,
     writer: &Arc<dyn henk_platform::IssueWriter>,

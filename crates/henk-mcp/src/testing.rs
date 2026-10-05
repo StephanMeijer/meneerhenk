@@ -1,6 +1,9 @@
 //! An in-process MCP server for tests, connected over a duplex pipe.
 
-#![allow(clippy::panic)]
+#![expect(
+    clippy::panic,
+    reason = "test support: a fake server that cannot start fails the test"
+)]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
