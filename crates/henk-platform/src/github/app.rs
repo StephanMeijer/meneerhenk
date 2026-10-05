@@ -166,6 +166,22 @@ impl GitHubAuth {
         Self::Token(token)
     }
 
+    /// A signed App JWT, for the few endpoints that authenticate as the App
+    /// itself rather than as an installation (`GET /app`,
+    /// `GET /app/installations`). `None` for a fixed token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Auth`] when signing fails.
+    pub fn app_jwt(&self) -> Option<Result<SecretString, PlatformError>> {
+        match self {
+            Self::Token(_) => None,
+            Self::App { credentials, .. } => {
+                Some(credentials.jwt(SystemTime::now()).map(SecretString::from))
+            }
+        }
+    }
+
     /// A bearer token for API calls, minting an installation token when the
     /// cached one is missing or within two minutes of expiry.
     ///

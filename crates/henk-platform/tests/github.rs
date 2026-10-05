@@ -281,3 +281,38 @@ async fn api_errors_carry_status_and_body() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn get_as_app_uses_the_jwt_not_an_installation_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 678, "account": {"login": "docspec", "type": "User"}, "repository_selection": "selected"}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(
+        &server.uri(),
+        GitHubAuth::app(AppCredentials::from_pem(12345, 678, KEY).unwrap()),
+    )
+    .unwrap();
+    let value = api.get_as_app("/app/installations").await.unwrap();
+    assert_eq!(value[0]["id"], 678);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "no token was minted");
+    let auth = requests[0].headers["authorization"].to_str().unwrap();
+    let jwt = auth.strip_prefix("Bearer ").unwrap();
+    assert_eq!(
+        jwt.split('.').count(),
+        3,
+        "a JWT, not an installation token"
+    );
+
+    let fixed = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    assert!(matches!(
+        fixed.get_as_app("/app").await,
+        Err(henk_platform::PlatformError::Auth(_))
+    ));
+}

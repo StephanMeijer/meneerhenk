@@ -108,6 +108,27 @@ impl GitHubApi {
         self.send(builder).await
     }
 
+    /// `GET` a REST path authenticated as the App itself (JWT), not as an
+    /// installation. Only `/app` and `/app/installations` need this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Auth`] when the client has no App
+    /// credentials, otherwise as [`Self::get`].
+    pub async fn get_as_app(&self, path: &str) -> Result<Value, PlatformError> {
+        let jwt = self
+            .auth
+            .app_jwt()
+            .ok_or_else(|| PlatformError::Auth("no App credentials configured".to_owned()))??;
+        let builder = self
+            .http
+            .get(format!("{}{path}", self.api_base))
+            .bearer_auth(jwt.expose_secret())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        self.send(builder).await
+    }
+
     /// `GET` every page of a REST list (up to ten pages of 100).
     ///
     /// # Errors

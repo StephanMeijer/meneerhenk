@@ -216,6 +216,17 @@ async fn check_github(settings: &Settings) -> Vec<Check> {
         Ok(api) => api,
         Err(error) => return vec![Check::fail("GitHub client", error.to_string())],
     };
+    let mut checks = vec![check_app_identity(&api, &github.bot_login).await];
+    if github.installation_id == 0 {
+        checks.push(Check::fail(
+            "GitHub App installation",
+            format!(
+                "installation_id is 0; set it to one of these: {}",
+                list_installations(&api).await
+            ),
+        ));
+        return checks;
+    }
     match tokio::time::timeout(
         Duration::from_secs(30),
         api.get("/installation/repositories?per_page=1"),
@@ -227,16 +238,89 @@ async fn check_github(settings: &Settings) -> Vec<Check> {
                 .get("total_count")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            vec![Check::ok(
-                "GitHub App",
-                format!("installation token works; {total} repositories visible"),
-            )]
+            checks.push(Check::ok(
+                "GitHub App installation",
+                format!(
+                    "installation {} token works; {total} repositories visible",
+                    github.installation_id
+                ),
+            ));
         }
-        Ok(Err(error)) => vec![Check::fail(
-            "GitHub App",
-            format!("installation token failed: {error}"),
-        )],
-        Err(_) => vec![Check::fail("GitHub App", "no answer within 30s")],
+        Ok(Err(error)) => checks.push(Check::fail(
+            "GitHub App installation",
+            format!(
+                "installation {} token failed: {error}; the App is installed as: {}",
+                github.installation_id,
+                list_installations(&api).await
+            ),
+        )),
+        Err(_) => checks.push(Check::fail(
+            "GitHub App installation",
+            "no answer within 30s",
+        )),
+    }
+    checks
+}
+
+/// `GET /app` as the App: proves the key and id match and that `bot_login`
+/// is the App's slug.
+async fn check_app_identity(api: &GitHubApi, bot_login: &str) -> Check {
+    match tokio::time::timeout(Duration::from_secs(30), api.get_as_app("/app")).await {
+        Ok(Ok(app)) => {
+            let slug = app.get("slug").and_then(serde_json::Value::as_str);
+            let name = app
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            match slug {
+                Some(slug) if format!("{slug}[bot]") == bot_login => Check::ok(
+                    "GitHub App",
+                    format!("{name} ({slug}); key and app_id match; bot_login matches"),
+                ),
+                Some(slug) => Check::warn(
+                    "GitHub App",
+                    format!(
+                        "{name} ({slug}); bot_login is {bot_login:?} but the App's login is \"{slug}[bot]\""
+                    ),
+                ),
+                None => Check::warn("GitHub App", format!("{name}; no slug in the answer")),
+            }
+        }
+        Ok(Err(error)) => Check::fail("GitHub App", format!("GET /app as the App failed: {error}")),
+        Err(_) => Check::fail("GitHub App", "no answer within 30s"),
+    }
+}
+
+/// The installations of the App, as text for a check detail.
+async fn list_installations(api: &GitHubApi) -> String {
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        api.get_as_app("/app/installations"),
+    )
+    .await
+    {
+        Ok(Ok(serde_json::Value::Array(installations))) if !installations.is_empty() => {
+            installations
+                .iter()
+                .map(|i| {
+                    let id = i.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let account = i
+                        .get("account")
+                        .and_then(|a| a.get("login"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    let selection = i
+                        .get("repository_selection")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    format!("{id} ({account}, {selection} repositories)")
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        Ok(Ok(_)) => "none; install the App on an account first".to_owned(),
+        Ok(Err(error)) => format!("could not list installations: {error}"),
+        Err(_) => "could not list installations within 30s".to_owned(),
     }
 }
 
