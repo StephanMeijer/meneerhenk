@@ -125,6 +125,46 @@ on one machine, with one lane:
    timeline afterwards, and `transcripts/<run>/<lane>.json` holds what the
    model saw and said.
 
+### Reviewing a pull request from a laptop
+
+With the setup above done once, a review is three commands. The secrets
+come from OpenBao at the moment they are needed: `.env` (gitignored) holds
+only `bao kv get` calls, never a value, and `source .env` runs them in the
+current shell.
+
+```sh
+cd /path/to/meneerhenk
+source .env                      # secrets into this shell; the App key becomes a 0600 file under $XDG_RUNTIME_DIR
+cargo run -q -- doctor           # optional; every line should say ok
+cargo run -q -- review https://github.com/owner/repo/pull/7
+```
+
+An `.env` for this looks like:
+
+```sh
+export LLM3_API_KEY="$(bao kv get -field=proxy-token secret/<path to the proxy token>)"
+umask 077
+mkdir -p "${XDG_RUNTIME_DIR:-/tmp}/henk"
+bao kv get -field=github_app_private_key secret/<path to the App secret> > "${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
+export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
+```
+
+The first line of `henk review`'s output is the run id. The repository must
+be on the allowlist; the App must be installed on it (`doctor` lists the
+installations when the token is refused). Variants:
+
+```sh
+RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
+cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head
+cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, lanes, findings, timeline
+cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
+```
+
+Another model is a name from `llm models` in `[models.<id>].model`, or a
+second `[models.*]` block and a second lane under `[review].lanes`; lane
+names must not equal a model name. Another repository is one more entry in
+`[allowlist].github_repositories`.
+
 ## Container image
 
 The `Dockerfile` builds one image with `henk`, the `github-mcp-server`

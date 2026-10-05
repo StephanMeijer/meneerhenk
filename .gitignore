@@ -7,3 +7,5 @@
 henk.toml
 henk.db*
 transcripts/
+scripts/henk-env.sh
+.henk-bao
