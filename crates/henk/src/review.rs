@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
+use henk_agent::{AgentConfig, StopCause, Tool as _, ToolSet, prompts};
 use henk_domain::allowlist::Platform;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
@@ -276,10 +276,11 @@ async fn review_body(
         number: target.number,
         commit: commit.clone(),
     };
+    let excluded = withheld_tools(app, &session, platform, &scope, target, run).await;
 
     let mut set = spawn_lanes(
         app, &session, &scope, &registry, writer, target, commit, title, base_ref, run, &cancel,
-        diff,
+        diff, &excluded,
     )
     .await?;
 
@@ -331,6 +332,46 @@ async fn review_body(
         .await
         .context("posting the summary")?;
     Ok((outcome, summary_text))
+}
+
+/// Server tools the lanes should not see on this repository. GitHub code
+/// search indexes only some repositories; when one probe returns nothing,
+/// the tool is withheld so lanes do not spend turns on empty answers.
+async fn withheld_tools(
+    app: &App,
+    session: &Arc<dyn McpSession>,
+    platform: Platform,
+    scope: &Scope,
+    target: &ReviewTarget,
+    run: &RunId,
+) -> Vec<&'static str> {
+    if platform != Platform::GitHub {
+        return Vec::new();
+    }
+    let Ok(tools) = platform_tools(Arc::clone(session), platform, scope.clone(), &[]).await else {
+        return Vec::new();
+    };
+    let Some(search) = tools.iter().find(|t| t.server_tool() == "search_code") else {
+        return Vec::new();
+    };
+    let output = search
+        .call(serde_json::json!({"query": target.repo.name()}))
+        .await;
+    let total = serde_json::from_str::<serde_json::Value>(&output.content)
+        .ok()
+        .and_then(|v| v.get("total_count").and_then(serde_json::Value::as_u64));
+    match (output.is_error, total) {
+        (false, Some(0)) => {
+            info!("code search returns nothing for this repository; withheld from lanes");
+            let _ = app.store.event(
+                run,
+                "info",
+                "code search returns nothing for this repository (not indexed); search_code withheld from lanes",
+            );
+            vec!["search_code"]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The diff, once, for every lane: handed out per file, and the check every
@@ -385,6 +426,7 @@ async fn spawn_lanes(
     run: &RunId,
     cancel: &CancellationToken,
     diff: Option<Arc<ReviewDiff>>,
+    excluded: &[&str],
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
@@ -401,6 +443,7 @@ async fn spawn_lanes(
             base_ref,
             run,
             diff.clone(),
+            excluded,
         )
         .await?;
         let lane_name = lane.name.clone();
@@ -489,10 +532,11 @@ async fn build_lane(
     base_ref: &str,
     run: &RunId,
     diff: Option<Arc<ReviewDiff>>,
+    excluded: &[&str],
 ) -> anyhow::Result<Lane> {
     let platform = target.platform();
     let model = app.model(lane.model.as_str())?;
-    let tools = platform_tools(Arc::clone(session), platform, scope.clone())
+    let tools = platform_tools(Arc::clone(session), platform, scope.clone(), excluded)
         .await
         .context("listing MCP tools")?;
     if tools.is_empty() {

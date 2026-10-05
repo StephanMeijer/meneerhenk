@@ -242,7 +242,7 @@ async fn planner_tools(
     scope: &Scope,
     context: Arc<PlanContext>,
 ) -> anyhow::Result<ToolSet> {
-    let tools = platform_tools(session, platform, scope.clone())
+    let tools = platform_tools(session, platform, scope.clone(), &[])
         .await
         .context("listing MCP tools")?;
     let mut set = ToolSet::new();

@@ -163,6 +163,8 @@ pub async fn run_session(
 
 /// The read tools of one platform MCP session that `scope` allows, each
 /// wrapped so that every call passes [`henk_domain::scope::guard`] first.
+/// `exclude` names server tools to leave out even though the scope allows
+/// them, for a tool known to be useless on this repository.
 ///
 /// # Errors
 ///
@@ -171,6 +173,7 @@ pub async fn platform_tools(
     session: Arc<dyn McpSession>,
     platform: Platform,
     scope: Scope,
+    exclude: &[&str],
 ) -> Result<Vec<McpTool>, McpError> {
     let guard: henk_agent::Guard = Arc::new(move |tool: &str, args: &serde_json::Value| {
         match scope::guard(platform, tool, args, &scope) {
@@ -182,7 +185,7 @@ pub async fn platform_tools(
     mcp_tools(
         session,
         &mut names,
-        |info| scope::is_exposed(platform, &info.name),
+        |info| scope::is_exposed(platform, &info.name) && !exclude.contains(&info.name.as_str()),
         guard,
     )
     .await
@@ -343,10 +346,14 @@ mod tests {
             number: 7,
             commit: CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
         };
-        let tools = platform_tools(session, Platform::GitHub, scope)
+        let tools = platform_tools(Arc::clone(&session), Platform::GitHub, scope.clone(), &[])
             .await
             .unwrap();
         assert_eq!(tools.len(), 1);
+        let excluded = platform_tools(session, Platform::GitHub, scope, &["pull_request_read"])
+            .await
+            .unwrap();
+        assert!(excluded.is_empty(), "an excluded tool is not exposed");
         assert_eq!(
             tools[0].definition().name.as_str(),
             "github__pull_request_read"
