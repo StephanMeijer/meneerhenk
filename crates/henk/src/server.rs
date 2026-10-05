@@ -418,7 +418,7 @@ github_owners = ["docspec"]
     async fn wait_for_outcomes(app: &Arc<App>, event: &str) -> usize {
         let id = EventId::parse(event).unwrap();
         for _ in 0..100 {
-            let n = app.store.outcomes(&id).map(|o| o.len()).unwrap_or(0);
+            let n = app.store.outcomes(&id).map_or(0, |o| o.len());
             if n >= 3 {
                 return n;
             }

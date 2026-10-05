@@ -36,7 +36,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_turns: 40,
-            timeout: Duration::from_secs(10 * 60),
+            timeout: Duration::from_mins(10),
             max_tool_output_chars: 60_000,
             max_conversation_chars: 240_000,
             keep_recent_turns: 2,

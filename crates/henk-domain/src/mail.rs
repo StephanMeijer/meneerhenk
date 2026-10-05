@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub const DISCLOSURE: &str = "This message has been written by an automated assistant.";
 
 /// How long an outgoing mail is held before it is sent (§6).
-pub const HOLD: Duration = Duration::from_secs(5 * 60);
+pub const HOLD: Duration = Duration::from_mins(5);
 
 /// Local parts that mark a machine sender (§6).
 const MACHINE_LOCAL_PARTS: &[&str] = &[

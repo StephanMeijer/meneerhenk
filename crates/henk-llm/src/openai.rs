@@ -257,8 +257,7 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
 fn synthetic_id(index: usize) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     format!("call_{index}_{nanos:08x}")
 }
 

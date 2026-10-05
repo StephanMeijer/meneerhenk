@@ -125,8 +125,7 @@ impl LaneContext {
         let earlier = self
             .rejections
             .lock()
-            .map(|r| r.get(key).copied().unwrap_or(0))
-            .unwrap_or(0);
+            .map_or(0, |r| r.get(key).copied().unwrap_or(0));
         if earlier >= MAX_REJECTIONS {
             return Gate::Stop(ToolOutput::error(format!(
                 "Not {what}: the fact-check has rejected claims on {}:{} {earlier} times. Do not try this line again; move on.",
@@ -152,15 +151,11 @@ impl LaneContext {
                 unchecked: Some(why),
             },
             CheckVerdict::Rejected { reason, .. } => {
-                let count = self
-                    .rejections
-                    .lock()
-                    .map(|mut r| {
-                        let count = r.entry(key.clone()).or_insert(0);
-                        *count += 1;
-                        *count
-                    })
-                    .unwrap_or(MAX_REJECTIONS);
+                let count = self.rejections.lock().map_or(MAX_REJECTIONS, |mut r| {
+                    let count = r.entry(key.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                });
                 let _ = self.store.record_finding(
                     &self.run,
                     self.lane.as_str(),

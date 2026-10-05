@@ -274,7 +274,7 @@ fn opening(request: &CheckRequest, diff: &ReviewDiff) -> String {
 fn ask_for_verdict(slot: Arc<Mutex<Option<(bool, String)>>>) -> Continuation {
     let asked = std::sync::atomic::AtomicBool::new(false);
     Box::new(move |ending| {
-        let missing = slot.lock().map(|v| v.is_none()).unwrap_or(false);
+        let missing = slot.lock().is_ok_and(|v| v.is_none());
         (ending.reason == EndReason::EndTurn && missing && !asked.swap(true, Ordering::SeqCst))
             .then(|| "You ended without a verdict. Call give_verdict with confirmed or rejected and a reason.".to_owned())
     })
