@@ -712,6 +712,7 @@ dependencies = [
  "henk-mcp",
  "henk-store",
  "rmcp",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",

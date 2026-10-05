@@ -8,6 +8,12 @@
 //!
 //! [`platform_tools`] is the one place where a platform's MCP read tools are
 //! filtered and guarded by scope (spec §8.5) before a model may call them.
+//!
+//! When `HENK_TRANSCRIPT_DIR` names a directory, every session also writes
+//! its full conversation there as JSON. That is a local diagnostic file for
+//! the operator; nothing reads it back and nothing sends it anywhere.
+
+pub mod transcript;
 
 use std::sync::Arc;
 
@@ -88,13 +94,20 @@ pub async fn run_session(
     if let Err(error) = store.start_lane(run, &spec.name, &model_name) {
         tracing::warn!(%error, "could not record the lane start");
     }
+    let system = spec.system;
     let agent = Agent::new(
         Arc::clone(&spec.model),
         spec.tools,
-        spec.system,
+        system.clone(),
         spec.limits,
     );
     let outcome = agent.run(spec.opening, cancel).await;
+    if let Some(dir) = transcript::directory_from_env() {
+        match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
+            Ok(path) => info!(path = %path.display(), "transcript written"),
+            Err(error) => tracing::warn!(%error, "could not write the transcript"),
+        }
+    }
 
     let (status, error) = match &outcome.stop {
         StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
