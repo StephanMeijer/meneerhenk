@@ -7,6 +7,7 @@
 //! can rewrite or refuse the arguments (spec §8.5).
 
 pub mod agent;
+pub mod compact;
 pub mod mcp_tools;
 pub mod prompts;
 pub mod tool;

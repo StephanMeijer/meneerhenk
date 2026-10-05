@@ -255,6 +255,8 @@ mod tests {
                 max_turns: 3,
                 timeout: Duration::from_secs(5),
                 max_tool_output_chars: 100,
+                max_conversation_chars: 100_000,
+                keep_recent_turns: 2,
             },
         }
     }

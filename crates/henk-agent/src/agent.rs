@@ -25,6 +25,11 @@ pub struct AgentConfig {
     /// Tool output longer than this is cut, with a note, before the model
     /// sees it. Keeps one huge diff from eating the context.
     pub max_tool_output_chars: usize,
+    /// When the conversation grows past this many characters, old tool
+    /// results are replaced by one-line stubs (see [`crate::compact`]).
+    pub max_conversation_chars: usize,
+    /// Turns whose tool results are never stubbed, counted from the end.
+    pub keep_recent_turns: u32,
 }
 
 impl Default for AgentConfig {
@@ -33,6 +38,8 @@ impl Default for AgentConfig {
             max_turns: 40,
             timeout: Duration::from_secs(10 * 60),
             max_tool_output_chars: 60_000,
+            max_conversation_chars: 240_000,
+            keep_recent_turns: 2,
         }
     }
 }
@@ -237,6 +244,19 @@ impl Agent {
                 });
             }
             messages.push(ChatMessage::tool_results(results));
+            let stubbed = crate::compact::compact(
+                &mut messages,
+                self.config.max_conversation_chars,
+                self.config.keep_recent_turns,
+            );
+            if stubbed > 0 {
+                debug!(
+                    turn = turns,
+                    stubbed,
+                    chars = crate::compact::size(&messages),
+                    "old tool results elided to stay under the conversation budget"
+                );
+            }
             if tokio::time::Instant::now() >= deadline {
                 break StopCause::Timeout;
             }

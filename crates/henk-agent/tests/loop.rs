@@ -57,6 +57,8 @@ fn config() -> AgentConfig {
         max_turns: 5,
         timeout: Duration::from_secs(5),
         max_tool_output_chars: 100,
+        max_conversation_chars: 100_000,
+        keep_recent_turns: 2,
     }
 }
 
@@ -343,4 +345,76 @@ async fn model_errors_end_the_run() {
         StopCause::ModelError(henk_llm::LlmError::Unauthorized { .. })
     ));
     assert_eq!(outcome.final_text, "");
+}
+
+#[tokio::test]
+async fn old_tool_results_are_elided_once_the_conversation_is_over_budget() {
+    // Three turns of one call each returning 500 chars; budget 900, keep 1.
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "echo", json!({"n": 1})),
+            call("c2", "echo", json!({"n": 2})),
+            call("c3", "echo", json!({"n": 3})),
+            text("done"),
+        ],
+    ));
+    let mut set = ToolSet::new();
+    set.add(Big);
+    let agent = Agent::new(
+        model.clone(),
+        set,
+        "s",
+        AgentConfig {
+            max_tool_output_chars: 10_000,
+            max_conversation_chars: 900,
+            keep_recent_turns: 1,
+            ..config()
+        },
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    // What the model saw on its last call: the first two results stubbed,
+    // the third intact.
+    let last_request = model.requests().last().unwrap().clone();
+    let results: Vec<String> = last_request
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .filter_map(|b| match b {
+            Block::ToolResult(r) => Some(r.content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 3);
+    assert!(
+        results[0].starts_with("[result of echo from turn 1 elided (500 chars)"),
+        "{}",
+        results[0]
+    );
+    assert!(
+        results[1].starts_with("[result of echo from turn 2 elided"),
+        "{}",
+        results[1]
+    );
+    assert_eq!(results[2].len(), 500);
+}
+
+struct Big;
+
+#[async_trait::async_trait]
+impl Tool for Big {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: ToolName::parse("echo").unwrap(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    async fn call(&self, _: Value) -> ToolOutput {
+        ToolOutput::ok("y".repeat(500))
+    }
 }
