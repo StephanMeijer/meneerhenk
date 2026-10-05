@@ -9,29 +9,232 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# The toolchain comes from rust-toolchain.toml in every job that compiles:
+# `rustup toolchain install` with no argument installs what that file names,
+# with its components. One place for the version, no second copy to drift.
+#
+# The commands are the gates CLAUDE.md lists, byte for byte, so a red check
+# here is one anybody can reproduce locally.
+
 jobs:
-  check:
-    name: fmt, clippy, test
+  fmt:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
         with:
-          toolchain: "1.93"
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+
+  clippy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --all-features --locked
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      # The example config is what the README tells people to start from, and
+      # config.rs embeds it; it has to load and validate.
+      - run: cargo run --locked -- --config henk.example.toml config check
 
-  deny:
-    name: cargo deny
+  # Fails on a dependency a crate declares but never names. Neither the
+  # compiler nor clippy notices one, and each is compile time and attack
+  # surface for nothing. cargo-machete reads sources and manifests and
+  # compiles nothing, so there is no toolchain and no cache. A false positive
+  # (a dependency used only through a macro that does not name it) is
+  # suppressed in that crate's Cargo.toml under
+  # `[package.metadata.cargo-machete] ignored`, with a reason, never with a
+  # flag here.
+  machete:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@v7
         with:
-          command: check
+          persist-credentials: false
+      # Renovate-style bumps move the action SHA but cannot see `tool:`, so the
+      # cargo-machete version moves by hand.
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-machete@0.9.2
+      - run: cargo machete
+
+  # The whole of deny.toml: advisories, licences, sources and the bans that
+  # keep TLS on rustls with ring. Runs on pull requests and on pushes to
+  # `main`; the `main` run is what tells an author that a red advisory check
+  # is not their diff. An advisory filed against a dependency nobody touched
+  # turns every open pull request red at once, and the fix belongs on `main`
+  # (update the lockfile, or an `ignore` entry in deny.toml with a reason and
+  # a link). advisories.yml runs the advisory part on a schedule, for the
+  # weeks nobody pushes.
+  #
+  # The advisory database cannot be pinned: a database frozen at a commit only
+  # knows the advisories that existed then, which is the thing being defended
+  # against. The tool is pinned, and the database's revision is recorded below.
+  # A green run is a claim about today.
+  #
+  # The binary rather than EmbarkStudios/cargo-deny-action, which is a Docker
+  # action that builds an image every run; the binary keeps the command
+  # identical to the one in CLAUDE.md.
+  deny:
+    runs-on: ubuntu-latest
+    # A tripwire on a hung database fetch, not a budget: the check takes
+    # seconds. A timeout cancels rather than fails, and a cancelled `needs:`
+    # skips the release jobs below without reporting anything as broken.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # cargo-deny compiles nothing but reads the graph through `cargo
+      # metadata`, so it still needs the pinned toolchain's cargo.
+      - run: rustup toolchain install
+      # Keep in step with advisories.yml.
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check
+      # `if: always()` because a red run is the one worth reproducing later.
+      - name: Record the advisory database revision this run judged against
+        if: always()
+        run: |
+          set -euo pipefail
+          dbs="${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
+          if [ ! -d "$dbs" ]; then
+            echo "::warning::no advisory database was cloned; the check failed before fetching one"
+            exit 0
+          fi
+          recorded=0
+          for db in "$dbs"/*/; do
+            [ -d "$db/.git" ] || continue
+            echo "::notice::judged against RustSec advisory-db $(basename "$db") $(git -C "$db" rev-parse HEAD) ($(git -C "$db" log -1 --format=%cI))"
+            recorded=1
+          done
+          [ "$recorded" = 1 ] || echo "::warning::$dbs exists but holds no git checkout to record"
+
+  # Releases, see RELEASING.md. Nothing is published to a registry: release-plz
+  # runs git-only (release-plz.toml), reads the version from the last vX.Y.Z
+  # tag, and on a push to main whose version is ahead of it, tags, creates the
+  # GitHub Release with the changelog and hands over to release.yml.
+  #
+  # Two constraints on how the two jobs are wired:
+  #
+  #   1. release-plz-pr `needs:` release-plz-release, so the new tag exists
+  #      before the PR job derives the next version from it. Run in parallel,
+  #      both read the same old tag and the PR job re-proposes the version
+  #      being released right then, with a duplicate CHANGELOG entry.
+  #
+  #      The dependency is on completion, not success (see release-plz-pr's
+  #      `if:`): a release that fails before tagging leaves the baseline as
+  #      the PR job expects, and the PR it opens may be the way out.
+  #
+  #   2. release-plz-release has no `concurrency:` block. GitHub cancels a
+  #      pending run when a newer one is queued for the same group, whatever
+  #      `cancel-in-progress` says, so three quick pushes to main would drop
+  #      the middle one's release. release-plz-pr keeps one: skipping a stale
+  #      PR update is safe, the newest run writes a correct PR.
+  release-plz-release:
+    name: Tag and create the GitHub Release
+    needs: [fmt, clippy, test, deny]
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && github.repository == 'StephanMeijer/meneerhenk'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+      # To dispatch release.yml, see below.
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Run release-plz (release)
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+          config: release-plz.toml
+          version: 0.3.169
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # release-plz pushed the tag with GITHUB_TOKEN, and GitHub does not fire
+      # `push` triggers for that (recursion prevention), so release.yml would
+      # never run on its own. workflow_dispatch is the documented exception.
+      # The `..|.tag?` walker reads either shape release-plz emits, and the
+      # `^v[0-9]` filter picks the workspace tag.
+      - name: Trigger release.yml for the tag
+        if: steps.release-plz.outputs.releases != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          tag=$(printf '%s' "$RELEASES" | jq -r '..|.tag? // empty | select(test("^v[0-9]"))' | head -n1)
+          if [ -n "$tag" ] && [ "$tag" != "null" ]; then
+            echo "Dispatching release.yml against tag $tag"
+            gh workflow run release.yml --ref "$tag" --repo "$GITHUB_REPOSITORY"
+          else
+            echo "No v* tag in release-plz output; nothing to dispatch"
+          fi
+
+  release-plz-pr:
+    name: Open / update release PR
+    needs: [fmt, clippy, test, deny, release-plz-release]
+    # `!cancelled()` lets this run after a failed release; the result check
+    # keeps the gate, since release-plz-release is `skipped` whenever one of
+    # the checks failed.
+    if: >-
+      !cancelled()
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && github.repository == 'StephanMeijer/meneerhenk'
+      && contains(fromJSON('["success", "failure"]'), needs.release-plz-release.result)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Run release-plz (release-pr)
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+          config: release-plz.toml
+          version: 0.3.169
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
