@@ -85,6 +85,7 @@ OpenBao.
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
+| `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
 
 The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node
@@ -98,7 +99,31 @@ henk doctor --probe    # also one short prompt to every model
 ```
 
 Every check is reported on its own line; the command fails when any
-check fails.
+check fails. With `installation_id = 0`, or when the installation token
+is refused, the GitHub check lists the App's installations so the right
+id can be copied into the config.
+
+## First live run
+
+The order that gets Henk from a fresh checkout to his first real review,
+on one machine, with one lane:
+
+1. Install the external servers: the `github-mcp-server` release binary
+   (the version the `Dockerfile` pins; verify the release checksum) on the
+   `PATH`, and Node for `npx @zereight/mcp-gitlab` if GitLab is in play.
+2. Export the secrets named in `henk.toml` in the shell that runs Henk:
+   at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
+   reads them; they are never written anywhere.
+3. `henk llm models --model <id>` lists what the endpoint serves; put the
+   chosen name in `[models.<id>].model`.
+4. `henk doctor --probe` until it reports `0 failing check(s)`.
+5. `henk mcp probe --server github --show pull_request_read` shows what a
+   lane will see.
+6. `RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts henk review <url>`
+   on a pull request in an allowlisted repository. The run id is printed
+   first; `henk runs show <id>` prints the run, lanes, findings and
+   timeline afterwards, and `transcripts/<run>/<lane>.json` holds what the
+   model saw and said.
 
 ## Container image
 
@@ -131,7 +156,9 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk llm probe --model proxy-fast                  # one prompt to a model
+henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
+henk runs show r-20261005-1a2b3c4d                 # a run from the local database
 ```
 
 In serve mode everything is an event. Hooks receive and publish; listeners
