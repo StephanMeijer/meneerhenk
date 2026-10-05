@@ -418,3 +418,65 @@ impl Tool for Big {
         ToolOutput::ok("y".repeat(500))
     }
 }
+
+#[tokio::test]
+async fn a_continuation_gets_one_more_turn_then_the_run_ends() {
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [text("I am done."), text("Still done.")],
+    ));
+    let nudges = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let seen = Arc::clone(&nudges);
+    let agent = Agent::new(model.clone(), ToolSet::new(), "s", config()).with_continuation(
+        Box::new(move |ending| {
+            assert_eq!(ending.reason, henk_agent::EndReason::EndTurn);
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Some(format!("Look again (turn {}).", ending.turn))
+            } else {
+                None
+            }
+        }),
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    assert_eq!(outcome.turns, 2);
+    assert_eq!(nudges.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(outcome.final_text, "Still done.");
+    let second = &model.requests()[1];
+    assert_eq!(
+        second.messages.last().unwrap().text(),
+        "Look again (turn 1)."
+    );
+}
+
+#[tokio::test]
+async fn an_output_cap_without_tool_calls_reaches_the_continuation() {
+    let cut = Ok(Completion {
+        message: ChatMessage::assistant("<think>thinking thinking"),
+        stop: StopReason::MaxTokens,
+        usage: henk_llm::Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new("m", [cut, text("posted")]));
+    let reasons = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reasons);
+    let agent = Agent::new(model, ToolSet::new(), "s", config()).with_continuation(Box::new(
+        move |ending| {
+            sink.lock().unwrap().push(ending.reason);
+            matches!(ending.reason, henk_agent::EndReason::OutputCap)
+                .then(|| "Post what you are sure of.".to_owned())
+        },
+    ));
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert_eq!(outcome.turns, 2);
+    assert_eq!(
+        *reasons.lock().unwrap(),
+        vec![
+            henk_agent::EndReason::OutputCap,
+            henk_agent::EndReason::EndTurn
+        ]
+    );
+}

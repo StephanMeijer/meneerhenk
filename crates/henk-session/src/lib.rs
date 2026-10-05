@@ -18,7 +18,7 @@ pub mod transcript;
 use std::sync::Arc;
 
 use henk_agent::mcp_tools::McpTool;
-use henk_agent::{Agent, AgentConfig, StopCause, ToolSet, Verdict, mcp_tools};
+use henk_agent::{Agent, AgentConfig, Continuation, StopCause, ToolSet, Verdict, mcp_tools};
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
 use henk_domain::run::RunId;
@@ -43,6 +43,9 @@ pub struct SessionSpec {
     pub tools: ToolSet,
     /// Turn limit, deadline, output cap.
     pub limits: AgentConfig,
+    /// Asked before the session ends without tool calls; may send one more
+    /// message and take another turn.
+    pub continuation: Option<Continuation>,
 }
 
 impl std::fmt::Debug for SessionSpec {
@@ -95,12 +98,15 @@ pub async fn run_session(
         tracing::warn!(%error, "could not record the lane start");
     }
     let system = spec.system;
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         Arc::clone(&spec.model),
         spec.tools,
         system.clone(),
         spec.limits,
     );
+    if let Some(continuation) = spec.continuation {
+        agent = agent.with_continuation(continuation);
+    }
     let outcome = agent.run(spec.opening, cancel).await;
     if let Some(dir) = transcript::directory_from_env() {
         match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
@@ -258,6 +264,7 @@ mod tests {
                 max_conversation_chars: 100_000,
                 keep_recent_turns: 2,
             },
+            continuation: None,
         }
     }
 

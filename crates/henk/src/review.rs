@@ -26,7 +26,7 @@ use crate::app::App;
 use crate::ids::new_run_id;
 use crate::review_tools::{
     GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings, PostFinding,
-    ReadFile,
+    ReadFile, lane_continuation,
 };
 
 /// The review was cancelled because a newer commit arrived.
@@ -566,6 +566,7 @@ async fn build_lane(
             opening: vec![opening],
             tools: set,
             limits,
+            continuation: Some(lane_continuation(Arc::clone(&context))),
         },
         context,
     })

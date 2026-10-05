@@ -4,9 +4,10 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use henk_agent::{Tool, ToolOutput};
+use henk_agent::{Continuation, EndReason, Ending, Tool, ToolOutput};
 use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Claim, Finding, FindingKey, FindingRegistry};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
@@ -57,6 +58,45 @@ impl LaneContext {
             .map(str::to_owned)
             .collect()
     }
+}
+
+/// What a lane is told, once each, before it is allowed to end: an answer
+/// cut off at the output cap gets one chance to post what it was sure of,
+/// and an end of turn with changed files never opened gets one request to
+/// look at them. After that the lane ends on its own terms.
+#[must_use]
+pub fn lane_continuation(context: Arc<LaneContext>) -> Continuation {
+    let nudged_cap = AtomicBool::new(false);
+    let nudged_coverage = AtomicBool::new(false);
+    Box::new(move |ending: &Ending<'_>| match ending.reason {
+        EndReason::OutputCap => {
+            if nudged_cap.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            info!(lane = %context.lane, turn = ending.turn, "nudging after an output cap");
+            Some(
+                "Your answer was cut off at the output limit. Post each finding you are sure of with post_finding, one call per finding, then end your turn.".to_owned(),
+            )
+        }
+        EndReason::EndTurn => {
+            let unopened = context.unopened_files();
+            if unopened.is_empty() || nudged_coverage.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            info!(lane = %context.lane, turn = ending.turn, files = unopened.len(), "nudging to cover the remaining files");
+            let shown: Vec<&str> = unopened.iter().take(20).map(String::as_str).collect();
+            let more = if unopened.len() > shown.len() {
+                format!(" and {} more", unopened.len() - shown.len())
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "You ended without looking at {} changed file(s): {}{more}. Look at each with get_file_diff and decide, or end your turn if you are done.",
+                unopened.len(),
+                shown.join(", ")
+            ))
+        }
+    })
 }
 
 /// `list_changed_files`: the files of the diff with their counts.
@@ -495,7 +535,7 @@ mod tests {
     use super::*;
     use crate::listeners::testing::FakeWriter;
 
-    const DIFF: &str = "\
+    pub(super) const DIFF: &str = "\
 diff --git a/src/a.rs b/src/a.rs
 --- a/src/a.rs
 +++ b/src/a.rs
@@ -512,7 +552,7 @@ diff --git a/README.md b/README.md
 +new
 ";
 
-    fn context(diff: Option<ReviewDiff>) -> Arc<LaneContext> {
+    pub(super) fn context(diff: Option<ReviewDiff>) -> Arc<LaneContext> {
         let store = Arc::new(RunStore::in_memory().unwrap());
         let run = RunId::parse("r-1").unwrap();
         store
@@ -650,5 +690,54 @@ diff --git a/README.md b/README.md
             .call(json!({"path": "src/a.rs", "line": 40, "body": "Wrong."}))
             .await;
         assert!(unchecked.content.contains("not in the fake"));
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
+    use henk_agent::{EndReason, Ending};
+    use henk_domain::diff::ReviewDiff;
+
+    use super::tests::context;
+    use super::*;
+
+    fn ending(reason: EndReason) -> Ending<'static> {
+        Ending {
+            reason,
+            turn: 3,
+            messages: &[],
+        }
+    }
+
+    #[tokio::test]
+    async fn nudges_once_for_coverage_and_once_for_an_output_cap() {
+        let ctx = context(Some(ReviewDiff::from_unified(super::tests::DIFF)));
+        let nudge = lane_continuation(Arc::clone(&ctx));
+        let first = nudge(&ending(EndReason::EndTurn)).unwrap();
+        assert!(
+            first.contains("2 changed file(s): src/a.rs, README.md"),
+            "{first}"
+        );
+        assert_eq!(nudge(&ending(EndReason::EndTurn)), None, "only once");
+        let cap = nudge(&ending(EndReason::OutputCap)).unwrap();
+        assert!(cap.contains("cut off"));
+        assert_eq!(nudge(&ending(EndReason::OutputCap)), None);
+    }
+
+    #[tokio::test]
+    async fn no_coverage_nudge_when_every_file_was_opened_or_there_is_no_diff() {
+        let ctx = context(Some(ReviewDiff::from_unified(super::tests::DIFF)));
+        for path in ["src/a.rs", "README.md"] {
+            GetFileDiff(Arc::clone(&ctx))
+                .call(json!({"path": path}))
+                .await;
+        }
+        assert_eq!(lane_continuation(ctx)(&ending(EndReason::EndTurn)), None);
+        assert_eq!(
+            lane_continuation(context(None))(&ending(EndReason::EndTurn)),
+            None
+        );
     }
 }
