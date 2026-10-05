@@ -599,39 +599,6 @@ impl RunStore {
             Ok(())
         })
     }
-
-    /// The most recent running review for a target, if any.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure or a corrupt row.
-    pub fn running_review(
-        &self,
-        platform: Platform,
-        repo: &str,
-        target: u64,
-    ) -> Result<Option<RunRecord>, StoreError> {
-        let id: Option<String> = self.with(|c| {
-            c.query_row(
-                "SELECT id FROM runs WHERE kind = 'review' AND platform = ?1 AND repo = ?2 AND target = ?3 AND status = 'running'
-                 ORDER BY started_at DESC LIMIT 1",
-                params![platform_str(platform), repo, i64::try_from(target).unwrap_or(i64::MAX)],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-        })?;
-        match id {
-            Some(id) => {
-                let id = RunId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
-                    column: "runs.id",
-                    value: id,
-                })?;
-                self.run(&id)
-            }
-            None => Ok(None),
-        }
-    }
 }
 
 impl RunStore {
@@ -1010,46 +977,24 @@ mod tests {
     }
 
     #[test]
-    fn running_review_finds_the_active_one_only() {
+    fn joining_a_running_run_is_recorded() {
         let store = RunStore::in_memory().unwrap();
         store.create_run(&new_run("r-3")).unwrap();
+        let run = RunId::parse("r-3").unwrap();
+        store.joined(&run, "comment").unwrap();
+        store.joined(&run, "webhook").unwrap();
+        let sources: Vec<String> = store
+            .with(|c| {
+                let mut statement =
+                    c.prepare("SELECT source FROM requests WHERE run_id = ?1 ORDER BY rowid")?;
+                let rows = statement.query_map(params![run.as_str()], |row| row.get(0))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .unwrap();
         assert_eq!(
-            store
-                .running_review(Platform::GitHub, "o/r", 7)
-                .unwrap()
-                .unwrap()
-                .id
-                .as_str(),
-            "r-3"
+            sources,
+            ["comment", "webhook"],
+            "one row per join, in order"
         );
-        assert!(
-            store
-                .running_review(Platform::GitHub, "o/r", 8)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store
-                .running_review(Platform::GitLab, "o/r", 7)
-                .unwrap()
-                .is_none()
-        );
-        store
-            .finish_run(
-                &RunId::parse("r-3").unwrap(),
-                RunStatus::Cancelled,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(
-            store
-                .running_review(Platform::GitHub, "o/r", 7)
-                .unwrap()
-                .is_none()
-        );
-        store
-            .joined(&RunId::parse("r-3").unwrap(), "comment")
-            .unwrap();
     }
 }
