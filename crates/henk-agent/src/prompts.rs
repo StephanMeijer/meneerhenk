@@ -55,4 +55,18 @@ mod tests {
         assert_eq!(greeting(1), greeting(1 + 4));
         assert!(PERSONA.contains("Not bad."));
     }
+
+    #[test]
+    fn review_lane_names_every_lane_tool() {
+        for tool in [
+            "list_changed_files",
+            "get_file_diff",
+            "read_file",
+            "list_existing_findings",
+            "post_finding",
+            "improve_finding",
+        ] {
+            assert!(REVIEW_LANE.contains(&format!("`{tool}`")), "{tool}");
+        }
+    }
 }
