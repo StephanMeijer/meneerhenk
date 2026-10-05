@@ -61,3 +61,42 @@ fn parses_every_file_of_a_real_diff() {
     let rendered: usize = diff.files().iter().map(|f| f.render().len()).sum();
     assert!(rendered > PR3.len(), "numbers add to the text");
 }
+
+#[test]
+fn ignored_files_are_listed_but_not_reviewed() {
+    let ignore = henk_domain::ignore::PathFilter::new(["**/Cargo.lock", "CHANGELOG.md"]);
+    let patches = henk_domain::diff::split_unified(PR3);
+    let diff = ReviewDiff::from_patches_filtered(&patches, &ignore);
+    assert_eq!(diff.files().len(), 29, "Cargo.lock is left out");
+    assert_eq!(diff.ignored(), ["Cargo.lock"]);
+    assert!(diff.file("Cargo.lock").is_none());
+    assert!(diff.paths().all(|p| p != "Cargo.lock"));
+    assert!(
+        diff.commentable("Cargo.lock", 1, DiffSide::Right).is_err(),
+        "no finding on an ignored file"
+    );
+    assert!(
+        diff.render_list()
+            .ends_with("Not reviewed (review.ignore): Cargo.lock\n")
+    );
+    assert!(!diff.is_empty());
+}
+
+#[test]
+fn a_change_of_only_ignored_files_has_nothing_to_review() {
+    let lock_only = "\
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1 +1 @@
+-old
++new
+";
+    let ignore = henk_domain::ignore::PathFilter::new(["**/Cargo.lock"]);
+    let diff =
+        ReviewDiff::from_patches_filtered(&henk_domain::diff::split_unified(lock_only), &ignore);
+    assert!(diff.is_empty());
+    assert!(diff.has_changes());
+    assert!(diff.render_list().starts_with("No file to review"));
+    assert!(!ReviewDiff::default().has_changes());
+}

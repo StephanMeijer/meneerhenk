@@ -9,6 +9,7 @@ use henk_agent::{AgentConfig, StopCause, Tool as _, ToolSet, prompts};
 use henk_domain::allowlist::Platform;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
+use henk_domain::ignore::PathFilter;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, LaneOutcome, LaneResult, LaneSpec, ReviewOutcome};
 use henk_domain::run::{RunId, RunKind};
@@ -223,6 +224,7 @@ async fn report_failure(
         commit: commit.clone(),
         lanes: Vec::new(),
         open_findings: 0,
+        nothing_to_review: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -255,14 +257,13 @@ async fn review_body(
     cancel: CancellationToken,
 ) -> anyhow::Result<(ReviewOutcome, String)> {
     let ReviewRun {
-        app,
         writer,
         target,
         commit,
         run,
         link,
+        ..
     } = review;
-    let platform = target.platform();
 
     // Seed the shared registry from what is already on the pull request.
     let existing = writer
@@ -285,6 +286,69 @@ async fn review_body(
     ))));
 
     let diff = fetch_diff(review, base_ref).await?;
+    // Every changed file left out by review.ignore: nothing for a lane to
+    // read. The review still counts, folds and summarises (§3.2).
+    let nothing_to_review = diff.is_empty();
+    let results = if nothing_to_review {
+        Vec::new()
+    } else {
+        run_lanes(review, registry, diff, title, base_ref, &cancel).await?
+    };
+    if cancel.is_cancelled() {
+        return Err(Superseded.into());
+    }
+
+    // The count comes from the platform, not from memory (§3.3).
+    let after = writer
+        .existing_findings(target)
+        .await
+        .context("re-listing findings")?;
+    let open_findings = after
+        .iter()
+        .filter(|f| f.line.is_some() && !f.resolved)
+        .count();
+    let outcome = ReviewOutcome {
+        commit: commit.clone(),
+        lanes: results,
+        open_findings,
+        nothing_to_review,
+    };
+
+    fold_outdated(writer, target, &after).await;
+
+    let summary_text = outcome.summary();
+    let body = Marker {
+        run: run.clone(),
+        model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
+        requested_by: None,
+        kind: Some(MarkerKind::Summary),
+        checked_by: None,
+    }
+    .attach(&format!("{summary_text}\n\nRun: {link}"));
+    writer
+        .post_comment(target, &body)
+        .await
+        .context("posting the summary")?;
+    Ok((outcome, summary_text))
+}
+
+/// Runs every configured lane on the diff, sharing one read session, and
+/// returns how each ended, in lane-name order.
+async fn run_lanes(
+    review: ReviewRun<'_>,
+    registry: Arc<Mutex<FindingRegistry>>,
+    diff: Arc<ReviewDiff>,
+    title: &str,
+    base_ref: &str,
+    cancel: &CancellationToken,
+) -> anyhow::Result<Vec<LaneResult>> {
+    let ReviewRun {
+        app,
+        target,
+        commit,
+        ..
+    } = review;
+    let platform = target.platform();
 
     // One read-only MCP session shared by the lanes of this review.
     let alias = app.read_mcp_alias(platform)?;
@@ -324,41 +388,7 @@ async fn review_body(
         }
     }
     results.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
-    if cancel.is_cancelled() {
-        return Err(Superseded.into());
-    }
-
-    // The count comes from the platform, not from memory (§3.3).
-    let after = writer
-        .existing_findings(target)
-        .await
-        .context("re-listing findings")?;
-    let open_findings = after
-        .iter()
-        .filter(|f| f.line.is_some() && !f.resolved)
-        .count();
-    let outcome = ReviewOutcome {
-        commit: commit.clone(),
-        lanes: results,
-        open_findings,
-    };
-
-    fold_outdated(writer, target, &after).await;
-
-    let summary_text = outcome.summary();
-    let body = Marker {
-        run: run.clone(),
-        model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
-        requested_by: None,
-        kind: Some(MarkerKind::Summary),
-        checked_by: None,
-    }
-    .attach(&format!("{summary_text}\n\nRun: {link}"));
-    writer
-        .post_comment(target, &body)
-        .await
-        .context("posting the summary")?;
-    Ok((outcome, summary_text))
+    Ok(results)
 }
 
 /// Server tools the lanes should not see on this repository. GitHub code
@@ -418,8 +448,9 @@ async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc
         .diff(target, commit, base_ref)
         .await
         .context("fetching the diff")?;
-    let diff = ReviewDiff::from_patches(&patches);
-    if diff.is_empty() {
+    let ignore = PathFilter::new(app.settings.review.ignore.iter().map(String::as_str));
+    let diff = ReviewDiff::from_patches_filtered(&patches, &ignore);
+    if !diff.has_changes() {
         return Err(anyhow!("the diff is empty; nothing to review"));
     }
     let (additions, deletions) = diff
@@ -430,8 +461,9 @@ async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc
         run,
         "info",
         &format!(
-            "diff: {} files, +{additions} -{deletions}",
-            diff.files().len()
+            "diff: {} files, +{additions} -{deletions}; {} not reviewed (review.ignore)",
+            diff.files().len(),
+            diff.ignored().len()
         ),
     );
     Ok(Arc::new(diff))

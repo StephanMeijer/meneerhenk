@@ -99,6 +99,14 @@ max_conversation_chars = 160000
 keep_recent_turns = 2
 max_concurrent = 3
 github_drafts = false
+# Changed files no lane reviews. A pattern without / matches the file name at
+# any depth; ** matches any number of directories. This is the default; set
+# it to replace the list, or to [] to review everything. A change made only
+# of these files is reported as nothing to review.
+ignore = [
+  "**/Cargo.lock", "**/package-lock.json", "**/yarn.lock", "**/pnpm-lock.yaml",
+  "**/go.sum", "**/poetry.lock", "**/uv.lock", "CHANGELOG.md",
+]
 
 # A second model checks every finding, rewrite and withdrawal before it is
 # made (spec §3.2). A rejected finding is not posted; the lane hears why.

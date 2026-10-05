@@ -7,6 +7,8 @@
 use std::fmt;
 use std::fmt::Write as _;
 
+use crate::ignore::PathFilter;
+
 /// Which side of the diff a line comment sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffSide {
@@ -120,10 +122,12 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
 }
 
-/// The diff of one review.
+/// The diff of one review: the files it reviews, and the paths of changed
+/// files it leaves out (`review.ignore`, §3.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewDiff {
     files: Vec<FileDiff>,
+    ignored: Vec<String>,
 }
 
 /// Why a line cannot carry a finding.
@@ -442,8 +446,20 @@ impl ReviewDiff {
     /// Parses every patch.
     #[must_use]
     pub fn from_patches(patches: &[FilePatch]) -> Self {
+        Self::from_patches_filtered(patches, &PathFilter::default())
+    }
+
+    /// Parses every patch, leaving out the files `ignore` matches. They are
+    /// listed as not reviewed and can carry no finding.
+    #[must_use]
+    pub fn from_patches_filtered(patches: &[FilePatch], ignore: &PathFilter) -> Self {
+        let (ignored, kept): (Vec<FileDiff>, Vec<FileDiff>) = patches
+            .iter()
+            .map(FileDiff::from_patch)
+            .partition(|file| ignore.matches(&file.path));
         Self {
-            files: patches.iter().map(FileDiff::from_patch).collect(),
+            files: kept,
+            ignored: ignored.into_iter().map(|file| file.path).collect(),
         }
     }
 
@@ -459,10 +475,22 @@ impl ReviewDiff {
         &self.files
     }
 
-    /// Whether the diff has no files.
+    /// Whether the diff has no file to review.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+
+    /// Whether any file changed at all, reviewed or not.
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        !self.files.is_empty() || !self.ignored.is_empty()
+    }
+
+    /// The changed files left out of the review, in diff order.
+    #[must_use]
+    pub fn ignored(&self) -> &[String] {
+        &self.ignored
     }
 
     /// One file by its path (the new path, or the old one for a removed file).
@@ -499,13 +527,17 @@ impl ReviewDiff {
         })
     }
 
-    /// One line per file: status letter, path, counts.
+    /// One line per file: status letter, path, counts; then the files left
+    /// out, if any.
     #[must_use]
     pub fn render_list(&self) -> String {
-        if self.files.is_empty() {
+        if !self.has_changes() {
             return "The diff is empty.".to_owned();
         }
         let mut out = String::new();
+        if self.files.is_empty() {
+            out.push_str("No file to review: every changed file is left out.\n");
+        }
         for file in &self.files {
             let _ = writeln!(
                 out,
@@ -514,6 +546,13 @@ impl ReviewDiff {
                 file.describe_path(),
                 file.additions,
                 file.deletions
+            );
+        }
+        if !self.ignored.is_empty() {
+            let _ = writeln!(
+                out,
+                "Not reviewed (review.ignore): {}",
+                self.ignored.join(", ")
             );
         }
         out
