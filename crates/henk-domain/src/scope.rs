@@ -62,8 +62,13 @@ enum Rule {
     PullNumber,
     /// `query` gets `repo:owner/name` and loses any other repo qualifier (GitHub search).
     SearchQueryRepo,
-    /// `sha` defaults to the reviewed commit when neither `sha` nor `ref` is set (GitHub).
-    DefaultShaToCommit,
+    /// Reads happen at the reviewed commit: `ref` is dropped and `sha`
+    /// defaults to the commit (GitHub, review scope). An explicit `sha` is
+    /// kept, so the base can still be read.
+    PinToCommit,
+    /// These `method` values are refused in review scope, because Henk's
+    /// own tools serve the same data per file (GitHub `pull_request_read`).
+    DenyWholeDiffMethods,
     /// `project_id` is the project path (GitLab).
     ProjectId,
     /// `merge_request_iid` is the reviewed merge request (GitLab, review scope only).
@@ -73,11 +78,16 @@ enum Rule {
 const GITHUB_READ: &[(&str, &[Rule])] = &[
     (
         "pull_request_read",
-        &[Rule::Owner, Rule::Repo, Rule::PullNumber],
+        &[
+            Rule::Owner,
+            Rule::Repo,
+            Rule::PullNumber,
+            Rule::DenyWholeDiffMethods,
+        ],
     ),
     (
         "get_file_contents",
-        &[Rule::Owner, Rule::Repo, Rule::DefaultShaToCommit],
+        &[Rule::Owner, Rule::Repo, Rule::PinToCommit],
     ),
     ("get_commit", &[Rule::Owner, Rule::Repo]),
     ("list_commits", &[Rule::Owner, Rule::Repo]),
@@ -199,12 +209,22 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
                 let query = args.get("query").and_then(Value::as_str).unwrap_or("");
                 args.insert("query".into(), json!(pin_search_query(query, &repo.path())));
             }
-            Rule::DefaultShaToCommit => {
-                if let Scope::Review { commit, .. } = scope
-                    && args.get("sha").is_none()
-                    && args.get("ref").is_none()
+            Rule::PinToCommit => {
+                if let Scope::Review { commit, .. } = scope {
+                    args.remove("ref");
+                    if args.get("sha").is_none() {
+                        args.insert("sha".into(), json!(commit.as_str()));
+                    }
+                }
+            }
+            Rule::DenyWholeDiffMethods => {
+                if matches!(scope, Scope::Review { .. })
+                    && let Some(method) = args.get("method").and_then(Value::as_str)
+                    && matches!(method, "get_diff" | "get_files")
                 {
-                    args.insert("sha".into(), json!(commit.as_str()));
+                    return Verdict::Deny(format!(
+                        "{method} is not used here: call list_changed_files for the files and get_file_diff for one file's numbered diff"
+                    ));
                 }
             }
         }
@@ -242,6 +262,13 @@ mod tests {
         }
     }
 
+    fn plan_scope() -> Scope {
+        Scope::Plan {
+            repo: RepoRef::parse(Platform::GitHub, "docspec/app").unwrap(),
+            issue: 9,
+        }
+    }
+
     #[test]
     fn unknown_and_write_tools_are_refused() {
         let scope = review_scope();
@@ -276,13 +303,13 @@ mod tests {
         let verdict = guard(
             Platform::GitHub,
             "pull_request_read",
-            &json!({"owner": "evil", "repo": "other", "pullNumber": 1, "method": "get_diff"}),
+            &json!({"owner": "evil", "repo": "other", "pullNumber": 1, "method": "get_commits"}),
             &review_scope(),
         );
         assert_eq!(
             verdict,
             Verdict::Allow(
-                json!({"owner": "docspec", "repo": "app", "pullNumber": 42, "method": "get_diff"})
+                json!({"owner": "docspec", "repo": "app", "pullNumber": 42, "method": "get_commits"})
             )
         );
     }
@@ -301,17 +328,61 @@ mod tests {
                 json!({"owner": "docspec", "repo": "app", "path": "src/main.rs", "sha": SHA})
             )
         );
+        // A ref is dropped: the lane reads the commit under review, not a
+        // branch that may have moved on.
+        let with_ref = guard(
+            Platform::GitHub,
+            "get_file_contents",
+            &json!({"path": "x", "ref": "refs/pull/7/head"}),
+            &review_scope(),
+        );
+        assert_eq!(
+            with_ref,
+            Verdict::Allow(json!({"owner": "docspec", "repo": "app", "path": "x", "sha": SHA}))
+        );
+        // An explicit sha is kept, so the base version can be read.
         let explicit = guard(
             Platform::GitHub,
             "get_file_contents",
-            &json!({"path": "x", "ref": "refs/heads/main"}),
+            &json!({"path": "x", "sha": "abc"}),
             &review_scope(),
         );
         assert_eq!(
             explicit,
-            Verdict::Allow(
-                json!({"owner": "docspec", "repo": "app", "path": "x", "ref": "refs/heads/main"})
-            )
+            Verdict::Allow(json!({"owner": "docspec", "repo": "app", "path": "x", "sha": "abc"}))
+        );
+    }
+
+    #[test]
+    fn whole_diff_methods_are_refused_in_review_scope() {
+        for method in ["get_diff", "get_files"] {
+            let verdict = guard(
+                Platform::GitHub,
+                "pull_request_read",
+                &json!({"method": method}),
+                &review_scope(),
+            );
+            assert!(
+                matches!(verdict, Verdict::Deny(ref reason) if reason.contains("get_file_diff")),
+                "{method}: {verdict:?}"
+            );
+        }
+        let get = guard(
+            Platform::GitHub,
+            "pull_request_read",
+            &json!({"method": "get"}),
+            &review_scope(),
+        );
+        assert!(matches!(get, Verdict::Allow(_)));
+        let plan = guard(
+            Platform::GitHub,
+            "pull_request_read",
+            &json!({"method": "get_diff", "pullNumber": 3}),
+            &plan_scope(),
+        );
+        assert!(
+            matches!(plan, Verdict::Allow(_)),
+            "planning may read whole diffs"
         );
     }
 
