@@ -74,6 +74,10 @@ pub(crate) mod testing {
         pub posts: Mutex<Vec<(String, u32, String)>>,
         pub updates: Mutex<Vec<(String, String)>>,
         pub resolved: Mutex<Vec<String>>,
+        /// What `diff` returns.
+        pub patches: Vec<henk_platform::FilePatch>,
+        /// Every outcome `finish_review` was given.
+        pub finished: Mutex<Vec<ReviewOutcome>>,
     }
 
     #[async_trait::async_trait]
@@ -117,7 +121,7 @@ pub(crate) mod testing {
             _: &CommitSha,
             _: &str,
         ) -> Result<Vec<henk_platform::FilePatch>, PlatformError> {
-            Ok(Vec::new())
+            Ok(self.patches.clone())
         }
 
         async fn existing_findings(
@@ -234,9 +238,10 @@ pub(crate) mod testing {
             _: &ReviewTarget,
             _: &CommitSha,
             _: Option<&ReviewHandle>,
-            _: &ReviewOutcome,
+            outcome: &ReviewOutcome,
             _: &str,
         ) -> Result<(), PlatformError> {
+            self.finished.lock().unwrap().push(outcome.clone());
             Ok(())
         }
     }
