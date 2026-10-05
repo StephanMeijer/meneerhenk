@@ -232,6 +232,7 @@ async fn report_failure(
         requested_by: None,
         kind: Some(MarkerKind::Failure),
         checked_by: None,
+        withdrawn: None,
     }
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
@@ -323,6 +324,7 @@ async fn review_body(
         requested_by: None,
         kind: Some(MarkerKind::Summary),
         checked_by: None,
+        withdrawn: None,
     }
     .attach(&format!("{summary_text}\n\nRun: {link}"));
     writer

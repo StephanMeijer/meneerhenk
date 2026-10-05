@@ -391,7 +391,8 @@ These hold everywhere:
 6. **Every visible action is traceable.** Each review, plan and mail links
    back to its run. Each comment carries hidden markers saying who wrote it,
    which model, which model fact-checked it when one did and, when someone
-   asked for it, for whom.
+   asked for it, for whom. A finding withdrawn as wrong keeps who wrote it
+   and adds who withdrew it, with which model and check.
 7. **Allowlists bound the world.** Henk acts only in allowlisted repositories
    and his own Discord channel, and as his own accounts. He reads the web
    freely; he writes nowhere else.
@@ -528,3 +529,6 @@ surprising reading of the earlier wording; veto any that is wrong.
   default) are not reviewed; a change made only of them completes as
   "nothing to review" with a success check, rather than failing for an
   empty diff (#13).
+- §8.6: withdrawing a finding no longer replaces its author in the hidden
+  marker; the withdrawal is recorded beside it, and the comment's note for
+  AI agents says there is nothing to do (#9).

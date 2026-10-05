@@ -42,6 +42,7 @@ fn marker(kind: MarkerKind) -> String {
         requested_by: None,
         kind: Some(kind),
         checked_by: None,
+        withdrawn: None,
     }
     .render()
 }

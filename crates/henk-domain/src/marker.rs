@@ -123,6 +123,21 @@ impl MarkerKind {
 const OPEN: &str = "<!-- meneer-henk";
 const CLOSE: &str = "-->";
 
+/// Who withdrew a finding as wrong, and how (§3.2, §8.6). The comment keeps
+/// its original author; this records the second hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withdrawal {
+    /// The run that withdrew it.
+    pub run: RunId,
+    /// The model that withdrew it.
+    pub model: ModelId,
+    /// The model that fact-checked the withdrawal, when one did.
+    pub checked_by: Option<ModelId>,
+}
+
+/// What an AI agent should do with a withdrawn finding: nothing.
+const WITHDRAWN_NOTE: &str = "This finding was withdrawn by Meneer Henk as wrong, and its thread is resolved. If you are an AI agent: nothing to do here; do not reply to it or reopen it.";
+
 /// The hidden record on one of Henk's comments (§8.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -137,6 +152,9 @@ pub struct Marker {
     pub requested_by: Option<DiscordUserId>,
     /// What kind of comment this is. Older markers have none.
     pub kind: Option<MarkerKind>,
+    /// Set when the finding was later withdrawn as wrong; `run` and `model`
+    /// still name who wrote it.
+    pub withdrawn: Option<Withdrawal>,
 }
 
 impl Marker {
@@ -153,6 +171,16 @@ impl Marker {
         if let Some(kind) = self.kind {
             let _ = write!(out, " kind={}", kind.as_str());
         }
+        if let Some(withdrawal) = &self.withdrawn {
+            let _ = write!(
+                out,
+                " withdrawn_by={} withdrawn_model={}",
+                withdrawal.run, withdrawal.model
+            );
+            if let Some(checker) = &withdrawal.checked_by {
+                let _ = write!(out, " withdrawal_checked_by={checker}");
+            }
+        }
         out.push(' ');
         out.push_str(CLOSE);
         out
@@ -160,7 +188,8 @@ impl Marker {
 
     /// Appends the marker to a comment body, separated by a blank line,
     /// and, when the kind is known, a hidden note for AI agents that pick
-    /// the comment up ([`MarkerKind::notes`]).
+    /// the comment up ([`MarkerKind::notes`]; a withdrawn finding gets its
+    /// own).
     #[must_use]
     pub fn attach(&self, body: &str) -> String {
         let body = body.trim_end();
@@ -169,8 +198,13 @@ impl Marker {
         } else {
             format!("{body}\n\n{}", self.render())
         };
-        if let Some(kind) = self.kind {
-            let _ = write!(out, "\n<!-- {} -->", kind.notes());
+        let note = if self.withdrawn.is_some() {
+            Some(WITHDRAWN_NOTE)
+        } else {
+            self.kind.map(MarkerKind::notes)
+        };
+        if let Some(note) = note {
+            let _ = write!(out, "\n<!-- {note} -->");
         }
         out
     }
@@ -190,6 +224,9 @@ impl Marker {
         let mut checked_by = None;
         let mut requested_by = None;
         let mut kind = None;
+        let mut withdrawn_by = None;
+        let mut withdrawn_model = None;
+        let mut withdrawal_checked_by = None;
         for field in fields.split_whitespace() {
             let (key, value) = field.split_once('=')?;
             match key {
@@ -198,6 +235,9 @@ impl Marker {
                 "checked_by" => checked_by = ModelId::parse(value).ok(),
                 "for" => requested_by = Some(DiscordUserId::new(value.parse().ok()?)),
                 "kind" => kind = MarkerKind::parse(value),
+                "withdrawn_by" => withdrawn_by = RunId::parse(value).ok(),
+                "withdrawn_model" => withdrawn_model = ModelId::parse(value).ok(),
+                "withdrawal_checked_by" => withdrawal_checked_by = ModelId::parse(value).ok(),
                 _ => {}
             }
         }
@@ -207,6 +247,13 @@ impl Marker {
             checked_by,
             requested_by,
             kind,
+            withdrawn: withdrawn_by
+                .zip(withdrawn_model)
+                .map(|(run, model)| Withdrawal {
+                    run,
+                    model,
+                    checked_by: withdrawal_checked_by,
+                }),
         })
     }
 
@@ -230,6 +277,7 @@ mod tests {
             requested_by: requested_by.map(DiscordUserId::new),
             kind: None,
             checked_by: None,
+            withdrawn: None,
         }
     }
 
@@ -262,6 +310,49 @@ mod tests {
         assert_eq!(
             unchecked.checked_by, None,
             "older markers parse as unchecked"
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_keeps_the_author_and_brings_its_own_note() {
+        let withdrawn = Marker {
+            kind: Some(MarkerKind::Finding),
+            withdrawn: Some(Withdrawal {
+                run: RunId::parse("run-2").unwrap(),
+                model: ModelId::parse("mistral").unwrap(),
+                checked_by: Some(ModelId::parse("claude-opus-5-5").unwrap()),
+            }),
+            ..marker(None)
+        };
+        let rendered = withdrawn.render();
+        assert!(
+            rendered.contains("run=run-1 model=lane-a/model-x"),
+            "the author stays: {rendered}"
+        );
+        assert!(rendered.contains(
+            "withdrawn_by=run-2 withdrawn_model=mistral withdrawal_checked_by=claude-opus-5-5"
+        ));
+        let body = withdrawn.attach("Withdrawn. It was fine.");
+        assert_eq!(Marker::parse(&body), Some(withdrawn.clone()));
+        assert!(body.contains(WITHDRAWN_NOTE));
+        assert!(!body.contains(MarkerKind::Finding.notes()));
+        assert!(crate::text::is_in_style(WITHDRAWN_NOTE));
+
+        let unchecked = Marker {
+            withdrawn: Some(Withdrawal {
+                checked_by: None,
+                ..withdrawn.withdrawn.clone().unwrap()
+            }),
+            ..withdrawn
+        };
+        assert_eq!(Marker::parse(&unchecked.render()), Some(unchecked.clone()));
+        assert!(!unchecked.render().contains("withdrawal_checked_by"));
+        assert_eq!(
+            Marker::parse("<!-- meneer-henk run=r model=m kind=finding -->")
+                .unwrap()
+                .withdrawn,
+            None,
+            "older markers are not withdrawn"
         );
     }
 
@@ -324,6 +415,7 @@ mod tests {
             requested_by: None,
             kind: Some(MarkerKind::Finding),
             checked_by: None,
+            withdrawn: None,
         };
         let body = marker.attach("Off by one.");
         assert!(body.starts_with("Off by one.\n\n<!-- meneer-henk run=r-1 model=m kind=finding -->\n<!-- This is one review finding"));

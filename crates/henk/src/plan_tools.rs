@@ -59,6 +59,7 @@ impl PlanContext {
                 .map(henk_domain::identity::DiscordUserId::new),
             kind: Some(kind),
             checked_by: None,
+            withdrawn: None,
         }
     }
 

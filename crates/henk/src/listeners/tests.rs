@@ -177,6 +177,7 @@ async fn bots_markers_and_foreign_repositories_are_ignored_by_everyone() {
         requested_by: None,
         kind: Some(MarkerKind::Summary),
         checked_by: None,
+        withdrawn: None,
     }
     .attach("@meneer-henk review");
     let own = h.deliver(comment(&marker, person("alice"))).await;

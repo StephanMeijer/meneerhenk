@@ -82,6 +82,7 @@ impl Listener for MentionListener {
             requested_by: None,
             kind: Some(MarkerKind::Reply),
             checked_by: None,
+            withdrawn: None,
         }
         .attach(&text);
         // On GitLab a diff note reply goes to its discussion id, which the

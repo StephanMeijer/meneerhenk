@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use henk_agent::{Continuation, EndReason, Ending, Tool, ToolOutput};
 use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Claim, Finding, FindingKey, FindingRegistry};
-use henk_domain::marker::{Marker, MarkerKind, ModelId};
+use henk_domain::marker::{Marker, MarkerKind, ModelId, Withdrawal};
 use henk_domain::review::{CommitSha, LaneName};
 use henk_domain::run::RunId;
 use henk_domain::text::style_violations;
@@ -480,6 +480,7 @@ impl LaneContext {
             requested_by: None,
             kind: Some(MarkerKind::Finding),
             checked_by,
+            withdrawn: None,
         }
     }
 
@@ -817,9 +818,17 @@ impl Tool for WithdrawFinding {
             } => (checked_by, unchecked),
             Gate::Stop(output) => return output,
         };
-        let full_body = ctx
-            .marker(checked_by)
-            .attach(&format!("Withdrawn: this finding was wrong. {reason}"));
+        // The finding keeps who wrote it (§8.6); the withdrawal is added.
+        let original = Marker::parse(&existing.body).unwrap_or_else(|| ctx.marker(None));
+        let full_body = Marker {
+            withdrawn: Some(Withdrawal {
+                run: ctx.run.clone(),
+                model: ctx.model.clone(),
+                checked_by,
+            }),
+            ..original
+        }
+        .attach(&format!("Withdrawn. {reason}"));
         if let Err(error) = ctx
             .writer
             .update_finding(&ctx.target, comment_id, &full_body)
@@ -1273,7 +1282,9 @@ mod gate_tests {
         assert!(
             updates[0]
                 .1
-                .starts_with("Withdrawn: this finding was wrong. src/a.rs:2 does set x.")
+                .starts_with("Withdrawn. src/a.rs:2 does set x."),
+            "{}",
+            updates[0].1
         );
         assert_eq!(*writer.resolved.lock().unwrap(), vec!["c1".to_owned()]);
         assert_eq!(ctx.registry.lock().unwrap().open_count(), 0);
@@ -1282,6 +1293,51 @@ mod gate_tests {
             matches!(&seen[1].kind, CheckKind::Withdrawal { finding } if finding == "x is never set.")
         );
         assert_eq!(actions(&ctx), vec!["posted", "withdrawn"]);
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_finding_keeps_its_author_and_names_who_withdrew_it() {
+        let (ctx, writer, _) = setup([confirmed()]);
+        // A finding an earlier run posted, with another model.
+        let original = Marker {
+            run: RunId::parse("r-0").unwrap(),
+            model: ModelId::parse("orig").unwrap(),
+            checked_by: None,
+            requested_by: None,
+            kind: Some(MarkerKind::Finding),
+            withdrawn: None,
+        };
+        ctx.registry.lock().unwrap().record(Finding {
+            key: FindingKey {
+                path: "src/a.rs".into(),
+                line: 2,
+            },
+            comment_id: "c9".into(),
+            body: original.attach("x is never set."),
+            lane: None,
+            answered_by_person: false,
+            resolved: false,
+            in_diff: true,
+        });
+        let out = WithdrawFinding(Arc::clone(&ctx))
+            .call(json!({"comment_id": "c9", "reason": "src/a.rs:2 sets x."}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        let updates = writer.updates.lock().unwrap();
+        let body = &updates[0].1;
+        let marker = Marker::parse(body).unwrap();
+        assert_eq!(marker.run.as_str(), "r-0", "the original run stays");
+        assert_eq!(marker.model.as_str(), "orig", "the original model stays");
+        let withdrawal = marker.withdrawn.unwrap();
+        assert_eq!(withdrawal.run, ctx.run);
+        assert_eq!(withdrawal.model, ctx.model);
+        assert_eq!(withdrawal.checked_by.unwrap().as_str(), "opus");
+        assert!(body.starts_with("Withdrawn. src/a.rs:2 sets x."), "{body}");
+        assert!(
+            body.contains("was withdrawn by Meneer Henk"),
+            "the withdrawal note"
+        );
+        assert!(!body.contains("address it"), "not the finding note");
     }
 
     #[tokio::test]
