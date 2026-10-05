@@ -323,6 +323,7 @@ impl Agent {
             messages,
             self.config.max_conversation_chars,
             self.config.keep_recent_turns,
+            |name| self.tools.keeps_in_context(name),
         );
         if stubbed > 0 {
             debug!(

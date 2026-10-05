@@ -300,6 +300,11 @@ impl Tool for GetFileDiff {
         }
     }
 
+    /// The diff is what a lane reviews: other results are stubbed first.
+    fn keep_in_context(&self) -> bool {
+        true
+    }
+
     async fn call(&self, args: Value) -> ToolOutput {
         let Some(path) = arg_str(&args, "path") else {
             return ToolOutput::error("path is required");
