@@ -229,6 +229,9 @@ pub struct ReviewOutcome {
     /// A newer commit arrived and this review stopped; the review of the
     /// newer commit stands (§3.3). Not Henk's failure, and not complete.
     pub superseded: bool,
+    /// Henk was stopped before the review ended: Ctrl-C, a shutdown, or a
+    /// process that died. Not complete (§3.3).
+    pub interrupted: bool,
 }
 
 impl ReviewOutcome {
@@ -241,6 +244,20 @@ impl ReviewOutcome {
             open_findings: 0,
             nothing_to_review: false,
             superseded: true,
+            interrupted: false,
+        }
+    }
+
+    /// The outcome of a review Henk was stopped in the middle of.
+    #[must_use]
+    pub fn interrupted(commit: CommitSha) -> Self {
+        Self {
+            commit,
+            lanes: Vec::new(),
+            open_findings: 0,
+            nothing_to_review: false,
+            superseded: false,
+            interrupted: true,
         }
     }
 
@@ -248,11 +265,11 @@ impl ReviewOutcome {
     /// was nothing to review.
     #[must_use]
     pub fn completed(&self) -> bool {
-        self.nothing_to_review
-            || self
-                .lanes
-                .iter()
-                .any(|lane| matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped))
+        !self.interrupted
+            && (self.nothing_to_review
+                || self.lanes.iter().any(|lane| {
+                    matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped)
+                }))
     }
 
     /// The lanes that reached their time limit, in order.
@@ -298,6 +315,9 @@ impl ReviewOutcome {
     pub fn headline(&self) -> String {
         if self.superseded {
             return "Superseded by a newer commit.".to_owned();
+        }
+        if self.interrupted {
+            return "Review interrupted.".to_owned();
         }
         if !self.completed() {
             return "Review did not complete.".to_owned();
@@ -366,6 +386,7 @@ mod tests {
             open_findings,
             nothing_to_review: false,
             superseded: false,
+            interrupted: false,
         }
     }
 
@@ -456,6 +477,23 @@ mod tests {
             &[("a", LaneOutcome::Finished), ("b", LaneOutcome::Dropped)],
             0,
         )
+    }
+
+    #[test]
+    fn an_interrupted_review_did_not_complete_and_says_so() {
+        let interrupted = ReviewOutcome::interrupted(outcome(&[], 0).commit);
+        assert!(!interrupted.completed());
+        assert_eq!(interrupted.check_conclusion(), CheckConclusion::Failure);
+        assert_eq!(interrupted.headline(), "Review interrupted.");
+        assert!(crate::text::is_in_style(&interrupted.summary()));
+        let partway = ReviewOutcome {
+            interrupted: true,
+            ..outcome(&[("a", LaneOutcome::Finished)], 0)
+        };
+        assert!(
+            !partway.completed(),
+            "a finished lane does not make it complete"
+        );
     }
 
     #[test]

@@ -132,6 +132,12 @@ change against the target branch.
   concludes *failure* only when the review did not complete. The check is
   advisory and must not be a required check in branch protection; a required
   check would let an incomplete review block a merge, against §8.2.
+- **An interrupted review ends too.** When Henk is stopped mid-review
+  (Ctrl-C, a shutdown), the check completes as *failure*, "Review
+  interrupted.", and nothing is posted; the next review posts. A run left
+  behind by a process that died is closed, with its check, the next time
+  Henk starts: a running run keeps a heartbeat, and one that has been silent
+  for minutes is known to be orphaned.
 
 ### 3.4 Mentions
 
@@ -535,3 +541,6 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.3: a review superseded by a newer commit ends with a neutral check and
   no comment, rather than a failure comment and a failure check; it was not
   Henk's failure. Earlier failure comments are folded like summaries (#8).
+- §3.3: an interrupted review closes its check as "Review interrupted." and
+  posts nothing, and runs a dead process left `running` are closed on the
+  next start, found by a heartbeat that stopped (#7).

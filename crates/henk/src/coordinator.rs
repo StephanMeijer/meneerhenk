@@ -117,7 +117,8 @@ impl Coordinator {
                 }
                 Decision::Start => {}
             }
-            let cancel = CancellationToken::new();
+            // A child of the shutdown token: a shutdown reaches it too.
+            let cancel = self.app.shutdown.child_token();
             active.insert(
                 key.clone(),
                 Active {
@@ -167,7 +168,7 @@ impl Coordinator {
         };
         let app = Arc::clone(&self.app);
         tokio::spawn(async move {
-            if let Err(error) = run_plan(&app, request, CancellationToken::new()).await {
+            if let Err(error) = run_plan(&app, request, app.shutdown.child_token()).await {
                 warn!(%error, "plan ended with an error");
             }
         });

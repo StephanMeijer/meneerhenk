@@ -11,6 +11,7 @@ use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter}
 use henk_platform::gitlab::GitLabWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
 use henk_store::RunStore;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Settings;
 
@@ -26,6 +27,10 @@ pub struct App {
     pub github: Option<Arc<GitHubWriter>>,
     /// The GitLab writer over its write-mode MCP session, when configured.
     pub gitlab: Option<Arc<GitLabWriter>>,
+    /// Cancelled when Henk is told to stop (Ctrl-C, SIGTERM). Every review
+    /// and plan runs under a child of it, so a run can tell being stopped
+    /// from being superseded.
+    pub shutdown: CancellationToken,
     /// Tests: the writer `writer` returns for every platform.
     #[cfg(test)]
     pub test_writer: Option<Arc<dyn PlatformWriter>>,
@@ -116,6 +121,7 @@ impl App {
             models,
             github,
             gitlab,
+            shutdown: CancellationToken::new(),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]

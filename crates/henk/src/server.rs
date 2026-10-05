@@ -3,6 +3,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use axum::Router;
@@ -38,6 +39,8 @@ pub struct Composed {
     pub hooks: Vec<Arc<dyn Hook>>,
     /// The bus, for tests and probes.
     pub bus: Arc<EventBus>,
+    /// The reviews in flight, so a shutdown can wait for them to close.
+    pub coordinator: Arc<Coordinator>,
 }
 
 /// Builds the server from the application. Secrets come from the
@@ -102,7 +105,7 @@ pub fn compose_with_secrets(
     let api = Arc::new(ApiHook::new(api_token, requester, Arc::clone(&bus)));
 
     let shared = Arc::new(Shared {
-        coordinator,
+        coordinator: Arc::clone(&coordinator),
         bus: Arc::clone(&bus),
     });
     let router = Router::new()
@@ -115,8 +118,16 @@ pub fn compose_with_secrets(
         .merge(Arc::clone(&api).routes())
         .layer(TraceLayer::new_for_http());
     let hooks: Vec<Arc<dyn Hook>> = vec![github, gitlab, api];
-    Composed { router, hooks, bus }
+    Composed {
+        router,
+        hooks,
+        bus,
+        coordinator,
+    }
 }
+
+/// How long a shutdown waits for reviews in flight to close their checks.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Serves until SIGINT or SIGTERM. Hooks with long-running parts run
 /// alongside and are cancelled on shutdown.
@@ -125,6 +136,7 @@ pub fn compose_with_secrets(
 ///
 /// Returns an error when the bind address is unusable.
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
+    crate::liveness::reap_orphans(&app).await;
     let bind = app.settings.server.bind.clone();
     let composed = compose(&app);
     let cancel = CancellationToken::new();
@@ -141,6 +153,12 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serving")?;
+    // Reviews in flight end as interrupted and close their checks (#7).
+    app.shutdown.cancel();
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+    while composed.coordinator.active_reviews() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     cancel.cancel();
     while hook_tasks.join_next().await.is_some() {}
     info!("stopped");

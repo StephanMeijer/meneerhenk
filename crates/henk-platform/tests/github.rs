@@ -249,6 +249,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         open_findings: 1,
         nothing_to_review: false,
         superseded: false,
+        interrupted: false,
     };
     writer
         .finish_review(

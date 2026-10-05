@@ -180,6 +180,10 @@ pub struct RunRecord {
     pub summary: Option<String>,
     /// The error, when it failed.
     pub error: Option<String>,
+    /// RFC 3339: when the process running it last said it was alive.
+    pub heartbeat_at: Option<String>,
+    /// The platform's id for the review's check, once it has one.
+    pub check_id: Option<String>,
 }
 
 /// A stored lane.
@@ -284,6 +288,7 @@ fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("../migrations/001_initial.sql")),
         M::up(include_str!("../migrations/002_inbound_events.sql")),
+        M::up(include_str!("../migrations/003_run_liveness.sql")),
     ])
 }
 
@@ -331,8 +336,8 @@ impl RunStore {
     pub fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link, heartbeat_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?10)",
                 params![
                     run.id.as_str(),
                     kind_str(run.kind),
@@ -380,31 +385,94 @@ impl RunStore {
     pub fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error
-                 FROM runs WHERE id = ?1",
+                &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"),
                 params![id.as_str()],
-                |row| {
-                    Ok(RawRun {
-                        id: row.get(0)?,
-                        kind: row.get(1)?,
-                        platform: row.get(2)?,
-                        repo: row.get(3)?,
-                        target: row.get(4)?,
-                        commit: row.get(5)?,
-                        requester: row.get(6)?,
-                        trigger: row.get(7)?,
-                        status: row.get(8)?,
-                        started_at: row.get(9)?,
-                        finished_at: row.get(10)?,
-                        link: row.get(11)?,
-                        summary: row.get(12)?,
-                        error: row.get(13)?,
-                    })
-                },
+                RawRun::from_row,
             )
             .optional()?
             .map(RawRun::into_record)
             .transpose()
+        })
+    }
+
+    /// Records that the process running `id` is alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE runs SET heartbeat_at = ?2 WHERE id = ?1",
+                params![id.as_str(), now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Stores the platform's id for the review's check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE runs SET check_id = ?2 WHERE id = ?1",
+                params![id.as_str(), check_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Runs still `running` whose heartbeat is older than `stale_before`,
+    /// or that never had one: a process that died left them (#7).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    pub fn orphaned_runs(
+        &self,
+        stale_before: OffsetDateTime,
+    ) -> Result<Vec<RunRecord>, StoreError> {
+        let cutoff = stale_before
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        self.with(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs
+                 WHERE status = ?1 AND (heartbeat_at IS NULL OR heartbeat_at < ?2)
+                 ORDER BY started_at"
+            ))?;
+            let raw = statement
+                .query_map(
+                    params![RunStatus::Running.as_str(), cutoff],
+                    RawRun::from_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            raw.into_iter().map(RawRun::into_record).collect()
+        })
+    }
+
+    /// Drops the lanes of `run` that are still running, with `reason`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE lanes SET status = ?2, finished_at = ?3, error = ?4
+                 WHERE run_id = ?1 AND status = ?5",
+                params![
+                    run.as_str(),
+                    LaneStatus::Dropped.as_str(),
+                    now(),
+                    reason,
+                    LaneStatus::Running.as_str()
+                ],
+            )?;
+            Ok(())
         })
     }
 
@@ -790,9 +858,35 @@ struct RawRun {
     link: String,
     summary: Option<String>,
     error: Option<String>,
+    heartbeat_at: Option<String>,
+    check_id: Option<String>,
 }
 
+/// The columns [`RawRun::from_row`] reads, in order.
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
+
 impl RawRun {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            platform: row.get(2)?,
+            repo: row.get(3)?,
+            target: row.get(4)?,
+            commit: row.get(5)?,
+            requester: row.get(6)?,
+            trigger: row.get(7)?,
+            status: row.get(8)?,
+            started_at: row.get(9)?,
+            finished_at: row.get(10)?,
+            link: row.get(11)?,
+            summary: row.get(12)?,
+            error: row.get(13)?,
+            heartbeat_at: row.get(14)?,
+            check_id: row.get(15)?,
+        })
+    }
+
     fn into_record(self) -> Result<RunRecord, StoreError> {
         let id = RunId::parse(self.id.clone()).map_err(|_| StoreError::Corrupt {
             column: "runs.id",
@@ -825,6 +919,8 @@ impl RawRun {
             link: self.link,
             summary: self.summary,
             error: self.error,
+            heartbeat_at: self.heartbeat_at,
+            check_id: self.check_id,
         })
     }
 }
@@ -852,6 +948,78 @@ mod tests {
             trigger: "opened".into(),
             link: format!("https://henk.example/runs/{id}"),
         }
+    }
+
+    fn id(value: &str) -> RunId {
+        RunId::parse(value).unwrap()
+    }
+
+    #[test]
+    fn a_run_without_a_fresh_heartbeat_is_orphaned() {
+        let store = RunStore::in_memory().unwrap();
+        for run in ["r-fresh", "r-silent", "r-done"] {
+            store.create_run(&new_run(run)).unwrap();
+        }
+        store
+            .with(|c| {
+                c.execute(
+                    "UPDATE runs SET heartbeat_at = NULL WHERE id = 'r-silent'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+            .finish_run(&id("r-done"), RunStatus::Finished, None, None)
+            .unwrap();
+        let ids = |runs: Vec<RunRecord>| {
+            runs.into_iter()
+                .map(|r| r.id.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let an_hour_ago = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        assert_eq!(ids(store.orphaned_runs(an_hour_ago).unwrap()), ["r-silent"]);
+        let in_an_hour = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        assert_eq!(
+            ids(store.orphaned_runs(in_an_hour).unwrap()),
+            ["r-fresh", "r-silent"],
+            "a finished run is never orphaned"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_moves_and_a_check_id_is_kept() {
+        let store = RunStore::in_memory().unwrap();
+        store.create_run(&new_run("r-1")).unwrap();
+        let first = store.run(&id("r-1")).unwrap().unwrap();
+        assert!(first.heartbeat_at.is_some(), "a new run starts alive");
+        assert_eq!(first.check_id, None);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.heartbeat(&id("r-1")).unwrap();
+        store.set_check(&id("r-1"), "42").unwrap();
+        let later = store.run(&id("r-1")).unwrap().unwrap();
+        assert!(later.heartbeat_at > first.heartbeat_at);
+        assert_eq!(later.check_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn dropping_running_lanes_leaves_finished_ones_alone() {
+        let store = RunStore::in_memory().unwrap();
+        store.create_run(&new_run("r-1")).unwrap();
+        store.start_lane(&id("r-1"), "a", "m").unwrap();
+        store.start_lane(&id("r-1"), "b", "m").unwrap();
+        store
+            .finish_lane(&id("r-1"), "a", LaneStatus::Finished, 3, 1, 1, None)
+            .unwrap();
+        store.drop_running_lanes(&id("r-1"), "interrupted").unwrap();
+        let lanes = store.lanes(&id("r-1")).unwrap();
+        let a = lanes.iter().find(|l| l.name == "a").unwrap();
+        let b = lanes.iter().find(|l| l.name == "b").unwrap();
+        assert_eq!(a.status, LaneStatus::Finished);
+        assert_eq!(a.error, None);
+        assert_eq!(b.status, LaneStatus::Dropped);
+        assert_eq!(b.error.as_deref(), Some("interrupted"));
     }
 
     #[test]
