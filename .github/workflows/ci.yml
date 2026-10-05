@@ -159,7 +159,7 @@ jobs:
   #      PR update is safe, the newest run writes a correct PR.
   release-plz-release:
     name: Tag and create the GitHub Release
-    needs: [fmt, clippy, test, deny]
+    needs: [fmt, clippy, test, deny, machete]
     if: >-
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'
@@ -207,7 +207,7 @@ jobs:
 
   release-plz-pr:
     name: Open / update release PR
-    needs: [fmt, clippy, test, deny, release-plz-release]
+    needs: [fmt, clippy, test, deny, machete, release-plz-release]
     # `!cancelled()` lets this run after a failed release; the result check
     # keeps the gate, since release-plz-release is `skipped` whenever one of
     # the checks failed.

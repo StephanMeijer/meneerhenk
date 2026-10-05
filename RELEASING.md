@@ -19,7 +19,7 @@ Release, signed Linux binaries and a signed container image.
 3. That job then dispatches `release.yml` for the tag, which builds the
    artifacts below and appends them to the release.
 
-Both release jobs run only after `fmt`, `clippy`, `test` and `deny` pass on
+Both release jobs run only after every check in `ci.yml` passes on
 the same push.
 
 `release_always = true` means any push to `main` whose version is ahead of
