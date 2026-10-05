@@ -15,6 +15,7 @@ pub mod anthropic;
 pub mod client;
 pub mod error;
 pub mod http;
+pub mod models;
 pub mod openai;
 pub mod schema;
 #[cfg(any(test, feature = "testing"))]
@@ -24,6 +25,7 @@ pub mod types;
 pub use client::{MaxTokensParam, ModelClient, ModelConfig, Provider, client_for};
 pub use error::LlmError;
 pub use http::{RetryPolicy, ensure_tls_provider};
+pub use models::list_models;
 pub use types::{
     Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
     ToolChoice, ToolDef, ToolName, ToolResult, Usage,
