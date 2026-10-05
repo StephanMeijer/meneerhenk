@@ -36,6 +36,13 @@ use crate::review_tools::{
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
 
+/// Turns left when a lane is told to wrap up (#12).
+const LANE_TURN_WARNING_AT: u32 = 3;
+
+/// What a lane is told then. Lanes that run into the turn limit otherwise
+/// end mid-review, with what they were sure of never posted.
+const LANE_TURN_WARNING: &str = "3 turns left. Post each finding you are sure of with post_finding now, one call per finding, then end your turn.";
+
 /// One review run, as every step of it sees it: known once `run_review`
 /// has the commit.
 #[derive(Clone, Copy)]
@@ -652,6 +659,10 @@ async fn build_lane(
             tools: set,
             limits,
             continuation: Some(lane_continuation(Arc::clone(&context))),
+            turn_warning: Some(henk_agent::TurnWarning {
+                turns_left: LANE_TURN_WARNING_AT,
+                message: LANE_TURN_WARNING.to_owned(),
+            }),
         },
         context,
     })
@@ -955,5 +966,17 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         let finished = f.writer.finished.lock().unwrap();
         assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lane_turn_warning_is_in_style_and_says_what_to_do() {
+        assert!(henk_domain::text::is_in_style(LANE_TURN_WARNING));
+        assert!(LANE_TURN_WARNING.contains("post_finding"));
+        assert!(LANE_TURN_WARNING.starts_with(&format!("{LANE_TURN_WARNING_AT} turns left")));
     }
 }

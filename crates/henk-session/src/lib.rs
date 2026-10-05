@@ -18,7 +18,9 @@ pub mod transcript;
 use std::sync::Arc;
 
 use henk_agent::mcp_tools::McpTool;
-use henk_agent::{Agent, AgentConfig, Continuation, StopCause, ToolSet, Verdict, mcp_tools};
+use henk_agent::{
+    Agent, AgentConfig, Continuation, StopCause, ToolSet, TurnWarning, Verdict, mcp_tools,
+};
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
 use henk_domain::run::RunId;
@@ -46,6 +48,8 @@ pub struct SessionSpec {
     /// Asked before the session ends without tool calls; may send one more
     /// message and take another turn.
     pub continuation: Option<Continuation>,
+    /// Sent once, a few turns before the turn limit.
+    pub turn_warning: Option<TurnWarning>,
 }
 
 impl std::fmt::Debug for SessionSpec {
@@ -106,6 +110,9 @@ pub async fn run_session(
     );
     if let Some(continuation) = spec.continuation {
         agent = agent.with_continuation(continuation);
+    }
+    if let Some(warning) = spec.turn_warning {
+        agent = agent.with_turn_warning(warning);
     }
     let outcome = agent.run(spec.opening, cancel).await;
     if let Some(dir) = transcript::directory_from_env() {
@@ -271,6 +278,7 @@ mod tests {
                 keep_recent_turns: 2,
             },
             continuation: None,
+            turn_warning: None,
         }
     }
 

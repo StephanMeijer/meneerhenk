@@ -158,6 +158,7 @@ impl SessionFactCheck {
             tools,
             limits: self.limits,
             continuation: Some(ask_for_verdict(Arc::clone(&slot))),
+            turn_warning: None,
         };
         let outcome = run_session(&self.store, &self.run, spec, self.cancel.clone()).await;
         let verdict = slot.lock().ok().and_then(|v| v.clone());
