@@ -7,6 +7,6 @@
 pub mod store;
 
 pub use store::{
-    EventRecord, FindingAction, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeRecord, RunRecord, RunStatus, RunStore, StoreError,
+    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
+    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RunRecord, RunStatus, RunStore, StoreError,
 };

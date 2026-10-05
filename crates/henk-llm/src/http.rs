@@ -168,6 +168,20 @@ pub async fn post_json(
         .send()
         .await
         .map_err(LlmError::Transport)?;
+    read_json(response).await
+}
+
+/// Sends a GET and returns the decoded JSON body of a 2xx response.
+///
+/// # Errors
+///
+/// As [`post_json`].
+pub async fn get_json(request: reqwest::RequestBuilder) -> Result<serde_json::Value, LlmError> {
+    let response = request.send().await.map_err(LlmError::Transport)?;
+    read_json(response).await
+}
+
+async fn read_json(response: reqwest::Response) -> Result<serde_json::Value, LlmError> {
     let status = response.status();
     let headers = response.headers().clone();
     let text = response.text().await.map_err(LlmError::Transport)?;

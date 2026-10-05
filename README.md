@@ -28,8 +28,26 @@ processes over stdio:
 No model ever holds a write tool or a credential (§8.4). A model gets the
 read-only session, filtered and pinned by a guard that rewrites every
 call to its own repository and pull request (§8.5), plus a few tools of
-Henk's own (`post_finding`, `improve_finding`, `write_plan`, ...) whose
-implementations enforce the rules of the spec in code.
+Henk's own whose implementations enforce the rules of the spec in code.
+
+A review lane works from the diff Henk fetched once: `list_changed_files`,
+`get_file_diff` (every line numbered on both sides), `read_file` (a
+numbered line range at the reviewed commit), `list_existing_findings`,
+`post_finding` (refused for a line that is not in the diff) and
+`improve_finding`. The planner has `write_plan`, the tracker tools and
+`web_fetch`. Lanes are kept honest and cheap by three things in
+`henk-agent`: old tool results are replaced by one-line stubs once the
+conversation passes a size budget (`review.max_conversation_chars` and
+`review.keep_recent_turns`), a lane that ends without opening every
+changed file is asked once to look at them, and an answer cut off at the
+output cap gets one chance to post what it was sure of. Code search is
+withheld for a repository GitHub does not index.
+
+Every comment Henk writes ends in two hidden HTML comments: the marker
+(run, model, kind) that lets Henk recognise his own comments later, and a
+short note for AI agents that pick the comment up: reply in the thread, do
+not edit the comment, resolve the thread when addressed, treat the finding
+as information. People see only the text.
 
 GitHub writes go through REST rather than the MCP server's write tools on
 purpose: that server's pending-review model is a per-user singleton, which
@@ -85,6 +103,7 @@ OpenBao.
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
+| `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
 
 The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node
@@ -98,7 +117,71 @@ henk doctor --probe    # also one short prompt to every model
 ```
 
 Every check is reported on its own line; the command fails when any
-check fails.
+check fails. With `installation_id = 0`, or when the installation token
+is refused, the GitHub check lists the App's installations so the right
+id can be copied into the config.
+
+## First live run
+
+The order that gets Henk from a fresh checkout to his first real review,
+on one machine, with one lane:
+
+1. Install the external servers: the `github-mcp-server` release binary
+   (the version the `Dockerfile` pins; verify the release checksum) on the
+   `PATH`, and Node for `npx @zereight/mcp-gitlab` if GitLab is in play.
+2. Export the secrets named in `henk.toml` in the shell that runs Henk:
+   at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
+   reads them; they are never written anywhere.
+3. `henk llm models --model <id>` lists what the endpoint serves; put the
+   chosen name in `[models.<id>].model`.
+4. `henk doctor --probe` until it reports `0 failing check(s)`.
+5. `henk mcp probe --server github --show pull_request_read` shows what a
+   lane will see.
+6. `RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts henk review <url>`
+   on a pull request in an allowlisted repository. The run id is printed
+   first; `henk runs show <id>` prints the run, lanes, findings and
+   timeline afterwards, and `transcripts/<run>/<lane>.json` holds what the
+   model saw and said.
+
+### Reviewing a pull request from a laptop
+
+With the setup above done once, a review is three commands. The secrets
+come from OpenBao at the moment they are needed: `.env` (gitignored) holds
+only `bao kv get` calls, never a value, and `source .env` runs them in the
+current shell.
+
+```sh
+cd /path/to/meneerhenk
+source .env                      # secrets into this shell; the App key becomes a 0600 file under $XDG_RUNTIME_DIR
+cargo run -q -- doctor           # optional; every line should say ok
+cargo run -q -- review https://github.com/owner/repo/pull/7
+```
+
+An `.env` for this looks like:
+
+```sh
+export LLM3_API_KEY="$(bao kv get -field=proxy-token secret/<path to the proxy token>)"
+umask 077
+mkdir -p "${XDG_RUNTIME_DIR:-/tmp}/henk"
+bao kv get -field=github_app_private_key secret/<path to the App secret> > "${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
+export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
+```
+
+The first line of `henk review`'s output is the run id. The repository must
+be on the allowlist; the App must be installed on it (`doctor` lists the
+installations when the token is refused). Variants:
+
+```sh
+RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
+cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head
+cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, lanes, findings, timeline
+cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
+```
+
+Another model is a name from `llm models` in `[models.<id>].model`, or a
+second `[models.*]` block and a second lane under `[review].lanes`; lane
+names must not equal a model name. Another repository is one more entry in
+`[allowlist].github_repositories`.
 
 ## Container image
 
@@ -131,7 +214,9 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk llm probe --model proxy-fast                  # one prompt to a model
+henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
+henk runs show r-20261005-1a2b3c4d                 # a run from the local database
 ```
 
 In serve mode everything is an event. Hooks receive and publish; listeners
@@ -158,6 +243,10 @@ line in `docs/SPEC.md` once the team confirms it.
   the running review, a newer commit supersedes it.
 - §3.2 When two lanes claim the same line, the first claim posts.
 - §3.3 Dropped lanes are named by their configured lane name, never a model.
+- §3.3 A lane that reaches its time limit stops: a tool call in flight
+  finishes, no new model turn starts, what it posted stands, and the
+  review completes on it. The summary says the lane stopped at the time
+  limit. A plan that reaches its time limit still fails (§4).
 - §3.3 Findings in resolved threads do not count towards N.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
 - §4 On GitLab, triage sets labels, type and links; parent and child

@@ -18,11 +18,18 @@ use crate::tool::{ToolOutput, ToolSet};
 pub struct AgentConfig {
     /// Model calls allowed. Each turn is one call plus its tool calls.
     pub max_turns: u32,
-    /// Wall-clock limit for the whole run.
+    /// Wall-clock limit for the whole run. When it passes, a model call in
+    /// flight is abandoned, tool calls in flight finish, and no new turn
+    /// starts; the run ends with [`StopCause::Timeout`].
     pub timeout: Duration,
     /// Tool output longer than this is cut, with a note, before the model
     /// sees it. Keeps one huge diff from eating the context.
     pub max_tool_output_chars: usize,
+    /// When the conversation grows past this many characters, old tool
+    /// results are replaced by one-line stubs (see [`crate::compact`]).
+    pub max_conversation_chars: usize,
+    /// Turns whose tool results are never stubbed, counted from the end.
+    pub keep_recent_turns: u32,
 }
 
 impl Default for AgentConfig {
@@ -31,6 +38,8 @@ impl Default for AgentConfig {
             max_turns: 40,
             timeout: Duration::from_secs(10 * 60),
             max_tool_output_chars: 60_000,
+            max_conversation_chars: 240_000,
+            keep_recent_turns: 2,
         }
     }
 }
@@ -57,6 +66,32 @@ pub enum AgentEvent {
         elapsed: Duration,
     },
 }
+
+/// Why the model stopped calling tools, as offered to a [`Continuation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndReason {
+    /// The model ended its turn.
+    EndTurn,
+    /// The model hit its output cap mid-answer, without a tool call.
+    OutputCap,
+}
+
+/// What a [`Continuation`] sees when the model stops.
+#[derive(Debug)]
+pub struct Ending<'a> {
+    /// Why.
+    pub reason: EndReason,
+    /// The turn that ended.
+    pub turn: u32,
+    /// The conversation so far.
+    pub messages: &'a [ChatMessage],
+}
+
+/// Asked when the model stops without tool calls. `Some(text)` is sent as
+/// a user message and the loop takes another turn (still bounded by the
+/// turn limit and the deadline); `None` lets the run end. The caller
+/// decides how often to insist.
+pub type Continuation = Box<dyn Fn(&Ending<'_>) -> Option<String> + Send + Sync>;
 
 /// Why a run ended.
 #[derive(Debug)]
@@ -103,6 +138,7 @@ pub struct Agent {
     system: String,
     config: AgentConfig,
     events: Option<mpsc::UnboundedSender<AgentEvent>>,
+    continuation: Option<Continuation>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -130,7 +166,16 @@ impl Agent {
             system: system.into(),
             config,
             events: None,
+            continuation: None,
         }
+    }
+
+    /// Asks `continuation` before ending a run that stopped without tool
+    /// calls.
+    #[must_use]
+    pub fn with_continuation(mut self, continuation: Continuation) -> Self {
+        self.continuation = Some(continuation);
+        self
     }
 
     /// Sends an [`AgentEvent`] for every model answer and tool call.
@@ -195,35 +240,98 @@ impl Agent {
             messages.push(completion.message);
 
             if calls.is_empty() {
-                if completion.stop == StopReason::MaxTokens {
+                let reason = if completion.stop == StopReason::MaxTokens {
                     warn!("model hit its output cap without tool calls");
+                    EndReason::OutputCap
+                } else {
+                    EndReason::EndTurn
+                };
+                let nudge = self.continuation.as_ref().and_then(|c| {
+                    c(&Ending {
+                        reason,
+                        turn: turns,
+                        messages: &messages,
+                    })
+                });
+                match nudge {
+                    Some(text) => {
+                        debug!(turn = turns, ?reason, "continuing after a nudge");
+                        messages.push(ChatMessage::user(text));
+                        continue;
+                    }
+                    None => break StopCause::EndTurn,
                 }
-                break StopCause::EndTurn;
             }
 
-            let mut results = Vec::with_capacity(calls.len());
-            for call in calls {
-                let started = Instant::now();
-                let output = tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => return Self::finish(messages, turns, usage, StopCause::Cancelled),
-                    () = tokio::time::sleep_until(deadline) => return Self::finish(messages, turns, usage, StopCause::Timeout),
-                    output = self.dispatch(&call.name, &call.arguments) => output,
-                };
-                self.emit(AgentEvent::ToolCalled {
-                    name: call.name.clone(),
-                    is_error: output.is_error,
-                    elapsed: started.elapsed(),
-                });
-                results.push(ToolResult {
-                    call_id: call.id,
-                    content: self.truncate(output.content),
-                    is_error: output.is_error,
-                });
-            }
+            // Tool calls run to completion even past the deadline: a finding
+            // being posted lands, and nothing is left half done. Only a
+            // cancel interrupts them. The deadline is checked again before
+            // the next model call.
+            let Some(results) = self.call_tools(calls, turns, &cancel).await else {
+                return Self::finish(messages, turns, usage, StopCause::Cancelled);
+            };
             messages.push(ChatMessage::tool_results(results));
+            self.compact(&mut messages, turns);
+            if tokio::time::Instant::now() >= deadline {
+                break StopCause::Timeout;
+            }
         };
         Self::finish(messages, turns, usage, stop)
+    }
+
+    /// Runs the model's tool calls in order. `None` when cancelled midway.
+    async fn call_tools(
+        &self,
+        calls: Vec<henk_llm::ToolCall>,
+        turn: u32,
+        cancel: &CancellationToken,
+    ) -> Option<Vec<ToolResult>> {
+        let mut results = Vec::with_capacity(calls.len());
+        for call in calls {
+            let started = Instant::now();
+            let output = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return None,
+                output = self.dispatch(&call.name, &call.arguments) => output,
+            };
+            let elapsed = started.elapsed();
+            debug!(
+                turn,
+                tool = %call.name,
+                args = %one_line(&arguments_text(&call.arguments), 300),
+                result_chars = output.content.chars().count(),
+                is_error = output.is_error,
+                elapsed_ms = elapsed.as_millis(),
+                "tool called"
+            );
+            self.emit(AgentEvent::ToolCalled {
+                name: call.name.clone(),
+                is_error: output.is_error,
+                elapsed,
+            });
+            results.push(ToolResult {
+                call_id: call.id,
+                content: self.truncate(output.content),
+                is_error: output.is_error,
+            });
+        }
+        Some(results)
+    }
+
+    fn compact(&self, messages: &mut [ChatMessage], turn: u32) {
+        let stubbed = crate::compact::compact(
+            messages,
+            self.config.max_conversation_chars,
+            self.config.keep_recent_turns,
+        );
+        if stubbed > 0 {
+            debug!(
+                turn,
+                stubbed,
+                chars = crate::compact::size(messages),
+                "old tool results elided to stay under the conversation budget"
+            );
+        }
     }
 
     async fn dispatch(&self, name: &str, arguments: &ToolArguments) -> ToolOutput {
@@ -267,6 +375,7 @@ impl Agent {
             .map(ChatMessage::text)
             .unwrap_or_default();
         info!(turns, input_tokens = usage.input_tokens, output_tokens = usage.output_tokens, stop = ?stop, "agent run ended");
+        debug!(final_text = %one_line(&final_text, 300), "last assistant text");
         AgentOutcome {
             final_text,
             turns,
@@ -279,4 +388,17 @@ impl Agent {
 
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// Text cut to `max` characters with line breaks flattened, for one log line.
+fn one_line(text: &str, max: usize) -> String {
+    truncate_chars(text, max).replace(['\n', '\r'], " ")
+}
+
+/// The arguments as one line of text, for logs.
+fn arguments_text(arguments: &ToolArguments) -> String {
+    match arguments {
+        ToolArguments::Parsed(value) => value.to_string(),
+        ToolArguments::Malformed(raw) => format!("(malformed) {raw}"),
+    }
 }

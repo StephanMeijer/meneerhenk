@@ -50,6 +50,7 @@ fn fake() -> FakeServer {
         "create_merge_request_emoji_reaction",
         "create_merge_request_note_emoji_reaction",
         "create_commit_status",
+        "get_merge_request_diffs",
     ]
     .iter()
     .map(|name| FakeServer::tool(name, "", &[]))
@@ -90,6 +91,13 @@ fn fake() -> FakeServer {
             text(json!({"id": 1}))
         }
         "create_commit_status" => text(json!({"id": 7, "status": "success"})),
+        "get_merge_request_diffs" => text(json!([
+            {"old_path": "src/a.rs", "new_path": "src/a.rs", "new_file": false, "deleted_file": false, "renamed_file": false,
+             "diff": "@@ -1,2 +1,2 @@\n-old\n+new\n keep\n"},
+            {"old_path": "gone.txt", "new_path": "gone.txt", "new_file": false, "deleted_file": true, "renamed_file": false,
+             "diff": "@@ -1 +0,0 @@\n-bye\n"},
+            {"old_path": "a.md", "new_path": "b.md", "new_file": false, "deleted_file": false, "renamed_file": true, "diff": ""}
+        ])),
         other => CallToolResult::error(vec![ContentBlock::text(format!("unexpected {other}"))]),
     })
 }
@@ -229,5 +237,26 @@ async fn tool_errors_become_platform_errors() {
     assert!(
         matches!(error, henk_platform::PlatformError::ToolFailed { ref tool, .. } if tool == "get_merge_request"),
         "{error}"
+    );
+}
+
+#[tokio::test]
+async fn diff_comes_from_the_merge_request_diffs_tool() {
+    let fake = fake();
+    let session = Arc::new(fake.connect("gitlab-write").await);
+    let writer = GitLabWriter::new(session, "meneerhenk");
+    let commit = CommitSha::parse(SHA).unwrap();
+    let patches = writer.diff(&target(), &commit, "main").await.unwrap();
+    assert_eq!(patches.len(), 3);
+    assert_eq!(patches[0].status, henk_domain::diff::FileStatus::Modified);
+    assert!(patches[0].patch.starts_with("@@ -1,2 +1,2 @@"));
+    assert_eq!(patches[1].status, henk_domain::diff::FileStatus::Removed);
+    assert_eq!(patches[1].new_path, None);
+    assert_eq!(patches[2].status, henk_domain::diff::FileStatus::Renamed);
+    assert_eq!(patches[2].old_path.as_deref(), Some("a.md"));
+    assert_eq!(patches[2].new_path.as_deref(), Some("b.md"));
+    assert_eq!(
+        fake.calls()[0].arguments,
+        json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5"})
     );
 }

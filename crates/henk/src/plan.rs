@@ -242,7 +242,7 @@ async fn planner_tools(
     scope: &Scope,
     context: Arc<PlanContext>,
 ) -> anyhow::Result<ToolSet> {
-    let tools = platform_tools(session, platform, scope.clone())
+    let tools = platform_tools(session, platform, scope.clone(), &[])
         .await
         .context("listing MCP tools")?;
     let mut set = ToolSet::new();
@@ -331,6 +331,7 @@ async fn plan_body(
         opening: vec![opening],
         tools: set,
         limits,
+        continuation: None,
     };
     let outcome = run_session(&app.store, &context.run, spec, cancel).await;
     match outcome.stop {

@@ -70,12 +70,22 @@ impl GitHubApi {
         method: reqwest::Method,
         url: &str,
     ) -> Result<reqwest::RequestBuilder, PlatformError> {
+        self.request_accepting(method, url, "application/vnd.github+json")
+            .await
+    }
+
+    async fn request_accepting(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        accept: &str,
+    ) -> Result<reqwest::RequestBuilder, PlatformError> {
         let token = self.auth.bearer(&self.http, &self.api_base).await?;
         Ok(self
             .http
             .request(method, url)
             .bearer_auth(token.expose_secret())
-            .header("Accept", "application/vnd.github+json")
+            .header("Accept", accept)
             .header("X-GitHub-Api-Version", "2022-11-28"))
     }
 
@@ -105,6 +115,53 @@ impl GitHubApi {
         let builder = self
             .request(reqwest::Method::GET, &format!("{}{path}", self.api_base))
             .await?;
+        self.send(builder).await
+    }
+
+    /// `GET` a REST path with a specific `Accept` and the body as text, for
+    /// the diff and patch media types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] on transport or status failure.
+    pub async fn get_text(&self, path: &str, accept: &str) -> Result<String, PlatformError> {
+        let builder = self
+            .request_accepting(
+                reqwest::Method::GET,
+                &format!("{}{path}", self.api_base),
+                accept,
+            )
+            .await?;
+        let response = builder.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(PlatformError::Status {
+                status: status.as_u16(),
+                body: truncate(&body),
+            });
+        }
+        Ok(body)
+    }
+
+    /// `GET` a REST path authenticated as the App itself (JWT), not as an
+    /// installation. Only `/app` and `/app/installations` need this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::Auth`] when the client has no App
+    /// credentials, otherwise as [`Self::get`].
+    pub async fn get_as_app(&self, path: &str) -> Result<Value, PlatformError> {
+        let jwt = self
+            .auth
+            .app_jwt()
+            .ok_or_else(|| PlatformError::Auth("no App credentials configured".to_owned()))??;
+        let builder = self
+            .http
+            .get(format!("{}{path}", self.api_base))
+            .bearer_auth(jwt.expose_secret())
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
         self.send(builder).await
     }
 

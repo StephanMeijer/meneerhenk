@@ -1,11 +1,13 @@
 //! The review orchestrator (§3).
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_agent::{AgentConfig, ToolSet, prompts};
+use henk_agent::{AgentConfig, StopCause, Tool as _, ToolSet, prompts};
 use henk_domain::allowlist::Platform;
+use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Finding, FindingKey, FindingRegistry};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, LaneOutcome, LaneResult, LaneSpec, ReviewOutcome};
@@ -22,7 +24,10 @@ use tracing::{error, info, instrument, warn};
 
 use crate::app::App;
 use crate::ids::new_run_id;
-use crate::review_tools::{ImproveFinding, LaneContext, ListExistingFindings, PostFinding};
+use crate::review_tools::{
+    GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings, PostFinding,
+    ReadFile, lane_continuation,
+};
 
 /// The review was cancelled because a newer commit arrived.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -261,6 +266,8 @@ async fn review_body(
         },
     ))));
 
+    let diff = fetch_diff(app, writer, target, commit, base_ref, run).await?;
+
     // One read-only MCP session shared by the lanes of this review.
     let alias = app.read_mcp_alias(platform)?;
     let session: Arc<dyn McpSession> = Arc::new(app.connect_mcp(alias).await?);
@@ -269,9 +276,11 @@ async fn review_body(
         number: target.number,
         commit: commit.clone(),
     };
+    let excluded = withheld_tools(app, &session, platform, &scope, target, run).await;
 
     let mut set = spawn_lanes(
         app, &session, &scope, &registry, writer, target, commit, title, base_ref, run, &cancel,
+        diff, &excluded,
     )
     .await?;
 
@@ -325,6 +334,80 @@ async fn review_body(
     Ok((outcome, summary_text))
 }
 
+/// Server tools the lanes should not see on this repository. GitHub code
+/// search indexes only some repositories; when one probe returns nothing,
+/// the tool is withheld so lanes do not spend turns on empty answers.
+async fn withheld_tools(
+    app: &App,
+    session: &Arc<dyn McpSession>,
+    platform: Platform,
+    scope: &Scope,
+    target: &ReviewTarget,
+    run: &RunId,
+) -> Vec<&'static str> {
+    if platform != Platform::GitHub {
+        return Vec::new();
+    }
+    let Ok(tools) = platform_tools(Arc::clone(session), platform, scope.clone(), &[]).await else {
+        return Vec::new();
+    };
+    let Some(search) = tools.iter().find(|t| t.server_tool() == "search_code") else {
+        return Vec::new();
+    };
+    let output = search
+        .call(serde_json::json!({"query": target.repo.name()}))
+        .await;
+    let total = serde_json::from_str::<serde_json::Value>(&output.content)
+        .ok()
+        .and_then(|v| v.get("total_count").and_then(serde_json::Value::as_u64));
+    match (output.is_error, total) {
+        (false, Some(0)) => {
+            info!("code search returns nothing for this repository; withheld from lanes");
+            let _ = app.store.event(
+                run,
+                "info",
+                "code search returns nothing for this repository (not indexed); search_code withheld from lanes",
+            );
+            vec!["search_code"]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The diff, once, for every lane: handed out per file, and the check every
+/// finding passes before it is posted. Without it there is no review: the
+/// error ends the run as Henk's own failure, which the summary says.
+async fn fetch_diff(
+    app: &App,
+    writer: &Arc<dyn PlatformWriter>,
+    target: &ReviewTarget,
+    commit: &CommitSha,
+    base_ref: &str,
+    run: &RunId,
+) -> anyhow::Result<Arc<ReviewDiff>> {
+    let patches = writer
+        .diff(target, commit, base_ref)
+        .await
+        .context("fetching the diff")?;
+    let diff = ReviewDiff::from_patches(&patches);
+    if diff.is_empty() {
+        return Err(anyhow!("the diff is empty; nothing to review"));
+    }
+    let (additions, deletions) = diff
+        .files()
+        .iter()
+        .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
+    let _ = app.store.event(
+        run,
+        "info",
+        &format!(
+            "diff: {} files, +{additions} -{deletions}",
+            diff.files().len()
+        ),
+    );
+    Ok(Arc::new(diff))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_lanes(
     app: &App,
@@ -338,6 +421,8 @@ async fn spawn_lanes(
     base_ref: &str,
     run: &RunId,
     cancel: &CancellationToken,
+    diff: Arc<ReviewDiff>,
+    excluded: &[&str],
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
@@ -353,18 +438,36 @@ async fn spawn_lanes(
             title,
             base_ref,
             run,
+            Arc::clone(&diff),
+            excluded,
         )
         .await?;
         let lane_name = lane.name.clone();
         let store = Arc::clone(&app.store);
         let run_id = run.clone();
         let cancel = cancel.clone();
+        let context = Arc::clone(&spec.context);
         set.spawn(async move {
-            let outcome = run_session(&store, &run_id, spec, cancel).await;
-            let lane_outcome = if outcome.finished() {
-                LaneOutcome::Finished
-            } else {
-                LaneOutcome::Dropped
+            let outcome = run_session(&store, &run_id, spec.session, cancel).await;
+            let unopened = context.unopened_files();
+            if !unopened.is_empty() {
+                let shown: Vec<&str> = unopened.iter().take(20).map(String::as_str).collect();
+                let _ = store.event(
+                    &run_id,
+                    "warn",
+                    &format!(
+                        "{lane_name}: never asked the diff of {} changed file(s): {}",
+                        unopened.len(),
+                        shown.join(", ")
+                    ),
+                );
+            }
+            // The lane row (henk-session) says finished for a time limit;
+            // the summary distinguishes it as stopped, from `stop`.
+            let lane_outcome = match outcome.stop {
+                StopCause::Timeout => LaneOutcome::Stopped,
+                _ if outcome.finished() => LaneOutcome::Finished,
+                _ => LaneOutcome::Dropped,
             };
             LaneResult {
                 lane: lane_name,
@@ -426,10 +529,12 @@ async fn build_lane(
     title: &str,
     base_ref: &str,
     run: &RunId,
-) -> anyhow::Result<SessionSpec> {
+    diff: Arc<ReviewDiff>,
+    excluded: &[&str],
+) -> anyhow::Result<Lane> {
     let platform = target.platform();
     let model = app.model(lane.model.as_str())?;
-    let tools = platform_tools(Arc::clone(session), platform, scope.clone())
+    let tools = platform_tools(Arc::clone(session), platform, scope.clone(), excluded)
         .await
         .context("listing MCP tools")?;
     if tools.is_empty() {
@@ -437,9 +542,16 @@ async fn build_lane(
             "the MCP server exposes none of the tools a review needs"
         ));
     }
+    // The platform's whole-file read is wrapped by read_file (a numbered
+    // line range); every other read tool is exposed as it is.
     let mut set = ToolSet::new();
+    let mut file_reader: Option<Arc<dyn henk_agent::Tool>> = None;
     for tool in tools {
-        set.add(tool);
+        if tool.server_tool() == "get_file_contents" {
+            file_reader = Some(Arc::new(tool));
+        } else {
+            set.add(tool);
+        }
     }
     let context = Arc::new(LaneContext {
         run: run.clone(),
@@ -450,10 +562,17 @@ async fn build_lane(
         registry,
         writer,
         store: Arc::clone(&app.store),
+        diff,
+        opened: Mutex::new(BTreeSet::new()),
     });
+    set.add(ListChangedFiles(Arc::clone(&context)));
+    set.add(GetFileDiff(Arc::clone(&context)));
+    if let Some(inner) = file_reader {
+        set.add(ReadFile { inner });
+    }
     set.add(ListExistingFindings(Arc::clone(&context)));
     set.add(PostFinding(Arc::clone(&context)));
-    set.add(ImproveFinding(context));
+    set.add(ImproveFinding(Arc::clone(&context)));
 
     let system = format!(
         "{}\n\n{}",
@@ -473,6 +592,8 @@ async fn build_lane(
     let limits = AgentConfig {
         max_turns: app.settings.review.lane_max_turns,
         timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
+        max_conversation_chars: app.settings.review.max_conversation_chars,
+        keep_recent_turns: app.settings.review.keep_recent_turns,
         ..AgentConfig::default()
     };
     let opening = ChatMessage::user(format!(
@@ -481,12 +602,23 @@ async fn build_lane(
         target_ref(platform, target.number),
         commit.short()
     ));
-    Ok(SessionSpec {
-        name: lane.name.as_str().to_owned(),
-        model,
-        system,
-        opening: vec![opening],
-        tools: set,
-        limits,
+    Ok(Lane {
+        session: SessionSpec {
+            name: lane.name.as_str().to_owned(),
+            model,
+            system,
+            opening: vec![opening],
+            tools: set,
+            limits,
+            continuation: Some(lane_continuation(Arc::clone(&context))),
+        },
+        context,
     })
+}
+
+/// A lane ready to run: its session and the context its tools share, kept
+/// so the orchestrator can read what the lane did.
+struct Lane {
+    session: SessionSpec,
+    context: Arc<LaneContext>,
 }

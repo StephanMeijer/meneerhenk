@@ -7,10 +7,13 @@
 //! can rewrite or refuse the arguments (spec §8.5).
 
 pub mod agent;
+pub mod compact;
 pub mod mcp_tools;
 pub mod prompts;
 pub mod tool;
 
-pub use agent::{Agent, AgentConfig, AgentEvent, AgentOutcome, StopCause};
+pub use agent::{
+    Agent, AgentConfig, AgentEvent, AgentOutcome, Continuation, EndReason, Ending, StopCause,
+};
 pub use mcp_tools::{Guard, Verdict, mcp_tools};
 pub use tool::{Tool, ToolOutput, ToolSet};

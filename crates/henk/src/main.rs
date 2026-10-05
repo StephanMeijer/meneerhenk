@@ -14,6 +14,7 @@ mod plan_tools;
 mod recorder;
 mod review;
 mod review_tools;
+mod runs;
 mod server;
 mod urls;
 mod web_fetch;
@@ -86,6 +87,20 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Read run records from the local database.
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsCommand {
+    /// Print one run: lanes, findings and timeline.
+    Show {
+        /// The run id, such as `r-20261005-1a2b3c4d`.
+        run: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,6 +121,12 @@ enum LlmCommand {
         /// The prompt.
         #[arg(long, default_value = "Say 'Not bad.' and nothing else.")]
         prompt: String,
+    },
+    /// List the models the endpoint of a configured model serves.
+    Models {
+        /// Model id from `[models]`; its base URL, provider and key are used.
+        #[arg(long)]
+        model: String,
     },
 }
 
@@ -192,10 +213,36 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
+        Command::Llm {
+            command: LlmCommand::Models { model },
+        } => cmd_llm_models(&cli.config, &model).await,
         Command::Mcp {
             command: McpCommand::Probe { server, show },
         } => cmd_mcp_probe(&cli.config, &server, &show).await,
+        Command::Runs {
+            command: RunsCommand::Show { run },
+        } => cmd_runs_show(&cli.config, &run),
     }
+}
+
+fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let store = henk_store::RunStore::open(Path::new(&settings.server.database_path))?;
+    let id = henk_domain::run::RunId::parse(run)?;
+    let record = store
+        .run(&id)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| anyhow!("no run {run} in {}", settings.server.database_path))?;
+    print!(
+        "{}",
+        runs::render(
+            &record,
+            &store.lanes(&id)?,
+            &store.findings(&id)?,
+            &store.events(&id)?
+        )
+    );
+    Ok(())
 }
 
 async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow::Result<()> {
@@ -210,6 +257,8 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
         .planning
         .as_ref()
         .map(|p| p.requester_id.to_string());
+    let run = ids::new_run_id();
+    println!("run {run}");
     let report = review::run_review(
         &app,
         review::ReviewRequest {
@@ -218,12 +267,13 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
             trigger: "cli".to_owned(),
             requester,
             acknowledge: None,
-            run: None,
+            run: Some(run.clone()),
         },
         CancellationToken::new(),
     )
-    .await?;
-    println!("run {}", report.run);
+    .await
+    .with_context(|| format!("run {run}"))?;
+    debug_assert_eq!(report.run, run);
     if let Some(summary) = report.summary {
         println!("{summary}");
     }
@@ -272,6 +322,23 @@ async fn cmd_llm_probe(config: &Path, model: &str, prompt: String) -> anyhow::Re
         "stop: {:?}; tokens in {} out {}",
         completion.stop, completion.usage.input_tokens, completion.usage.output_tokens
     );
+    Ok(())
+}
+
+async fn cmd_llm_models(config: &Path, model: &str) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let entry = settings
+        .models
+        .get(model)
+        .ok_or_else(|| anyhow!("model {model:?} is not configured"))?;
+    let client_config = entry
+        .to_client_config(app::env_var)
+        .map_err(|variable| anyhow!("environment variable {variable} is not set"))?;
+    let ids = henk_llm::list_models(&client_config).await?;
+    eprintln!("{} models at {}:", ids.len(), entry.base_url);
+    for id in ids {
+        println!("{id}");
+    }
     Ok(())
 }
 

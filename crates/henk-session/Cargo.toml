@@ -14,6 +14,7 @@ henk-domain = { workspace = true }
 henk-llm = { workspace = true }
 henk-mcp = { workspace = true }
 henk-store = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

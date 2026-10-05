@@ -9,8 +9,8 @@ use tracing::{debug, instrument};
 use crate::error::PlatformError;
 use crate::github::api::GitHubApi;
 use crate::writer::{
-    DiffSide, ExistingFinding, ExistingSummary, PlatformWriter, PostedComment, PullRequestInfo,
-    PullRequestState, ReviewHandle, ReviewTarget,
+    DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
+    PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
 };
 
 /// Name of the check run (§3.3).
@@ -76,6 +76,28 @@ fn body_of(value: &Value) -> &str {
 impl PlatformWriter for GitHubWriter {
     fn platform(&self) -> Platform {
         Platform::GitHub
+    }
+
+    async fn diff(
+        &self,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        base_ref: &str,
+    ) -> Result<Vec<FilePatch>, PlatformError> {
+        // Three dots: the change since the merge base, which is what the
+        // pull request shows.
+        let text = self
+            .api
+            .get_text(
+                &format!(
+                    "/repos/{}/compare/{base_ref}...{}",
+                    target.repo.path(),
+                    commit.as_str()
+                ),
+                "application/vnd.github.diff",
+            )
+            .await?;
+        Ok(henk_domain::diff::split_unified(&text))
     }
 
     async fn pull_request(&self, target: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {

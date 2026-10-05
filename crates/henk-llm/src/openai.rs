@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 use tracing::instrument;
 
 use crate::client::{MaxTokensParam, ModelClient, ModelConfig};
-use crate::error::LlmError;
+use crate::error::{LlmError, truncate_body};
 use crate::http::{build_client, post_json, with_retry};
 use crate::schema;
 use crate::types::{
@@ -67,7 +67,7 @@ impl OpenAiClient {
                         "type": "function",
                         "function": {
                             "name": tool.name.as_str(),
-                            "description": tool.description,
+                            "description": schema::cap_description(&tool.description),
                             "parameters": schema::clean(&tool.input_schema),
                         }
                     })
@@ -157,16 +157,25 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
 /// # Errors
 ///
 /// Returns [`LlmError::Decode`] when the response has no choice or an
-/// unreadable message.
+/// unreadable message. The error carries the (truncated) body, because a
+/// proxy that answers 200 with an error object lands here.
 pub fn decode(response: &Value) -> Result<Completion, LlmError> {
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .ok_or_else(|| LlmError::Decode("no choices in response".to_owned()))?;
-    let message = choice
-        .get("message")
-        .ok_or_else(|| LlmError::Decode("choice without message".to_owned()))?;
+        .ok_or_else(|| {
+            LlmError::Decode(format!(
+                "no choices in response: {}",
+                truncate_body(&response.to_string())
+            ))
+        })?;
+    let message = choice.get("message").ok_or_else(|| {
+        LlmError::Decode(format!(
+            "choice without message: {}",
+            truncate_body(&choice.to_string())
+        ))
+    })?;
 
     let mut blocks = Vec::new();
     match message.get("content") {
@@ -198,6 +207,11 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
                 .and_then(Value::as_str)
                 .map_or_else(|| synthetic_id(index), str::to_owned);
             let arguments = match function.get("arguments") {
+                // Proxies and some models send "" for a tool without
+                // parameters; that is an empty object, not malformed JSON.
+                Some(Value::String(raw)) if raw.trim().is_empty() => {
+                    ToolArguments::Parsed(json!({}))
+                }
                 Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).map_or_else(
                     |_| ToolArguments::Malformed(raw.clone()),
                     ToolArguments::Parsed,

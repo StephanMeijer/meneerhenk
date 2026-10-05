@@ -58,6 +58,9 @@ api_key_env = "LLM3_API_KEY"
 model = "fast-model"
 max_tokens = 4096
 
+# max_tokens caps one answer. A reasoning model spends part of it on its
+# thinking, so give one 16384 or more; an answer cut off at the cap costs
+# a turn.
 [models.claude]
 provider = "anthropic"
 base_url = "https://api.anthropic.com"
@@ -74,6 +77,11 @@ lanes = [
 ]
 lane_timeout_secs = 600
 lane_max_turns = 40
+# Every turn resends the conversation. Past this many characters, the oldest
+# tool results outside the last keep_recent_turns turns become one-line
+# stubs; the lane can call the tool again. Roughly 4 characters per token.
+max_conversation_chars = 160000
+keep_recent_turns = 2
 max_concurrent = 3
 github_drafts = false
 

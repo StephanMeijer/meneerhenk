@@ -8,11 +8,17 @@
 //!
 //! [`platform_tools`] is the one place where a platform's MCP read tools are
 //! filtered and guarded by scope (spec §8.5) before a model may call them.
+//!
+//! When `HENK_TRANSCRIPT_DIR` names a directory, every session also writes
+//! its full conversation there as JSON. That is a local diagnostic file for
+//! the operator; nothing reads it back and nothing sends it anywhere.
+
+pub mod transcript;
 
 use std::sync::Arc;
 
 use henk_agent::mcp_tools::McpTool;
-use henk_agent::{Agent, AgentConfig, StopCause, ToolSet, Verdict, mcp_tools};
+use henk_agent::{Agent, AgentConfig, Continuation, StopCause, ToolSet, Verdict, mcp_tools};
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
 use henk_domain::run::RunId;
@@ -37,6 +43,9 @@ pub struct SessionSpec {
     pub tools: ToolSet,
     /// Turn limit, deadline, output cap.
     pub limits: AgentConfig,
+    /// Asked before the session ends without tool calls; may send one more
+    /// message and take another turn.
+    pub continuation: Option<Continuation>,
 }
 
 impl std::fmt::Debug for SessionSpec {
@@ -50,7 +59,7 @@ impl std::fmt::Debug for SessionSpec {
     }
 }
 
-/// How a session ended.
+/// How a session ended. `stop` says whether the time limit ended it.
 #[derive(Debug)]
 pub struct SessionOutcome {
     /// Why the loop stopped.
@@ -88,17 +97,34 @@ pub async fn run_session(
     if let Err(error) = store.start_lane(run, &spec.name, &model_name) {
         tracing::warn!(%error, "could not record the lane start");
     }
-    let agent = Agent::new(
+    let system = spec.system;
+    let mut agent = Agent::new(
         Arc::clone(&spec.model),
         spec.tools,
-        spec.system,
+        system.clone(),
         spec.limits,
     );
+    if let Some(continuation) = spec.continuation {
+        agent = agent.with_continuation(continuation);
+    }
     let outcome = agent.run(spec.opening, cancel).await;
+    if let Some(dir) = transcript::directory_from_env() {
+        match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
+            Ok(path) => info!(path = %path.display(), "transcript written"),
+            Err(error) => tracing::warn!(%error, "could not write the transcript"),
+        }
+    }
 
+    // The lane row records whether the session ran to an end (finished) or
+    // broke off (dropped). A session that reaches its time limit ran to an
+    // end: what it posted stands and it posts nothing more, so the row says
+    // finished. How a caller presents that is the caller's business, read
+    // from `stop`: the review reports such a lane as stopped at the time
+    // limit in its summary, the planner treats it as a failed plan.
     let (status, error) = match &outcome.stop {
-        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
-        StopCause::Timeout => (LaneStatus::Dropped, Some("timed out".to_owned())),
+        StopCause::EndTurn | StopCause::MaxTurns | StopCause::Timeout => {
+            (LaneStatus::Finished, None)
+        }
         StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
         StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
     };
@@ -114,9 +140,14 @@ pub async fn run_session(
         tracing::warn!(error = %store_error, "could not record the lane end");
     }
     let last_words: String = outcome.final_text.chars().take(200).collect();
+    let level = if error.is_some() || matches!(outcome.stop, StopCause::Timeout) {
+        "warn"
+    } else {
+        "info"
+    };
     let _ = store.event(
         run,
-        if error.is_some() { "warn" } else { "info" },
+        level,
         &format!(
             "{}: {:?} after {} turns; last words: {last_words}",
             spec.name, outcome.stop, outcome.turns
@@ -135,6 +166,8 @@ pub async fn run_session(
 
 /// The read tools of one platform MCP session that `scope` allows, each
 /// wrapped so that every call passes [`henk_domain::scope::guard`] first.
+/// `exclude` names server tools to leave out even though the scope allows
+/// them, for a tool known to be useless on this repository.
 ///
 /// # Errors
 ///
@@ -143,6 +176,7 @@ pub async fn platform_tools(
     session: Arc<dyn McpSession>,
     platform: Platform,
     scope: Scope,
+    exclude: &[&str],
 ) -> Result<Vec<McpTool>, McpError> {
     let guard: henk_agent::Guard = Arc::new(move |tool: &str, args: &serde_json::Value| {
         match scope::guard(platform, tool, args, &scope) {
@@ -154,7 +188,7 @@ pub async fn platform_tools(
     mcp_tools(
         session,
         &mut names,
-        |info| scope::is_exposed(platform, &info.name),
+        |info| scope::is_exposed(platform, &info.name) && !exclude.contains(&info.name.as_str()),
         guard,
     )
     .await
@@ -233,7 +267,10 @@ mod tests {
                 max_turns: 3,
                 timeout: Duration::from_secs(5),
                 max_tool_output_chars: 100,
+                max_conversation_chars: 100_000,
+                keep_recent_turns: 2,
             },
+            continuation: None,
         }
     }
 
@@ -251,6 +288,28 @@ mod tests {
         assert_eq!(lanes[0].status, LaneStatus::Finished);
         assert_eq!(lanes[0].input_tokens, 12);
         assert_eq!(store.events(&run_id()).unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_time_limit_finishes_the_session_instead_of_dropping_it() {
+        let store = store_with_run();
+        let model: Arc<dyn ModelClient> =
+            Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
+        let mut spec = spec(model);
+        spec.limits.timeout = Duration::from_millis(50);
+        let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
+        assert!(matches!(outcome.stop, StopCause::Timeout));
+        assert!(outcome.finished());
+        assert_eq!(outcome.error, None);
+        let lanes = store.lanes(&run_id()).unwrap();
+        assert_eq!(lanes[0].status, LaneStatus::Finished);
+        let events = store.events(&run_id()).unwrap();
+        assert_eq!(events[0].level, "warn");
+        assert!(
+            events[0].message.contains("Timeout"),
+            "{}",
+            events[0].message
+        );
     }
 
     #[tokio::test]
@@ -290,10 +349,14 @@ mod tests {
             number: 7,
             commit: CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
         };
-        let tools = platform_tools(session, Platform::GitHub, scope)
+        let tools = platform_tools(Arc::clone(&session), Platform::GitHub, scope.clone(), &[])
             .await
             .unwrap();
         assert_eq!(tools.len(), 1);
+        let excluded = platform_tools(session, Platform::GitHub, scope, &["pull_request_read"])
+            .await
+            .unwrap();
+        assert!(excluded.is_empty(), "an excluded tool is not exposed");
         assert_eq!(
             tools[0].definition().name.as_str(),
             "github__pull_request_read"

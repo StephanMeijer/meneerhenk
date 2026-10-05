@@ -2,9 +2,13 @@
 //! listing, posting and improving findings, with every rule of §3.2 and
 //! §8.5 enforced here rather than in the prompt.
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use henk_agent::{Tool, ToolOutput};
+use henk_agent::{Continuation, EndReason, Ending, Tool, ToolOutput};
+use henk_domain::diff::ReviewDiff;
 use henk_domain::finding::{Claim, Finding, FindingKey, FindingRegistry};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, LaneName};
@@ -34,6 +38,206 @@ pub struct LaneContext {
     pub writer: Arc<dyn PlatformWriter>,
     /// Run records.
     pub store: Arc<RunStore>,
+    /// The diff of the review. Findings are checked against it before
+    /// anything is posted.
+    pub diff: Arc<ReviewDiff>,
+    /// The changed files this lane asked the diff of.
+    pub opened: Mutex<BTreeSet<String>>,
+}
+
+impl LaneContext {
+    /// The changed files this lane has not asked the diff of yet.
+    #[must_use]
+    pub fn unopened_files(&self) -> Vec<String> {
+        let opened = self.opened.lock().map(|o| o.clone()).unwrap_or_default();
+        self.diff
+            .paths()
+            .filter(|p| !opened.contains(*p))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// What a lane is told, once each, before it is allowed to end: an answer
+/// cut off at the output cap gets one chance to post what it was sure of,
+/// and an end of turn with changed files never opened gets one request to
+/// look at them. After that the lane ends on its own terms.
+#[must_use]
+pub fn lane_continuation(context: Arc<LaneContext>) -> Continuation {
+    let nudged_cap = AtomicBool::new(false);
+    let nudged_coverage = AtomicBool::new(false);
+    Box::new(move |ending: &Ending<'_>| match ending.reason {
+        EndReason::OutputCap => {
+            if nudged_cap.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            info!(lane = %context.lane, turn = ending.turn, "nudging after an output cap");
+            Some(
+                "Your answer was cut off at the output limit. Post each finding you are sure of with post_finding, one call per finding, then end your turn.".to_owned(),
+            )
+        }
+        EndReason::EndTurn => {
+            let unopened = context.unopened_files();
+            if unopened.is_empty() || nudged_coverage.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            info!(lane = %context.lane, turn = ending.turn, files = unopened.len(), "nudging to cover the remaining files");
+            let shown: Vec<&str> = unopened.iter().take(20).map(String::as_str).collect();
+            let more = if unopened.len() > shown.len() {
+                format!(" and {} more", unopened.len() - shown.len())
+            } else {
+                String::new()
+            };
+            Some(format!(
+                "You ended without looking at {} changed file(s): {}{more}. Look at each with get_file_diff and decide, or end your turn if you are done.",
+                unopened.len(),
+                shown.join(", ")
+            ))
+        }
+    })
+}
+
+/// `list_changed_files`: the files of the diff with their counts.
+pub struct ListChangedFiles(pub Arc<LaneContext>);
+
+#[async_trait::async_trait]
+impl Tool for ListChangedFiles {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("list_changed_files"),
+            description: "Lists the files this change touches: status letter (A added, M modified, D removed, R renamed), path, lines added and removed. Start here, then read each file's diff with get_file_diff.".to_owned(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn call(&self, _: Value) -> ToolOutput {
+        ToolOutput::ok(self.0.diff.render_list())
+    }
+}
+
+/// `get_file_diff`: one file's hunks with line numbers on both sides.
+pub struct GetFileDiff(pub Arc<LaneContext>);
+
+#[async_trait::async_trait]
+impl Tool for GetFileDiff {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("get_file_diff"),
+            description: "The diff of one changed file, every line numbered: old line number, new line number, then + for added, - for removed, space for context. A finding goes on a line shown here, by its new line number (or old number with side LEFT for a removed line).".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "A path from list_changed_files"}
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value) -> ToolOutput {
+        let Some(path) = arg_str(&args, "path") else {
+            return ToolOutput::error("path is required");
+        };
+        let diff = &self.0.diff;
+        match diff.file(path) {
+            Some(file) => {
+                if let Ok(mut opened) = self.0.opened.lock() {
+                    opened.insert(file.path.clone());
+                }
+                ToolOutput::ok(file.render())
+            }
+            None => ToolOutput::error(format!(
+                "{path} is not part of this change. The changed files are:\n{}",
+                diff.render_list()
+            )),
+        }
+    }
+}
+
+/// `read_file`: a line range of a file at the reviewed commit, numbered.
+/// Wraps the guarded MCP file read so a lane never pulls whole files.
+pub struct ReadFile {
+    /// The guarded `get_file_contents` of the platform session.
+    pub inner: Arc<dyn Tool>,
+}
+
+/// Lines per read.
+const READ_FILE_MAX_LINES: usize = 400;
+
+#[async_trait::async_trait]
+impl Tool for ReadFile {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("read_file"),
+            description: format!(
+                "Reads a line range of a file at the reviewed commit, numbered. Use it to confirm a suspicion from the diff: callers, tests, definitions. At most {READ_FILE_MAX_LINES} lines per call; ask for the range you need."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path in the repository"},
+                    "start_line": {"type": "integer", "description": "First line, 1-based (default 1)"},
+                    "end_line": {"type": "integer", "description": format!("Last line, inclusive (default start_line + {})", READ_FILE_MAX_LINES - 1)}
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value) -> ToolOutput {
+        let Some(path) = arg_str(&args, "path") else {
+            return ToolOutput::error("path is required");
+        };
+        let start = args
+            .get("start_line")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1);
+        let end = args
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n >= start)
+            .unwrap_or(start + READ_FILE_MAX_LINES - 1)
+            .min(start + READ_FILE_MAX_LINES - 1);
+        let output = self.inner.call(json!({"path": path})).await;
+        if output.is_error {
+            return output;
+        }
+        ToolOutput::ok(number_lines(&output.content, start, end))
+    }
+}
+
+/// Numbers `content` from `start` to `end` inclusive, after dropping the
+/// MCP server's preamble (the status line and the resource URI).
+fn number_lines(content: &str, start: usize, end: usize) -> String {
+    let mut lines: Vec<&str> = content.lines().collect();
+    if lines
+        .first()
+        .is_some_and(|l| l.starts_with("successfully downloaded"))
+    {
+        lines.remove(0);
+    }
+    if lines.first().is_some_and(|l| l.starts_with("[repo://")) {
+        lines.remove(0);
+    }
+    let total = lines.len();
+    if start > total {
+        return format!("The file has {total} lines; nothing at line {start}.");
+    }
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate().skip(start - 1) {
+        let number = index + 1;
+        if number > end {
+            break;
+        }
+        let _ = writeln!(out, "{number:>5}| {line}");
+    }
+    if end < total {
+        let _ = writeln!(out, "[lines {}-{total} not shown]", end + 1);
+    }
+    out
 }
 
 impl LaneContext {
@@ -151,6 +355,11 @@ impl Tool for PostFinding {
         if let Some(error) = LaneContext::style_error(body) {
             return error;
         }
+        if let Err(reason) = ctx.diff.commentable(path, line, side) {
+            return ToolOutput::error(format!(
+                "Cannot post on {path}:{line}: {reason}. Use get_file_diff to see the numbered lines."
+            ));
+        }
         let key = FindingKey {
             path: path.to_owned(),
             line,
@@ -192,6 +401,16 @@ impl Tool for PostFinding {
             Ok(posted) => posted,
             Err(error) => {
                 warn!(%error, path, line, "posting a finding failed");
+                // On the timeline too, so a lane whose every post failed does
+                // not look like a lane that found nothing.
+                let _ = ctx.store.event(
+                    &ctx.run,
+                    "warn",
+                    &format!(
+                        "{}: could not post a finding on {path}:{line}: {error}",
+                        ctx.lane
+                    ),
+                );
                 return ToolOutput::error(format!(
                     "Could not post on {path}:{line}: {error}. If the line is not part of the diff, pick a line that is."
                 ));
@@ -283,5 +502,217 @@ impl Tool for ImproveFinding {
             FindingAction::Improved,
         );
         ToolOutput::ok(format!("Updated comment {comment_id}."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::diff::ReviewDiff;
+    use henk_domain::review::LaneName;
+    use henk_llm::ToolName;
+
+    use super::*;
+    use crate::listeners::testing::FakeWriter;
+
+    pub(super) const DIFF: &str = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    let x = 1;
++    let x = 2;
+ }
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -5 +5 @@
+-old
++new
+";
+
+    pub(super) fn context(diff: ReviewDiff) -> Arc<LaneContext> {
+        let store = Arc::new(RunStore::in_memory().unwrap());
+        let run = RunId::parse("r-1").unwrap();
+        store
+            .create_run(&henk_store::NewRun {
+                id: run.clone(),
+                kind: henk_domain::run::RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "o/r".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "test".into(),
+                link: "l".into(),
+            })
+            .unwrap();
+        Arc::new(LaneContext {
+            run,
+            lane: LaneName::new("lane-a"),
+            model: ModelId::parse("m").unwrap(),
+            target: ReviewTarget {
+                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+                number: 7,
+            },
+            commit: CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
+            registry: Arc::new(Mutex::new(FindingRegistry::seeded(std::iter::empty()))),
+            writer: Arc::new(FakeWriter::default()),
+            store,
+            diff: Arc::new(diff),
+            opened: Mutex::new(BTreeSet::new()),
+        })
+    }
+
+    struct FixedFile(&'static str);
+
+    #[async_trait::async_trait]
+    impl Tool for FixedFile {
+        fn definition(&self) -> ToolDef {
+            ToolDef {
+                name: ToolName::parse("github__get_file_contents").unwrap(),
+                description: String::new(),
+                input_schema: json!({"type": "object"}),
+            }
+        }
+
+        async fn call(&self, args: Value) -> ToolOutput {
+            assert_eq!(args["path"], "src/a.rs");
+            ToolOutput::ok(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn list_and_file_diff_track_what_the_lane_opened() {
+        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let list = ListChangedFiles(Arc::clone(&ctx)).call(json!({})).await;
+        assert!(!list.is_error);
+        assert!(list.content.contains("M src/a.rs (+1 -1)"));
+        assert_eq!(ctx.unopened_files(), vec!["src/a.rs", "README.md"]);
+
+        let file = GetFileDiff(Arc::clone(&ctx))
+            .call(json!({"path": "src/a.rs"}))
+            .await;
+        assert!(!file.is_error, "{file:?}");
+        assert!(
+            file.content.contains("    2 |      |-    let x = 1;"),
+            "{}",
+            file.content
+        );
+        assert_eq!(ctx.unopened_files(), vec!["README.md"]);
+
+        let missing = GetFileDiff(Arc::clone(&ctx))
+            .call(json!({"path": "src/zzz.rs"}))
+            .await;
+        assert!(missing.is_error);
+        assert!(missing.content.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn read_file_numbers_a_range_and_drops_the_preamble() {
+        let text = "successfully downloaded text file (SHA: abc)\n[repo://o/r/sha/x/contents/src/a.rs]\nline one\nline two\nline three\nline four\n";
+        let tool = ReadFile {
+            inner: Arc::new(FixedFile(text)),
+        };
+        let all = tool.call(json!({"path": "src/a.rs"})).await;
+        assert_eq!(
+            all.content,
+            "    1| line one\n    2| line two\n    3| line three\n    4| line four\n"
+        );
+        let range = tool
+            .call(json!({"path": "src/a.rs", "start_line": 2, "end_line": 3}))
+            .await;
+        assert_eq!(
+            range.content,
+            "    2| line two\n    3| line three\n[lines 4-4 not shown]\n"
+        );
+        let past = tool
+            .call(json!({"path": "src/a.rs", "start_line": 9}))
+            .await;
+        assert!(past.content.contains("has 4 lines"));
+        assert!(tool.call(json!({})).await.is_error);
+    }
+
+    #[tokio::test]
+    async fn post_finding_refuses_lines_outside_the_diff_before_posting() {
+        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let tool = PostFinding(Arc::clone(&ctx));
+        let outside = tool
+            .call(json!({"path": "src/a.rs", "line": 40, "body": "Wrong."}))
+            .await;
+        assert!(outside.is_error);
+        assert!(outside.content.contains("1-3"), "{}", outside.content);
+        let unknown = tool
+            .call(json!({"path": "lib.rs", "line": 1, "body": "Wrong."}))
+            .await;
+        assert!(
+            unknown.content.contains("not part of the diff"),
+            "{}",
+            unknown.content
+        );
+        // A line in the diff reaches the writer (the fake refuses, which is
+        // a different error) and lands on the timeline.
+        let inside = tool
+            .call(json!({"path": "src/a.rs", "line": 2, "body": "Wrong."}))
+            .await;
+        assert!(
+            inside.content.contains("not in the fake"),
+            "{}",
+            inside.content
+        );
+        assert_eq!(ctx.store.events(&ctx.run).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
+    use henk_agent::{EndReason, Ending};
+    use henk_domain::diff::ReviewDiff;
+
+    use super::tests::context;
+    use super::*;
+
+    fn ending(reason: EndReason) -> Ending<'static> {
+        Ending {
+            reason,
+            turn: 3,
+            messages: &[],
+        }
+    }
+
+    #[tokio::test]
+    async fn nudges_once_for_coverage_and_once_for_an_output_cap() {
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
+        let nudge = lane_continuation(Arc::clone(&ctx));
+        let first = nudge(&ending(EndReason::EndTurn)).unwrap();
+        assert!(
+            first.contains("2 changed file(s): src/a.rs, README.md"),
+            "{first}"
+        );
+        assert_eq!(nudge(&ending(EndReason::EndTurn)), None, "only once");
+        let cap = nudge(&ending(EndReason::OutputCap)).unwrap();
+        assert!(cap.contains("cut off"));
+        assert_eq!(nudge(&ending(EndReason::OutputCap)), None);
+    }
+
+    #[tokio::test]
+    async fn no_coverage_nudge_when_every_file_was_opened() {
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
+        for path in ["src/a.rs", "README.md"] {
+            GetFileDiff(Arc::clone(&ctx))
+                .call(json!({"path": path}))
+                .await;
+        }
+        assert_eq!(lane_continuation(ctx)(&ending(EndReason::EndTurn)), None);
     }
 }

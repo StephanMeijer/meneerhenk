@@ -57,6 +57,8 @@ fn config() -> AgentConfig {
         max_turns: 5,
         timeout: Duration::from_secs(5),
         max_tool_output_chars: 100,
+        max_conversation_chars: 100_000,
+        keep_recent_turns: 2,
     }
 }
 
@@ -280,6 +282,33 @@ async fn times_out_during_a_slow_tool() {
         .await;
     assert!(matches!(outcome.stop, StopCause::Timeout));
     assert_eq!(outcome.turns, 1);
+    // The slow tool was allowed to finish; its result is in the conversation
+    // and no second model call was made.
+    let last = outcome.messages.last().unwrap();
+    assert!(matches!(
+        last.blocks.first(),
+        Some(Block::ToolResult(result)) if result.content == "woke"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_model_call_is_abandoned_at_the_deadline() {
+    let model = Arc::new(ScriptedClient::new("m", []).with_delay(Duration::from_secs(30)));
+    let agent = Agent::new(
+        model,
+        ToolSet::new(),
+        "s",
+        AgentConfig {
+            timeout: Duration::from_millis(50),
+            ..config()
+        },
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::Timeout));
+    assert_eq!(outcome.turns, 1);
+    assert_eq!(outcome.messages.len(), 1, "no answer was recorded");
 }
 
 #[tokio::test]
@@ -316,4 +345,138 @@ async fn model_errors_end_the_run() {
         StopCause::ModelError(henk_llm::LlmError::Unauthorized { .. })
     ));
     assert_eq!(outcome.final_text, "");
+}
+
+#[tokio::test]
+async fn old_tool_results_are_elided_once_the_conversation_is_over_budget() {
+    // Three turns of one call each returning 500 chars; budget 900, keep 1.
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "echo", json!({"n": 1})),
+            call("c2", "echo", json!({"n": 2})),
+            call("c3", "echo", json!({"n": 3})),
+            text("done"),
+        ],
+    ));
+    let mut set = ToolSet::new();
+    set.add(Big);
+    let agent = Agent::new(
+        model.clone(),
+        set,
+        "s",
+        AgentConfig {
+            max_tool_output_chars: 10_000,
+            max_conversation_chars: 900,
+            keep_recent_turns: 1,
+            ..config()
+        },
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    // What the model saw on its last call: the first two results stubbed,
+    // the third intact.
+    let last_request = model.requests().last().unwrap().clone();
+    let results: Vec<String> = last_request
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .filter_map(|b| match b {
+            Block::ToolResult(r) => Some(r.content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 3);
+    assert!(
+        results[0].starts_with("[result of echo from turn 1 elided (500 chars)"),
+        "{}",
+        results[0]
+    );
+    assert!(
+        results[1].starts_with("[result of echo from turn 2 elided"),
+        "{}",
+        results[1]
+    );
+    assert_eq!(results[2].len(), 500);
+}
+
+struct Big;
+
+#[async_trait::async_trait]
+impl Tool for Big {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: ToolName::parse("echo").unwrap(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    async fn call(&self, _: Value) -> ToolOutput {
+        ToolOutput::ok("y".repeat(500))
+    }
+}
+
+#[tokio::test]
+async fn a_continuation_gets_one_more_turn_then_the_run_ends() {
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [text("I am done."), text("Still done.")],
+    ));
+    let nudges = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let seen = Arc::clone(&nudges);
+    let agent = Agent::new(model.clone(), ToolSet::new(), "s", config()).with_continuation(
+        Box::new(move |ending| {
+            assert_eq!(ending.reason, henk_agent::EndReason::EndTurn);
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Some(format!("Look again (turn {}).", ending.turn))
+            } else {
+                None
+            }
+        }),
+    );
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    assert_eq!(outcome.turns, 2);
+    assert_eq!(nudges.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(outcome.final_text, "Still done.");
+    let second = &model.requests()[1];
+    assert_eq!(
+        second.messages.last().unwrap().text(),
+        "Look again (turn 1)."
+    );
+}
+
+#[tokio::test]
+async fn an_output_cap_without_tool_calls_reaches_the_continuation() {
+    let cut = Ok(Completion {
+        message: ChatMessage::assistant("<think>thinking thinking"),
+        stop: StopReason::MaxTokens,
+        usage: henk_llm::Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new("m", [cut, text("posted")]));
+    let reasons = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reasons);
+    let agent = Agent::new(model, ToolSet::new(), "s", config()).with_continuation(Box::new(
+        move |ending| {
+            sink.lock().unwrap().push(ending.reason);
+            matches!(ending.reason, henk_agent::EndReason::OutputCap)
+                .then(|| "Post what you are sure of.".to_owned())
+        },
+    ));
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert_eq!(outcome.turns, 2);
+    assert_eq!(
+        *reasons.lock().unwrap(),
+        vec![
+            henk_agent::EndReason::OutputCap,
+            henk_agent::EndReason::EndTurn
+        ]
+    );
 }
