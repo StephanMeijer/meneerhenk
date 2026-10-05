@@ -351,8 +351,7 @@ async fn run_lanes(
     let platform = target.platform();
 
     // One read-only MCP session shared by the lanes of this review.
-    let alias = app.read_mcp_alias(platform)?;
-    let session: Arc<dyn McpSession> = Arc::new(app.connect_mcp(alias).await?);
+    let session = app.read_session(platform).await?;
     let scope = Scope::Review {
         repo: target.repo.clone(),
         number: target.number,
@@ -726,4 +725,235 @@ async fn build_fact_check(
 struct Lane {
     session: SessionSpec,
     context: Arc<LaneContext>,
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    //! `run_review` end to end on fakes: the writer, the MCP session and the
+    //! model are in-process, so every path that ends a review is exercised
+    //! without a network.
+
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::unnecessary_wraps
+    )]
+
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::marker::{Marker, MarkerKind};
+    use henk_domain::review::CheckConclusion;
+    use henk_llm::testing::ScriptedClient;
+    use henk_llm::{Completion, ModelClient, StopReason, Usage};
+    use henk_mcp::testing::{FakeServer, echo_behaviour};
+    use henk_store::{LaneStatus, RunStore};
+
+    use super::*;
+    use crate::config::Config;
+    use crate::listeners::testing::FakeWriter;
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const DIFF: &str = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    let x = 1;
++    let x = 2;
+ }
+";
+
+    const CONFIG: &str = r#"
+[discord]
+channel_id = 1
+henk_user_id = 2
+team_lead_ids = [3]
+[mail]
+address = "henk@example.com"
+[allowlist]
+github_owners = ["o"]
+[github]
+app_id = 1
+installation_id = 2
+bot_login = "h[bot]"
+[mcp.github]
+command = "unused"
+[models.m]
+provider = "open_ai"
+base_url = "https://x.test/v1"
+api_key_env = "UNUSED"
+model = "scripted"
+[review]
+lanes = [{ name = "lane-a", model = "m" }]
+"#;
+
+    fn done() -> Result<Completion, henk_llm::LlmError> {
+        Ok(Completion {
+            message: henk_llm::ChatMessage::assistant("Nothing to report."),
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    struct Fixture {
+        app: App,
+        writer: Arc<FakeWriter>,
+    }
+
+    /// An app whose writer, read session and model are fakes. `patches`
+    /// is the diff the writer serves; `model` answers the lane.
+    async fn fixture(diff: &str, model: ScriptedClient) -> Fixture {
+        let settings = Config::parse(CONFIG)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let writer = Arc::new(FakeWriter {
+            head: SHA.to_owned(),
+            patches: henk_domain::diff::split_unified(diff),
+            ..FakeWriter::default()
+        });
+        let server = FakeServer::new(
+            vec![FakeServer::tool("get_commit", "", &["sha"])],
+            echo_behaviour(),
+        );
+        let session: Arc<dyn McpSession> = Arc::new(server.connect("github").await);
+        let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
+        models.insert("m".to_owned(), Arc::new(model));
+        Fixture {
+            app: App {
+                settings,
+                store: Arc::new(RunStore::in_memory().unwrap()),
+                models,
+                github: None,
+                gitlab: None,
+                test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
+                test_session: Some(session),
+            },
+            writer,
+        }
+    }
+
+    fn request(run: &RunId) -> ReviewRequest {
+        ReviewRequest {
+            target: ReviewTarget {
+                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+                number: 7,
+            },
+            commit: None,
+            trigger: "test".to_owned(),
+            requester: None,
+            acknowledge: None,
+            run: Some(run.clone()),
+        }
+    }
+
+    /// The kinds of the comments posted, from their hidden markers.
+    fn posted_kinds(writer: &FakeWriter) -> Vec<Option<MarkerKind>> {
+        writer
+            .replies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| Marker::parse(&r.body).and_then(|m| m.kind))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_completed_review_posts_its_summary_and_closes_the_check() {
+        // Twice: the lane's end of turn is answered by the coverage nudge.
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done(), done()])).await;
+        let run = RunId::parse("r-done").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.summary.as_deref(), Some("No issues found."));
+        assert_eq!(posted_kinds(&f.writer), vec![Some(MarkerKind::Summary)]);
+        let finished = f.writer.finished.lock().unwrap();
+        assert_eq!(finished.len(), 1, "the check is closed once");
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Success);
+        let record = f.app.store.run(&run).unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        let lanes = f.app.store.lanes(&run).unwrap();
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].status, LaneStatus::Finished);
+    }
+
+    #[tokio::test]
+    async fn a_failed_review_says_so_and_closes_the_check_as_failure() {
+        // No patches: the diff is empty, which ends the run as Henk's failure.
+        let f = fixture("", ScriptedClient::new("scripted", [])).await;
+        let run = RunId::parse("r-fail").unwrap();
+        let error = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("diff is empty"), "{error:#}");
+        assert_eq!(posted_kinds(&f.writer), vec![Some(MarkerKind::Failure)]);
+        let finished = f.writer.finished.lock().unwrap();
+        assert_eq!(finished.len(), 1);
+        assert!(finished[0].lanes.is_empty());
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
+        let record = f.app.store.run(&run).unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert!(record.error.unwrap().contains("diff is empty"));
+    }
+
+    /// A review cancelled while its lane waits on the model.
+    async fn cancelled_review(run: &RunId) -> (Fixture, anyhow::Result<ReviewReport>) {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let f = fixture(DIFF, model).await;
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            trigger.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&f.app, request(run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+        (f, result)
+    }
+
+    /// The contract #7's fix relies on: a cancelled review closes its check
+    /// and leaves no run or lane `running`.
+    #[tokio::test]
+    async fn a_cancelled_review_closes_its_check_and_leaves_nothing_running() {
+        let run = RunId::parse("r-cancel").unwrap();
+        let (f, result) = cancelled_review(&run).await;
+        assert!(result.is_err());
+        assert_eq!(
+            f.writer.finished.lock().unwrap().len(),
+            1,
+            "the check is closed"
+        );
+        let record = f.app.store.run(&run).unwrap().unwrap();
+        assert_ne!(record.status, RunStatus::Running);
+        for lane in f.app.store.lanes(&run).unwrap() {
+            assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
+        }
+    }
+
+    /// #8: a review superseded by a newer commit is not Henk's failure. It
+    /// must not post the failure comment, and its check is neutral.
+    #[tokio::test]
+    #[ignore = "fails until #8: a superseded review must not post a failure"]
+    async fn a_superseded_review_posts_no_failure() {
+        let run = RunId::parse("r-superseded").unwrap();
+        let (f, result) = cancelled_review(&run).await;
+        assert!(result.is_err_and(|e| e.is::<Superseded>()));
+        assert!(
+            !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),
+            "no failure comment"
+        );
+        let finished = f.writer.finished.lock().unwrap();
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+    }
 }

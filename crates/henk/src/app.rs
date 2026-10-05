@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow};
 use henk_llm::{ModelClient, client_for};
-use henk_mcp::{McpServerConfig, RmcpSession};
+use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::GitLabWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
@@ -26,6 +26,12 @@ pub struct App {
     pub github: Option<Arc<GitHubWriter>>,
     /// The GitLab writer over its write-mode MCP session, when configured.
     pub gitlab: Option<Arc<GitLabWriter>>,
+    /// Tests: the writer `writer` returns for every platform.
+    #[cfg(test)]
+    pub test_writer: Option<Arc<dyn PlatformWriter>>,
+    /// Tests: the session `read_session` returns instead of starting one.
+    #[cfg(test)]
+    pub test_session: Option<Arc<dyn McpSession>>,
 }
 
 impl std::fmt::Debug for App {
@@ -110,6 +116,10 @@ impl App {
             models,
             github,
             gitlab,
+            #[cfg(test)]
+            test_writer: None,
+            #[cfg(test)]
+            test_session: None,
         })
     }
 
@@ -149,6 +159,25 @@ impl App {
             .with_context(|| format!("MCP server {alias}"))
     }
 
+    /// The read-only MCP session for a platform: its configured server,
+    /// started now.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform or its server is not configured,
+    /// or the server does not start.
+    pub async fn read_session(
+        &self,
+        platform: henk_domain::allowlist::Platform,
+    ) -> anyhow::Result<Arc<dyn McpSession>> {
+        #[cfg(test)]
+        if let Some(session) = &self.test_session {
+            return Ok(Arc::clone(session));
+        }
+        let alias = self.read_mcp_alias(platform)?;
+        Ok(Arc::new(self.connect_mcp(alias).await?))
+    }
+
     /// The writer for a platform.
     ///
     /// # Errors
@@ -158,6 +187,10 @@ impl App {
         &self,
         platform: henk_domain::allowlist::Platform,
     ) -> anyhow::Result<Arc<dyn PlatformWriter>> {
+        #[cfg(test)]
+        if let Some(writer) = &self.test_writer {
+            return Ok(Arc::clone(writer));
+        }
         match platform {
             henk_domain::allowlist::Platform::GitHub => self
                 .github
