@@ -105,6 +105,10 @@ OpenBao.
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
 | `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
 
+Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
+the list (see `henk.example.toml`), and a change made only of such files is
+reported as nothing to review.
+
 A finding is posted only after a second model has checked it when
 `[review.fact_check]` names one (the example uses Claude Opus 5.5 at
 `effort = "high"`, with Claude Sonnet 5.5 as the backup). A rejected finding

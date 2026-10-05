@@ -207,7 +207,8 @@ Three details carry the spec's weight. The count comes from the second
 `existing_findings` call, what the platform reports rather than memory, so
 findings of earlier reviews whose line is still in the diff count too (§3.3).
 The diff is fetched once per review (`PlatformWriter::diff`, parsed by
-`henk_domain::diff`) and handed to lanes per file with line numbers; a lane
+`henk_domain::diff`, minus the files `review.ignore` matches, see
+`henk_domain::ignore`) and handed to lanes per file with line numbers; a lane
 that ends without opening every changed file is asked once to look at them,
 and the conversation is kept under a size budget by stubbing old tool
 results (`henk_agent::compact`). Stubbing edits earlier turns, and current

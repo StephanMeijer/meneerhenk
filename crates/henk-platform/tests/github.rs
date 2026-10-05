@@ -244,6 +244,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
             outcome: LaneOutcome::Finished,
         }],
         open_findings: 1,
+        nothing_to_review: false,
     };
     writer
         .finish_review(

@@ -12,6 +12,7 @@ pub mod diff;
 pub mod discord;
 pub mod finding;
 pub mod identity;
+pub mod ignore;
 pub mod mail;
 pub mod marker;
 pub mod plan;
