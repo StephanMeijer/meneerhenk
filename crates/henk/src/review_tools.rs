@@ -281,43 +281,101 @@ impl Tool for ListChangedFiles {
     }
 }
 
-/// `get_file_diff`: one file's hunks with line numbers on both sides.
+/// `get_file_diff`: the hunks of one or more changed files, with line
+/// numbers on both sides.
 pub struct GetFileDiff(pub Arc<DiffFiles>);
+
+/// Characters of diff one `get_file_diff` call returns at most; the files
+/// that would pass it are named so the model can ask for them next. The
+/// first file asked for is always returned.
+const FILE_DIFF_BATCH_CHARS: usize = 40_000;
 
 #[async_trait::async_trait]
 impl Tool for GetFileDiff {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("get_file_diff"),
-            description: "The diff of one changed file, every line numbered: old line number, new line number, then + for added, - for removed, space for context. A finding goes on a line shown here, by its new line number (or old number with side LEFT for a removed line).".to_owned(),
+            description: "The diff of changed files, every line numbered: old line number, new line number, then + for added, - for removed, space for context. Pass several paths at once to read them in one call. A finding goes on a line shown here, by its new line number (or old number with side LEFT for a removed line).".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "A path from list_changed_files"}
-                },
-                "required": ["path"]
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Paths from list_changed_files; several at once"},
+                    "path": {"type": "string", "description": "One path from list_changed_files"}
+                }
             }),
         }
     }
 
     async fn call(&self, args: Value) -> ToolOutput {
-        let Some(path) = arg_str(&args, "path") else {
-            return ToolOutput::error("path is required");
-        };
-        let diff = &self.0.diff;
-        match diff.file(path) {
-            Some(file) => {
-                if let Ok(mut opened) = self.0.opened.lock() {
-                    opened.insert(file.path.clone());
-                }
-                ToolOutput::ok(file.render())
-            }
-            None => ToolOutput::error(format!(
-                "{path} is not part of this change. The changed files are:\n{}",
-                diff.render_list()
-            )),
+        let mut paths: Vec<&str> = args
+            .get("paths")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+        if let Some(path) = arg_str(&args, "path") {
+            paths.insert(0, path);
+        }
+        if paths.is_empty() {
+            return ToolOutput::error("paths (or path) is required");
+        }
+        match render_files(&self.0, &paths, FILE_DIFF_BATCH_CHARS) {
+            Ok(text) => ToolOutput::ok(text),
+            Err(text) => ToolOutput::error(text),
         }
     }
+}
+
+/// The diffs of `paths`, in order, under a header each, until `cap`
+/// characters; unknown paths get a note. Marks every returned file opened.
+/// An error when no path is part of the change.
+fn render_files(files: &DiffFiles, paths: &[&str], cap: usize) -> Result<String, String> {
+    let diff = &files.diff;
+    let mut out = String::new();
+    let mut unknown = Vec::new();
+    let mut left_out = Vec::new();
+    let mut returned = 0_usize;
+    for path in paths {
+        let Some(file) = diff.file(path) else {
+            unknown.push(*path);
+            continue;
+        };
+        let rendered = file.render();
+        if returned > 0 && out.len() + rendered.len() > cap {
+            left_out.push(file.path.as_str());
+            continue;
+        }
+        if returned > 0 {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "== {} ==", file.path);
+        out.push_str(&rendered);
+        returned += 1;
+        if let Ok(mut opened) = files.opened.lock() {
+            opened.insert(file.path.clone());
+        }
+    }
+    if returned == 0 {
+        return Err(format!(
+            "{} is not part of this change. The changed files are:\n{}",
+            unknown.join(", "),
+            diff.render_list()
+        ));
+    }
+    if !unknown.is_empty() {
+        let _ = write!(out, "\nNot part of this change: {}.", unknown.join(", "));
+    }
+    if !left_out.is_empty() {
+        let _ = write!(
+            out,
+            "\nNot included, too long for one call; ask again: {}.",
+            left_out.join(", ")
+        );
+    }
+    Ok(out)
 }
 
 /// `read_file`: a line range of a file at the reviewed commit, numbered.
@@ -911,6 +969,70 @@ diff --git a/README.md b/README.md
             .await;
         assert!(missing.is_error);
         assert!(missing.content.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn get_file_diff_reads_several_files_in_one_call() {
+        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let both = GetFileDiff(Arc::clone(&ctx.files))
+            .call(json!({"paths": ["src/a.rs", "README.md"]}))
+            .await;
+        assert!(!both.is_error, "{both:?}");
+        assert!(
+            both.content.starts_with("== src/a.rs =="),
+            "{}",
+            both.content
+        );
+        assert!(both.content.contains("== README.md =="));
+        assert!(ctx.unopened_files().is_empty(), "both count as opened");
+
+        let mixed = GetFileDiff(Arc::clone(&ctx.files))
+            .call(json!({"paths": ["src/zzz.rs", "README.md"]}))
+            .await;
+        assert!(!mixed.is_error);
+        assert!(
+            mixed
+                .content
+                .ends_with("Not part of this change: src/zzz.rs."),
+            "{}",
+            mixed.content
+        );
+
+        let none = GetFileDiff(Arc::clone(&ctx.files))
+            .call(json!({"paths": ["src/zzz.rs"]}))
+            .await;
+        assert!(none.is_error);
+        assert!(
+            none.content.contains("README.md"),
+            "the file list comes back"
+        );
+
+        assert!(
+            GetFileDiff(Arc::clone(&ctx.files))
+                .call(json!({}))
+                .await
+                .is_error
+        );
+    }
+
+    #[test]
+    fn a_batch_stops_at_the_cap_and_names_what_it_left_out() {
+        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let text = render_files(&ctx.files, &["src/a.rs", "README.md"], 10).unwrap();
+        assert!(
+            text.starts_with("== src/a.rs =="),
+            "the first file always comes"
+        );
+        assert!(!text.contains("== README.md =="));
+        assert!(
+            text.ends_with("Not included, too long for one call; ask again: README.md."),
+            "{text}"
+        );
+        assert_eq!(
+            ctx.unopened_files(),
+            vec!["README.md"],
+            "left out is not opened"
+        );
     }
 
     #[tokio::test]
