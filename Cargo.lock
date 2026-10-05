@@ -590,7 +590,6 @@ dependencies = [
  "http-body-util",
  "rand",
  "reqwest",
- "rustls",
  "secrecy",
  "serde",
  "serde_json",
