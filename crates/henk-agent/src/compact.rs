@@ -7,6 +7,12 @@
 //! the tool again if it needs the content. The system prompt, the opening
 //! messages, the model's own text and the most recent turns are never
 //! touched.
+//!
+//! Stubbing edits earlier turns, and current Claude models bind each
+//! thinking block to the exact history before it: a replayed block after an
+//! edit is refused. So whenever anything is stubbed, every provider-specific
+//! block (thinking) is dropped from the whole conversation. Dropping all of
+//! them is allowed; the model answers on without that earlier reasoning.
 
 use std::fmt::Write as _;
 
@@ -38,8 +44,20 @@ pub fn size(messages: &[ChatMessage]) -> usize {
 /// Brings `messages` under `budget` characters by stubbing old tool
 /// results, oldest first, leaving the last `keep_recent_turns` turns intact.
 /// A turn starts at an assistant message. Returns how many results were
-/// stubbed.
+/// stubbed. When that is more than zero, opaque blocks are dropped too.
 pub fn compact(messages: &mut [ChatMessage], budget: usize, keep_recent_turns: u32) -> usize {
+    let stubbed = stub_old_results(messages, budget, keep_recent_turns);
+    if stubbed > 0 {
+        for message in messages.iter_mut() {
+            message
+                .blocks
+                .retain(|block| !matches!(block, Block::Opaque(_)));
+        }
+    }
+    stubbed
+}
+
+fn stub_old_results(messages: &mut [ChatMessage], budget: usize, keep_recent_turns: u32) -> usize {
     let mut total = size(messages);
     if total <= budget {
         return 0;
@@ -187,6 +205,34 @@ mod tests {
             2,
             "stubs are skipped, the next two go"
         );
+    }
+
+    #[test]
+    fn stubbing_drops_every_thinking_block_and_nothing_else() {
+        let thinking =
+            || Block::Opaque(json!({"type": "thinking", "thinking": "", "signature": "s"}));
+        let mut messages = conversation(&[5000, 5000, 5000]);
+        messages[1].blocks.insert(0, thinking());
+        messages[5].blocks.insert(0, thinking());
+        assert_eq!(compact(&mut messages, 11_000, 1), 1);
+        assert!(
+            messages
+                .iter()
+                .flat_map(|m| &m.blocks)
+                .all(|b| !matches!(b, Block::Opaque(_))),
+            "no thinking block survives an edit"
+        );
+        assert!(matches!(&messages[5].blocks[0], Block::ToolCall(_)));
+    }
+
+    #[test]
+    fn thinking_blocks_stay_when_nothing_is_stubbed() {
+        let mut messages = conversation(&[1000]);
+        messages[1]
+            .blocks
+            .insert(0, Block::Opaque(json!({"type": "thinking"})));
+        assert_eq!(compact(&mut messages, 100_000, 1), 0);
+        assert!(matches!(&messages[1].blocks[0], Block::Opaque(_)));
     }
 
     #[test]
