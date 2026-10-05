@@ -14,6 +14,7 @@ mod plan_tools;
 mod recorder;
 mod review;
 mod review_tools;
+mod runs;
 mod server;
 mod urls;
 mod web_fetch;
@@ -85,6 +86,20 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Read run records from the local database.
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsCommand {
+    /// Print one run: lanes, findings and timeline.
+    Show {
+        /// The run id, such as `r-20261005-1a2b3c4d`.
+        run: String,
     },
 }
 
@@ -195,7 +210,30 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Mcp {
             command: McpCommand::Probe { server, show },
         } => cmd_mcp_probe(&cli.config, &server, &show).await,
+        Command::Runs {
+            command: RunsCommand::Show { run },
+        } => cmd_runs_show(&cli.config, &run),
     }
+}
+
+fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let store = henk_store::RunStore::open(Path::new(&settings.server.database_path))?;
+    let id = henk_domain::run::RunId::parse(run)?;
+    let record = store
+        .run(&id)
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| anyhow!("no run {run} in {}", settings.server.database_path))?;
+    print!(
+        "{}",
+        runs::render(
+            &record,
+            &store.lanes(&id)?,
+            &store.findings(&id)?,
+            &store.events(&id)?
+        )
+    );
+    Ok(())
 }
 
 async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow::Result<()> {
@@ -210,6 +248,8 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
         .planning
         .as_ref()
         .map(|p| p.requester_id.to_string());
+    let run = ids::new_run_id();
+    println!("run {run}");
     let report = review::run_review(
         &app,
         review::ReviewRequest {
@@ -218,12 +258,13 @@ async fn cmd_review(config: &Path, url: &str, commit: Option<String>) -> anyhow:
             trigger: "cli".to_owned(),
             requester,
             acknowledge: None,
-            run: None,
+            run: Some(run.clone()),
         },
         CancellationToken::new(),
     )
-    .await?;
-    println!("run {}", report.run);
+    .await
+    .with_context(|| format!("run {run}"))?;
+    debug_assert_eq!(report.run, run);
     if let Some(summary) = report.summary {
         println!("{summary}");
     }

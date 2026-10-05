@@ -192,6 +192,23 @@ pub struct LaneRecord {
     pub error: Option<String>,
 }
 
+/// One recorded finding action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingRecord {
+    /// RFC 3339.
+    pub at: String,
+    /// The lane.
+    pub lane: String,
+    /// File path.
+    pub path: String,
+    /// Line number.
+    pub line: u32,
+    /// The platform comment id.
+    pub comment_id: String,
+    /// `posted`, `improved` or `refused`.
+    pub action: String,
+}
+
 /// One event on a run's timeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
@@ -492,6 +509,31 @@ impl RunStore {
                 params![run.as_str(), lane, path, line_number, comment_id, action.as_str(), now()],
             )?;
             Ok(())
+        })
+    }
+
+    /// The finding actions of a run, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    pub fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT created_at, lane, path, line, comment_id, action FROM findings WHERE run_id = ?1 ORDER BY id",
+            )?;
+            let rows = statement.query_map(params![run.as_str()], |row| {
+                Ok(FindingRecord {
+                    at: row.get(0)?,
+                    lane: row.get(1)?,
+                    path: row.get(2)?,
+                    line: row.get(3)?,
+                    comment_id: row.get(4)?,
+                    action: row.get(5)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
         })
     }
 
@@ -877,6 +919,19 @@ mod tests {
         assert_eq!(lanes[0].input_tokens, 1000);
         assert_eq!(lanes[1].error.as_deref(), Some("timeout"));
         assert_eq!(store.events(&run.id).unwrap()[0].message, "started");
+        let findings = store.findings(&run.id).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].lane, "a");
+        assert_eq!(findings[0].path, "src/x.rs");
+        assert_eq!(findings[0].line, 12);
+        assert_eq!(findings[0].comment_id, "c1");
+        assert_eq!(findings[0].action, "posted");
+        assert!(
+            store
+                .findings(&RunId::parse("r-none").unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
