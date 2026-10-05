@@ -31,7 +31,7 @@ flowchart LR
         COORD["Coordinator<br/>one review per PR at a time"]
         REV["Review orchestrator<br/>lanes in parallel"]
         PLAN["Planner"]
-        DB[("SQLite<br/>run records")]
+        DB[("SQLite or PostgreSQL<br/>run records")]
     end
     subgraph children["Child processes, started by Henk"]
         GHR["github-mcp-server<br/>read-only toolsets"]
@@ -93,7 +93,7 @@ flowchart TB
     SESSION["henk-session<br/>SessionSpec, run_session, guarded platform tools"]
     AGENT["henk-agent<br/>the tool-calling loop, prompts"]
     PLATFORM["henk-platform<br/>webhooks, GitHub App, writers"]
-    STORE["henk-store<br/>SQLite run records"]
+    STORE["henk-store<br/>run records: SQLite or PostgreSQL"]
     LLM["henk-llm<br/>ModelClient: OpenAI-compatible and Anthropic"]
     MCP["henk-mcp<br/>MCP sessions on rmcp"]
     DOMAIN["henk-domain<br/>the spec's rules<br/>no I/O, no async, no credentials"]
@@ -130,7 +130,7 @@ flowchart TB
 | `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
-| `henk-store` | `store`, `migrations/001_initial.sql` | rusqlite (bundled) |
+| `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
 | `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `web_fetch`, `coordinator`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,

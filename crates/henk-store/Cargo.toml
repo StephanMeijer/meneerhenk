@@ -1,6 +1,6 @@
 [package]
 name = "henk-store"
-description = "SQLite run records: runs, lanes, findings and events"
+description = "Run records in SQLite or PostgreSQL: runs, lanes, findings and events"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,20 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+deadpool-postgres = { workspace = true }
 henk-domain = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+tokio-postgres = { workspace = true }
+tokio-postgres-rustls = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true

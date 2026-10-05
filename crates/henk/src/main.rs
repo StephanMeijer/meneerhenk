@@ -230,25 +230,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_mcp_probe(&cli.config, &server, &show).await,
         Command::Runs {
             command: RunsCommand::Show { run },
-        } => cmd_runs_show(&cli.config, &run),
+        } => cmd_runs_show(&cli.config, &run).await,
     }
 }
 
-fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
+async fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
-    let store = henk_store::RunStore::open(Path::new(&settings.server.database_path))?;
+    let store = app::open_store(&settings.database).await?;
     let id = henk_domain::run::RunId::parse(run)?;
     let record = store
         .run(&id)
+        .await
         .map_err(anyhow::Error::from)?
-        .ok_or_else(|| anyhow!("no run {run} in {}", settings.server.database_path))?;
+        .ok_or_else(|| anyhow!("no run {run} in {}", settings.database.describe()))?;
     print!(
         "{}",
         runs::render(
             &record,
-            &store.lanes(&id)?,
-            &store.findings(&id)?,
-            &store.events(&id)?
+            &store.lanes(&id).await?,
+            &store.findings(&id).await?,
+            &store.events(&id).await?
         )
     );
     Ok(())

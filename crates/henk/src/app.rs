@@ -10,17 +10,17 @@ use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::GitLabWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
-use henk_store::RunStore;
+use henk_store::{PgStore, RunStore, SqliteStore};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Settings;
+use crate::config::{DatabaseConfig, Settings};
 
 /// The shared application state.
 pub struct App {
     /// Validated configuration.
     pub settings: Settings,
     /// Run records.
-    pub store: Arc<RunStore>,
+    pub store: Arc<dyn RunStore>,
     /// Model clients by configured id.
     pub models: BTreeMap<String, Arc<dyn ModelClient>>,
     /// The GitHub writer, when GitHub is configured.
@@ -52,6 +52,28 @@ pub fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// Opens the configured run store. A `PostgreSQL` URL holds a password, so
+/// it is read from its environment variable here (§8.4) and never shown.
+///
+/// # Errors
+///
+/// Returns an error when the variable is unset or the store cannot be opened.
+pub async fn open_store(database: &DatabaseConfig) -> anyhow::Result<Arc<dyn RunStore>> {
+    match database {
+        DatabaseConfig::Sqlite { path } => Ok(Arc::new(
+            SqliteStore::open(Path::new(path)).with_context(|| format!("opening {path}"))?,
+        )),
+        DatabaseConfig::Postgres { url_env } => {
+            let url = env_var(url_env)
+                .ok_or_else(|| anyhow!("environment variable {url_env} is not set"))?;
+            let place = henk_store::describe_url(&url)?;
+            Ok(Arc::new(PgStore::connect(&url).await.with_context(
+                || format!("connecting to PostgreSQL at {place}"),
+            )?))
+        }
+    }
+}
+
 impl App {
     /// Builds the application: opens the store, builds every configured
     /// model client and the GitHub writer. Secrets are read from the
@@ -62,12 +84,11 @@ impl App {
     /// Returns an error naming the first missing secret or unusable setting.
     pub async fn build(settings: Settings, database: Option<&Path>) -> anyhow::Result<Self> {
         henk_llm::ensure_tls_provider();
-        let store = match database {
-            Some(path) => {
-                RunStore::open(path).with_context(|| format!("opening {}", path.display()))?
-            }
-            None => RunStore::open(Path::new(&settings.server.database_path))
-                .with_context(|| format!("opening {}", settings.server.database_path))?,
+        let store: Arc<dyn RunStore> = match database {
+            Some(path) => Arc::new(
+                SqliteStore::open(path).with_context(|| format!("opening {}", path.display()))?,
+            ),
+            None => open_store(&settings.database).await?,
         };
 
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
@@ -117,7 +138,7 @@ impl App {
 
         Ok(Self {
             settings,
-            store: Arc::new(store),
+            store,
             models,
             github,
             gitlab,

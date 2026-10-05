@@ -90,17 +90,19 @@ pub async fn run_plan(
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
     let requester = planning.requester_id;
-    app.store.create_run(&NewRun {
-        id: run.clone(),
-        kind: RunKind::Plan,
-        platform,
-        repo: request.target.repo.path(),
-        target: request.target.number,
-        commit: None,
-        requester: Some(requester.to_string()),
-        trigger: request.trigger.clone(),
-        link: link.clone(),
-    })?;
+    app.store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Plan,
+            platform,
+            repo: request.target.repo.path(),
+            target: request.target.number,
+            commit: None,
+            requester: Some(requester.to_string()),
+            trigger: request.trigger.clone(),
+            link: link.clone(),
+        })
+        .await?;
     info!(run = %run, "planning started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
 
@@ -133,7 +135,7 @@ pub async fn run_plan(
     .await;
 
     if result.is_err() && app.shutdown.is_cancelled() {
-        return end_interrupted(app, &run);
+        return end_interrupted(app, &run).await;
     }
 
     let (plan, changes) = match context.state.lock() {
@@ -213,7 +215,8 @@ async fn finish_plan(
                 }
             }
             app.store
-                .finish_run(run, RunStatus::Finished, Some("plan written"), None)?;
+                .finish_run(run, RunStatus::Finished, Some("plan written"), None)
+                .await?;
             info!(run = %run, changes = changes.len(), "planning ended");
             Ok(PlanReport {
                 run: run.clone(),
@@ -242,7 +245,8 @@ async fn finish_plan(
                 error!(%post_error, "could not post the failure comment");
             }
             app.store
-                .finish_run(run, RunStatus::Failed, None, Some(&reason))?;
+                .finish_run(run, RunStatus::Failed, None, Some(&reason))
+                .await?;
             Err(anyhow!("planning failed: {reason}"))
         }
     }
@@ -250,10 +254,11 @@ async fn finish_plan(
 
 /// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
 /// posted; the run ends with the reason (#7).
-fn end_interrupted(app: &App, run: &RunId) -> anyhow::Result<PlanReport> {
+async fn end_interrupted(app: &App, run: &RunId) -> anyhow::Result<PlanReport> {
     warn!(run = %run, "planning interrupted");
     app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))?;
+        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))
+        .await?;
     Err(Interrupted.into())
 }
 
@@ -355,7 +360,7 @@ async fn plan_body(
         continuation: None,
         turn_warning: None,
     };
-    let outcome = run_session(&app.store, &context.run, spec, cancel).await;
+    let outcome = run_session(app.store.as_ref(), &context.run, spec, cancel).await;
     match outcome.stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
         StopCause::Timeout => Err(anyhow!(

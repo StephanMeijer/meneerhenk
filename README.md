@@ -68,7 +68,7 @@ Anthropic Messages API. Lanes and their models are configuration.
 | `henk-session` | One way to run a model session: `SessionSpec`, `run_session` with run bookkeeping, scope-guarded platform tools |
 | `henk-events` | The event model, the webhook parsers, the bus that delivers events to listeners, and the local record of both |
 | `henk-platform` | Webhook verification and parsing, GitHub App auth and API, the GitHub and GitLab writers for pull requests and issues |
-| `henk-store` | SQLite run records: runs, lanes, findings, events |
+| `henk-store` | Run records in SQLite or PostgreSQL: runs, lanes, findings, events |
 | `henk` | The binary: configuration, hooks, listeners, review and planning orchestration, coordinator, HTTP server, CLI |
 
 ## Build and test
@@ -102,8 +102,20 @@ OpenBao.
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
+| `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
 | `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
+
+Run records live in one SQLite file by default (`[database] backend =
+"sqlite"`, `path`). With `backend = "postgres"` they go to a PostgreSQL
+database instead; `url_env` names the variable holding the URL, for example
+`postgres://henk:...@db.internal/henk?sslmode=verify-full`. TLS is rustls
+with the platform's certificate store, and `sslmode` works as usual. Henk
+creates and migrates the schema on start, safely when several processes
+start at once. A new PostgreSQL database starts empty: earlier SQLite
+records stay in their file, readable with `henk runs show` by pointing
+`[database]` back at it. `server.database_path` still works for SQLite and
+`config check` calls it deprecated.
 
 Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
 the list (see `henk.example.toml`), and a change made only of such files is
@@ -234,7 +246,7 @@ henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
-henk runs show r-20261005-1a2b3c4d                 # a run from the local database
+henk runs show r-20261005-1a2b3c4d                 # a run from the configured database
 ```
 
 In serve mode everything is an event. Hooks receive and publish; listeners
@@ -245,7 +257,7 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 `POST /plan {"url", "note"?}` with `Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
 
-Every inbound event is recorded in Henk's own SQLite with what each listener
+Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in
 the service; nothing is sent anywhere. `GET /events/{id}` shows an event and
 its outcomes, `GET /runs/{id}` a run and the events that led to it. Pruning

@@ -31,13 +31,13 @@ pub struct KeepAlive(JoinHandle<()>);
 
 impl KeepAlive {
     /// Starts the heartbeat of `run`. `create_run` already set the first.
-    pub fn start(store: Arc<RunStore>, run: RunId) -> Self {
+    pub fn start(store: Arc<dyn RunStore>, run: RunId) -> Self {
         Self(tokio::spawn(async move {
             let mut every = tokio::time::interval(HEARTBEAT_EVERY);
             every.tick().await;
             loop {
                 every.tick().await;
-                if let Err(error) = store.heartbeat(&run) {
+                if let Err(error) = store.heartbeat(&run).await {
                     warn!(%error, run = %run, "could not record a heartbeat");
                 }
             }
@@ -59,7 +59,7 @@ pub async fn reap_orphans(app: &App) -> usize {
 
 /// Closes the runs still `running` whose last heartbeat is before `cutoff`.
 pub(crate) async fn reap_silent_since(app: &App, cutoff: time::OffsetDateTime) -> usize {
-    let orphans = match app.store.orphaned_runs(cutoff) {
+    let orphans = match app.store.orphaned_runs(cutoff).await {
         Ok(orphans) => orphans,
         Err(error) => {
             warn!(%error, "could not list interrupted runs");
@@ -68,14 +68,15 @@ pub(crate) async fn reap_silent_since(app: &App, cutoff: time::OffsetDateTime) -
     };
     let mut reaped = 0;
     for run in orphans {
-        if let Err(error) = app
-            .store
-            .drop_running_lanes(&run.id, REAPED)
-            .and_then(|()| {
+        let closed = match app.store.drop_running_lanes(&run.id, REAPED).await {
+            Ok(()) => {
                 app.store
                     .finish_run(&run.id, RunStatus::Failed, None, Some(REAPED))
-            })
-        {
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = closed {
             warn!(%error, run = %run.id, "could not close an interrupted run");
             continue;
         }

@@ -1,0 +1,634 @@
+//! `PostgreSQL`: a small connection pool, TLS on rustls with the platform's
+//! roots, and native timestamps. Behaves exactly like [`crate::SqliteStore`];
+//! `tests/conformance.rs` holds both to that.
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use henk_domain::run::{EventId, RunId};
+use rustls_platform_verifier::BuilderVerifierExt as _;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tokio_postgres::Row;
+use tokio_postgres::config::Host;
+use tokio_postgres_rustls::MakeRustlsConnect;
+
+use crate::store::RunStore;
+use crate::types::{
+    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
+    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RawRun, RunRecord, RunStatus, StoreError, kind_str,
+    platform_str,
+};
+
+/// Schema migrations, applied in order. Only ever append.
+const MIGRATIONS: &[&str] = &[include_str!("../migrations/postgres/001_initial.sql")];
+
+/// Serialises migrations between Henk processes starting together.
+const MIGRATION_LOCK: i64 = 0x4865_6e6b; // "Henk"
+
+/// Connections kept open at most. Henk's writes are small and few.
+const POOL_SIZE: usize = 8;
+
+/// How long a new connection may take when the URL does not say.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The run store over `PostgreSQL`.
+#[derive(Debug)]
+pub struct PgStore {
+    pool: Pool,
+}
+
+impl PgStore {
+    /// Connects to the database at `url` and brings its schema up to date.
+    /// `sslmode` in the URL decides TLS, as usual for `PostgreSQL`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the URL does not parse, the server cannot
+    /// be reached, or migrating fails. The URL itself is never in the error.
+    pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        let mut config = parse_url(url)?;
+        if config.get_connect_timeout().is_none() {
+            config.connect_timeout(CONNECT_TIMEOUT);
+        }
+        let manager = Manager::from_config(
+            config,
+            tls()?,
+            ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
+        );
+        let pool = Pool::builder(manager)
+            .max_size(POOL_SIZE)
+            .build()
+            .map_err(|error| StoreError::Connect(error.to_string()))?;
+        let store = Self { pool };
+        store.migrate().await?;
+        Ok(store)
+    }
+
+    async fn migrate(&self) -> Result<(), StoreError> {
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+        transaction
+            .execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
+            .await?;
+        transaction
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS henk_schema_migrations (
+                    version    INTEGER PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                 )",
+            )
+            .await?;
+        let applied: i32 = transaction
+            .query_one(
+                "SELECT COALESCE(MAX(version), 0) FROM henk_schema_migrations",
+                &[],
+            )
+            .await?
+            .try_get(0)?;
+        let known = i32::try_from(MIGRATIONS.len()).unwrap_or(i32::MAX);
+        if applied > known {
+            return Err(StoreError::Schema(format!(
+                "the database is at schema version {applied}, newer than the {known} this Henk knows"
+            )));
+        }
+        for (version, sql) in (1..).zip(MIGRATIONS) {
+            if version <= applied {
+                continue;
+            }
+            transaction.batch_execute(sql).await?;
+            transaction
+                .execute(
+                    "INSERT INTO henk_schema_migrations (version) VALUES ($1)",
+                    &[&version],
+                )
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn client(&self) -> Result<deadpool_postgres::Object, StoreError> {
+        Ok(self.pool.get().await?)
+    }
+}
+
+/// Where `url` points, without user or password: for logs and `henk doctor`.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Connect`] when the URL does not parse.
+pub fn describe_url(url: &str) -> Result<String, StoreError> {
+    let config = parse_url(url)?;
+    let ports = config.get_ports();
+    let hosts: Vec<String> = config
+        .get_hosts()
+        .iter()
+        .enumerate()
+        .map(|(i, host)| {
+            let host = match host {
+                Host::Tcp(name) => name.clone(),
+                Host::Unix(path) => path.display().to_string(),
+            };
+            match ports.get(i).or_else(|| ports.first()) {
+                Some(port) => format!("{host}:{port}"),
+                None => host,
+            }
+        })
+        .collect();
+    Ok(format!(
+        "{}/{}",
+        hosts.join(","),
+        config.get_dbname().unwrap_or("")
+    ))
+}
+
+fn parse_url(url: &str) -> Result<tokio_postgres::Config, StoreError> {
+    // The parse error can quote the URL, and the URL holds the password.
+    url.parse()
+        .map_err(|_| StoreError::Connect("the database URL does not parse".to_owned()))
+}
+
+fn tls() -> Result<MakeRustlsConnect, StoreError> {
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| StoreError::Connect(error.to_string()))?
+    .with_platform_verifier()
+    .map_err(|error| StoreError::Connect(error.to_string()))?
+    .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
+}
+
+fn now() -> OffsetDateTime {
+    OffsetDateTime::now_utc()
+}
+
+fn text(at: OffsetDateTime) -> String {
+    at.format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+/// A caller-supplied RFC 3339 time; empty means now.
+fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, StoreError> {
+    if value.is_empty() {
+        return Ok(now());
+    }
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_owned(),
+    })
+}
+
+fn to_i64(column: &'static str, value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_string(),
+    })
+}
+
+fn to_u64(column: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_string(),
+    })
+}
+
+/// The columns [`raw_run`] reads, in order.
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
+
+fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
+    let at = |i: usize| -> Result<String, StoreError> { Ok(text(row.try_get(i)?)) };
+    let maybe_at = |i: usize| -> Result<Option<String>, StoreError> {
+        Ok(row.try_get::<_, Option<OffsetDateTime>>(i)?.map(text))
+    };
+    Ok(RawRun {
+        id: row.try_get(0)?,
+        kind: row.try_get(1)?,
+        platform: row.try_get(2)?,
+        repo: row.try_get(3)?,
+        target: row.try_get(4)?,
+        commit: row.try_get(5)?,
+        requester: row.try_get(6)?,
+        trigger: row.try_get(7)?,
+        status: row.try_get(8)?,
+        started_at: at(9)?,
+        finished_at: maybe_at(10)?,
+        link: row.try_get(11)?,
+        summary: row.try_get(12)?,
+        error: row.try_get(13)?,
+        heartbeat_at: maybe_at(14)?,
+        check_id: row.try_get(15)?,
+    })
+}
+
+fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
+    let id: String = row.try_get(0)?;
+    let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
+        column: "inbound_events.id",
+        value: id,
+    })?;
+    let target: Option<i64> = row.try_get(5)?;
+    Ok(InboundEvent {
+        id,
+        received_at: text(row.try_get(1)?),
+        source: row.try_get(2)?,
+        kind: row.try_get(3)?,
+        repo: row.try_get(4)?,
+        target: target
+            .map(|t| to_u64("inbound_events.target", t))
+            .transpose()?,
+        payload: row.try_get(6)?,
+    })
+}
+
+#[async_trait]
+impl RunStore for PgStore {
+    async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
+        let started = now();
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link, heartbeat_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $10)",
+                &[
+                    &run.id.as_str(),
+                    &kind_str(run.kind),
+                    &platform_str(run.platform),
+                    &run.repo,
+                    &to_i64("runs.target", run.target)?,
+                    &run.commit,
+                    &run.requester,
+                    &run.trigger,
+                    &RunStatus::Running.as_str(),
+                    &started,
+                    &run.link,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn finish_run(
+        &self,
+        id: &RunId,
+        status: RunStatus,
+        summary: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE runs SET status = $2, finished_at = $3, summary = $4, error = $5 WHERE id = $1",
+                &[&id.as_str(), &status.as_str(), &now(), &summary, &error],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
+        self.client()
+            .await?
+            .query_opt(
+                &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = $1"),
+                &[&id.as_str()],
+            )
+            .await?
+            .map(|row| raw_run(&row)?.into_record())
+            .transpose()
+    }
+
+    async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE runs SET heartbeat_at = $2 WHERE id = $1",
+                &[&id.as_str(), &now()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE runs SET check_id = $2 WHERE id = $1",
+                &[&id.as_str(), &check_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn orphaned_runs(
+        &self,
+        stale_before: OffsetDateTime,
+    ) -> Result<Vec<RunRecord>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {RUN_COLUMNS} FROM runs
+                     WHERE status = $1 AND (heartbeat_at IS NULL OR heartbeat_at < $2)
+                     ORDER BY started_at, id"
+                ),
+                &[&RunStatus::Running.as_str(), &stale_before],
+            )
+            .await?
+            .iter()
+            .map(|row| raw_run(row)?.into_record())
+            .collect()
+    }
+
+    async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE lanes SET status = $2, finished_at = $3, error = $4
+                 WHERE run_id = $1 AND status = $5",
+                &[
+                    &run.as_str(),
+                    &LaneStatus::Dropped.as_str(),
+                    &now(),
+                    &reason,
+                    &LaneStatus::Running.as_str(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO lanes (run_id, name, model, status, started_at) VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &run.as_str(),
+                    &name,
+                    &model,
+                    &LaneStatus::Running.as_str(),
+                    &now(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn finish_lane(
+        &self,
+        run: &RunId,
+        name: &str,
+        status: LaneStatus,
+        turns: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        // Counts beyond i64 cannot happen; saturate like the SQLite store.
+        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        self.client()
+            .await?
+            .execute(
+                "UPDATE lanes SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8
+                 WHERE run_id = $1 AND name = $2",
+                &[
+                    &run.as_str(),
+                    &name,
+                    &status.as_str(),
+                    &count(turns),
+                    &count(input_tokens),
+                    &count(output_tokens),
+                    &now(),
+                    &error,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error FROM lanes WHERE run_id = $1 ORDER BY name",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let status: String = row.try_get(2)?;
+                let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
+                    column: "lanes.status",
+                    value: status,
+                })?;
+                Ok(LaneRecord {
+                    name: row.try_get(0)?,
+                    model: row.try_get(1)?,
+                    status,
+                    turns: to_u64("lanes.turns", row.try_get(3)?)?,
+                    input_tokens: to_u64("lanes.input_tokens", row.try_get(4)?)?,
+                    output_tokens: to_u64("lanes.output_tokens", row.try_get(5)?)?,
+                    error: row.try_get(6)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn record_finding(
+        &self,
+        run: &RunId,
+        lane: &str,
+        path: &str,
+        line_number: u32,
+        comment_id: &str,
+        action: FindingAction,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO findings (run_id, lane, path, line, comment_id, action, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &run.as_str(),
+                    &lane,
+                    &path,
+                    &i64::from(line_number),
+                    &comment_id,
+                    &action.as_str(),
+                    &now(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT created_at, lane, path, line, comment_id, action FROM findings WHERE run_id = $1 ORDER BY id",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let line: i64 = row.try_get(3)?;
+                Ok(FindingRecord {
+                    at: text(row.try_get(0)?),
+                    lane: row.try_get(1)?,
+                    path: row.try_get(2)?,
+                    line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
+                        column: "findings.line",
+                        value: line.to_string(),
+                    })?,
+                    comment_id: row.try_get(4)?,
+                    action: row.try_get(5)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO events (run_id, at, level, message) VALUES ($1, $2, $3, $4)",
+                &[&run.as_str(), &now(), &level, &message],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn events(&self, run: &RunId) -> Result<Vec<EventRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT at, level, message FROM events WHERE run_id = $1 ORDER BY id",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(EventRecord {
+                    at: text(row.try_get(0)?),
+                    level: row.try_get(1)?,
+                    message: row.try_get(2)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn joined(&self, run: &RunId, source: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO requests (run_id, at, source) VALUES ($1, $2, $3)",
+                &[&run.as_str(), &now(), &source],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
+        let payload = event
+            .payload
+            .as_deref()
+            .filter(|p| p.len() <= MAX_PAYLOAD_BYTES);
+        let target = event
+            .target
+            .map(|t| to_i64("inbound_events.target", t))
+            .transpose()?;
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &event.id.as_str(),
+                    &parse_time("inbound_events.received_at", &event.received_at)?,
+                    &event.source,
+                    &event.kind,
+                    &event.repo,
+                    &target,
+                    &payload,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_outcome(&self, outcome: &OutcomeRecord) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO event_outcomes (event_id, listener, outcome, detail, run_id, at) VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &outcome.event_id.as_str(),
+                    &outcome.listener,
+                    &outcome.outcome,
+                    &outcome.detail,
+                    &outcome.run_id,
+                    &parse_time("event_outcomes.at", &outcome.at)?,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
+        self.client()
+            .await?
+            .query_opt(
+                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events WHERE id = $1",
+                &[&id.as_str()],
+            )
+            .await?
+            .map(|row| inbound_event(&row))
+            .transpose()
+    }
+
+    async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT listener, outcome, detail, run_id, at FROM event_outcomes WHERE event_id = $1 ORDER BY id",
+                &[&id.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(OutcomeRecord {
+                    event_id: id.clone(),
+                    listener: row.try_get(0)?,
+                    outcome: row.try_get(1)?,
+                    detail: row.try_get(2)?,
+                    run_id: row.try_get(3)?,
+                    at: text(row.try_get(4)?),
+                })
+            })
+            .collect()
+    }
+
+    async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError> {
+        // One query, unlike SQLite's lookup per id: here each lookup is a round trip.
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT e.id, e.received_at, e.source, e.kind, e.repo, e.target, e.payload
+                 FROM inbound_events e
+                 WHERE e.id IN (SELECT o.event_id FROM event_outcomes o WHERE o.run_id = $1)
+                 ORDER BY e.received_at, e.id",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter().map(inbound_event).collect()
+    }
+}

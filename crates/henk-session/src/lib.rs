@@ -92,13 +92,13 @@ impl SessionOutcome {
 /// Runs one session and records it as a lane of `run`.
 #[instrument(skip_all, fields(run = %run, session = %spec.name, model = %spec.model.model()))]
 pub async fn run_session(
-    store: &RunStore,
+    store: &dyn RunStore,
     run: &RunId,
     spec: SessionSpec,
     cancel: CancellationToken,
 ) -> SessionOutcome {
     let model_name = spec.model.model().to_owned();
-    if let Err(error) = store.start_lane(run, &spec.name, &model_name) {
+    if let Err(error) = store.start_lane(run, &spec.name, &model_name).await {
         tracing::warn!(%error, "could not record the lane start");
     }
     let system = spec.system;
@@ -135,15 +135,18 @@ pub async fn run_session(
         StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
         StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
     };
-    if let Err(store_error) = store.finish_lane(
-        run,
-        &spec.name,
-        status,
-        u64::from(outcome.turns),
-        outcome.usage.input_tokens,
-        outcome.usage.output_tokens,
-        error.as_deref(),
-    ) {
+    if let Err(store_error) = store
+        .finish_lane(
+            run,
+            &spec.name,
+            status,
+            u64::from(outcome.turns),
+            outcome.usage.input_tokens,
+            outcome.usage.output_tokens,
+            error.as_deref(),
+        )
+        .await
+    {
         tracing::warn!(error = %store_error, "could not record the lane end");
     }
     let last_words: String = outcome.final_text.chars().take(200).collect();
@@ -152,14 +155,16 @@ pub async fn run_session(
     } else {
         "info"
     };
-    let _ = store.event(
-        run,
-        level,
-        &format!(
-            "{}: {:?} after {} turns; last words: {last_words}",
-            spec.name, outcome.stop, outcome.turns
-        ),
-    );
+    let _ = store
+        .event(
+            run,
+            level,
+            &format!(
+                "{}: {:?} after {} turns; last words: {last_words}",
+                spec.name, outcome.stop, outcome.turns
+            ),
+        )
+        .await;
     info!(turns = outcome.turns, ?status, "session ended");
     SessionOutcome {
         stop: outcome.stop,
@@ -245,8 +250,8 @@ mod tests {
         RunId::parse("r-1").unwrap()
     }
 
-    fn store_with_run() -> RunStore {
-        let store = RunStore::in_memory().unwrap();
+    async fn store_with_run() -> henk_store::SqliteStore {
+        let store = henk_store::SqliteStore::in_memory().unwrap();
         store
             .create_run(&henk_store::NewRun {
                 id: run_id(),
@@ -259,6 +264,7 @@ mod tests {
                 trigger: "test".into(),
                 link: "l".into(),
             })
+            .await
             .unwrap();
         store
     }
@@ -284,23 +290,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_session_records_a_lane_row() {
-        let store = store_with_run();
+        let store = store_with_run().await;
         let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new("m", [text("done")]));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
         assert!(outcome.finished());
         assert_eq!(outcome.final_text, "done");
-        let lanes = store.lanes(&run_id()).unwrap();
+        let lanes = store.lanes(&run_id()).await.unwrap();
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].name, "planner");
         assert_eq!(lanes[0].model, "m");
         assert_eq!(lanes[0].status, LaneStatus::Finished);
         assert_eq!(lanes[0].input_tokens, 12);
-        assert_eq!(store.events(&run_id()).unwrap().len(), 1);
+        assert_eq!(store.events(&run_id()).await.unwrap().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_time_limit_finishes_the_session_instead_of_dropping_it() {
-        let store = store_with_run();
+        let store = store_with_run().await;
         let model: Arc<dyn ModelClient> =
             Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
         let mut spec = spec(model);
@@ -309,9 +315,9 @@ mod tests {
         assert!(matches!(outcome.stop, StopCause::Timeout));
         assert!(outcome.finished());
         assert_eq!(outcome.error, None);
-        let lanes = store.lanes(&run_id()).unwrap();
+        let lanes = store.lanes(&run_id()).await.unwrap();
         assert_eq!(lanes[0].status, LaneStatus::Finished);
-        let events = store.events(&run_id()).unwrap();
+        let events = store.events(&run_id()).await.unwrap();
         assert_eq!(events[0].level, "warn");
         assert!(
             events[0].message.contains("Timeout"),
@@ -322,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_error_drops_the_session_with_the_error_text() {
-        let store = store_with_run();
+        let store = store_with_run().await;
         let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new(
             "m",
             [Err(LlmError::Unauthorized {
@@ -334,7 +340,7 @@ mod tests {
         assert!(!outcome.finished());
         assert_eq!(outcome.status, LaneStatus::Dropped);
         assert!(outcome.error.as_deref().unwrap_or("").contains("401"));
-        let lanes = store.lanes(&run_id()).unwrap();
+        let lanes = store.lanes(&run_id()).await.unwrap();
         assert_eq!(lanes[0].status, LaneStatus::Dropped);
     }
 

@@ -33,20 +33,21 @@ pub trait Hook: Send + Sync + 'static {
 
 /// Local persistence of events and outcomes. Implemented by the binary over
 /// its run store; recordings never leave the service.
+#[async_trait::async_trait]
 pub trait EventRecorder: Send + Sync {
     /// Records an event before any listener sees it.
     ///
     /// # Errors
     ///
     /// Returns a description of the storage failure. Delivery continues.
-    fn record_event(&self, event: &Event) -> Result<(), String>;
+    async fn record_event(&self, event: &Event) -> Result<(), String>;
 
     /// Records what one listener did with an event.
     ///
     /// # Errors
     ///
     /// Returns a description of the storage failure.
-    fn record_outcome(
+    async fn record_outcome(
         &self,
         event: &EventId,
         listener: &str,
@@ -58,12 +59,13 @@ pub trait EventRecorder: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoRecorder;
 
+#[async_trait::async_trait]
 impl EventRecorder for NoRecorder {
-    fn record_event(&self, _: &Event) -> Result<(), String> {
+    async fn record_event(&self, _: &Event) -> Result<(), String> {
         Ok(())
     }
 
-    fn record_outcome(&self, _: &EventId, _: &str, _: &Handled) -> Result<(), String> {
+    async fn record_outcome(&self, _: &EventId, _: &str, _: &Handled) -> Result<(), String> {
         Ok(())
     }
 }
@@ -104,7 +106,7 @@ impl EventBus {
     /// returns each outcome. Tests call this and assert on the result.
     #[instrument(skip_all, fields(event = %event.id, kind = event.kind.name(), source = event.source.name()))]
     pub async fn deliver(&self, event: Event) -> Vec<(&'static str, Handled)> {
-        if let Err(error) = self.recorder.record_event(&event) {
+        if let Err(error) = self.recorder.record_event(&event).await {
             warn!(%error, "could not record the event");
         }
         let event = Arc::new(event);
@@ -126,7 +128,11 @@ impl EventBus {
                     Handled::Failed(format!("listener panicked: {error}")),
                 ),
             };
-            if let Err(error) = self.recorder.record_outcome(&event.id, name, &outcome) {
+            if let Err(error) = self
+                .recorder
+                .record_outcome(&event.id, name, &outcome)
+                .await
+            {
                 warn!(%error, listener = name, "could not record the outcome");
             }
             info!(listener = name, outcome = outcome.name(), detail = %outcome.detail(), "handled");
@@ -169,13 +175,14 @@ mod tests {
         outcomes: Mutex<Vec<(String, String, String)>>,
     }
 
+    #[async_trait::async_trait]
     impl EventRecorder for MemoryRecorder {
-        fn record_event(&self, event: &Event) -> Result<(), String> {
+        async fn record_event(&self, event: &Event) -> Result<(), String> {
             self.events.lock().unwrap().push(event.id.to_string());
             Ok(())
         }
 
-        fn record_outcome(
+        async fn record_outcome(
             &self,
             event: &EventId,
             listener: &str,

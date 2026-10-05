@@ -58,6 +58,36 @@ jobs:
       # config.rs embeds it; it has to load and validate.
       - run: cargo run --locked -- --config henk.example.toml config check
 
+  # The run store's conformance suite against a real PostgreSQL. These tests
+  # are #[ignore]d so the plain `cargo test` above needs no database; here
+  # they run with HENK_TEST_DATABASE_URL set. Each test makes and drops its
+  # own schema.
+  postgres:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: docker.io/library/postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+        env:
+          POSTGRES_PASSWORD: henk-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      HENK_TEST_DATABASE_URL: postgres://postgres:henk-ci@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test -p henk-store --locked -- --ignored
+
   # Fails on a dependency a crate declares but never names. Neither the
   # compiler nor clippy notices one, and each is compile time and attack
   # surface for nothing. cargo-machete reads sources and manifests and

@@ -117,17 +117,19 @@ pub async fn run_review(
 
     let (info, commit) = preflight(app, &writer, &request).await?;
 
-    app.store.create_run(&NewRun {
-        id: run.clone(),
-        kind: RunKind::Review,
-        platform,
-        repo: request.target.repo.path(),
-        target: request.target.number,
-        commit: Some(commit.as_str().to_owned()),
-        requester: request.requester.clone(),
-        trigger: request.trigger.clone(),
-        link: link.clone(),
-    })?;
+    app.store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform,
+            repo: request.target.repo.path(),
+            target: request.target.number,
+            commit: Some(commit.as_str().to_owned()),
+            requester: request.requester.clone(),
+            trigger: request.trigger.clone(),
+            link: link.clone(),
+        })
+        .await?;
     info!(run = %run, commit = %commit.short(), "review started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
 
@@ -142,7 +144,7 @@ pub async fn run_review(
     let handle = match writer.start_review(&request.target, &commit, &link).await {
         Ok(handle) => {
             if let Some(ReviewHandle(check_id)) = &handle
-                && let Err(error) = app.store.set_check(&run, check_id)
+                && let Err(error) = app.store.set_check(&run, check_id).await
             {
                 warn!(%error, "could not store the check id");
             }
@@ -177,7 +179,9 @@ pub async fn run_review(
             {
                 error!(%error, "could not finish the check");
             }
-            app.store.finish_run(&run, status, Some(&summary), None)?;
+            app.store
+                .finish_run(&run, status, Some(&summary), None)
+                .await?;
             info!(run = %run, open = outcome.open_findings, "review ended");
             Ok(ReviewReport {
                 run,
@@ -257,7 +261,8 @@ async fn report_superseded(
         error!(%finish_error, "could not finish the check of a superseded review");
     }
     app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&Superseded.to_string()))?;
+        .finish_run(run, RunStatus::Failed, None, Some(&Superseded.to_string()))
+        .await?;
     Ok(())
 }
 
@@ -284,7 +289,8 @@ async fn report_interrupted(
         error!(%finish_error, "could not finish the check of an interrupted review");
     }
     app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))?;
+        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))
+        .await?;
     Ok(())
 }
 
@@ -332,7 +338,8 @@ async fn report_failure(
         error!(%finish_error, "could not finish the check after failure");
     }
     app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&message))?;
+        .finish_run(run, RunStatus::Failed, None, Some(&message))
+        .await?;
     Ok(())
 }
 
@@ -518,7 +525,7 @@ async fn withheld_tools(
                 run,
                 "info",
                 "code search returns nothing for this repository (not indexed); search_code withheld from lanes",
-            );
+            ).await;
             vec!["search_code"]
         }
         _ => Vec::new(),
@@ -550,15 +557,18 @@ async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc
         .files()
         .iter()
         .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
-    let _ = app.store.event(
-        run,
-        "info",
-        &format!(
-            "diff: {} files, +{additions} -{deletions}; {} not reviewed (review.ignore)",
-            diff.files().len(),
-            diff.ignored().len()
-        ),
-    );
+    let _ = app
+        .store
+        .event(
+            run,
+            "info",
+            &format!(
+                "diff: {} files, +{additions} -{deletions}; {} not reviewed (review.ignore)",
+                diff.files().len(),
+                diff.ignored().len()
+            ),
+        )
+        .await;
     Ok(Arc::new(diff))
 }
 
@@ -576,19 +586,21 @@ async fn spawn_lanes(
         let cancel = lanes.cancel.clone();
         let context = Arc::clone(&spec.context);
         set.spawn(async move {
-            let outcome = run_session(&store, &run_id, spec.session, cancel).await;
+            let outcome = run_session(store.as_ref(), &run_id, spec.session, cancel).await;
             let unopened = context.unopened_files();
             if !unopened.is_empty() {
                 let shown: Vec<&str> = unopened.iter().take(20).map(String::as_str).collect();
-                let _ = store.event(
-                    &run_id,
-                    "warn",
-                    &format!(
-                        "{lane_name}: never asked the diff of {} changed file(s): {}",
-                        unopened.len(),
-                        shown.join(", ")
-                    ),
-                );
+                let _ = store
+                    .event(
+                        &run_id,
+                        "warn",
+                        &format!(
+                            "{lane_name}: never asked the diff of {} changed file(s): {}",
+                            unopened.len(),
+                            shown.join(", ")
+                        ),
+                    )
+                    .await;
             }
             // The lane row (henk-session) says finished for a time limit;
             // the summary distinguishes it as stopped, from `stop`.
@@ -854,7 +866,7 @@ mod lifecycle_tests {
     use henk_llm::testing::ScriptedClient;
     use henk_llm::{Completion, ModelClient, StopReason, Usage};
     use henk_mcp::testing::{FakeServer, echo_behaviour};
-    use henk_store::{LaneStatus, RunStore};
+    use henk_store::LaneStatus;
 
     use super::*;
     use crate::config::Config;
@@ -931,7 +943,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         Fixture {
             app: App {
                 settings,
-                store: Arc::new(RunStore::in_memory().unwrap()),
+                store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
                 models,
                 github: None,
                 gitlab: None,
@@ -978,12 +990,14 @@ lanes = [{ name = "lane-a", model = "m" }]
             .unwrap();
         assert_eq!(report.summary.as_deref(), Some("No issues found."));
         assert_eq!(posted_kinds(&f.writer), vec![Some(MarkerKind::Summary)]);
-        let finished = f.writer.finished.lock().unwrap();
-        assert_eq!(finished.len(), 1, "the check is closed once");
-        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Success);
-        let record = f.app.store.run(&run).unwrap().unwrap();
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1, "the check is closed once");
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Success);
+        }
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished);
-        let lanes = f.app.store.lanes(&run).unwrap();
+        let lanes = f.app.store.lanes(&run).await.unwrap();
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].status, LaneStatus::Finished);
     }
@@ -998,11 +1012,13 @@ lanes = [{ name = "lane-a", model = "m" }]
             .unwrap_err();
         assert!(format!("{error:#}").contains("diff is empty"), "{error:#}");
         assert_eq!(posted_kinds(&f.writer), vec![Some(MarkerKind::Failure)]);
-        let finished = f.writer.finished.lock().unwrap();
-        assert_eq!(finished.len(), 1);
-        assert!(finished[0].lanes.is_empty());
-        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
-        let record = f.app.store.run(&run).unwrap().unwrap();
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1);
+            assert!(finished[0].lanes.is_empty());
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
+        }
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert!(record.error.unwrap().contains("diff is empty"));
     }
@@ -1048,9 +1064,9 @@ lanes = [{ name = "lane-a", model = "m" }]
             1,
             "the check is closed"
         );
-        let record = f.app.store.run(&run).unwrap().unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_ne!(record.status, RunStatus::Running);
-        for lane in f.app.store.lanes(&run).unwrap() {
+        for lane in f.app.store.lanes(&run).await.unwrap() {
             assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
         }
     }
@@ -1066,14 +1082,16 @@ lanes = [{ name = "lane-a", model = "m" }]
             f.writer.replies.lock().unwrap().is_empty(),
             "nothing posted"
         );
-        let finished = f.writer.finished.lock().unwrap();
-        assert_eq!(finished.len(), 1, "the check is closed");
-        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
-        assert_eq!(finished[0].headline(), "Review interrupted.");
-        let record = f.app.store.run(&run).unwrap().unwrap();
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1, "the check is closed");
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
+            assert_eq!(finished[0].headline(), "Review interrupted.");
+        }
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert_eq!(record.error.as_deref(), Some("interrupted"));
-        for lane in f.app.store.lanes(&run).unwrap() {
+        for lane in f.app.store.lanes(&run).await.unwrap() {
             assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
         }
     }
@@ -1101,25 +1119,25 @@ lanes = [{ name = "lane-a", model = "m" }]
             RunId::parse("r-dead").unwrap(),
             RunId::parse("r-live").unwrap(),
         );
-        f.app.store.create_run(&new_run(&dead)).unwrap();
-        f.app.store.set_check(&dead, "4242").unwrap();
-        f.app.store.start_lane(&dead, "lane-a", "m").unwrap();
+        f.app.store.create_run(&new_run(&dead)).await.unwrap();
+        f.app.store.set_check(&dead, "4242").await.unwrap();
+        f.app.store.start_lane(&dead, "lane-a", "m").await.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let cutoff = time::OffsetDateTime::now_utc();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        f.app.store.create_run(&new_run(&live)).unwrap();
-        f.app.store.start_lane(&live, "lane-a", "m").unwrap();
+        f.app.store.create_run(&new_run(&live)).await.unwrap();
+        f.app.store.start_lane(&live, "lane-a", "m").await.unwrap();
 
         assert_eq!(crate::liveness::reap_silent_since(&f.app, cutoff).await, 1);
 
-        let record = f.app.store.run(&dead).unwrap().unwrap();
+        let record = f.app.store.run(&dead).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert_eq!(
             record.error.as_deref(),
             Some("interrupted: the process ended")
         );
         assert_eq!(
-            f.app.store.lanes(&dead).unwrap()[0].status,
+            f.app.store.lanes(&dead).await.unwrap()[0].status,
             LaneStatus::Dropped
         );
         assert_eq!(
@@ -1131,10 +1149,10 @@ lanes = [{ name = "lane-a", model = "m" }]
             "Review interrupted."
         );
 
-        let untouched = f.app.store.run(&live).unwrap().unwrap();
+        let untouched = f.app.store.run(&live).await.unwrap().unwrap();
         assert_eq!(untouched.status, RunStatus::Running);
         assert_eq!(
-            f.app.store.lanes(&live).unwrap()[0].status,
+            f.app.store.lanes(&live).await.unwrap()[0].status,
             LaneStatus::Running
         );
     }
@@ -1150,9 +1168,11 @@ lanes = [{ name = "lane-a", model = "m" }]
             !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),
             "no failure comment"
         );
-        let finished = f.writer.finished.lock().unwrap();
-        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
-        let record = f.app.store.run(&run).unwrap().unwrap();
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+        }
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert_eq!(
             record.error.as_deref(),
