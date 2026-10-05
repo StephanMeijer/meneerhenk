@@ -29,6 +29,19 @@ pub fn clean(schema: &Value) -> Value {
     Value::Object(object)
 }
 
+/// OpenAI rejects a function description over 1024 characters, and several
+/// MCP servers ship longer ones. Cuts at a character boundary with a marker.
+#[must_use]
+pub fn cap_description(description: &str) -> String {
+    const LIMIT: usize = 1024;
+    const MARKER: &str = " [...]";
+    if description.chars().count() <= LIMIT {
+        return description.to_owned();
+    }
+    let keep: String = description.chars().take(LIMIT - MARKER.len()).collect();
+    format!("{}{MARKER}", keep.trim_end())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]

@@ -87,7 +87,8 @@ pub struct ToolDef {
 }
 
 /// The arguments of a tool call as the model produced them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolArguments {
     /// Valid JSON.
     Parsed(Value),
@@ -97,7 +98,7 @@ pub enum ToolArguments {
 }
 
 /// One tool call in an assistant message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolCall {
     /// The provider's id for this call; tool results refer to it.
     pub id: String,
@@ -108,7 +109,7 @@ pub struct ToolCall {
 }
 
 /// The result of one tool call, sent back in a user message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolResult {
     /// The id of the call this answers.
     pub call_id: String,
@@ -120,7 +121,8 @@ pub struct ToolResult {
 }
 
 /// One block of a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Block {
     /// Plain text.
     Text(String),
@@ -133,8 +135,8 @@ pub enum Block {
     Opaque(Value),
 }
 
-/// One message in the conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One message in the conversation. Serialises for local transcripts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChatMessage {
     /// Who wrote it.
     pub role: Role,
@@ -225,7 +227,8 @@ pub struct CompletionRequest {
 }
 
 /// Why the model stopped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// A normal end of turn.
     EndTurn,
@@ -238,7 +241,7 @@ pub enum StopReason {
 }
 
 /// Token usage of one completion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Usage {
     /// Tokens in the prompt.
     pub input_tokens: u64,

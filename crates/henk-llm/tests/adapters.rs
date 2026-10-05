@@ -80,6 +80,126 @@ fn conversation() -> Vec<ChatMessage> {
 // ---- OpenAI ----------------------------------------------------------------
 
 #[test]
+fn openai_treats_empty_arguments_as_an_empty_object() {
+    let response = json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "list_existing_findings", "arguments": ""}},
+                    {"id": "c2", "type": "function", "function": {"name": "list_existing_findings", "arguments": "  \n"}}
+                ]
+            }
+        }]
+    });
+    let completion = openai::decode(&response).unwrap();
+    let calls: Vec<_> = completion.message.tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].arguments, ToolArguments::Parsed(json!({})));
+    assert_eq!(calls[1].arguments, ToolArguments::Parsed(json!({})));
+}
+
+#[test]
+fn openai_decode_errors_carry_the_body() {
+    let error = openai::decode(&json!({"error": {"message": "model not found"}})).unwrap_err();
+    assert!(matches!(error, LlmError::Decode(_)));
+    assert!(error.to_string().contains("model not found"), "{error}");
+    let error = openai::decode(&json!({"choices": [{"delta": {}}]})).unwrap_err();
+    assert!(error.to_string().contains("delta"), "{error}");
+}
+
+#[test]
+fn tool_descriptions_are_capped_for_both_adapters() {
+    let mut long = tool();
+    long.description = "x".repeat(3000);
+    let request = CompletionRequest {
+        tools: vec![long],
+        ..Default::default()
+    };
+    let openai_body = openai::OpenAiClient::new(config(Provider::OpenAi, "http://x/v1"))
+        .unwrap()
+        .body(&request);
+    let description = openai_body["tools"][0]["function"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.chars().count() <= 1024, "{}", description.len());
+    assert!(description.ends_with("[...]"));
+    let anthropic_body = anthropic::AnthropicClient::new(config(Provider::Anthropic, "http://x"))
+        .unwrap()
+        .body(&request);
+    let description = anthropic_body["tools"][0]["description"].as_str().unwrap();
+    assert!(description.chars().count() <= 1024);
+
+    let short = openai::OpenAiClient::new(config(Provider::OpenAi, "http://x/v1"))
+        .unwrap()
+        .body(&CompletionRequest {
+            tools: vec![tool()],
+            ..Default::default()
+        });
+    assert_eq!(
+        short["tools"][0]["function"]["description"],
+        "Reads a pull request."
+    );
+}
+
+#[test]
+fn transcripts_serialise() {
+    let text = serde_json::to_string(&conversation()).unwrap();
+    assert!(text.contains("\"tool_call\""), "{text}");
+    assert!(text.contains("\"parsed\""), "{text}");
+    assert!(text.contains("\"tool_result\""), "{text}");
+}
+
+#[tokio::test]
+async fn list_models_openai_and_anthropic() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer secret-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"id": "fast-model", "object": "model"}, {"id": "big-model"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let ids = henk_llm::list_models(&config(Provider::OpenAi, &format!("{}/v1", server.uri())))
+        .await
+        .unwrap();
+    assert_eq!(ids, vec!["big-model", "fast-model"]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("x-api-key", "secret-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-sonnet-5-5", "type": "model"}],
+            "has_more": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let ids = henk_llm::list_models(&config(Provider::Anthropic, &server.uri()))
+        .await
+        .unwrap();
+    assert_eq!(ids, vec!["claude-sonnet-5-5"]);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("no key"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let error = henk_llm::list_models(&config(Provider::OpenAi, &format!("{}/v1", server.uri())))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::Unauthorized { status: 401, .. }));
+}
+
+#[test]
 fn openai_decodes_tool_calls_including_malformed_arguments() {
     let completion = openai::decode(&fixture("openai/tool_call.json")).unwrap();
     assert_eq!(completion.stop, StopReason::ToolUse);

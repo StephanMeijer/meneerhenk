@@ -13,7 +13,7 @@ use crate::types::{
     ToolChoice, Usage,
 };
 
-const API_VERSION: &str = "2023-06-01";
+pub(crate) const API_VERSION: &str = "2023-06-01";
 
 /// A client for one model on an Anthropic-style endpoint.
 #[derive(Debug)]
@@ -61,7 +61,7 @@ impl AnthropicClient {
                 .map(|tool| {
                     json!({
                         "name": tool.name.as_str(),
-                        "description": tool.description,
+                        "description": schema::cap_description(&tool.description),
                         "input_schema": schema::clean(&tool.input_schema),
                     })
                 })
