@@ -977,8 +977,21 @@ mod tests {
     fn joining_a_running_run_is_recorded() {
         let store = RunStore::in_memory().unwrap();
         store.create_run(&new_run("r-3")).unwrap();
-        store
-            .joined(&RunId::parse("r-3").unwrap(), "comment")
+        let run = RunId::parse("r-3").unwrap();
+        store.joined(&run, "comment").unwrap();
+        store.joined(&run, "webhook").unwrap();
+        let sources: Vec<String> = store
+            .with(|c| {
+                let mut statement =
+                    c.prepare("SELECT source FROM requests WHERE run_id = ?1 ORDER BY rowid")?;
+                let rows = statement.query_map(params![run.as_str()], |row| row.get(0))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
             .unwrap();
+        assert_eq!(
+            sources,
+            ["comment", "webhook"],
+            "one row per join, in order"
+        );
     }
 }
