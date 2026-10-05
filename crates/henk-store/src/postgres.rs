@@ -18,7 +18,7 @@ use crate::store::RunStore;
 use crate::types::{
     EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
     MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RawRun, RunRecord, RunStatus, StoreError, kind_str,
-    platform_str,
+    platform_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -181,20 +181,6 @@ fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, Store
     OffsetDateTime::parse(value, &Rfc3339).map_err(|_| StoreError::Corrupt {
         column,
         value: value.to_owned(),
-    })
-}
-
-fn to_i64(column: &'static str, value: u64) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::Corrupt {
-        column,
-        value: value.to_string(),
-    })
-}
-
-fn to_u64(column: &'static str, value: i64) -> Result<u64, StoreError> {
-    u64::try_from(value).map_err(|_| StoreError::Corrupt {
-        column,
-        value: value.to_string(),
     })
 }
 

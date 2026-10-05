@@ -15,7 +15,7 @@ use crate::store::RunStore;
 use crate::types::{
     EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
     MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RawRun, RunRecord, RunStatus, StoreError, kind_str,
-    now, platform_str,
+    now, platform_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -72,6 +72,7 @@ impl SqliteStore {
 #[async_trait]
 impl RunStore for SqliteStore {
     async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
+        let target = to_i64("runs.target", run.target)?;
         self.with(|c| {
             c.execute(
                 "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link, heartbeat_at)
@@ -81,7 +82,7 @@ impl RunStore for SqliteStore {
                     kind_str(run.kind),
                     platform_str(run.platform),
                     run.repo,
-                    i64::try_from(run.target).unwrap_or(i64::MAX),
+                    target,
                     run.commit,
                     run.requester,
                     run.trigger,
@@ -244,9 +245,9 @@ impl RunStore for SqliteStore {
                     name,
                     model,
                     status,
-                    turns: u64::try_from(turns).unwrap_or(0),
-                    input_tokens: u64::try_from(input_tokens).unwrap_or(0),
-                    output_tokens: u64::try_from(output_tokens).unwrap_or(0),
+                    turns: to_u64("lanes.turns", turns)?,
+                    input_tokens: to_u64("lanes.input_tokens", input_tokens)?,
+                    output_tokens: to_u64("lanes.output_tokens", output_tokens)?,
                     error,
                 });
             }
@@ -333,6 +334,10 @@ impl RunStore for SqliteStore {
             .payload
             .as_deref()
             .filter(|p| p.len() <= MAX_PAYLOAD_BYTES);
+        let target = event
+            .target
+            .map(|t| to_i64("inbound_events.target", t))
+            .transpose()?;
         self.with(|c| {
             c.execute(
                 "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -342,7 +347,7 @@ impl RunStore for SqliteStore {
                     event.source,
                     event.kind,
                     event.repo,
-                    event.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
+                    target,
                     payload,
                 ],
             )?;
@@ -393,7 +398,9 @@ impl RunStore for SqliteStore {
                     source,
                     kind,
                     repo,
-                    target: target.and_then(|t| u64::try_from(t).ok()),
+                    target: target
+                        .map(|t| to_u64("inbound_events.target", t))
+                        .transpose()?,
                     payload,
                 })
             })

@@ -78,6 +78,7 @@ macro_rules! for_each_scenario {
             outcomes_and_linked_events_keep_their_order,
             a_duplicate_run_id_is_an_error,
             joining_is_accepted,
+            a_number_beyond_i64_is_refused_not_stored_as_something_else,
         );
     };
 }
@@ -354,6 +355,34 @@ async fn joining_is_accepted(store: &dyn RunStore) {
     store.joined(&id("r-3"), "webhook").await.unwrap();
 }
 
+async fn a_number_beyond_i64_is_refused_not_stored_as_something_else(store: &dyn RunStore) {
+    let run = NewRun {
+        target: u64::MAX,
+        ..new_run("r-big")
+    };
+    assert!(matches!(
+        store.create_run(&run).await,
+        Err(henk_store::StoreError::Corrupt { .. })
+    ));
+    assert!(store.run(&id("r-big")).await.unwrap().is_none());
+
+    let event = InboundEvent {
+        target: Some(u64::MAX),
+        ..inbound("e-big", "2026-10-03T00:00:00Z")
+    };
+    assert!(matches!(
+        store.record_event(&event).await,
+        Err(henk_store::StoreError::Corrupt { .. })
+    ));
+    assert!(
+        store
+            .inbound_event(&event_id("e-big"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 mod sqlite {
     use super::*;
 
@@ -470,21 +499,6 @@ mod postgres {
             "data survives"
         );
         assert!(b.run(&id("r-kept")).await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    #[ignore = "needs HENK_TEST_DATABASE_URL"]
-    async fn a_target_beyond_i64_is_refused_not_wrapped() {
-        let schema = schema().await;
-        let run = NewRun {
-            target: u64::MAX,
-            ..new_run("r-big")
-        };
-        assert!(matches!(
-            schema.store.create_run(&run).await,
-            Err(henk_store::StoreError::Corrupt { .. })
-        ));
-        assert!(schema.store.run(&id("r-big")).await.unwrap().is_none());
     }
 
     #[tokio::test]

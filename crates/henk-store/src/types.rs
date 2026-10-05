@@ -345,6 +345,23 @@ pub(crate) fn platform_parse(value: &str) -> Option<Platform> {
     })
 }
 
+/// A number for a signed 64-bit column. Beyond `i64` is refused, on every
+/// backend alike, rather than stored as something else.
+pub(crate) fn to_i64(column: &'static str, value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_string(),
+    })
+}
+
+/// A signed column read back as unsigned; a negative value is corrupt.
+pub(crate) fn to_u64(column: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_string(),
+    })
+}
+
 /// A run row as a backend read it, before its values are checked.
 pub(crate) struct RawRun {
     pub(crate) id: String,
@@ -389,7 +406,7 @@ impl RawRun {
             kind,
             platform,
             repo: self.repo,
-            target: u64::try_from(self.target).unwrap_or(0),
+            target: to_u64("runs.target", self.target)?,
             commit: self.commit,
             requester: self.requester,
             trigger: self.trigger,
