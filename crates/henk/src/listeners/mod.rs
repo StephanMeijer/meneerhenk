@@ -105,6 +105,15 @@ pub(crate) mod testing {
             Ok(())
         }
 
+        async fn diff(
+            &self,
+            _: &ReviewTarget,
+            _: &CommitSha,
+            _: &str,
+        ) -> Result<Vec<henk_platform::FilePatch>, PlatformError> {
+            Ok(Vec::new())
+        }
+
         async fn existing_findings(
             &self,
             _: &ReviewTarget,

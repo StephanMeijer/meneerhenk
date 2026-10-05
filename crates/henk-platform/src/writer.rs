@@ -32,7 +32,7 @@ pub struct PullRequestInfo {
     pub state: PullRequestState,
 }
 
-pub use henk_domain::diff::DiffSide;
+pub use henk_domain::diff::{DiffSide, FilePatch};
 
 /// A comment Henk posted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +91,15 @@ pub trait PlatformWriter: Send + Sync {
 
     /// Reads the target.
     async fn pull_request(&self, target: &ReviewTarget) -> Result<PullRequestInfo, PlatformError>;
+
+    /// The diff of the target at `commit` against `base_ref`, one patch per
+    /// file. A review reads its own commit, not the current head.
+    async fn diff(
+        &self,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        base_ref: &str,
+    ) -> Result<Vec<FilePatch>, PlatformError>;
 
     /// Marks a review as started (GitHub: check run in progress; GitLab:
     /// award emoji). Returns a handle for `finish_review` when there is one.

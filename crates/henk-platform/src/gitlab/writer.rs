@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use henk_domain::allowlist::Platform;
+use henk_domain::diff::FileStatus;
 use henk_domain::marker::{Marker, MarkerKind};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_mcp::McpSession;
@@ -13,8 +14,8 @@ use tracing::{debug, instrument, warn};
 
 use crate::error::PlatformError;
 use crate::writer::{
-    DiffSide, ExistingFinding, ExistingSummary, PlatformWriter, PostedComment, PullRequestInfo,
-    PullRequestState, ReviewHandle, ReviewTarget,
+    DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
+    PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
 };
 
 /// Name of the commit status (§3.3).
@@ -161,6 +162,58 @@ fn is_system(note: &Value) -> bool {
 impl PlatformWriter for GitLabWriter {
     fn platform(&self) -> Platform {
         Platform::GitLab
+    }
+
+    async fn diff(
+        &self,
+        target: &ReviewTarget,
+        _commit: &CommitSha,
+        _base_ref: &str,
+    ) -> Result<Vec<FilePatch>, PlatformError> {
+        // GitLab serves the merge request's current diff; a merge request
+        // under review at an older commit is superseded anyway.
+        let value = self
+            .call_tool(
+                "get_merge_request_diffs",
+                Value::Object(Self::base_args(target)),
+            )
+            .await?;
+        let items = match value {
+            Value::Array(items) => items,
+            Value::Object(ref map) => map
+                .get("changes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        Ok(items
+            .iter()
+            .filter_map(|item| {
+                let get = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_owned);
+                let flag = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
+                let status = if flag("new_file") {
+                    FileStatus::Added
+                } else if flag("deleted_file") {
+                    FileStatus::Removed
+                } else if flag("renamed_file") {
+                    FileStatus::Renamed
+                } else {
+                    FileStatus::Modified
+                };
+                let old_path = get("old_path").filter(|_| status != FileStatus::Added);
+                let new_path = get("new_path").filter(|_| status != FileStatus::Removed);
+                if old_path.is_none() && new_path.is_none() {
+                    return None;
+                }
+                Some(FilePatch {
+                    old_path,
+                    new_path,
+                    status,
+                    patch: get("diff").unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     async fn pull_request(&self, target: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {

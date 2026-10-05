@@ -316,3 +316,25 @@ async fn get_as_app_uses_the_jwt_not_an_installation_token() {
         Err(henk_platform::PlatformError::Auth(_))
     ));
 }
+
+#[tokio::test]
+async fn diff_compares_base_with_the_reviewed_commit_as_a_unified_diff() {
+    let server = MockServer::start().await;
+    let unified = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,2 @@\n-old\n+new\n keep\ndiff --git a/new.md b/new.md\nnew file mode 100644\n--- /dev/null\n+++ b/new.md\n@@ -0,0 +1 @@\n+hello\n";
+    Mock::given(method("GET"))
+        .and(path(format!("/repos/docspec/app/compare/main...{SHA}")))
+        .and(header("accept", "application/vnd.github.diff"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(unified))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    let writer = GitHubWriter::new(api, "meneer-henk[bot]");
+    let commit = CommitSha::parse(SHA).unwrap();
+    let patches = writer.diff(&target(), &commit, "main").await.unwrap();
+    assert_eq!(patches.len(), 2);
+    assert_eq!(patches[0].new_path.as_deref(), Some("src/a.rs"));
+    assert!(patches[0].patch.starts_with("@@ -1,2 +1,2 @@"));
+    assert_eq!(patches[1].status, henk_domain::diff::FileStatus::Added);
+    assert_eq!(patches[1].old_path, None);
+}
