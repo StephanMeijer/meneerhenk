@@ -36,6 +36,13 @@ use crate::review_tools::{
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
 
+/// Turns left when a lane is told to wrap up (#12).
+const LANE_TURN_WARNING_AT: u32 = 3;
+
+/// What a lane is told then. Lanes that run into the turn limit otherwise
+/// end mid-review, with what they were sure of never posted.
+const LANE_TURN_WARNING: &str = "3 turns left. Post each finding you are sure of with post_finding now, one call per finding, then end your turn.";
+
 /// One review run, as every step of it sees it: known once `run_review`
 /// has the commit.
 #[derive(Clone, Copy)]
@@ -634,15 +641,7 @@ async fn build_lane(
         keep_recent_turns: app.settings.review.keep_recent_turns,
         ..AgentConfig::default()
     };
-    // The file list up front saves a turn, and the hint to read several
-    // diffs per call saves one per file for models that never batch calls.
-    let opening = ChatMessage::user(format!(
-        "Review {} {} at commit {}. The changed files:\n{}\nRead their diffs with get_file_diff, several paths per call.",
-        kind_name(platform),
-        target_ref(platform, target.number),
-        commit.short(),
-        context.files.diff.render_list().trim_end()
-    ));
+    let opening = lane_opening(target, commit, &context.files.diff);
     Ok(Lane {
         session: SessionSpec {
             name: lane.name.as_str().to_owned(),
@@ -652,9 +651,27 @@ async fn build_lane(
             tools: set,
             limits,
             continuation: Some(lane_continuation(Arc::clone(&context))),
+            turn_warning: Some(henk_agent::TurnWarning {
+                turns_left: LANE_TURN_WARNING_AT,
+                message: LANE_TURN_WARNING.to_owned(),
+            }),
         },
         context,
     })
+}
+
+/// A lane's first message. The file list up front saves a turn, and the
+/// hint to read several diffs per call saves one per file for models that
+/// never batch calls.
+fn lane_opening(target: &ReviewTarget, commit: &CommitSha, diff: &ReviewDiff) -> ChatMessage {
+    let platform = target.platform();
+    ChatMessage::user(format!(
+        "Review {} {} at commit {}. The changed files:\n{}\nRead their diffs with get_file_diff, several paths per call.",
+        kind_name(platform),
+        target_ref(platform, target.number),
+        commit.short(),
+        diff.render_list().trim_end()
+    ))
 }
 
 /// The fact-check every lane's writes pass, when one is configured (§3.2).
@@ -955,5 +972,17 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         let finished = f.writer.finished.lock().unwrap();
         assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lane_turn_warning_is_in_style_and_says_what_to_do() {
+        assert!(henk_domain::text::is_in_style(LANE_TURN_WARNING));
+        assert!(LANE_TURN_WARNING.contains("post_finding"));
+        assert!(LANE_TURN_WARNING.starts_with(&format!("{LANE_TURN_WARNING_AT} turns left")));
     }
 }

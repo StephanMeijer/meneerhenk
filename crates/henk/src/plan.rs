@@ -336,6 +336,7 @@ async fn plan_body(
         tools: set,
         limits,
         continuation: None,
+        turn_warning: None,
     };
     let outcome = run_session(&app.store, &context.run, spec, cancel).await;
     match outcome.stop {

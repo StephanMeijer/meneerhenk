@@ -480,3 +480,76 @@ async fn an_output_cap_without_tool_calls_reaches_the_continuation() {
         ]
     );
 }
+
+fn warning() -> henk_agent::TurnWarning {
+    henk_agent::TurnWarning {
+        turns_left: 3,
+        message: "3 turns left: wrap up.".to_owned(),
+    }
+}
+
+fn busy_tools() -> ToolSet {
+    let mut tools = ToolSet::new();
+    tools.add(Echo);
+    tools
+}
+
+#[tokio::test]
+async fn the_turn_warning_comes_once_before_the_third_to_last_turn() {
+    // A model that never stops calling a tool: it runs into max_turns = 5.
+    let script: Vec<_> = (0..5)
+        .map(|i| call(&format!("c{i}"), "sleep", json!({})))
+        .collect();
+    let model = Arc::new(ScriptedClient::new("m", script));
+    let agent = Agent::new(model.clone(), busy_tools(), "s", config()).with_turn_warning(warning());
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(matches!(outcome.stop, StopCause::MaxTurns));
+    let requests = model.requests();
+    assert_eq!(requests.len(), 5);
+    let carries = |i: usize| {
+        requests[i]
+            .messages
+            .iter()
+            .any(|m| m.text() == "3 turns left: wrap up.")
+    };
+    assert!(!carries(1), "not before the third-to-last turn");
+    assert!(carries(2), "turn 3 of 5 is the third-to-last");
+    assert_eq!(
+        requests[2].messages.last().unwrap().text(),
+        "3 turns left: wrap up."
+    );
+    let count = requests[4]
+        .messages
+        .iter()
+        .filter(|m| m.text() == "3 turns left: wrap up.")
+        .count();
+    assert_eq!(count, 1, "sent once");
+}
+
+#[tokio::test]
+async fn no_turn_warning_when_the_limit_is_that_small() {
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "sleep", json!({})),
+            call("c2", "sleep", json!({})),
+        ],
+    ));
+    let limits = AgentConfig {
+        max_turns: 2,
+        ..config()
+    };
+    let agent = Agent::new(model.clone(), busy_tools(), "s", limits).with_turn_warning(warning());
+    agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    assert!(
+        model
+            .requests()
+            .iter()
+            .flat_map(|r| &r.messages)
+            .all(|m| m.text() != "3 turns left: wrap up.")
+    );
+}

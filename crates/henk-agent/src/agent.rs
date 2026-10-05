@@ -93,6 +93,17 @@ pub struct Ending<'a> {
 /// decides how often to insist.
 pub type Continuation = Box<dyn Fn(&Ending<'_>) -> Option<String> + Send + Sync>;
 
+/// A message the agent sends once, as a user message before the model call
+/// that leaves exactly `turns_left` turns, counting that one. A session that
+/// would otherwise run into its turn limit mid-task gets to wrap up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnWarning {
+    /// Turns left, including the one the message precedes.
+    pub turns_left: u32,
+    /// What the model is told.
+    pub message: String,
+}
+
 /// Why a run ended.
 #[derive(Debug)]
 pub enum StopCause {
@@ -139,6 +150,7 @@ pub struct Agent {
     config: AgentConfig,
     events: Option<mpsc::UnboundedSender<AgentEvent>>,
     continuation: Option<Continuation>,
+    turn_warning: Option<TurnWarning>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -167,6 +179,7 @@ impl Agent {
             config,
             events: None,
             continuation: None,
+            turn_warning: None,
         }
     }
 
@@ -175,6 +188,13 @@ impl Agent {
     #[must_use]
     pub fn with_continuation(mut self, continuation: Continuation) -> Self {
         self.continuation = Some(continuation);
+        self
+    }
+
+    /// Sends `warning` once, a few turns before the turn limit.
+    #[must_use]
+    pub fn with_turn_warning(mut self, warning: TurnWarning) -> Self {
+        self.turn_warning = Some(warning);
         self
     }
 
@@ -209,6 +229,17 @@ impl Agent {
         let stop = loop {
             if turns >= self.config.max_turns {
                 break StopCause::MaxTurns;
+            }
+            if let Some(warning) = &self.turn_warning
+                && self.config.max_turns > warning.turns_left
+                && self.config.max_turns - turns == warning.turns_left
+            {
+                debug!(
+                    turn = turns + 1,
+                    turns_left = warning.turns_left,
+                    "turn warning sent"
+                );
+                messages.push(ChatMessage::user(warning.message.clone()));
             }
             turns += 1;
             let request = CompletionRequest {
