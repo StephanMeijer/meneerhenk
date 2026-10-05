@@ -282,6 +282,28 @@ pub struct ReviewConfig {
     /// are posted unchecked.
     #[serde(default)]
     pub fact_check: Option<FactCheckConfig>,
+    /// Changed files no lane reviews (§3.2): lockfiles and generated
+    /// changelogs by default. A pattern without `/` matches the file name at
+    /// any depth; `**` matches any number of directories. Setting the key
+    /// replaces the default; `ignore = []` reviews everything.
+    #[serde(default = "default_review_ignore")]
+    pub ignore: Vec<String>,
+}
+
+fn default_review_ignore() -> Vec<String> {
+    [
+        "**/Cargo.lock",
+        "**/package-lock.json",
+        "**/yarn.lock",
+        "**/pnpm-lock.yaml",
+        "**/go.sum",
+        "**/poetry.lock",
+        "**/uv.lock",
+        "CHANGELOG.md",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 /// A second model checks every finding before it is posted (§3.2).
@@ -336,6 +358,7 @@ impl Default for ReviewConfig {
             max_concurrent: default_max_concurrent(),
             github_drafts: false,
             fact_check: None,
+            ignore: default_review_ignore(),
         }
     }
 }
@@ -437,6 +460,9 @@ pub enum ConfigError {
     /// A model configuration is unusable.
     #[error("model {0:?}: {1}")]
     Model(String, String),
+    /// A review setting is unusable.
+    #[error("{0}")]
+    Review(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -501,6 +527,11 @@ impl Config {
 
         validate_models(&self.models)?;
         let lanes = validate_lanes(&self.review.lanes, &self.models)?;
+        if self.review.ignore.iter().any(|p| p.trim().is_empty()) {
+            return Err(ConfigError::Review(
+                "review.ignore has an empty pattern".to_owned(),
+            ));
+        }
         if let Some(fact_check) = &self.review.fact_check {
             let models = std::iter::once(&fact_check.model).chain(&fact_check.backup_model);
             for model in models {
@@ -771,6 +802,15 @@ impl Settings {
             "Review limits:   {} at once, {}s and {} turns per lane",
             self.review.max_concurrent, self.review.lane_timeout_secs, self.review.lane_max_turns
         );
+        let _ = writeln!(
+            out,
+            "Not reviewed:    {}",
+            if self.review.ignore.is_empty() {
+                "nothing ignored".to_owned()
+            } else {
+                self.review.ignore.join(", ")
+            }
+        );
         let _ = writeln!(out, "Review lanes:");
         for lane in &self.lanes {
             let _ = writeln!(out, "  {} on model {}", lane.name, lane.model);
@@ -941,6 +981,23 @@ github_owners = ["docspec"]
             .unwrap();
         let fact_check = settings.review.fact_check.unwrap();
         assert_eq!((fact_check.timeout_secs, fact_check.max_turns), (180, 12));
+    }
+
+    #[test]
+    fn review_ignore_defaults_to_lockfiles_and_the_changelog() {
+        let settings = Config::parse(MINIMAL)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert!(settings.review.ignore.contains(&"**/Cargo.lock".to_owned()));
+        assert!(settings.review.ignore.contains(&"CHANGELOG.md".to_owned()));
+        let off = format!("{MINIMAL}\n[review]\nignore = []\n");
+        let settings = Config::parse(&off).and_then(Config::into_settings).unwrap();
+        assert!(settings.review.ignore.is_empty());
+        let empty = format!("{MINIMAL}\n[review]\nignore = [\"*.lock\", \" \"]\n");
+        assert!(matches!(
+            Config::parse(&empty).and_then(Config::into_settings),
+            Err(ConfigError::Review(_))
+        ));
     }
 
     #[test]
