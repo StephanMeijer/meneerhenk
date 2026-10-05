@@ -1,8 +1,9 @@
 //! The tools a review lane gets besides the read-only MCP tools:
-//! listing, posting and improving findings, with every rule of §3.2 and
-//! §8.5 enforced here rather than in the prompt.
+//! listing, posting, improving and withdrawing findings, with every rule of
+//! §3.2 and §8.5 enforced here rather than in the prompt. When a fact-check
+//! is configured, every write passes it first.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +21,39 @@ use henk_store::{FindingAction, RunStore};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-/// What all three tools of one lane share.
+use crate::fact_check::{CheckKind, CheckRequest, CheckVerdict, FactCheck};
+
+/// The diff of a review as the read tools serve it, and which files a
+/// session asked the diff of.
+pub struct DiffFiles {
+    /// The diff.
+    pub diff: Arc<ReviewDiff>,
+    opened: Mutex<BTreeSet<String>>,
+}
+
+impl DiffFiles {
+    /// Serves `diff`, nothing opened yet.
+    #[must_use]
+    pub fn new(diff: Arc<ReviewDiff>) -> Self {
+        Self {
+            diff,
+            opened: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// The changed files not asked the diff of yet.
+    #[must_use]
+    pub fn unopened(&self) -> Vec<String> {
+        let opened = self.opened.lock().map(|o| o.clone()).unwrap_or_default();
+        self.diff
+            .paths()
+            .filter(|p| !opened.contains(*p))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// What the tools of one lane share.
 pub struct LaneContext {
     /// The run.
     pub run: RunId,
@@ -40,21 +73,159 @@ pub struct LaneContext {
     pub store: Arc<RunStore>,
     /// The diff of the review. Findings are checked against it before
     /// anything is posted.
-    pub diff: Arc<ReviewDiff>,
-    /// The changed files this lane asked the diff of.
-    pub opened: Mutex<BTreeSet<String>>,
+    pub files: Arc<DiffFiles>,
+    /// The second model every write passes, when configured (§3.2).
+    pub fact_check: Option<Arc<dyn FactCheck>>,
+    /// Fact-check rejections per line, for this lane.
+    pub rejections: Mutex<BTreeMap<FindingKey, u32>>,
 }
 
 impl LaneContext {
     /// The changed files this lane has not asked the diff of yet.
     #[must_use]
     pub fn unopened_files(&self) -> Vec<String> {
-        let opened = self.opened.lock().map(|o| o.clone()).unwrap_or_default();
-        self.diff
-            .paths()
-            .filter(|p| !opened.contains(*p))
-            .map(str::to_owned)
-            .collect()
+        self.files.unopened()
+    }
+}
+
+/// What the fact-check decided for one write.
+enum Gate {
+    /// Go ahead.
+    Pass {
+        /// The model that confirmed the write, for its marker.
+        checked_by: Option<ModelId>,
+        /// Why no check could be made, when none was.
+        unchecked: Option<String>,
+    },
+    /// Do not write; tell the lane this.
+    Stop(ToolOutput),
+}
+
+/// How often a line may be rejected before the lane is told to stop trying.
+const MAX_REJECTIONS: u32 = 2;
+
+impl LaneContext {
+    /// Runs the fact-check for one write. `what` completes "Not ...":
+    /// "posted", "updated", "withdrawn".
+    async fn gate(
+        &self,
+        kind: CheckKind,
+        key: &FindingKey,
+        side: DiffSide,
+        text: &str,
+        comment_id: Option<&str>,
+        what: &str,
+    ) -> Gate {
+        let Some(checker) = &self.fact_check else {
+            return Gate::Pass {
+                checked_by: None,
+                unchecked: None,
+            };
+        };
+        let earlier = self
+            .rejections
+            .lock()
+            .map(|r| r.get(key).copied().unwrap_or(0))
+            .unwrap_or(0);
+        if earlier >= MAX_REJECTIONS {
+            return Gate::Stop(ToolOutput::error(format!(
+                "Not {what}: the fact-check has rejected claims on {}:{} {earlier} times. Do not try this line again; move on.",
+                key.path, key.line
+            )));
+        }
+        let request = CheckRequest {
+            lane: self.lane.clone(),
+            lane_model: self.model.clone(),
+            kind,
+            path: key.path.clone(),
+            line: key.line,
+            side,
+            text: text.to_owned(),
+        };
+        match checker.check(&request).await {
+            CheckVerdict::Confirmed { by, .. } => Gate::Pass {
+                checked_by: Some(by),
+                unchecked: None,
+            },
+            CheckVerdict::Unavailable { why } => Gate::Pass {
+                checked_by: None,
+                unchecked: Some(why),
+            },
+            CheckVerdict::Rejected { reason, .. } => {
+                let count = self
+                    .rejections
+                    .lock()
+                    .map(|mut r| {
+                        let count = r.entry(key.clone()).or_insert(0);
+                        *count += 1;
+                        *count
+                    })
+                    .unwrap_or(MAX_REJECTIONS);
+                let _ = self.store.record_finding(
+                    &self.run,
+                    self.lane.as_str(),
+                    &key.path,
+                    key.line,
+                    comment_id.unwrap_or(""),
+                    FindingAction::Rejected,
+                );
+                let next = if count >= MAX_REJECTIONS {
+                    "It has now been rejected twice: do not try this line again; move on."
+                } else {
+                    "If the problem still holds, correct what the reason says is wrong and try again; otherwise move on."
+                };
+                Gate::Stop(ToolOutput::error(format!(
+                    "Not {what}: a fact-check rejected it. Reason: {reason}\n{next}"
+                )))
+            }
+        }
+    }
+
+    /// The refusal when `key` already has a finding: improve it instead.
+    ///
+    /// Claim under the lock, then release it before any I/O: a std mutex
+    /// guard must not live across an await. Two lanes racing between the
+    /// claim and the post is rare, and the registry stays consistent because
+    /// the post result is recorded under the lock again.
+    fn refuse_if_taken(&self, key: &FindingKey) -> Option<ToolOutput> {
+        let taken: Option<String> = {
+            let Ok(registry) = self.registry.lock() else {
+                return Some(ToolOutput::error("finding registry unavailable"));
+            };
+            match registry.claim(key) {
+                Claim::Exists(existing) => Some(existing.comment_id.clone()),
+                Claim::New => None,
+            }
+        };
+        let existing_id = taken?;
+        let (path, line) = (&key.path, key.line);
+        let _ = self.store.record_finding(
+            &self.run,
+            self.lane.as_str(),
+            path,
+            line,
+            &existing_id,
+            FindingAction::Refused,
+        );
+        Some(ToolOutput::error(format!(
+            "Line {path}:{line} already has finding {existing_id}. Improve it with improve_finding if you can explain it better, otherwise move on."
+        )))
+    }
+
+    /// Records a write that went out unchecked and says so to the lane.
+    fn unverified(&self, key: &FindingKey, comment_id: &str, why: Option<&str>) -> String {
+        let Some(why) = why else {
+            return String::new();
+        };
+        let _ = self.store.record_finding(
+            &self.run,
+            self.lane.as_str(),
+            &key.path,
+            key.line,
+            comment_id,
+            FindingAction::Unverified,
+        );
+        format!(" The fact-check could not run ({why}), so it went out unchecked.")
     }
 }
 
@@ -98,7 +269,7 @@ pub fn lane_continuation(context: Arc<LaneContext>) -> Continuation {
 }
 
 /// `list_changed_files`: the files of the diff with their counts.
-pub struct ListChangedFiles(pub Arc<LaneContext>);
+pub struct ListChangedFiles(pub Arc<DiffFiles>);
 
 #[async_trait::async_trait]
 impl Tool for ListChangedFiles {
@@ -116,7 +287,7 @@ impl Tool for ListChangedFiles {
 }
 
 /// `get_file_diff`: one file's hunks with line numbers on both sides.
-pub struct GetFileDiff(pub Arc<LaneContext>);
+pub struct GetFileDiff(pub Arc<DiffFiles>);
 
 #[async_trait::async_trait]
 impl Tool for GetFileDiff {
@@ -188,19 +359,25 @@ impl Tool for ReadFile {
         let Some(path) = arg_str(&args, "path") else {
             return ToolOutput::error("path is required");
         };
-        let start = args
-            .get("start_line")
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(1);
-        let end = args
-            .get("end_line")
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .filter(|n| *n >= start)
-            .unwrap_or(start + READ_FILE_MAX_LINES - 1)
-            .min(start + READ_FILE_MAX_LINES - 1);
+        let line_arg = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+        };
+        let start = line_arg("start_line").unwrap_or(1);
+        if start == 0 {
+            return ToolOutput::error("start_line is 1-based; the first line is 1.");
+        }
+        let last = start + READ_FILE_MAX_LINES - 1;
+        let end = match line_arg("end_line") {
+            Some(end) if end < start => {
+                return ToolOutput::error(format!(
+                    "end_line {end} is before start_line {start}. Ask for start_line <= end_line, at most {READ_FILE_MAX_LINES} lines."
+                ));
+            }
+            Some(end) => end.min(last),
+            None => last,
+        };
         let output = self.inner.call(json!({"path": path})).await;
         if output.is_error {
             return output;
@@ -241,12 +418,15 @@ fn number_lines(content: &str, start: usize, end: usize) -> String {
 }
 
 impl LaneContext {
-    fn marker(&self) -> Marker {
+    /// The marker of a finding this lane writes, naming the model that
+    /// fact-checked it, when one did.
+    fn marker(&self, checked_by: Option<ModelId>) -> Marker {
         Marker {
             run: self.run.clone(),
             model: self.model.clone(),
             requested_by: None,
             kind: Some(MarkerKind::Finding),
+            checked_by,
         }
     }
 
@@ -302,7 +482,7 @@ impl Tool for ListExistingFindings {
                     (_, _, false) => " [outdated]",
                     _ => "",
                 };
-                let body = f.body.split("<!--").next().unwrap_or("").trim();
+                let body = visible_text(&f.body);
                 format!(
                     "- comment {} at {}:{}{state}\n  {}",
                     f.comment_id, f.key.path, f.key.line, body
@@ -355,7 +535,7 @@ impl Tool for PostFinding {
         if let Some(error) = LaneContext::style_error(body) {
             return error;
         }
-        if let Err(reason) = ctx.diff.commentable(path, line, side) {
+        if let Err(reason) = ctx.files.diff.commentable(path, line, side) {
             return ToolOutput::error(format!(
                 "Cannot post on {path}:{line}: {reason}. Use get_file_diff to see the numbered lines."
             ));
@@ -365,34 +545,22 @@ impl Tool for PostFinding {
             line,
         };
 
-        // Claim under the lock, then release it before any I/O: a std mutex
-        // guard must not live across an await. Two lanes racing between the
-        // claim and the post is rare, and the registry stays consistent
-        // because the post result is recorded under the lock again.
-        let taken: Option<String> = {
-            let Ok(registry) = ctx.registry.lock() else {
-                return ToolOutput::error("finding registry unavailable");
-            };
-            match registry.claim(&key) {
-                Claim::Exists(existing) => Some(existing.comment_id.clone()),
-                Claim::New => None,
-            }
-        };
-        if let Some(existing_id) = taken {
-            let _ = ctx.store.record_finding(
-                &ctx.run,
-                ctx.lane.as_str(),
-                path,
-                line,
-                &existing_id,
-                FindingAction::Refused,
-            );
-            return ToolOutput::error(format!(
-                "Line {path}:{line} already has finding {existing_id}. Improve it with improve_finding if you can explain it better, otherwise move on."
-            ));
+        if let Some(refusal) = ctx.refuse_if_taken(&key) {
+            return refusal;
         }
 
-        let full_body = ctx.marker().attach(body);
+        let (checked_by, unchecked) = match ctx
+            .gate(CheckKind::NewFinding, &key, side, body, None, "posted")
+            .await
+        {
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
+            Gate::Stop(output) => return output,
+        };
+
+        let full_body = ctx.marker(checked_by).attach(body);
         let posted = match ctx
             .writer
             .post_finding(&ctx.target, &ctx.commit, path, line, side, &full_body)
@@ -418,7 +586,7 @@ impl Tool for PostFinding {
         };
         if let Ok(mut registry) = ctx.registry.lock() {
             registry.record(Finding {
-                key,
+                key: key.clone(),
                 comment_id: posted.id.clone(),
                 body: full_body,
                 lane: Some(ctx.lane.clone()),
@@ -436,7 +604,8 @@ impl Tool for PostFinding {
             FindingAction::Posted,
         );
         info!(lane = %ctx.lane, path, line, comment = %posted.id, "finding posted");
-        ToolOutput::ok(format!("Posted as comment {}.", posted.id))
+        let note = ctx.unverified(&key, &posted.id, unchecked.as_deref());
+        ToolOutput::ok(format!("Posted as comment {}.{note}", posted.id))
     }
 }
 
@@ -482,7 +651,25 @@ impl Tool for ImproveFinding {
         if existing.answered_by_person {
             return ToolOutput::error("A person has answered that finding; it stays as it is.");
         }
-        let full_body = ctx.marker().attach(body);
+        let current = visible_text(&existing.body).to_owned();
+        let (checked_by, unchecked) = match ctx
+            .gate(
+                CheckKind::Rewrite { current },
+                &existing.key,
+                DiffSide::Right,
+                body,
+                Some(comment_id),
+                "updated",
+            )
+            .await
+        {
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
+            Gate::Stop(output) => return output,
+        };
+        let full_body = ctx.marker(checked_by).attach(body);
         if let Err(error) = ctx
             .writer
             .update_finding(&ctx.target, comment_id, &full_body)
@@ -501,7 +688,119 @@ impl Tool for ImproveFinding {
             comment_id,
             FindingAction::Improved,
         );
-        ToolOutput::ok(format!("Updated comment {comment_id}."))
+        let note = ctx.unverified(&existing.key, comment_id, unchecked.as_deref());
+        ToolOutput::ok(format!("Updated comment {comment_id}.{note}"))
+    }
+}
+
+/// The visible text of a comment: everything before the hidden marker.
+fn visible_text(body: &str) -> &str {
+    body.split("<!--").next().unwrap_or("").trim()
+}
+
+/// `withdraw_finding`: take back a finding that is wrong.
+pub struct WithdrawFinding(pub Arc<LaneContext>);
+
+#[async_trait::async_trait]
+impl Tool for WithdrawFinding {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("withdraw_finding"),
+            description: "Withdraws an existing finding that is wrong: its text is replaced by your reason and its thread is resolved, so it no longer counts. Only for Henk's own findings that no person has answered.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "comment_id": {"type": "string", "description": "The comment id from list_existing_findings"},
+                    "reason": {"type": "string", "description": "Why the finding is wrong, citing the code as path:line"}
+                },
+                "required": ["comment_id", "reason"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value) -> ToolOutput {
+        let ctx = &self.0;
+        let (Some(comment_id), Some(reason)) =
+            (arg_str(&args, "comment_id"), arg_str(&args, "reason"))
+        else {
+            return ToolOutput::error("comment_id and reason are required");
+        };
+        if let Some(error) = LaneContext::style_error(reason) {
+            return error;
+        }
+        let existing = match ctx.registry.lock() {
+            Ok(registry) => registry
+                .iter()
+                .find(|f| f.comment_id == comment_id)
+                .cloned(),
+            Err(_) => return ToolOutput::error("finding registry unavailable"),
+        };
+        let Some(existing) = existing else {
+            return ToolOutput::error(format!("No finding with comment id {comment_id}."));
+        };
+        if existing.answered_by_person {
+            return ToolOutput::error(
+                "A person has answered that finding; it stays as it is. Reply is for people.",
+            );
+        }
+        if existing.resolved {
+            return ToolOutput::error(format!("Finding {comment_id} is already resolved."));
+        }
+        let finding = visible_text(&existing.body).to_owned();
+        let (checked_by, unchecked) = match ctx
+            .gate(
+                CheckKind::Withdrawal { finding },
+                &existing.key,
+                DiffSide::Right,
+                reason,
+                Some(comment_id),
+                "withdrawn",
+            )
+            .await
+        {
+            Gate::Pass {
+                checked_by,
+                unchecked,
+            } => (checked_by, unchecked),
+            Gate::Stop(output) => return output,
+        };
+        let full_body = ctx
+            .marker(checked_by)
+            .attach(&format!("Withdrawn: this finding was wrong. {reason}"));
+        if let Err(error) = ctx
+            .writer
+            .update_finding(&ctx.target, comment_id, &full_body)
+            .await
+        {
+            return ToolOutput::error(format!("Could not update comment {comment_id}: {error}"));
+        }
+        if let Err(error) = ctx.writer.resolve_finding(&ctx.target, comment_id).await {
+            // The text already says it is withdrawn; an open thread only
+            // means it still counts until someone resolves it.
+            warn!(%error, comment = comment_id, "could not resolve a withdrawn finding");
+            let _ = ctx.store.event(
+                &ctx.run,
+                "warn",
+                &format!(
+                    "{}: withdrew {comment_id} but could not resolve its thread: {error}",
+                    ctx.lane
+                ),
+            );
+        }
+        if let Ok(mut registry) = ctx.registry.lock() {
+            registry.withdraw(&existing.key, full_body);
+        }
+        let _ = ctx.store.record_finding(
+            &ctx.run,
+            ctx.lane.as_str(),
+            &existing.key.path,
+            existing.key.line,
+            comment_id,
+            FindingAction::Withdrawn,
+        );
+        info!(lane = %ctx.lane, comment = comment_id, "finding withdrawn");
+        let note = ctx.unverified(&existing.key, comment_id, unchecked.as_deref());
+        ToolOutput::ok(format!("Withdrew comment {comment_id}.{note}"))
     }
 }
 
@@ -567,8 +866,9 @@ diff --git a/README.md b/README.md
             registry: Arc::new(Mutex::new(FindingRegistry::seeded(std::iter::empty()))),
             writer: Arc::new(FakeWriter::default()),
             store,
-            diff: Arc::new(diff),
-            opened: Mutex::new(BTreeSet::new()),
+            files: Arc::new(DiffFiles::new(Arc::new(diff))),
+            fact_check: None,
+            rejections: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -593,12 +893,14 @@ diff --git a/README.md b/README.md
     #[tokio::test]
     async fn list_and_file_diff_track_what_the_lane_opened() {
         let ctx = context(ReviewDiff::from_unified(DIFF));
-        let list = ListChangedFiles(Arc::clone(&ctx)).call(json!({})).await;
+        let list = ListChangedFiles(Arc::clone(&ctx.files))
+            .call(json!({}))
+            .await;
         assert!(!list.is_error);
         assert!(list.content.contains("M src/a.rs (+1 -1)"));
         assert_eq!(ctx.unopened_files(), vec!["src/a.rs", "README.md"]);
 
-        let file = GetFileDiff(Arc::clone(&ctx))
+        let file = GetFileDiff(Arc::clone(&ctx.files))
             .call(json!({"path": "src/a.rs"}))
             .await;
         assert!(!file.is_error, "{file:?}");
@@ -609,7 +911,7 @@ diff --git a/README.md b/README.md
         );
         assert_eq!(ctx.unopened_files(), vec!["README.md"]);
 
-        let missing = GetFileDiff(Arc::clone(&ctx))
+        let missing = GetFileDiff(Arc::clone(&ctx.files))
             .call(json!({"path": "src/zzz.rs"}))
             .await;
         assert!(missing.is_error);
@@ -639,6 +941,20 @@ diff --git a/README.md b/README.md
             .await;
         assert!(past.content.contains("has 4 lines"));
         assert!(tool.call(json!({})).await.is_error);
+        let inverted = tool
+            .call(json!({"path": "src/a.rs", "start_line": 3, "end_line": 1}))
+            .await;
+        assert!(inverted.is_error);
+        assert!(
+            inverted.content.contains("before start_line 3"),
+            "{}",
+            inverted.content
+        );
+        assert!(
+            tool.call(json!({"path": "src/a.rs", "start_line": 0}))
+                .await
+                .is_error
+        );
     }
 
     #[tokio::test]
@@ -669,6 +985,197 @@ diff --git a/README.md b/README.md
             inside.content
         );
         assert_eq!(ctx.store.events(&ctx.run).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use std::collections::VecDeque;
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::diff::ReviewDiff;
+
+    use super::tests::DIFF;
+    use super::*;
+    use crate::fact_check::{CheckRequest, CheckVerdict, FactCheck};
+    use crate::listeners::testing::FakeWriter;
+
+    /// Answers each check with the next verdict and keeps the requests.
+    struct Fixed {
+        verdicts: Mutex<VecDeque<CheckVerdict>>,
+        seen: Mutex<Vec<CheckRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FactCheck for Fixed {
+        async fn check(&self, request: &CheckRequest) -> CheckVerdict {
+            self.seen.lock().unwrap().push(request.clone());
+            self.verdicts.lock().unwrap().pop_front().unwrap()
+        }
+    }
+
+    fn by() -> ModelId {
+        ModelId::parse("opus").unwrap()
+    }
+
+    fn rejected(reason: &str) -> CheckVerdict {
+        CheckVerdict::Rejected {
+            by: by(),
+            reason: reason.into(),
+        }
+    }
+
+    fn confirmed() -> CheckVerdict {
+        CheckVerdict::Confirmed {
+            by: by(),
+            reason: "holds".into(),
+        }
+    }
+
+    fn setup(
+        verdicts: impl IntoIterator<Item = CheckVerdict>,
+    ) -> (Arc<LaneContext>, Arc<FakeWriter>, Arc<Fixed>) {
+        let base = super::tests::context(ReviewDiff::from_unified(DIFF));
+        let writer = Arc::new(FakeWriter {
+            accept_posts: true,
+            ..FakeWriter::default()
+        });
+        let checker = Arc::new(Fixed {
+            verdicts: Mutex::new(verdicts.into_iter().collect()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let ctx = Arc::new(LaneContext {
+            run: base.run.clone(),
+            lane: base.lane.clone(),
+            model: base.model.clone(),
+            target: ReviewTarget {
+                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+                number: 7,
+            },
+            commit: base.commit.clone(),
+            registry: Arc::clone(&base.registry),
+            writer: Arc::clone(&writer) as Arc<dyn PlatformWriter>,
+            store: Arc::clone(&base.store),
+            files: Arc::clone(&base.files),
+            fact_check: Some(Arc::clone(&checker) as Arc<dyn FactCheck>),
+            rejections: Mutex::new(BTreeMap::new()),
+        });
+        (ctx, writer, checker)
+    }
+
+    fn post() -> Value {
+        json!({"path": "src/a.rs", "line": 2, "body": "x is never set."})
+    }
+
+    fn actions(ctx: &LaneContext) -> Vec<String> {
+        ctx.store
+            .findings(&ctx.run)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.action)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_finding_is_posted() {
+        let (ctx, writer, checker) = setup([confirmed()]);
+        let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
+        assert!(!out.is_error, "{out:?}");
+        let posts = writer.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        let marker = Marker::parse(&posts[0].2).unwrap();
+        assert_eq!(marker.checked_by.unwrap().as_str(), "opus");
+        let seen = checker.seen.lock().unwrap();
+        assert_eq!(seen[0].text, "x is never set.");
+        assert_eq!(seen[0].lane_model.as_str(), "m");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_finding_is_not_posted_and_the_lane_hears_why_and_twice_is_final() {
+        let (ctx, writer, _) = setup([rejected("src/a.rs:2 sets x."), rejected("Still set.")]);
+        let tool = PostFinding(Arc::clone(&ctx));
+        let first = tool.call(post()).await;
+        assert!(first.is_error);
+        assert!(
+            first.content.contains("Reason: src/a.rs:2 sets x."),
+            "{}",
+            first.content
+        );
+        assert!(first.content.contains("try again"), "{}", first.content);
+        let second = tool.call(post()).await;
+        assert!(
+            second.content.contains("rejected twice"),
+            "{}",
+            second.content
+        );
+        let third = tool.call(post()).await;
+        assert!(
+            third.content.contains("Do not try this line again"),
+            "{}",
+            third.content
+        );
+        assert!(writer.posts.lock().unwrap().is_empty());
+        assert_eq!(actions(&ctx), vec!["rejected", "rejected"]);
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_check_posts_unchecked_and_says_so() {
+        let (ctx, writer, _) = setup([CheckVerdict::Unavailable {
+            why: "no verdict from opus".into(),
+        }]);
+        let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
+        assert!(!out.is_error);
+        assert!(
+            out.content.contains("went out unchecked"),
+            "{}",
+            out.content
+        );
+        let posts = writer.posts.lock().unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(Marker::parse(&posts[0].2).unwrap().checked_by, None);
+        assert_eq!(actions(&ctx), vec!["posted", "unverified"]);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_withdrawal_rewrites_resolves_and_stops_counting() {
+        let (ctx, writer, checker) = setup([confirmed(), confirmed()]);
+        PostFinding(Arc::clone(&ctx)).call(post()).await;
+        assert_eq!(ctx.registry.lock().unwrap().open_count(), 1);
+        let out = WithdrawFinding(Arc::clone(&ctx))
+            .call(json!({"comment_id": "c1", "reason": "src/a.rs:2 does set x."}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        let updates = writer.updates.lock().unwrap();
+        assert!(
+            updates[0]
+                .1
+                .starts_with("Withdrawn: this finding was wrong. src/a.rs:2 does set x.")
+        );
+        assert_eq!(*writer.resolved.lock().unwrap(), vec!["c1".to_owned()]);
+        assert_eq!(ctx.registry.lock().unwrap().open_count(), 0);
+        let seen = checker.seen.lock().unwrap();
+        assert!(
+            matches!(&seen[1].kind, CheckKind::Withdrawal { finding } if finding == "x is never set.")
+        );
+        assert_eq!(actions(&ctx), vec!["posted", "withdrawn"]);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_rewrite_leaves_the_finding_alone() {
+        let (ctx, writer, _) = setup([confirmed(), rejected("The rewrite is wrong.")]);
+        PostFinding(Arc::clone(&ctx)).call(post()).await;
+        let out = ImproveFinding(Arc::clone(&ctx))
+            .call(json!({"comment_id": "c1", "body": "Nothing is wrong here."}))
+            .await;
+        assert!(out.is_error);
+        assert!(writer.updates.lock().unwrap().is_empty());
     }
 }
 
@@ -709,7 +1216,7 @@ mod continuation_tests {
     async fn no_coverage_nudge_when_every_file_was_opened() {
         let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
         for path in ["src/a.rs", "README.md"] {
-            GetFileDiff(Arc::clone(&ctx))
+            GetFileDiff(Arc::clone(&ctx.files))
                 .call(json!({"path": path}))
                 .await;
         }

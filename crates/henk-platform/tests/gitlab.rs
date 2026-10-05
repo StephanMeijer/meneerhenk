@@ -31,6 +31,7 @@ fn marker(kind: MarkerKind) -> String {
         model: ModelId::parse("m").unwrap(),
         requested_by: None,
         kind: Some(kind),
+        checked_by: None,
     }
     .render()
 }
@@ -51,6 +52,7 @@ fn fake() -> FakeServer {
         "create_merge_request_note_emoji_reaction",
         "create_commit_status",
         "get_merge_request_diffs",
+        "resolve_merge_request_thread",
     ]
     .iter()
     .map(|name| FakeServer::tool(name, "", &[]))
@@ -87,6 +89,9 @@ fn fake() -> FakeServer {
         "create_merge_request_note" => text(json!({"id": 301})),
         "create_merge_request_discussion_note" => text(json!({"id": 302})),
         "update_merge_request_note" => text(json!({"id": 101})),
+        "resolve_merge_request_thread" => {
+            text(json!({"id": args["discussion_id"], "resolved": true}))
+        }
         "create_merge_request_emoji_reaction" | "create_merge_request_note_emoji_reaction" => {
             text(json!({"id": 1}))
         }
@@ -258,5 +263,25 @@ async fn diff_comes_from_the_merge_request_diffs_tool() {
     assert_eq!(
         fake.calls()[0].arguments,
         json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5"})
+    );
+}
+
+#[tokio::test]
+async fn resolve_finding_resolves_the_discussion_its_note_starts() {
+    let fake = fake();
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    writer.resolve_finding(&target(), "101").await.unwrap();
+    let call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.name == "resolve_merge_request_thread")
+        .unwrap();
+    assert_eq!(
+        call.arguments,
+        json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5", "discussion_id": "d1", "resolved": true})
+    );
+    assert!(
+        writer.resolve_finding(&target(), "102").await.is_err(),
+        "a reply starts no discussion"
     );
 }

@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use henk_llm::{
-    Block, ChatMessage, CompletionRequest, LlmError, MaxTokensParam, ModelConfig, Provider,
+    Block, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig, Provider,
     RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName, ToolResult,
     anthropic, client_for, openai,
 };
@@ -39,6 +39,7 @@ fn config(provider: Provider, base_url: &str) -> ModelConfig {
             max_delay: Duration::from_millis(5),
         },
         max_tokens_param: MaxTokensParam::MaxTokens,
+        effort: None,
     }
 }
 
@@ -78,6 +79,36 @@ fn conversation() -> Vec<ChatMessage> {
 }
 
 // ---- OpenAI ----------------------------------------------------------------
+
+#[test]
+fn openai_reads_usage_under_either_naming() {
+    let response = |usage: Value| {
+        json!({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+            "usage": usage,
+        })
+    };
+    let openai_style = openai::decode(&response(
+        json!({"prompt_tokens": 7, "completion_tokens": 3}),
+    ))
+    .unwrap();
+    assert_eq!(
+        (
+            openai_style.usage.input_tokens,
+            openai_style.usage.output_tokens
+        ),
+        (7, 3)
+    );
+    let passed_through =
+        openai::decode(&response(json!({"input_tokens": 9, "output_tokens": 4}))).unwrap();
+    assert_eq!(
+        (
+            passed_through.usage.input_tokens,
+            passed_through.usage.output_tokens
+        ),
+        (9, 4)
+    );
+}
 
 #[test]
 fn openai_treats_empty_arguments_as_an_empty_object() {
@@ -406,6 +437,44 @@ fn anthropic_encodes_system_top_level_and_echoes_thinking() {
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_1");
     assert_eq!(messages[2]["content"][0]["is_error"], false);
     assert!(body["tools"][0]["input_schema"].get("$schema").is_none());
+}
+
+#[test]
+fn anthropic_sends_adaptive_thinking_and_effort_and_no_temperature() {
+    let mut cfg = config(Provider::Anthropic, "https://x.test");
+    cfg.effort = Some(Effort::High);
+    let client = anthropic::AnthropicClient::new(cfg).unwrap();
+    let request = CompletionRequest {
+        messages: vec![ChatMessage::user("a")],
+        temperature: Some(0.2),
+        ..Default::default()
+    };
+    let body = client.body(&request);
+    assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(body["output_config"], json!({"effort": "high"}));
+    assert!(body.get("temperature").is_none());
+}
+
+#[test]
+fn anthropic_without_effort_sends_no_thinking_settings() {
+    let client =
+        anthropic::AnthropicClient::new(config(Provider::Anthropic, "https://x.test")).unwrap();
+    let request = CompletionRequest {
+        messages: vec![ChatMessage::user("a")],
+        temperature: Some(0.2),
+        ..Default::default()
+    };
+    let body = client.body(&request);
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+    assert_eq!(body["temperature"], 0.2);
+}
+
+#[test]
+fn effort_is_refused_on_openai_style_endpoints() {
+    let mut cfg = config(Provider::OpenAi, "https://x.test/v1");
+    cfg.effort = Some(Effort::Low);
+    assert!(matches!(client_for(cfg), Err(LlmError::InvalidConfig(_))));
 }
 
 #[test]

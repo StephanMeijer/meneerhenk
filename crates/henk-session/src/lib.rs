@@ -361,9 +361,15 @@ mod tests {
             tools[0].definition().name.as_str(),
             "github__pull_request_read"
         );
-        let output = tools[0]
+        let refused = tools[0]
             .call(json!({"owner": "evil", "repo": "x", "pullNumber": 1, "method": "get"}))
             .await;
+        assert!(
+            refused.is_error,
+            "another repository is refused, not swapped"
+        );
+        assert!(fake.calls().is_empty(), "nothing reached the server");
+        let output = tools[0].call(json!({"method": "get"})).await;
         assert!(!output.is_error, "{output:?}");
         assert_eq!(fake.calls()[0].arguments["owner"], "docspec");
         assert_eq!(fake.calls()[0].arguments["pullNumber"], 7);

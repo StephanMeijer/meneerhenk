@@ -130,6 +130,9 @@ pub struct Marker {
     pub run: RunId,
     /// The model that wrote the comment (§3.2).
     pub model: ModelId,
+    /// The model that fact-checked it before it was written, when one did
+    /// (§3.2). Absent on unchecked comments and on older markers.
+    pub checked_by: Option<ModelId>,
     /// Who asked for it, when the write came from Discord (§5.3).
     pub requested_by: Option<DiscordUserId>,
     /// What kind of comment this is. Older markers have none.
@@ -141,6 +144,9 @@ impl Marker {
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = format!("{OPEN} run={} model={}", self.run, self.model);
+        if let Some(checker) = &self.checked_by {
+            let _ = write!(out, " checked_by={checker}");
+        }
         if let Some(user) = self.requested_by {
             let _ = write!(out, " for={user}");
         }
@@ -181,6 +187,7 @@ impl Marker {
 
         let mut run = None;
         let mut model = None;
+        let mut checked_by = None;
         let mut requested_by = None;
         let mut kind = None;
         for field in fields.split_whitespace() {
@@ -188,6 +195,7 @@ impl Marker {
             match key {
                 "run" => run = RunId::parse(value).ok(),
                 "model" => model = ModelId::parse(value).ok(),
+                "checked_by" => checked_by = ModelId::parse(value).ok(),
                 "for" => requested_by = Some(DiscordUserId::new(value.parse().ok()?)),
                 "kind" => kind = MarkerKind::parse(value),
                 _ => {}
@@ -196,6 +204,7 @@ impl Marker {
         Some(Self {
             run: run?,
             model: model?,
+            checked_by,
             requested_by,
             kind,
         })
@@ -220,6 +229,7 @@ mod tests {
             model: ModelId::parse("lane-a/model-x").unwrap_or_else(|e| panic!("{e}")),
             requested_by: requested_by.map(DiscordUserId::new),
             kind: None,
+            checked_by: None,
         }
     }
 
@@ -232,6 +242,26 @@ mod tests {
         assert_eq!(
             marker(Some(42)).render(),
             "<!-- meneer-henk run=run-1 model=lane-a/model-x for=42 -->"
+        );
+    }
+
+    #[test]
+    fn names_the_fact_checking_model_when_there_was_one() {
+        let checked = Marker {
+            checked_by: Some(ModelId::parse("claude-opus-5-5").unwrap()),
+            kind: Some(MarkerKind::Finding),
+            ..marker(None)
+        };
+        assert!(
+            checked
+                .render()
+                .starts_with("<!-- meneer-henk run=run-1 model=lane-a/model-x checked_by=claude-opus-5-5 kind=finding")
+        );
+        assert_eq!(Marker::parse(&checked.attach("Off by one.")), Some(checked));
+        let unchecked = Marker::parse("<!-- meneer-henk run=run-1 model=m -->").unwrap();
+        assert_eq!(
+            unchecked.checked_by, None,
+            "older markers parse as unchecked"
         );
     }
 
@@ -293,6 +323,7 @@ mod tests {
             model: ModelId::parse("m").unwrap(),
             requested_by: None,
             kind: Some(MarkerKind::Finding),
+            checked_by: None,
         };
         let body = marker.attach("Off by one.");
         assert!(body.starts_with("Off by one.\n\n<!-- meneer-henk run=r-1 model=m kind=finding -->\n<!-- This is one review finding"));

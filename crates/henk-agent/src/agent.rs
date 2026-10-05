@@ -337,8 +337,11 @@ impl Agent {
     async fn dispatch(&self, name: &str, arguments: &ToolArguments) -> ToolOutput {
         let Some(tool) = self.tools.get(name) else {
             let known: Vec<&str> = self.tools.names().collect();
+            let hint = closest_tool(name, &known)
+                .map(|known| format!(" Did you mean {known:?}?"))
+                .unwrap_or_default();
             return ToolOutput::error(format!(
-                "Unknown tool {name:?}. Available: {}",
+                "Unknown tool {name:?}.{hint} Available: {}",
                 known.join(", ")
             ));
         };
@@ -372,7 +375,7 @@ impl Agent {
             .iter()
             .rev()
             .find(|m| m.role == henk_llm::Role::Assistant)
-            .map(ChatMessage::text)
+            .map(|m| without_thinking(&m.text()))
             .unwrap_or_default();
         info!(turns, input_tokens = usage.input_tokens, output_tokens = usage.output_tokens, stop = ?stop, "agent run ended");
         debug!(final_text = %one_line(&final_text, 300), "last assistant text");
@@ -384,6 +387,38 @@ impl Agent {
             messages,
         }
     }
+}
+
+/// The known tool an unknown name most likely meant: the same name with an
+/// MCP server prefix added or taken away (`github__x` for `x`, or the
+/// reverse). Models that see both kinds of name in one list guess the
+/// prefix.
+fn closest_tool<'a>(name: &str, known: &[&'a str]) -> Option<&'a str> {
+    let bare = |n: &'a str| n.split_once("__").map_or(n, |(_, rest)| rest);
+    let wanted = name.split_once("__").map_or(name, |(_, rest)| rest);
+    known.iter().copied().find(|k| bare(k) == wanted)
+}
+
+/// Text with reasoning some models write inline removed: every
+/// `<think>...</think>` span, and an unclosed `<think>` with everything after
+/// it. The last words of a session reach the run page; reasoning does not
+/// belong there.
+fn without_thinking(text: &str) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(rest.get(..start).unwrap_or_default());
+        let after = rest.get(start + OPEN.len()..).unwrap_or_default();
+        let Some(end) = after.find(CLOSE) else {
+            rest = "";
+            break;
+        };
+        rest = after.get(end + CLOSE.len()..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -400,5 +435,41 @@ fn arguments_text(arguments: &ToolArguments) -> String {
     match arguments {
         ToolArguments::Parsed(value) => value.to_string(),
         ToolArguments::Malformed(raw) => format!("(malformed) {raw}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_guessed_server_prefix_points_at_the_real_tool() {
+        let known = [
+            "get_file_diff",
+            "github__get_commit",
+            "list_existing_findings",
+        ];
+        assert_eq!(
+            closest_tool("github__list_existing_findings", &known),
+            Some("list_existing_findings")
+        );
+        assert_eq!(
+            closest_tool("get_commit", &known),
+            Some("github__get_commit")
+        );
+        assert_eq!(closest_tool("delete_everything", &known), None);
+    }
+
+    #[test]
+    fn inline_reasoning_is_removed_from_the_final_text() {
+        assert_eq!(without_thinking("<think>hmm</think>Done."), "Done.");
+        assert_eq!(
+            without_thinking("A <think>x</think>B<think>y</think> C"),
+            "A B C"
+        );
+        assert_eq!(without_thinking("Done.<think>never closed"), "Done.");
+        assert_eq!(without_thinking("Plain."), "Plain.");
     }
 }

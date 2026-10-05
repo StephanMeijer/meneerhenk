@@ -151,6 +151,7 @@ sequenceDiagram
     participant C as coordinator.rs
     participant R as review.rs
     participant L as Lane (henk-agent)
+    participant F as Fact-check (another model)
     participant M as Model
     participant X as read-only MCP
     participant W as GitHubWriter
@@ -183,8 +184,12 @@ sequenceDiagram
                 L->>X: call_tool
                 X-->>L: text, truncated
             else post_finding
-                L->>L: claim the line, check style, attach Marker
-                L->>W: post_finding at the commit
+                L->>L: claim the line, check style
+                opt fact_check configured
+                    L->>F: check session: diff tools + give_verdict
+                    F-->>L: confirmed, rejected (reason) or unavailable
+                end
+                L->>W: post_finding at the commit, Marker attached
                 L->>DB: record_finding
             end
         end
@@ -205,9 +210,15 @@ The diff is fetched once per review (`PlatformWriter::diff`, parsed by
 `henk_domain::diff`) and handed to lanes per file with line numbers; a lane
 that ends without opening every changed file is asked once to look at them,
 and the conversation is kept under a size budget by stubbing old tool
-results (`henk_agent::compact`).
+results (`henk_agent::compact`). Stubbing edits earlier turns, and current
+Claude models refuse a thinking block replayed after its history changed, so
+a compaction that stubs anything also drops every thinking block.
 Findings are posted inside the loop by `post_finding`, not collected until the
-end (§3.2). A lane that fails comes back as `Dropped` and the review stands on
+end (§3.2). With `[review.fact_check]`, every post, rewrite and withdrawal
+first passes a check session on another model (`crate::fact_check`): a
+rejection is not posted and the lane gets the reason back, at most twice per
+line; a check that yields no verdict lets the write through and records it
+as `unverified`. A lane that fails comes back as `Dropped` and the review stands on
 the others (§3.3). A lane that reaches its time limit comes back as `Stopped`:
 what it posted stands, it posts nothing more, and the review completes.
 
@@ -220,20 +231,22 @@ through Henk's dispatcher, and every MCP call through the guard.
 ```mermaid
 flowchart TD
     M["Model emits a tool call<br/>name + JSON arguments"] --> A["Agent::dispatch<br/>look up the name in the ToolSet"]
-    A -- "unknown name" --> E1["error result back to the model"]
+    A -- "unknown name" --> E1["error result back to the model<br/>naming the tool it probably meant"]
     A -- "malformed JSON" --> E1
     A -- "native tool" --> N{"which one"}
     A -- "MCP tool" --> G["scope::guard(platform, tool, args, scope)"]
     G -- "tool not in the read table" --> E2["Refused: not available in this task"]
-    G -- "allowed" --> P["pin owner and repo<br/>pin pullNumber or merge_request_iid<br/>confine search queries to repo:owner/name<br/>pin file reads to the reviewed commit<br/>refuse whole-diff methods in a review"]
+    G -- "names another repository or target" --> E2
+    G -- "allowed" --> P["pin owner and repo when left out<br/>pin pullNumber or merge_request_iid<br/>confine search queries to repo:owner/name<br/>pin file reads to the reviewed commit<br/>refuse whole-diff methods in a review"]
     P --> X["McpSession::call_tool<br/>child process over stdio"]
     X --> T["flatten content to text<br/>truncate to max_tool_output_chars"]
     T --> M
     N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file, opened files tracked"]
     N -- "read_file" --> F6["a numbered line range<br/>through the guarded file read"]
     N -- "list_existing_findings" --> F1["read the shared FindingRegistry"]
-    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>claim the line, first claim wins<br/>Marker attached<br/>PlatformWriter::post_finding"]
-    N -- "improve_finding" --> F3["refuse when a person answered<br/>PlatformWriter::update_finding"]
+    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>claim the line, first claim wins<br/>fact-check, when configured<br/>Marker attached<br/>PlatformWriter::post_finding"]
+    N -- "improve_finding" --> F3["refuse when a person answered<br/>fact-check, when configured<br/>PlatformWriter::update_finding"]
+    N -- "withdraw_finding" --> F7["refuse when a person answered<br/>fact-check, when configured<br/>update_finding + resolve_finding"]
     N -- "write_plan, set_title, add_labels, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     F0 --> M
@@ -241,6 +254,7 @@ flowchart TD
     F1 --> M
     F2 --> M
     F3 --> M
+    F7 --> M
     F4 --> M
     F5 --> M
     E1 --> M
@@ -248,7 +262,10 @@ flowchart TD
 ```
 
 The guard table lives in `crates/henk-domain/src/scope.rs`. It is a constant
-list per platform of read tools and the arguments each one gets pinned. A tool
+list per platform of read tools and the arguments each one gets pinned. A
+value the model gives that names another repository, pull request or search
+scope is refused with the reason, never swapped for the right one: a silent
+swap answers a question the model did not ask. A tool
 that is not in the table does not exist as far as the model is concerned, and
 `henk mcp probe` shows which of a server's tools the table exposes. The server
 itself is also started restricted (`GITHUB_READ_ONLY=1`, `GITLAB_PERMISSION_MODE=readonly`),

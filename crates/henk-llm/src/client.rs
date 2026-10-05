@@ -43,6 +43,40 @@ pub enum MaxTokensParam {
     MaxCompletionTokens,
 }
 
+/// How hard a Claude model thinks: Anthropic's `output_config.effort`.
+///
+/// Current Claude models always think, adaptively; effort is the control.
+/// Sending it also sends `thinking: {type: "adaptive"}`. Claude Opus 5.5
+/// defaults to `medium` when it is not sent, other models to `high`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    /// Least thinking: simple, high-volume work.
+    Low,
+    /// The step down from `high` where quality holds.
+    Medium,
+    /// The usual choice for work where correctness matters.
+    High,
+    /// Between `high` and `max`.
+    Xhigh,
+    /// Most thinking, most cost.
+    Max,
+}
+
+impl Effort {
+    /// The value sent on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// Everything needed to build a client.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -64,6 +98,9 @@ pub struct ModelConfig {
     pub retry: RetryPolicy,
     /// OpenAI style only: which parameter carries the output cap.
     pub max_tokens_param: MaxTokensParam,
+    /// Anthropic style only: thinking effort. `None` sends neither
+    /// `thinking` nor `output_config`, leaving the model's default.
+    pub effort: Option<Effort>,
 }
 
 impl ModelConfig {
@@ -89,6 +126,11 @@ pub fn client_for(config: ModelConfig) -> Result<Arc<dyn ModelClient>, LlmError>
         return Err(LlmError::InvalidConfig(format!(
             "base_url {base:?} must start with http(s)://"
         )));
+    }
+    if config.effort.is_some() && config.provider != Provider::Anthropic {
+        return Err(LlmError::InvalidConfig(
+            "effort applies to Anthropic-style endpoints only".to_owned(),
+        ));
     }
     Ok(match config.provider {
         Provider::OpenAi => Arc::new(OpenAiClient::new(config)?),

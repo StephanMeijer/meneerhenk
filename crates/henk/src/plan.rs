@@ -222,6 +222,7 @@ async fn finish_plan(
                 model: model_id.clone(),
                 requested_by: None,
                 kind: Some(MarkerKind::Failure),
+                checked_by: None,
             }
             .attach(&format!(
                 "Planning failed. That is my failure, not the issue's.\n\nRun: {link}"

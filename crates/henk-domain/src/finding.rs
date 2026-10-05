@@ -109,6 +109,19 @@ impl FindingRegistry {
         }
     }
 
+    /// Marks a finding withdrawn: its text replaced and its thread
+    /// resolved, so it no longer counts (§3.3).
+    pub fn withdraw(&mut self, key: &FindingKey, body: String) -> bool {
+        match self.by_key.get_mut(key) {
+            Some(finding) => {
+                finding.body = body;
+                finding.resolved = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Every finding, in path and line order.
     pub fn iter(&self) -> impl Iterator<Item = &Finding> + '_ {
         self.by_key.values()
@@ -152,6 +165,24 @@ mod tests {
             resolved: false,
             in_diff: true,
         }
+    }
+
+    #[test]
+    fn a_withdrawn_finding_stops_counting_and_keeps_its_line() {
+        let mut registry = FindingRegistry::seeded([finding("a.rs", 1), finding("a.rs", 2)]);
+        assert_eq!(registry.open_count(), 2);
+        let key = FindingKey {
+            path: "a.rs".into(),
+            line: 1,
+        };
+        assert!(registry.withdraw(&key, "Withdrawn.".into()));
+        assert_eq!(registry.open_count(), 1);
+        assert!(matches!(registry.claim(&key), Claim::Exists(f) if f.resolved));
+        let missing = FindingKey {
+            path: "b.rs".into(),
+            line: 1,
+        };
+        assert!(!registry.withdraw(&missing, "x".into()));
     }
 
     #[test]

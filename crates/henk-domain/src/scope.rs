@@ -60,7 +60,8 @@ enum Rule {
     Repo,
     /// `pullNumber` is the reviewed pull request (GitHub, review scope only).
     PullNumber,
-    /// `query` gets `repo:owner/name` and loses any other repo qualifier (GitHub search).
+    /// `query` gets `repo:owner/name`; a qualifier naming anything else is
+    /// refused (GitHub search).
     SearchQueryRepo,
     /// Reads happen at the reviewed commit: `ref` is dropped and `sha`
     /// defaults to the commit (GitHub, review scope). An explicit `sha` is
@@ -165,19 +166,45 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
         _ => return Verdict::Deny("arguments must be a JSON object".to_owned()),
     };
     let repo = scope.repo();
+    // A value the model gave that names something else is refused rather
+    // than replaced: a silent swap answers a different question than the
+    // one asked, and the model cannot tell.
     for rule in *rules {
         match rule {
             Rule::Owner => {
+                if let Some(other) = differs(&args, "owner", repo.owner(), Match::IgnoreCase) {
+                    return outside(repo, "owner", &other);
+                }
                 args.insert("owner".into(), json!(repo.owner()));
             }
             Rule::Repo => {
+                if let Some(other) = differs(&args, "repo", repo.name(), Match::IgnoreCase) {
+                    return outside(repo, "repo", &other);
+                }
                 args.insert("repo".into(), json!(repo.name()));
             }
             Rule::ProjectId => {
+                // A numeric project id cannot be checked here; it is pinned.
+                let numeric = args
+                    .get("project_id")
+                    .is_some_and(|v| v.is_u64() || v.as_str().is_some_and(is_number));
+                if !numeric
+                    && let Some(other) =
+                        differs(&args, "project_id", &repo.path(), Match::IgnoreCase)
+                {
+                    return outside(repo, "project_id", &other);
+                }
                 args.insert("project_id".into(), json!(repo.path()));
             }
             Rule::PullNumber => {
                 if let Scope::Review { number, .. } = scope {
+                    if let Some(other) =
+                        differs(&args, "pullNumber", &number.to_string(), Match::Exact)
+                    {
+                        return Verdict::Deny(format!(
+                            "this review reads only pull request {number}; {other} is outside it. Leave pullNumber out."
+                        ));
+                    }
                     args.insert("pullNumber".into(), json!(number));
                 } else if args.get("pullNumber").is_none() {
                     return Verdict::Deny(format!("{tool} needs pullNumber"));
@@ -185,6 +212,16 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
             }
             Rule::MergeRequestIid => {
                 if let Scope::Review { number, .. } = scope {
+                    if let Some(other) = differs(
+                        &args,
+                        "merge_request_iid",
+                        &number.to_string(),
+                        Match::Exact,
+                    ) {
+                        return Verdict::Deny(format!(
+                            "this review reads only merge request {number}; {other} is outside it. Leave merge_request_iid out."
+                        ));
+                    }
                     args.insert("merge_request_iid".into(), json!(number.to_string()));
                 } else if args.get("merge_request_iid").is_none() {
                     return Verdict::Deny(format!("{tool} needs merge_request_iid"));
@@ -192,7 +229,12 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
             }
             Rule::SearchQueryRepo => {
                 let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-                args.insert("query".into(), json!(pin_search_query(query, &repo.path())));
+                match pin_search_query(query, repo) {
+                    Ok(pinned) => {
+                        args.insert("query".into(), json!(pinned));
+                    }
+                    Err(qualifier) => return outside(repo, "search qualifier", &qualifier),
+                }
             }
             Rule::PinToCommit => {
                 if let Scope::Review { commit, .. } = scope {
@@ -217,18 +259,69 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
     Verdict::Allow(Value::Object(args))
 }
 
-/// Removes `repo:`, `org:` and `user:` qualifiers and appends ours.
-fn pin_search_query(query: &str, repo_path: &str) -> String {
-    let mut kept: Vec<&str> = query
-        .split_whitespace()
-        .filter(|word| {
-            let lower = word.to_ascii_lowercase();
-            !(lower.starts_with("repo:") || lower.starts_with("org:") || lower.starts_with("user:"))
-        })
-        .collect();
-    let pin = format!("repo:{repo_path}");
+#[derive(Clone, Copy)]
+enum Match {
+    Exact,
+    IgnoreCase,
+}
+
+/// The value of `key` as text when the model gave one and it is not
+/// `expected`. Absent and null values do not differ: they are pinned.
+fn differs(
+    args: &serde_json::Map<String, Value>,
+    key: &str,
+    expected: &str,
+    how: Match,
+) -> Option<String> {
+    let given = match args.get(key)? {
+        Value::Null => return None,
+        Value::String(text) => text.trim().to_owned(),
+        other => other.to_string(),
+    };
+    let same = match how {
+        Match::Exact => given == expected,
+        Match::IgnoreCase => given.eq_ignore_ascii_case(expected),
+    };
+    (!same).then_some(given)
+}
+
+fn is_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn outside(repo: &RepoRef, what: &str, given: &str) -> Verdict {
+    Verdict::Deny(format!(
+        "this task reads only {}; {what} {given:?} is outside it. Leave {what} out to read this repository.",
+        repo.path()
+    ))
+}
+
+/// Replaces `repo:`, `org:` and `user:` qualifiers naming this repository
+/// or its owner with `repo:owner/name`. Returns the first qualifier naming
+/// anything else as the error.
+fn pin_search_query(query: &str, repo: &RepoRef) -> Result<String, String> {
+    let path = repo.path();
+    let mut kept: Vec<&str> = Vec::new();
+    for word in query.split_whitespace() {
+        let Some((key, value)) = word.split_once(':') else {
+            kept.push(word);
+            continue;
+        };
+        let ours = match key.to_ascii_lowercase().as_str() {
+            "repo" => value.eq_ignore_ascii_case(&path),
+            "org" | "user" => value.eq_ignore_ascii_case(repo.owner()),
+            _ => {
+                kept.push(word);
+                continue;
+            }
+        };
+        if !ours {
+            return Err(word.to_owned());
+        }
+    }
+    let pin = format!("repo:{path}");
     kept.push(&pin);
-    kept.join(" ")
+    Ok(kept.join(" "))
 }
 
 #[cfg(test)]
@@ -284,19 +377,50 @@ mod tests {
     }
 
     #[test]
-    fn repository_and_pull_number_are_pinned() {
-        let verdict = guard(
-            Platform::GitHub,
-            "pull_request_read",
-            &json!({"owner": "evil", "repo": "other", "pullNumber": 1, "method": "get_commits"}),
-            &review_scope(),
+    fn repository_and_pull_number_are_pinned_when_left_out_or_matching() {
+        let expected = Verdict::Allow(
+            json!({"owner": "docspec", "repo": "app", "pullNumber": 42, "method": "get_commits"}),
         );
-        assert_eq!(
-            verdict,
-            Verdict::Allow(
-                json!({"owner": "docspec", "repo": "app", "pullNumber": 42, "method": "get_commits"})
-            )
-        );
+        for given in [
+            json!({"method": "get_commits"}),
+            json!({"owner": "DocSpec", "repo": "App", "pullNumber": 42, "method": "get_commits"}),
+            json!({"owner": null, "pullNumber": "42", "method": "get_commits"}),
+        ] {
+            assert_eq!(
+                guard(
+                    Platform::GitHub,
+                    "pull_request_read",
+                    &given,
+                    &review_scope()
+                ),
+                expected,
+                "{given}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_repository_or_pull_request_is_refused_not_swapped() {
+        for given in [
+            json!({"owner": "actions", "repo": "checkout", "sha": "main"}),
+            json!({"owner": "docspec", "repo": "other", "sha": "main"}),
+        ] {
+            let Verdict::Deny(reason) =
+                guard(Platform::GitHub, "get_commit", &given, &review_scope())
+            else {
+                panic!("{given} must be refused");
+            };
+            assert!(reason.contains("docspec/app"), "{reason}");
+        }
+        assert!(matches!(
+            guard(
+                Platform::GitHub,
+                "pull_request_read",
+                &json!({"pullNumber": 1, "method": "get"}),
+                &review_scope()
+            ),
+            Verdict::Deny(_)
+        ));
     }
 
     #[test]
@@ -376,13 +500,27 @@ mod tests {
         let verdict = guard(
             Platform::GitHub,
             "search_code",
-            &json!({"query": "fn main repo:evil/x org:evil language:rust"}),
+            &json!({"query": "fn main repo:DocSpec/app org:docspec language:rust"}),
             &review_scope(),
         );
         assert_eq!(
             verdict,
             Verdict::Allow(json!({"query": "fn main language:rust repo:docspec/app"}))
         );
+        for query in ["fn main repo:evil/x", "fn main org:evil", "user:someone x"] {
+            assert!(
+                matches!(
+                    guard(
+                        Platform::GitHub,
+                        "search_code",
+                        &json!({"query": query}),
+                        &review_scope()
+                    ),
+                    Verdict::Deny(_)
+                ),
+                "{query}"
+            );
+        }
     }
 
     #[test]
@@ -429,6 +567,15 @@ mod tests {
             ),
             Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5"}))
         );
+        assert!(matches!(
+            guard(
+                Platform::GitLab,
+                "get_merge_request",
+                &json!({"project_id": "other/project"}),
+                &scope
+            ),
+            Verdict::Deny(_)
+        ));
     }
 
     #[test]
