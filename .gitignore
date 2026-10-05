@@ -5,3 +5,5 @@
 .env
 .env.*
 henk.toml
+henk.db*
+transcripts/
