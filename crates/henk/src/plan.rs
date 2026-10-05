@@ -226,6 +226,7 @@ async fn finish_plan(
                 requested_by: None,
                 kind: Some(MarkerKind::Failure),
                 checked_by: None,
+                withdrawn: None,
             }
             .attach(&format!(
                 "Planning failed. That is my failure, not the issue's.\n\nRun: {link}"
