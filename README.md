@@ -28,8 +28,19 @@ processes over stdio:
 No model ever holds a write tool or a credential (§8.4). A model gets the
 read-only session, filtered and pinned by a guard that rewrites every
 call to its own repository and pull request (§8.5), plus a few tools of
-Henk's own (`post_finding`, `improve_finding`, `write_plan`, ...) whose
-implementations enforce the rules of the spec in code.
+Henk's own whose implementations enforce the rules of the spec in code.
+
+A review lane works from the diff Henk fetched once: `list_changed_files`,
+`get_file_diff` (every line numbered on both sides), `read_file` (a
+numbered line range at the reviewed commit), `list_existing_findings`,
+`post_finding` (refused for a line that is not in the diff) and
+`improve_finding`. The planner has `write_plan`, the tracker tools and
+`web_fetch`. Lanes are kept honest and cheap by three things in
+`henk-agent`: old tool results are replaced by one-line stubs once the
+conversation passes a size budget, a lane that ends without opening every
+changed file is asked once to look at them, and an answer cut off at the
+output cap gets one chance to post what it was sure of. Code search is
+withheld for a repository GitHub does not index.
 
 GitHub writes go through REST rather than the MCP server's write tools on
 purpose: that server's pending-review model is a per-user singleton, which

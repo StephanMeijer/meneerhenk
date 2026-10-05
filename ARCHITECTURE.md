@@ -201,6 +201,11 @@ sequenceDiagram
 Three details carry the spec's weight. The count comes from the second
 `existing_findings` call, what the platform reports rather than memory, so
 findings of earlier reviews whose line is still in the diff count too (§3.3).
+The diff is fetched once per review (`PlatformWriter::diff`, parsed by
+`henk_domain::diff`) and handed to lanes per file with line numbers; a lane
+that ends without opening every changed file is asked once to look at them,
+and the conversation is kept under a size budget by stubbing old tool
+results (`henk_agent::compact`).
 Findings are posted inside the loop by `post_finding`, not collected until the
 end (§3.2). A lane that fails comes back as `Dropped` and the review stands on
 the others (§3.3). A lane that reaches its time limit comes back as `Stopped`:
@@ -220,15 +225,19 @@ flowchart TD
     A -- "native tool" --> N{"which one"}
     A -- "MCP tool" --> G["scope::guard(platform, tool, args, scope)"]
     G -- "tool not in the read table" --> E2["Refused: not available in this task"]
-    G -- "allowed" --> P["pin owner and repo<br/>pin pullNumber or merge_request_iid<br/>confine search queries to repo:owner/name<br/>default sha to the reviewed commit"]
+    G -- "allowed" --> P["pin owner and repo<br/>pin pullNumber or merge_request_iid<br/>confine search queries to repo:owner/name<br/>pin file reads to the reviewed commit<br/>refuse whole-diff methods in a review"]
     P --> X["McpSession::call_tool<br/>child process over stdio"]
     X --> T["flatten content to text<br/>truncate to max_tool_output_chars"]
     T --> M
+    N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file, opened files tracked"]
+    N -- "read_file" --> F6["a numbered line range<br/>through the guarded file read"]
     N -- "list_existing_findings" --> F1["read the shared FindingRegistry"]
-    N -- "post_finding" --> F2["style check<br/>claim the line, first claim wins<br/>Marker attached<br/>PlatformWriter::post_finding"]
+    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>claim the line, first claim wins<br/>Marker attached<br/>PlatformWriter::post_finding"]
     N -- "improve_finding" --> F3["refuse when a person answered<br/>PlatformWriter::update_finding"]
     N -- "write_plan, set_title, add_labels, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
+    F0 --> M
+    F6 --> M
     F1 --> M
     F2 --> M
     F3 --> M
