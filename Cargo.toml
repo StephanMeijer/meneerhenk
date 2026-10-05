@@ -58,6 +58,25 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "json"] }
 wiremock = "0.6"
 
+# cargo-dist builds the release binaries (.github/workflows/release.yml).
+# Only `henk` opts in, via [package.metadata.dist] in its own manifest; the
+# library crates stay library-only. Linux only: Henk is deployed on Linux
+# (deny.toml judges the same two targets), and the container image is the
+# main way to run it, since it also needs the MCP servers it starts.
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+# release.yml is maintained by hand on top of what `dist generate` writes.
+allow-dirty = ["ci"]
+ci = ["github"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]
+installers = ["shell"]
+unix-archive = ".tar.xz"
+checksum = "sha256"
+publish-prereleases = false
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
@@ -82,3 +101,6 @@ must_use_candidate = "allow"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+[profile.dist]
+inherits = "release"

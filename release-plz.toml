@@ -1,0 +1,57 @@
+# release-plz configuration. Henk is not published to a registry: every crate
+# is `publish = false`, so release-plz runs in git-only mode and reads the
+# current version from the last `vX.Y.Z` tag instead of from crates.io.
+#
+# All crates share [workspace.package].version and release as ONE workspace
+# tag (vX.Y.Z) with ONE root CHANGELOG.md. The `henk` binary crate owns the
+# tag, the GitHub Release and the changelog; `changelog_include` pulls in the
+# commits of every library crate, so nothing is dropped.
+#
+# Why per-crate changelog writes are off at workspace level: release-plz
+# writes per-crate changelogs one after another, and when several crates
+# target the same file each write truncates it, so only the last crate's
+# entries survive (https://github.com/release-plz/release-plz/issues/2428).
+
+[workspace]
+git_only = true
+
+# Tags and GitHub releases are off for the library crates and enabled for
+# `henk` below, so the workspace gets one `vX.Y.Z` tag instead of nine crates
+# racing to create it.
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+
+# Release whenever the workspace version is ahead of the last tag, not only on
+# the commit that merges a release PR. With the release-PR-only rule a release
+# is a one-shot event: if the merge's CI run never reaches
+# `release-plz-release`, main sits at the new version with no tag, and neither
+# `release` nor `release-pr` will ever move again. Comparing against the tag
+# makes a missed release self-healing: the next push to main retries it.
+#
+# What this widens: any push to `main` whose version is ahead of the last tag
+# releases. Version bumps belong in release PRs; nothing in CI enforces that.
+release_always = true
+
+semver_check = false
+
+# Don't run `cargo update` in the release PR (no unrelated lockfile churn).
+dependencies_update = false
+
+[[package]]
+name = "henk"
+git_tag_name = "v{{ version }}"
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = [
+  "henk-domain",
+  "henk-llm",
+  "henk-mcp",
+  "henk-agent",
+  "henk-session",
+  "henk-events",
+  "henk-platform",
+  "henk-store",
+]

@@ -8,6 +8,10 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[package.metadata.dist]
+# The one crate cargo-dist packages; `publish = false` excludes it otherwise.
+dist = true
+
 [[bin]]
 name = "henk"
 path = "src/main.rs"
