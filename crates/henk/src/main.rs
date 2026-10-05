@@ -294,7 +294,11 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
                 .with_context(|| format!("run {run}"))
         }
     })
-    .await;
+    .await
+    .into_iter()
+    // A crashed review task is a failed review, reported like any other.
+    .map(|(job, result)| (job, result.map_err(anyhow::Error::from).and_then(|r| r)))
+    .collect::<Vec<_>>();
 
     let mut results = results;
     if single && let Some((_, result)) = results.pop() {
