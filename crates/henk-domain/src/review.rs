@@ -226,9 +226,24 @@ pub struct ReviewOutcome {
     /// Every changed file was left out by `review.ignore`, so no lane ran
     /// (§3.2). Such a review is complete.
     pub nothing_to_review: bool,
+    /// A newer commit arrived and this review stopped; the review of the
+    /// newer commit stands (§3.3). Not Henk's failure, and not complete.
+    pub superseded: bool,
 }
 
 impl ReviewOutcome {
+    /// The outcome of a review stopped because a newer commit arrived.
+    #[must_use]
+    pub fn superseded(commit: CommitSha) -> Self {
+        Self {
+            commit,
+            lanes: Vec::new(),
+            open_findings: 0,
+            nothing_to_review: false,
+            superseded: true,
+        }
+    }
+
     /// Whether the review completed: at least one lane finished, or there
     /// was nothing to review.
     #[must_use]
@@ -259,7 +274,9 @@ impl ReviewOutcome {
     /// The GitHub check conclusion.
     #[must_use]
     pub fn check_conclusion(&self) -> CheckConclusion {
-        if !self.completed() {
+        if self.superseded {
+            CheckConclusion::Neutral
+        } else if !self.completed() {
             CheckConclusion::Failure
         } else if self.open_findings == 0 {
             CheckConclusion::Success
@@ -279,6 +296,9 @@ impl ReviewOutcome {
     /// The first line of the summary: the count, or that the review did not complete.
     #[must_use]
     pub fn headline(&self) -> String {
+        if self.superseded {
+            return "Superseded by a newer commit.".to_owned();
+        }
         if !self.completed() {
             return "Review did not complete.".to_owned();
         }
@@ -345,6 +365,7 @@ mod tests {
                 .collect(),
             open_findings,
             nothing_to_review: false,
+            superseded: false,
         }
     }
 
@@ -435,6 +456,15 @@ mod tests {
             &[("a", LaneOutcome::Finished), ("b", LaneOutcome::Dropped)],
             0,
         )
+    }
+
+    #[test]
+    fn a_superseded_review_is_neutral_and_says_why() {
+        let superseded = ReviewOutcome::superseded(outcome(&[], 0).commit);
+        assert!(!superseded.completed());
+        assert_eq!(superseded.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(superseded.headline(), "Superseded by a newer commit.");
+        assert!(crate::text::is_in_style(&superseded.summary()));
     }
 
     #[test]

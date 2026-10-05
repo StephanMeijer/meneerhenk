@@ -115,10 +115,10 @@ change against the target branch.
 | Review starts | A check "Meneer Henk", *in progress*, linked to the run | Henk's award emoji on the MR *(in development)* |
 | During | Line comments appear one by one | Diff discussions appear one by one |
 | Review ends | A **summary comment**: "No issues found" or "N issues found", and which lanes did not finish | A **summary note** with the same content |
-| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete) | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
+| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). A review superseded by a newer commit completes neutral, "Superseded by a newer commit.", and posts no comment | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
 - **Only the latest summary counts.** When he posts a new summary, his
-  earlier summaries are folded as outdated, and so are his comments in
+  earlier summaries and failure comments are folded as outdated, and so are his comments in
   resolved threads. On GitLab the earlier summary becomes an "outdated" line.
   His conversational replies are never folded.
 - **The count** is the number of Henk's distinct findings still open on the
@@ -532,3 +532,6 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §8.6: withdrawing a finding no longer replaces its author in the hidden
   marker; the withdrawal is recorded beside it, and the comment's note for
   AI agents says there is nothing to do (#9).
+- §3.3: a review superseded by a newer commit ends with a neutral check and
+  no comment, rather than a failure comment and a failure check; it was not
+  Henk's failure. Earlier failure comments are folded like summaries (#8).

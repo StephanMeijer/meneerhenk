@@ -124,7 +124,8 @@ pub trait PlatformWriter: Send + Sync {
         target: &ReviewTarget,
     ) -> Result<Vec<ExistingFinding>, PlatformError>;
 
-    /// Henk's summaries on the target.
+    /// Henk's summaries and failure comments on the target: the comments
+    /// a newer summary folds as outdated (§3.3).
     async fn existing_summaries(
         &self,
         target: &ReviewTarget,

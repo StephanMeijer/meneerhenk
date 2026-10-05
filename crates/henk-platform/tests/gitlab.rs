@@ -80,6 +80,9 @@ fn fake() -> FakeServer {
                 {"id": "d3", "individual_note": true, "notes": [
                     {"id": 104, "body": format!("No issues found.\n\n{}", marker(MarkerKind::Summary)), "author": {"username": "meneerhenk"}}
                 ]},
+                {"id": "d6", "individual_note": true, "notes": [
+                    {"id": 107, "body": format!("Review did not complete.\n\n{}", marker(MarkerKind::Failure)), "author": {"username": "meneerhenk"}}
+                ]},
                 {"id": "d4", "notes": [
                     {"id": 105, "body": "human thread", "author": {"username": "bob"}, "position": {"new_path": "x", "new_line": 1}}
                 ]},
@@ -154,9 +157,10 @@ async fn review_lifecycle_on_gitlab() {
     assert!(findings[1].resolved);
 
     let summaries = writer.existing_summaries(&t).await.unwrap();
-    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries.len(), 2, "summaries and failure comments fold");
     assert_eq!(summaries[0].comment_id, "104");
     assert!(!summaries[0].folded);
+    assert_eq!(summaries[1].comment_id, "107");
 
     let posted = writer
         .post_finding(&t, &commit, "src/c.rs", 12, DiffSide::Right, "Wrong.")
@@ -212,6 +216,7 @@ async fn review_lifecycle_on_gitlab() {
         }],
         open_findings: 2,
         nothing_to_review: false,
+        superseded: false,
     };
     writer
         .finish_review(&t, &commit, None, &outcome, "https://henk/runs/r-1")
