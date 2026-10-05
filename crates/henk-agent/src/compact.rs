@@ -4,9 +4,11 @@
 //! file per turn pays for all of them on every later turn. Once the
 //! conversation is over budget, the oldest large tool results are replaced
 //! by a one-line stub that names the tool and the turn; the model can call
-//! the tool again if it needs the content. The system prompt, the opening
-//! messages, the model's own text and the most recent turns are never
-//! touched.
+//! the tool again if it needs the content. Results of tools that mark
+//! themselves as the work itself ([`crate::Tool::keep_in_context`], the
+//! review's diffs) go last: every other result is stubbed first. The system
+//! prompt, the opening messages, the model's own text and the most recent
+//! turns are never touched.
 //!
 //! Stubbing edits earlier turns, and current Claude models bind each
 //! thinking block to the exact history before it: a replayed block after an
@@ -45,8 +47,13 @@ pub fn size(messages: &[ChatMessage]) -> usize {
 /// results, oldest first, leaving the last `keep_recent_turns` turns intact.
 /// A turn starts at an assistant message. Returns how many results were
 /// stubbed. When that is more than zero, opaque blocks are dropped too.
-pub fn compact(messages: &mut [ChatMessage], budget: usize, keep_recent_turns: u32) -> usize {
-    let stubbed = stub_old_results(messages, budget, keep_recent_turns);
+pub fn compact(
+    messages: &mut [ChatMessage],
+    budget: usize,
+    keep_recent_turns: u32,
+    keep: impl Fn(&str) -> bool,
+) -> usize {
+    let stubbed = stub_old_results(messages, budget, keep_recent_turns, &keep);
     if stubbed > 0 {
         for message in messages.iter_mut() {
             message
@@ -57,7 +64,12 @@ pub fn compact(messages: &mut [ChatMessage], budget: usize, keep_recent_turns: u
     stubbed
 }
 
-fn stub_old_results(messages: &mut [ChatMessage], budget: usize, keep_recent_turns: u32) -> usize {
+fn stub_old_results(
+    messages: &mut [ChatMessage],
+    budget: usize,
+    keep_recent_turns: u32,
+    keep: &dyn Fn(&str) -> bool,
+) -> usize {
     let mut total = size(messages);
     if total <= budget {
         return 0;
@@ -69,17 +81,36 @@ fn stub_old_results(messages: &mut [ChatMessage], budget: usize, keep_recent_tur
         .filter(|(_, m)| m.role == Role::Assistant)
         .map(|(i, _)| i)
         .collect();
-    let keep = usize::try_from(keep_recent_turns).unwrap_or(usize::MAX);
-    let protected_from = if keep == 0 {
+    let recent = usize::try_from(keep_recent_turns).unwrap_or(usize::MAX);
+    let protected_from = if recent == 0 {
         messages.len()
     } else {
         assistant_indices
             .len()
-            .checked_sub(keep)
+            .checked_sub(recent)
             .and_then(|at| assistant_indices.get(at).copied())
             .unwrap_or(0)
     };
+    // Evidence first (file reads, MCP answers), then, only if that is not
+    // enough, the results a tool marks as the work itself (the diffs).
+    let mut stubbed = 0;
+    for kept in [false, true] {
+        stubbed += stub_pass(messages, protected_from, budget, &mut total, |tool| {
+            keep(tool) == kept
+        });
+    }
+    stubbed
+}
 
+/// One oldest-first pass over the unprotected messages, stubbing the large
+/// results of the tools `select` accepts until `total` is within `budget`.
+fn stub_pass(
+    messages: &mut [ChatMessage],
+    protected_from: usize,
+    budget: usize,
+    total: &mut usize,
+    select: impl Fn(&str) -> bool,
+) -> usize {
     let mut stubbed = 0;
     let mut turn = 0;
     let mut last_calls: Vec<(String, String)> = Vec::new();
@@ -96,7 +127,7 @@ fn stub_old_results(messages: &mut [ChatMessage], budget: usize, keep_recent_tur
             break;
         }
         for block in &mut message.blocks {
-            if total <= budget {
+            if *total <= budget {
                 return stubbed;
             }
             let Block::ToolResult(result) = block else {
@@ -110,12 +141,15 @@ fn stub_old_results(messages: &mut [ChatMessage], budget: usize, keep_recent_tur
                 .iter()
                 .find(|(id, _)| *id == result.call_id)
                 .map_or("a tool", |(_, name)| name.as_str());
+            if !select(tool) {
+                continue;
+            }
             let mut stub = String::new();
             let _ = write!(
                 stub,
                 "[result of {tool} from turn {turn} elided ({chars} chars); call it again if you need it]"
             );
-            total = total.saturating_sub(chars) + stub.chars().count();
+            *total = total.saturating_sub(chars) + stub.chars().count();
             result.content = stub;
             stubbed += 1;
         }
@@ -168,14 +202,14 @@ mod tests {
     fn under_budget_nothing_changes() {
         let mut messages = conversation(&[1000, 1000]);
         let before = messages.clone();
-        assert_eq!(compact(&mut messages, 10_000, 2), 0);
+        assert_eq!(compact(&mut messages, 10_000, 2, |_| false), 0);
         assert_eq!(messages, before);
     }
 
     #[test]
     fn stubs_the_oldest_large_results_and_keeps_recent_turns() {
         let mut messages = conversation(&[5000, 100, 5000, 5000, 5000]);
-        let stubbed = compact(&mut messages, 12_000, 2);
+        let stubbed = compact(&mut messages, 12_000, 2, |_| false);
         assert_eq!(
             stubbed, 2,
             "turns 1 and 3; turn 2 is small, 4 and 5 are recent"
@@ -198,10 +232,14 @@ mod tests {
     #[test]
     fn stops_as_soon_as_the_budget_is_met_and_never_stubs_twice() {
         let mut messages = conversation(&[5000, 5000, 5000, 5000]);
-        assert_eq!(compact(&mut messages, 16_000, 1), 1);
-        assert_eq!(compact(&mut messages, 16_000, 1), 0, "already under budget");
+        assert_eq!(compact(&mut messages, 16_000, 1, |_| false), 1);
         assert_eq!(
-            compact(&mut messages, 6_000, 1),
+            compact(&mut messages, 16_000, 1, |_| false),
+            0,
+            "already under budget"
+        );
+        assert_eq!(
+            compact(&mut messages, 6_000, 1, |_| false),
             2,
             "stubs are skipped, the next two go"
         );
@@ -214,7 +252,7 @@ mod tests {
         let mut messages = conversation(&[5000, 5000, 5000]);
         messages[1].blocks.insert(0, thinking());
         messages[5].blocks.insert(0, thinking());
-        assert_eq!(compact(&mut messages, 11_000, 1), 1);
+        assert_eq!(compact(&mut messages, 11_000, 1, |_| false), 1);
         assert!(
             messages
                 .iter()
@@ -231,14 +269,59 @@ mod tests {
         messages[1]
             .blocks
             .insert(0, Block::Opaque(json!({"type": "thinking"})));
-        assert_eq!(compact(&mut messages, 100_000, 1), 0);
+        assert_eq!(compact(&mut messages, 100_000, 1, |_| false), 0);
         assert!(matches!(&messages[1].blocks[0], Block::Opaque(_)));
+    }
+
+    /// A turn whose one tool call is `tool`, with a result of `chars`.
+    fn named_turn(n: usize, tool: &str, chars: usize) -> [ChatMessage; 2] {
+        let [mut call, result] = turn(n, chars);
+        if let Some(Block::ToolCall(c)) = call.blocks.first_mut() {
+            c.name = tool.to_owned();
+        }
+        [call, result]
+    }
+
+    fn content(messages: &[ChatMessage], index: usize) -> String {
+        match &messages[index].blocks[0] {
+            Block::ToolResult(r) => r.content.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_kept_tools_result_outlives_a_newer_file_read() {
+        // Turn 1 is a diff, turn 2 a file read, turns 3 and 4 are recent.
+        let mut messages = vec![ChatMessage::user("go")];
+        messages.extend(named_turn(1, "get_file_diff", 30_000));
+        messages.extend(named_turn(2, "read_file", 30_000));
+        messages.extend(named_turn(3, "read_file", 100));
+        messages.extend(named_turn(4, "read_file", 100));
+        let stubbed = compact(&mut messages, 40_000, 2, |tool| tool == "get_file_diff");
+        assert_eq!(stubbed, 1);
+        assert_eq!(content(&messages, 2).len(), 30_000, "the older diff stays");
+        assert!(content(&messages, 4).starts_with("[result of read_file from turn 2 elided"));
+    }
+
+    #[test]
+    fn kept_results_go_too_when_nothing_else_is_left() {
+        let mut messages = vec![ChatMessage::user("go")];
+        messages.extend(named_turn(1, "get_file_diff", 30_000));
+        messages.extend(named_turn(2, "get_file_diff", 30_000));
+        messages.extend(named_turn(3, "read_file", 30_000));
+        messages.extend(named_turn(4, "read_file", 100));
+        let stubbed = compact(&mut messages, 35_000, 1, |tool| tool == "get_file_diff");
+        assert_eq!(stubbed, 2, "the read first, then the oldest diff");
+        assert!(content(&messages, 6).starts_with("[result of read_file"));
+        assert!(content(&messages, 2).starts_with("[result of get_file_diff from turn 1"));
+        assert_eq!(content(&messages, 4).len(), 30_000, "the newer diff stays");
+        assert!(size(&messages) <= 35_000);
     }
 
     #[test]
     fn zero_recent_turns_protects_nothing() {
         let mut messages = conversation(&[5000, 5000]);
-        assert_eq!(compact(&mut messages, 100, 0), 2);
+        assert_eq!(compact(&mut messages, 100, 0, |_| false), 2);
         assert!(size(&messages) < 300);
     }
 }
