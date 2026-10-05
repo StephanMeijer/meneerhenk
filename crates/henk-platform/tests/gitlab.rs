@@ -210,6 +210,7 @@ async fn review_lifecycle_on_gitlab() {
             outcome: LaneOutcome::Dropped,
         }],
         open_findings: 2,
+        nothing_to_review: false,
     };
     writer
         .finish_review(&t, &commit, None, &outcome, "https://henk/runs/r-1")

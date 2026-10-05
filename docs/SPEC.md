@@ -84,6 +84,10 @@ change against the target branch.
   surrounding code (callers, tests, configuration) as it needs.
 - Each lane reports **only real problems the change introduces**: bugs,
   security issues, broken behaviour. No style remarks, no nitpicks.
+- **Some files are not reviewed:** lockfiles and generated changelogs by
+  default, or whatever is configured instead. They are listed as not
+  reviewed and carry no finding. A change made only of such files is
+  reported as "nothing to review", which is a completed review.
 - Each problem becomes a **comment on its line**, posted as soon as the lane
   is sure of it. On GitHub that is a review comment; on GitLab, a diff
   discussion.
@@ -520,3 +524,7 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.2: when the check cannot be made, the finding is posted unchecked rather
   than held back, since Henk is advisory (§8.2) and an outage of the checking
   model must not silence reviews.
+- §3.2: files matched by `review.ignore` (lockfiles and `CHANGELOG.md` by
+  default) are not reviewed; a change made only of them completes as
+  "nothing to review" with a success check, rather than failing for an
+  empty diff (#13).

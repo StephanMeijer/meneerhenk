@@ -223,15 +223,21 @@ pub struct ReviewOutcome {
     /// commit, including findings from earlier reviews whose line is still
     /// in the diff.
     pub open_findings: usize,
+    /// Every changed file was left out by `review.ignore`, so no lane ran
+    /// (§3.2). Such a review is complete.
+    pub nothing_to_review: bool,
 }
 
 impl ReviewOutcome {
-    /// Whether the review completed: at least one lane finished.
+    /// Whether the review completed: at least one lane finished, or there
+    /// was nothing to review.
     #[must_use]
     pub fn completed(&self) -> bool {
-        self.lanes
-            .iter()
-            .any(|lane| matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped))
+        self.nothing_to_review
+            || self
+                .lanes
+                .iter()
+                .any(|lane| matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped))
     }
 
     /// The lanes that reached their time limit, in order.
@@ -275,6 +281,9 @@ impl ReviewOutcome {
     pub fn headline(&self) -> String {
         if !self.completed() {
             return "Review did not complete.".to_owned();
+        }
+        if self.nothing_to_review && self.open_findings == 0 {
+            return "Nothing to review: every changed file is in review.ignore.".to_owned();
         }
         match self.open_findings {
             0 => "No issues found.".to_owned(),
@@ -335,6 +344,7 @@ mod tests {
                 })
                 .collect(),
             open_findings,
+            nothing_to_review: false,
         }
     }
 
@@ -425,6 +435,31 @@ mod tests {
             &[("a", LaneOutcome::Finished), ("b", LaneOutcome::Dropped)],
             0,
         )
+    }
+
+    #[test]
+    fn nothing_to_review_is_a_complete_review_without_lanes() {
+        let skipped = ReviewOutcome {
+            nothing_to_review: true,
+            ..outcome(&[], 0)
+        };
+        assert!(skipped.completed());
+        assert_eq!(skipped.check_conclusion(), CheckConclusion::Success);
+        assert_eq!(
+            skipped.summary(),
+            "Nothing to review: every changed file is in review.ignore."
+        );
+        // Earlier findings still on the diff are still counted (§3.3).
+        let open = ReviewOutcome {
+            nothing_to_review: true,
+            ..outcome(&[], 2)
+        };
+        assert_eq!(open.summary(), "2 issues found.");
+        assert_eq!(open.check_conclusion(), CheckConclusion::Neutral);
+        assert!(
+            !outcome(&[], 0).completed(),
+            "no lanes and something to review"
+        );
     }
 
     #[test]
