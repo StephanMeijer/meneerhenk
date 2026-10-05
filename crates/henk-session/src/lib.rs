@@ -115,9 +115,12 @@ pub async fn run_session(
         }
     }
 
-    // A session that reaches its time limit is finished, not dropped: what
-    // it posted stands, and it posts nothing more. Callers that need a
-    // complete result (the planner) read `stop` and decide for themselves.
+    // The lane row records whether the session ran to an end (finished) or
+    // broke off (dropped). A session that reaches its time limit ran to an
+    // end: what it posted stands and it posts nothing more, so the row says
+    // finished. How a caller presents that is the caller's business, read
+    // from `stop`: the review reports such a lane as stopped at the time
+    // limit in its summary, the planner treats it as a failed plan.
     let (status, error) = match &outcome.stop {
         StopCause::EndTurn | StopCause::MaxTurns | StopCause::Timeout => {
             (LaneStatus::Finished, None)

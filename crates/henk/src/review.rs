@@ -462,6 +462,8 @@ async fn spawn_lanes(
                     ),
                 );
             }
+            // The lane row (henk-session) says finished for a time limit;
+            // the summary distinguishes it as stopped, from `stop`.
             let lane_outcome = match outcome.stop {
                 StopCause::Timeout => LaneOutcome::Stopped,
                 _ if outcome.finished() => LaneOutcome::Finished,
