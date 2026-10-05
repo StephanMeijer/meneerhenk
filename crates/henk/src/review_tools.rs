@@ -192,6 +192,16 @@ impl Tool for PostFinding {
             Ok(posted) => posted,
             Err(error) => {
                 warn!(%error, path, line, "posting a finding failed");
+                // On the timeline too, so a lane whose every post failed does
+                // not look like a lane that found nothing.
+                let _ = ctx.store.event(
+                    &ctx.run,
+                    "warn",
+                    &format!(
+                        "{}: could not post a finding on {path}:{line}: {error}",
+                        ctx.lane
+                    ),
+                );
                 return ToolOutput::error(format!(
                     "Could not post on {path}:{line}: {error}. If the line is not part of the diff, pick a line that is."
                 ));
