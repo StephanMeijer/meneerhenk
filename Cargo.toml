@@ -33,7 +33,7 @@ henk-store = { path = "crates/henk-store" }
 anyhow = "1.0"
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path"] }
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 hmac = "0.13"
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng", "thread_rng"] }

@@ -682,7 +682,7 @@ name = "henk-platform"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "henk-domain",
  "henk-llm",
  "henk-mcp",
