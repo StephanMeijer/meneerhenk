@@ -122,6 +122,12 @@ enum LlmCommand {
         #[arg(long, default_value = "Say 'Not bad.' and nothing else.")]
         prompt: String,
     },
+    /// List the models the endpoint of a configured model serves.
+    Models {
+        /// Model id from `[models]`; its base URL, provider and key are used.
+        #[arg(long)]
+        model: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +213,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
+        Command::Llm {
+            command: LlmCommand::Models { model },
+        } => cmd_llm_models(&cli.config, &model).await,
         Command::Mcp {
             command: McpCommand::Probe { server, show },
         } => cmd_mcp_probe(&cli.config, &server, &show).await,
@@ -313,6 +322,23 @@ async fn cmd_llm_probe(config: &Path, model: &str, prompt: String) -> anyhow::Re
         "stop: {:?}; tokens in {} out {}",
         completion.stop, completion.usage.input_tokens, completion.usage.output_tokens
     );
+    Ok(())
+}
+
+async fn cmd_llm_models(config: &Path, model: &str) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let entry = settings
+        .models
+        .get(model)
+        .ok_or_else(|| anyhow!("model {model:?} is not configured"))?;
+    let client_config = entry
+        .to_client_config(app::env_var)
+        .map_err(|variable| anyhow!("environment variable {variable} is not set"))?;
+    let ids = henk_llm::list_models(&client_config).await?;
+    eprintln!("{} models at {}:", ids.len(), entry.base_url);
+    for id in ids {
+        println!("{id}");
+    }
     Ok(())
 }
 
