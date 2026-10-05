@@ -1,0 +1,57 @@
+# The advisory check ci.yml's `deny` job runs, on a clock.
+#
+# ci.yml covers every pull request and push to `main`, but an advisory is not
+# published in response to activity here. RustSec files one against a
+# dependency nobody touched, and if the repository is quiet that week nothing
+# looks at Cargo.lock until somebody pushes. This is what looks.
+#
+# A separate workflow, because a `schedule:` trigger in ci.yml would run every
+# job there to answer a question that compiles nothing. It gates nothing; the
+# fix belongs on `main` (update the lockfile, or an `ignore` entry in
+# deny.toml with a reason and a link).
+#
+# Keep the cargo-deny version in step with ci.yml.
+name: Advisories
+
+on:
+  schedule:
+    # 07:00 UTC on weekdays, so a finding is there before the working day.
+    - cron: "0 7 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # cargo-deny compiles nothing but reads the graph through `cargo
+      # metadata`, so it still needs the pinned toolchain's cargo.
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check advisories
+      - name: Record the advisory database revision this run judged against
+        if: always()
+        run: |
+          set -euo pipefail
+          dbs="${CARGO_HOME:-$HOME/.cargo}/advisory-dbs"
+          if [ ! -d "$dbs" ]; then
+            echo "::warning::no advisory database was cloned; the check failed before fetching one"
+            exit 0
+          fi
+          recorded=0
+          for db in "$dbs"/*/; do
+            [ -d "$db/.git" ] || continue
+            echo "::notice::judged against RustSec advisory-db $(basename "$db") $(git -C "$db" rev-parse HEAD) ($(git -C "$db" log -1 --format=%cI))"
+            recorded=1
+          done
+          [ "$recorded" = 1 ] || echo "::warning::$dbs exists but holds no git checkout to record"

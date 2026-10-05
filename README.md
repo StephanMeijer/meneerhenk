@@ -206,6 +206,11 @@ container's paths: the GitLab servers are started as `node
 /opt/mcp-gitlab/.../build/index.js` because distroless has no
 `/usr/bin/env`. The only writable path is `/var/lib/henk`.
 
+Released images are on `ghcr.io/stephanmeijer/meneerhenk` (`:X.Y.Z`,
+`:X.Y`, `:latest`), signed with cosign and carrying SLSA provenance; each
+GitHub Release also has signed Linux binaries. `RELEASING.md` says how a
+release is cut and how to verify one.
+
 ## Run
 
 ```sh
