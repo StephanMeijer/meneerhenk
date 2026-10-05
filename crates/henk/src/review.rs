@@ -266,7 +266,7 @@ async fn review_body(
         },
     ))));
 
-    let diff = fetch_diff(app, writer, target, commit, base_ref, run).await;
+    let diff = fetch_diff(app, writer, target, commit, base_ref, run).await?;
 
     // One read-only MCP session shared by the lanes of this review.
     let alias = app.read_mcp_alias(platform)?;
@@ -375,8 +375,8 @@ async fn withheld_tools(
 }
 
 /// The diff, once, for every lane: handed out per file, and the check every
-/// finding passes before it is posted. `None` when the platform refused,
-/// in which case lanes fall back to the platform server's own diff tools.
+/// finding passes before it is posted. Without it there is no review: the
+/// error ends the run as Henk's own failure, which the summary says.
 async fn fetch_diff(
     app: &App,
     writer: &Arc<dyn PlatformWriter>,
@@ -384,32 +384,28 @@ async fn fetch_diff(
     commit: &CommitSha,
     base_ref: &str,
     run: &RunId,
-) -> Option<Arc<ReviewDiff>> {
-    match writer.diff(target, commit, base_ref).await {
-        Ok(patches) => {
-            let diff = ReviewDiff::from_patches(&patches);
-            let (additions, deletions) = diff
-                .files()
-                .iter()
-                .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
-            let _ = app.store.event(
-                run,
-                "info",
-                &format!(
-                    "diff: {} files, +{additions} -{deletions}",
-                    diff.files().len()
-                ),
-            );
-            Some(Arc::new(diff))
-        }
-        Err(error) => {
-            warn!(%error, "could not fetch the diff; lanes read it through the platform server");
-            let _ = app
-                .store
-                .event(run, "warn", &format!("could not fetch the diff: {error}"));
-            None
-        }
+) -> anyhow::Result<Arc<ReviewDiff>> {
+    let patches = writer
+        .diff(target, commit, base_ref)
+        .await
+        .context("fetching the diff")?;
+    let diff = ReviewDiff::from_patches(&patches);
+    if diff.is_empty() {
+        return Err(anyhow!("the diff is empty; nothing to review"));
     }
+    let (additions, deletions) = diff
+        .files()
+        .iter()
+        .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
+    let _ = app.store.event(
+        run,
+        "info",
+        &format!(
+            "diff: {} files, +{additions} -{deletions}",
+            diff.files().len()
+        ),
+    );
+    Ok(Arc::new(diff))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -425,7 +421,7 @@ async fn spawn_lanes(
     base_ref: &str,
     run: &RunId,
     cancel: &CancellationToken,
-    diff: Option<Arc<ReviewDiff>>,
+    diff: Arc<ReviewDiff>,
     excluded: &[&str],
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let mut set = JoinSet::new();
@@ -442,7 +438,7 @@ async fn spawn_lanes(
             title,
             base_ref,
             run,
-            diff.clone(),
+            Arc::clone(&diff),
             excluded,
         )
         .await?;
@@ -531,7 +527,7 @@ async fn build_lane(
     title: &str,
     base_ref: &str,
     run: &RunId,
-    diff: Option<Arc<ReviewDiff>>,
+    diff: Arc<ReviewDiff>,
     excluded: &[&str],
 ) -> anyhow::Result<Lane> {
     let platform = target.platform();

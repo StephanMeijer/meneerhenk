@@ -38,9 +38,9 @@ pub struct LaneContext {
     pub writer: Arc<dyn PlatformWriter>,
     /// Run records.
     pub store: Arc<RunStore>,
-    /// The diff of the review, when it could be fetched. Findings are
-    /// checked against it before anything is posted.
-    pub diff: Option<Arc<ReviewDiff>>,
+    /// The diff of the review. Findings are checked against it before
+    /// anything is posted.
+    pub diff: Arc<ReviewDiff>,
     /// The changed files this lane asked the diff of.
     pub opened: Mutex<BTreeSet<String>>,
 }
@@ -49,11 +49,9 @@ impl LaneContext {
     /// The changed files this lane has not asked the diff of yet.
     #[must_use]
     pub fn unopened_files(&self) -> Vec<String> {
-        let Some(diff) = &self.diff else {
-            return Vec::new();
-        };
         let opened = self.opened.lock().map(|o| o.clone()).unwrap_or_default();
-        diff.paths()
+        self.diff
+            .paths()
             .filter(|p| !opened.contains(*p))
             .map(str::to_owned)
             .collect()
@@ -113,12 +111,7 @@ impl Tool for ListChangedFiles {
     }
 
     async fn call(&self, _: Value) -> ToolOutput {
-        match &self.0.diff {
-            Some(diff) => ToolOutput::ok(diff.render_list()),
-            None => ToolOutput::error(
-                "The diff could not be fetched for this review; use pull_request_read with method get_files instead.",
-            ),
-        }
+        ToolOutput::ok(self.0.diff.render_list())
     }
 }
 
@@ -145,11 +138,7 @@ impl Tool for GetFileDiff {
         let Some(path) = arg_str(&args, "path") else {
             return ToolOutput::error("path is required");
         };
-        let Some(diff) = &self.0.diff else {
-            return ToolOutput::error(
-                "The diff could not be fetched for this review; use pull_request_read with method get_diff instead.",
-            );
-        };
+        let diff = &self.0.diff;
         match diff.file(path) {
             Some(file) => {
                 if let Ok(mut opened) = self.0.opened.lock() {
@@ -366,9 +355,7 @@ impl Tool for PostFinding {
         if let Some(error) = LaneContext::style_error(body) {
             return error;
         }
-        if let Some(diff) = &ctx.diff
-            && let Err(reason) = diff.commentable(path, line, side)
-        {
+        if let Err(reason) = ctx.diff.commentable(path, line, side) {
             return ToolOutput::error(format!(
                 "Cannot post on {path}:{line}: {reason}. Use get_file_diff to see the numbered lines."
             ));
@@ -552,7 +539,7 @@ diff --git a/README.md b/README.md
 +new
 ";
 
-    pub(super) fn context(diff: Option<ReviewDiff>) -> Arc<LaneContext> {
+    pub(super) fn context(diff: ReviewDiff) -> Arc<LaneContext> {
         let store = Arc::new(RunStore::in_memory().unwrap());
         let run = RunId::parse("r-1").unwrap();
         store
@@ -580,7 +567,7 @@ diff --git a/README.md b/README.md
             registry: Arc::new(Mutex::new(FindingRegistry::seeded(std::iter::empty()))),
             writer: Arc::new(FakeWriter::default()),
             store,
-            diff: diff.map(Arc::new),
+            diff: Arc::new(diff),
             opened: Mutex::new(BTreeSet::new()),
         })
     }
@@ -605,7 +592,7 @@ diff --git a/README.md b/README.md
 
     #[tokio::test]
     async fn list_and_file_diff_track_what_the_lane_opened() {
-        let ctx = context(Some(ReviewDiff::from_unified(DIFF)));
+        let ctx = context(ReviewDiff::from_unified(DIFF));
         let list = ListChangedFiles(Arc::clone(&ctx)).call(json!({})).await;
         assert!(!list.is_error);
         assert!(list.content.contains("M src/a.rs (+1 -1)"));
@@ -627,9 +614,6 @@ diff --git a/README.md b/README.md
             .await;
         assert!(missing.is_error);
         assert!(missing.content.contains("README.md"));
-
-        let none = context(None);
-        assert!(ListChangedFiles(none).call(json!({})).await.is_error);
     }
 
     #[tokio::test]
@@ -659,7 +643,7 @@ diff --git a/README.md b/README.md
 
     #[tokio::test]
     async fn post_finding_refuses_lines_outside_the_diff_before_posting() {
-        let ctx = context(Some(ReviewDiff::from_unified(DIFF)));
+        let ctx = context(ReviewDiff::from_unified(DIFF));
         let tool = PostFinding(Arc::clone(&ctx));
         let outside = tool
             .call(json!({"path": "src/a.rs", "line": 40, "body": "Wrong."}))
@@ -685,11 +669,6 @@ diff --git a/README.md b/README.md
             inside.content
         );
         assert_eq!(ctx.store.events(&ctx.run).unwrap().len(), 1);
-        // Without a diff nothing is checked here.
-        let unchecked = PostFinding(context(None))
-            .call(json!({"path": "src/a.rs", "line": 40, "body": "Wrong."}))
-            .await;
-        assert!(unchecked.content.contains("not in the fake"));
     }
 }
 
@@ -713,7 +692,7 @@ mod continuation_tests {
 
     #[tokio::test]
     async fn nudges_once_for_coverage_and_once_for_an_output_cap() {
-        let ctx = context(Some(ReviewDiff::from_unified(super::tests::DIFF)));
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
         let nudge = lane_continuation(Arc::clone(&ctx));
         let first = nudge(&ending(EndReason::EndTurn)).unwrap();
         assert!(
@@ -727,17 +706,13 @@ mod continuation_tests {
     }
 
     #[tokio::test]
-    async fn no_coverage_nudge_when_every_file_was_opened_or_there_is_no_diff() {
-        let ctx = context(Some(ReviewDiff::from_unified(super::tests::DIFF)));
+    async fn no_coverage_nudge_when_every_file_was_opened() {
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
         for path in ["src/a.rs", "README.md"] {
             GetFileDiff(Arc::clone(&ctx))
                 .call(json!({"path": path}))
                 .await;
         }
         assert_eq!(lane_continuation(ctx)(&ending(EndReason::EndTurn)), None);
-        assert_eq!(
-            lane_continuation(context(None))(&ending(EndReason::EndTurn)),
-            None
-        );
     }
 }
