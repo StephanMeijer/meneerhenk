@@ -210,10 +210,20 @@ impl Agent {
                     () = tokio::time::sleep_until(deadline) => return Self::finish(messages, turns, usage, StopCause::Timeout),
                     output = self.dispatch(&call.name, &call.arguments) => output,
                 };
+                let elapsed = started.elapsed();
+                debug!(
+                    turn = turns,
+                    tool = %call.name,
+                    args = %truncate_chars(&arguments_text(&call.arguments), 300),
+                    result_chars = output.content.chars().count(),
+                    is_error = output.is_error,
+                    elapsed_ms = elapsed.as_millis(),
+                    "tool called"
+                );
                 self.emit(AgentEvent::ToolCalled {
                     name: call.name.clone(),
                     is_error: output.is_error,
-                    elapsed: started.elapsed(),
+                    elapsed,
                 });
                 results.push(ToolResult {
                     call_id: call.id,
@@ -267,6 +277,7 @@ impl Agent {
             .map(ChatMessage::text)
             .unwrap_or_default();
         info!(turns, input_tokens = usage.input_tokens, output_tokens = usage.output_tokens, stop = ?stop, "agent run ended");
+        debug!(final_text = %truncate_chars(&final_text, 300), "last assistant text");
         AgentOutcome {
             final_text,
             turns,
@@ -279,4 +290,12 @@ impl Agent {
 
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// The arguments as one line of text, for logs.
+fn arguments_text(arguments: &ToolArguments) -> String {
+    match arguments {
+        ToolArguments::Parsed(value) => value.to_string(),
+        ToolArguments::Malformed(raw) => format!("(malformed) {raw}"),
+    }
 }
