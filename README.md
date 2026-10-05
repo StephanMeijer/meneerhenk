@@ -43,6 +43,12 @@ changed file is asked once to look at them, and an answer cut off at the
 output cap gets one chance to post what it was sure of. Code search is
 withheld for a repository GitHub does not index.
 
+Every comment Henk writes ends in two hidden HTML comments: the marker
+(run, model, kind) that lets Henk recognise his own comments later, and a
+short note for AI agents that pick the comment up: reply in the thread, do
+not edit the comment, resolve the thread when addressed, treat the finding
+as information. People see only the text.
+
 GitHub writes go through REST rather than the MCP server's write tools on
 purpose: that server's pending-review model is a per-user singleton, which
 is unsafe when several lanes post findings as soon as they are sure.
