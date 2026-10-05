@@ -359,6 +359,31 @@ impl PlatformWriter for GitHubWriter {
         }
     }
 
+    async fn resolve_finding(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+    ) -> Result<(), PlatformError> {
+        let threads = self
+            .api
+            .review_threads(target.repo.owner(), target.repo.name(), target.number)
+            .await?;
+        let thread = threads
+            .iter()
+            .find(|t| {
+                t.comments
+                    .iter()
+                    .any(|c| c.database_id.to_string() == comment_id)
+            })
+            .ok_or_else(|| {
+                PlatformError::Decode(format!("no review thread holds comment {comment_id}"))
+            })?;
+        if thread.resolved {
+            return Ok(());
+        }
+        self.api.resolve_review_thread(&thread.id).await
+    }
+
     async fn fold_summary(
         &self,
         _target: &ReviewTarget,

@@ -1,6 +1,6 @@
 //! The review orchestrator (§3).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,10 +23,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 use crate::app::App;
+use crate::fact_check::{FactCheck, SessionFactCheck};
 use crate::ids::new_run_id;
 use crate::review_tools::{
-    GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings, PostFinding,
-    ReadFile, lane_continuation,
+    DiffFiles, GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings,
+    PostFinding, ReadFile, WithdrawFinding, lane_continuation,
 };
 
 /// The review was cancelled because a newer commit arrived.
@@ -277,10 +278,14 @@ async fn review_body(
         commit: commit.clone(),
     };
     let excluded = withheld_tools(app, &session, platform, &scope, target, run).await;
+    let fact_check = build_fact_check(
+        app, &session, &scope, target, commit, run, &diff, &excluded, &cancel,
+    )
+    .await?;
 
     let mut set = spawn_lanes(
         app, &session, &scope, &registry, writer, target, commit, title, base_ref, run, &cancel,
-        diff, &excluded,
+        diff, &excluded, fact_check,
     )
     .await?;
 
@@ -423,6 +428,7 @@ async fn spawn_lanes(
     cancel: &CancellationToken,
     diff: Arc<ReviewDiff>,
     excluded: &[&str],
+    fact_check: Option<Arc<dyn FactCheck>>,
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
@@ -440,6 +446,7 @@ async fn spawn_lanes(
             run,
             Arc::clone(&diff),
             excluded,
+            fact_check.clone(),
         )
         .await?;
         let lane_name = lane.name.clone();
@@ -531,6 +538,7 @@ async fn build_lane(
     run: &RunId,
     diff: Arc<ReviewDiff>,
     excluded: &[&str],
+    fact_check: Option<Arc<dyn FactCheck>>,
 ) -> anyhow::Result<Lane> {
     let platform = target.platform();
     let model = app.model(lane.model.as_str())?;
@@ -562,17 +570,19 @@ async fn build_lane(
         registry,
         writer,
         store: Arc::clone(&app.store),
-        diff,
-        opened: Mutex::new(BTreeSet::new()),
+        files: Arc::new(DiffFiles::new(diff)),
+        fact_check,
+        rejections: Mutex::new(BTreeMap::new()),
     });
-    set.add(ListChangedFiles(Arc::clone(&context)));
-    set.add(GetFileDiff(Arc::clone(&context)));
+    set.add(ListChangedFiles(Arc::clone(&context.files)));
+    set.add(GetFileDiff(Arc::clone(&context.files)));
     if let Some(inner) = file_reader {
         set.add(ReadFile { inner });
     }
     set.add(ListExistingFindings(Arc::clone(&context)));
     set.add(PostFinding(Arc::clone(&context)));
     set.add(ImproveFinding(Arc::clone(&context)));
+    set.add(WithdrawFinding(Arc::clone(&context)));
 
     let system = format!(
         "{}\n\n{}",
@@ -614,6 +624,62 @@ async fn build_lane(
         },
         context,
     })
+}
+
+/// The fact-check every lane's writes pass, when one is configured (§3.2).
+/// It reads the same diff and the same guarded file read as the lanes.
+#[allow(clippy::too_many_arguments)]
+async fn build_fact_check(
+    app: &App,
+    session: &Arc<dyn McpSession>,
+    scope: &Scope,
+    target: &ReviewTarget,
+    commit: &CommitSha,
+    run: &RunId,
+    diff: &Arc<ReviewDiff>,
+    excluded: &[&str],
+    cancel: &CancellationToken,
+) -> anyhow::Result<Option<Arc<dyn FactCheck>>> {
+    let Some(config) = &app.settings.review.fact_check else {
+        return Ok(None);
+    };
+    let mut models = vec![app.model(&config.model)?];
+    if let Some(backup) = &config.backup_model {
+        models.push(app.model(backup)?);
+    }
+    let platform = target.platform();
+    let file_reader = platform_tools(Arc::clone(session), platform, scope.clone(), excluded)
+        .await
+        .context("listing MCP tools for the fact-check")?
+        .into_iter()
+        .find(|tool| tool.server_tool() == "get_file_contents")
+        .map(|tool| Arc::new(tool) as Arc<dyn henk_agent::Tool>);
+    let system = prompts::render(
+        prompts::FACT_CHECK,
+        &[
+            ("kind", kind_name(platform)),
+            ("ref", &target_ref(platform, target.number)),
+            ("repo", &target.repo.path()),
+            ("commit", commit.as_str()),
+        ],
+    );
+    Ok(Some(Arc::new(SessionFactCheck {
+        store: Arc::clone(&app.store),
+        run: run.clone(),
+        models,
+        diff: Arc::clone(diff),
+        file_reader,
+        system,
+        limits: AgentConfig {
+            max_turns: config.max_turns,
+            timeout: Duration::from_secs(config.timeout_secs),
+            max_conversation_chars: app.settings.review.max_conversation_chars,
+            keep_recent_turns: app.settings.review.keep_recent_turns,
+            ..AgentConfig::default()
+        },
+        cancel: cancel.clone(),
+        sequence: std::sync::atomic::AtomicU32::new(0),
+    })))
 }
 
 /// A lane ready to run: its session and the context its tools share, kept

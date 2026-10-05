@@ -386,6 +386,22 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
         Ok(threads)
     }
 
+    /// Resolves a review thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] on failure.
+    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<(), PlatformError> {
+        const MUTATION: &str = r"
+mutation($id: ID!) {
+  resolveReviewThread(input: {threadId: $id}) {
+    thread { isResolved }
+  }
+}";
+        self.graphql(MUTATION, json!({"id": thread_id})).await?;
+        Ok(())
+    }
+
     /// Minimises a comment as outdated.
     ///
     /// # Errors

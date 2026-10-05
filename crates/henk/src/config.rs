@@ -15,7 +15,7 @@ use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, Peop
 use henk_domain::mail::EmailAddress;
 use henk_domain::marker::ModelId;
 use henk_domain::review::{LaneName, LaneSpec};
-use henk_llm::{MaxTokensParam, Provider, RetryPolicy};
+use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
 
 /// An example configuration, printed by `henk config example`.
@@ -238,6 +238,10 @@ pub struct ModelFileConfig {
     /// Which parameter carries the output cap (OpenAI style only).
     #[serde(default)]
     pub max_tokens_param: MaxTokensParam,
+    /// Thinking effort (Anthropic style only): `low`, `medium`, `high`,
+    /// `xhigh` or `max`. Left out, the model's own default applies.
+    #[serde(default)]
+    pub effort: Option<Effort>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -274,6 +278,35 @@ pub struct ReviewConfig {
     /// Whether GitHub draft pull requests are reviewed (open question 1).
     #[serde(default)]
     pub github_drafts: bool,
+    /// Fact-checking of findings before they are posted. Absent: findings
+    /// are posted unchecked.
+    #[serde(default)]
+    pub fact_check: Option<FactCheckConfig>,
+}
+
+/// A second model checks every finding before it is posted (§3.2).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactCheckConfig {
+    /// Model id from `[models]`.
+    pub model: String,
+    /// Model id from `[models]`, used when `model` wrote the finding itself
+    /// or when its check could not be run.
+    #[serde(default)]
+    pub backup_model: Option<String>,
+    /// Wall-clock limit per check, in seconds.
+    #[serde(default = "default_fact_check_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Model calls per check.
+    #[serde(default = "default_fact_check_max_turns")]
+    pub max_turns: u32,
+}
+
+fn default_fact_check_timeout_secs() -> u64 {
+    180
+}
+fn default_fact_check_max_turns() -> u32 {
+    12
 }
 
 fn default_lane_timeout_secs() -> u64 {
@@ -302,6 +335,7 @@ impl Default for ReviewConfig {
             keep_recent_turns: default_keep_recent_turns(),
             max_concurrent: default_max_concurrent(),
             github_drafts: false,
+            fact_check: None,
         }
     }
 }
@@ -467,6 +501,17 @@ impl Config {
 
         validate_models(&self.models)?;
         let lanes = validate_lanes(&self.review.lanes, &self.models)?;
+        if let Some(fact_check) = &self.review.fact_check {
+            let models = std::iter::once(&fact_check.model).chain(&fact_check.backup_model);
+            for model in models {
+                if !self.models.contains_key(model) {
+                    return Err(ConfigError::UnknownModel {
+                        what: "review.fact_check".to_owned(),
+                        model: model.clone(),
+                    });
+                }
+            }
+        }
         if let Some(planning) = &self.planning {
             if !self.models.contains_key(&planning.model) {
                 return Err(ConfigError::UnknownModel {
@@ -527,6 +572,12 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
             return Err(ConfigError::Model(
                 id.clone(),
                 "base_url must start with http(s)://".to_owned(),
+            ));
+        }
+        if model.effort.is_some() && model.provider != Provider::Anthropic {
+            return Err(ConfigError::Model(
+                id.clone(),
+                "effort applies to provider \"anthropic\" only".to_owned(),
             ));
         }
     }
@@ -652,6 +703,7 @@ impl ModelFileConfig {
             timeout: Duration::from_secs(self.timeout_secs),
             retry: RetryPolicy::default(),
             max_tokens_param: self.max_tokens_param,
+            effort: self.effort,
         })
     }
 }
@@ -854,6 +906,41 @@ github_owners = ["docspec"]
             Config::parse(&text).and_then(Config::into_settings),
             Err(ConfigError::PlanningRequester(_))
         ));
+    }
+
+    #[test]
+    fn effort_is_for_anthropic_models_only() {
+        let model = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\neffort = \"high\"\n";
+        let text = format!("{MINIMAL}\n{model}");
+        assert!(matches!(
+            Config::parse(&text).and_then(Config::into_settings),
+            Err(ConfigError::Model(..))
+        ));
+        let text = text.replace("open_ai", "anthropic");
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.models.get("m").unwrap().effort, Some(Effort::High));
+        let bad = text.replace("\"high\"", "\"extreme\"");
+        assert!(matches!(Config::parse(&bad), Err(ConfigError::Syntax(_))));
+    }
+
+    #[test]
+    fn fact_check_models_must_exist() {
+        let model = "[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n";
+        let text = format!(
+            "{MINIMAL}\n{model}[review.fact_check]\nmodel = \"m\"\nbackup_model = \"nope\"\n"
+        );
+        assert!(matches!(
+            Config::parse(&text).and_then(Config::into_settings),
+            Err(ConfigError::UnknownModel { ref what, .. }) if what == "review.fact_check"
+        ));
+        let text = text.replace("backup_model = \"nope\"\n", "");
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        let fact_check = settings.review.fact_check.unwrap();
+        assert_eq!((fact_check.timeout_secs, fact_check.max_turns), (180, 12));
     }
 
     #[test]

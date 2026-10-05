@@ -105,6 +105,12 @@ pub enum FindingAction {
     Improved,
     /// The lane wanted to post but the line was taken or the text refused.
     Refused,
+    /// The fact-check found the finding wrong; nothing was posted or changed.
+    Rejected,
+    /// The fact-check could not run; the finding was posted unchecked.
+    Unverified,
+    /// A finding was withdrawn as wrong: its text replaced, its thread resolved.
+    Withdrawn,
 }
 
 impl FindingAction {
@@ -113,6 +119,9 @@ impl FindingAction {
             Self::Posted => "posted",
             Self::Improved => "improved",
             Self::Refused => "refused",
+            Self::Rejected => "rejected",
+            Self::Unverified => "unverified",
+            Self::Withdrawn => "withdrawn",
         }
     }
 }

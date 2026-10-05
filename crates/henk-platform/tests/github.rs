@@ -20,7 +20,9 @@ use henk_domain::run::RunId;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::{DiffSide, PlatformWriter as _, ReviewTarget};
 use serde_json::{Value, json};
-use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+use wiremock::matchers::{
+    body_partial_json, body_string_contains, header, method, path, query_param,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -337,4 +339,35 @@ async fn diff_compares_base_with_the_reviewed_commit_as_a_unified_diff() {
     assert!(patches[0].patch.starts_with("@@ -1,2 +1,2 @@"));
     assert_eq!(patches[1].status, henk_domain::diff::FileStatus::Added);
     assert_eq!(patches[1].old_path, None);
+}
+
+#[tokio::test]
+async fn resolve_finding_resolves_the_thread_that_holds_the_comment() {
+    let server = MockServer::start().await;
+    let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    let writer = GitHubWriter::new(api, "meneer-henk[bot]");
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("reviewThreads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [
+                {"id": "T_1", "isResolved": false, "comments": {"nodes": [{"databaseId": 1001, "author": {"login": "meneer-henk[bot]", "__typename": "Bot"}}]}},
+                {"id": "T_2", "isResolved": false, "comments": {"nodes": [{"databaseId": 1002, "author": {"login": "meneer-henk[bot]", "__typename": "Bot"}}]}}
+            ]
+        }}}}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("resolveReviewThread"))
+        .and(body_partial_json(json!({"variables": {"id": "T_2"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"resolveReviewThread": {"thread": {"isResolved": true}}}}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    writer.resolve_finding(&target(), "1002").await.unwrap();
+    assert!(writer.resolve_finding(&target(), "9999").await.is_err());
 }

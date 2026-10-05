@@ -144,7 +144,9 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
             messages: vec![henk_llm::ChatMessage::user(
                 "Reply with the single word: ready",
             )],
-            max_tokens: Some(16),
+            // A thinking model spends its cap on thinking first; give it
+            // the configured one rather than cutting it off before it answers.
+            max_tokens: model.effort.is_none().then_some(16),
             ..Default::default()
         };
         match tokio::time::timeout(Duration::from_secs(60), client.complete(&request)).await {
@@ -165,6 +167,11 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
                 .iter()
                 .any(|l| l.model.as_str() == id.as_str())
                 && settings.planning.as_ref().is_none_or(|p| &p.model != *id)
+                && settings
+                    .review
+                    .fact_check
+                    .as_ref()
+                    .is_none_or(|f| &f.model != *id && f.backup_model.as_ref() != Some(*id))
         })
         .map(String::as_str)
         .collect();
@@ -172,7 +179,7 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         checks.push(Check::warn(
             "models",
             format!(
-                "configured but used by no lane or planner: {}",
+                "configured but used by no lane, fact-check or planner: {}",
                 unused.join(", ")
             ),
         ));

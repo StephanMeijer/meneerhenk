@@ -6,6 +6,9 @@ pub const PERSONA: &str = include_str!("../prompts/persona.md");
 /// Instructions for one review lane (§3.2).
 pub const REVIEW_LANE: &str = include_str!("../prompts/review_lane.md");
 
+/// Instructions for a fact-check of one finding (§3.2).
+pub const FACT_CHECK: &str = include_str!("../prompts/fact_check.md");
+
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
@@ -49,6 +52,7 @@ mod tests {
     fn persona_is_in_style() {
         assert!(henk_domain::text::is_in_style(PERSONA));
         assert!(henk_domain::text::is_in_style(REVIEW_LANE));
+        assert!(henk_domain::text::is_in_style(FACT_CHECK));
         assert!(henk_domain::text::is_in_style(PLANNER));
         assert!(henk_domain::text::is_in_style(GREETINGS));
         assert!(greeting(7).contains("review"));
@@ -65,8 +69,21 @@ mod tests {
             "list_existing_findings",
             "post_finding",
             "improve_finding",
+            "withdraw_finding",
         ] {
             assert!(REVIEW_LANE.contains(&format!("`{tool}`")), "{tool}");
+        }
+    }
+
+    #[test]
+    fn fact_check_names_every_checker_tool() {
+        for tool in [
+            "list_changed_files",
+            "get_file_diff",
+            "read_file",
+            "give_verdict",
+        ] {
+            assert!(FACT_CHECK.contains(&format!("`{tool}`")), "{tool}");
         }
     }
 }

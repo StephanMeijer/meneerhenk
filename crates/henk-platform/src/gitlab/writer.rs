@@ -439,6 +439,34 @@ impl PlatformWriter for GitLabWriter {
         Ok(())
     }
 
+    async fn resolve_finding(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+    ) -> Result<(), PlatformError> {
+        let discussion_id = self
+            .discussions(target)
+            .await?
+            .iter()
+            .find(|d| {
+                d.get("notes")
+                    .and_then(Value::as_array)
+                    .and_then(|notes| notes.first())
+                    .and_then(note_id)
+                    .is_some_and(|id| id == comment_id)
+            })
+            .and_then(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
+            .ok_or_else(|| {
+                PlatformError::Decode(format!("no discussion starts with note {comment_id}"))
+            })?;
+        let mut args = Self::base_args(target);
+        args.insert("discussion_id".into(), json!(discussion_id));
+        args.insert("resolved".into(), json!(true));
+        self.call_tool("resolve_merge_request_thread", Value::Object(args))
+            .await?;
+        Ok(())
+    }
+
     async fn post_comment(
         &self,
         target: &ReviewTarget,

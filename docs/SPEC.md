@@ -87,10 +87,19 @@ change against the target branch.
 - Each problem becomes a **comment on its line**, posted as soon as the lane
   is sure of it. On GitHub that is a review comment; on GitLab, a diff
   discussion.
+- **A second model checks each finding first**, when one is configured. It
+  reads the code the finding is about and confirms or rejects it. A rejected
+  finding is not posted; the lane is told why and may correct it. If no
+  check can be made, the finding is posted and the run records it as
+  unchecked.
 - **Lanes do not repeat each other.** Before posting, a lane looks at what is
   already there. When it can explain an existing finding better, it improves
   that comment rather than posting a second one. It never rewrites a comment a
   person has already answered.
+- **A wrong finding is withdrawn**, not left standing. A lane that sees one
+  of Henk's findings is wrong replaces its text with the reason and resolves
+  its thread, so it no longer counts. Withdrawals are checked like findings,
+  and a finding a person has answered is never withdrawn.
 - A lane that finds nothing posts nothing.
 - Which model wrote which comment is recorded invisibly on the comment, never
   in its visible text.
@@ -500,3 +509,13 @@ surprising reading of the earlier wording; veto any that is wrong.
   not be required in branch protection.
 - §7: "commits" removed from the language rule, since Henk never commits
   (§1, §9).
+
+## Revision notes (2026-10-05)
+
+- §3.2: findings are checked by a second model before they are posted, and a
+  wrong finding is withdrawn rather than rewritten into a non-finding. Both
+  follow a review in which two of two findings were wrong and the one lane
+  that noticed could only edit the text.
+- §3.2: when the check cannot be made, the finding is posted unchecked rather
+  than held back, since Henk is advisory (§8.2) and an outage of the checking
+  model must not silence reviews.

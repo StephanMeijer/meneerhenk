@@ -63,11 +63,17 @@ pub(crate) mod testing {
     }
 
     /// Answers `pull_request` with a fixed open head and records replies.
+    /// Line comments are refused unless `accept_posts` is set; then they,
+    /// rewrites and resolved threads are recorded.
     #[derive(Debug, Default)]
     pub struct FakeWriter {
         pub head: String,
         pub replies: Mutex<Vec<Reply>>,
         pub pull_request_calls: Mutex<u32>,
+        pub accept_posts: bool,
+        pub posts: Mutex<Vec<(String, u32, String)>>,
+        pub updates: Mutex<Vec<(String, String)>>,
+        pub resolved: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -132,20 +138,42 @@ pub(crate) mod testing {
             &self,
             _: &ReviewTarget,
             _: &CommitSha,
-            _: &str,
-            _: u32,
+            path: &str,
+            line: u32,
             _: DiffSide,
-            _: &str,
+            body: &str,
         ) -> Result<PostedComment, PlatformError> {
-            Err(PlatformError::Decode("not in the fake".into()))
+            if !self.accept_posts {
+                return Err(PlatformError::Decode("not in the fake".into()));
+            }
+            let mut posts = self.posts.lock().unwrap();
+            posts.push((path.to_owned(), line, body.to_owned()));
+            Ok(PostedComment {
+                id: format!("c{}", posts.len()),
+                node_id: None,
+                url: String::new(),
+            })
         }
 
         async fn update_finding(
             &self,
             _: &ReviewTarget,
-            _: &str,
-            _: &str,
+            comment_id: &str,
+            body: &str,
         ) -> Result<(), PlatformError> {
+            self.updates
+                .lock()
+                .unwrap()
+                .push((comment_id.to_owned(), body.to_owned()));
+            Ok(())
+        }
+
+        async fn resolve_finding(
+            &self,
+            _: &ReviewTarget,
+            comment_id: &str,
+        ) -> Result<(), PlatformError> {
+            self.resolved.lock().unwrap().push(comment_id.to_owned());
             Ok(())
         }
 

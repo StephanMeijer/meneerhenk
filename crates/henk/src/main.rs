@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod coordinator;
 mod doctor;
+mod fact_check;
 mod hooks;
 mod ids;
 mod listeners;

@@ -105,6 +105,14 @@ OpenBao.
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
 | `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
 
+A finding is posted only after a second model has checked it when
+`[review.fact_check]` names one (the example uses Claude Opus 5.5 at
+`effort = "high"`, with Claude Sonnet 5.5 as the backup). A rejected finding
+is not posted; the lane gets the reason and may correct it once. `henk runs
+show <id>` lists each check as a `check-<lane>-<n>` session, with its
+verdict on the timeline. `effort` on an Anthropic model sets how much it
+thinks; it needs a `max_tokens` of 16384 or so and a longer `timeout_secs`.
+
 The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node
 for `npx @zereight/mcp-gitlab`.

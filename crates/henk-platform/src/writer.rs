@@ -149,6 +149,14 @@ pub trait PlatformWriter: Send + Sync {
         body: &str,
     ) -> Result<(), PlatformError>;
 
+    /// Resolves the thread a line comment opened. Used when a finding is
+    /// withdrawn as wrong; GitHub then shows the thread collapsed.
+    async fn resolve_finding(
+        &self,
+        target: &ReviewTarget,
+        comment_id: &str,
+    ) -> Result<(), PlatformError>;
+
     /// Posts a conversation comment (summary, greeting, failure).
     async fn post_comment(
         &self,
