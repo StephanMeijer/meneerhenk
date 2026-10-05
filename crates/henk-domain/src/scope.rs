@@ -108,25 +108,12 @@ const GITHUB_READ: &[(&str, &[Rule])] = &[
     ("list_issue_types", &[Rule::Owner, Rule::Repo]),
 ];
 
+// Whole-diff tools (get_merge_request_diffs, get_commit_diff, ...) are not
+// here on purpose: the review serves its own diff per file, numbered, and
+// the planner reads merge requests through get_merge_request.
 const GITLAB_READ: &[(&str, &[Rule])] = &[
     (
         "get_merge_request",
-        &[Rule::ProjectId, Rule::MergeRequestIid],
-    ),
-    (
-        "get_merge_request_diffs",
-        &[Rule::ProjectId, Rule::MergeRequestIid],
-    ),
-    (
-        "list_merge_request_diffs",
-        &[Rule::ProjectId, Rule::MergeRequestIid],
-    ),
-    (
-        "get_merge_request_file_diff",
-        &[Rule::ProjectId, Rule::MergeRequestIid],
-    ),
-    (
-        "list_merge_request_changed_files",
         &[Rule::ProjectId, Rule::MergeRequestIid],
     ),
     ("mr_discussions", &[Rule::ProjectId, Rule::MergeRequestIid]),
@@ -135,8 +122,6 @@ const GITLAB_READ: &[(&str, &[Rule])] = &[
     ("get_repository_tree", &[Rule::ProjectId]),
     ("list_commits", &[Rule::ProjectId]),
     ("get_commit", &[Rule::ProjectId]),
-    ("get_commit_diff", &[Rule::ProjectId]),
-    ("get_branch_diffs", &[Rule::ProjectId]),
     ("search_repositories", &[]),
     ("get_issue", &[Rule::ProjectId]),
     ("list_issues", &[Rule::ProjectId]),
