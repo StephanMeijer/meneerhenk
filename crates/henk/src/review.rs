@@ -35,6 +35,31 @@ use crate::review_tools::{
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
 
+/// One review run, as every step of it sees it: known once `run_review`
+/// has the commit.
+#[derive(Clone, Copy)]
+struct ReviewRun<'a> {
+    app: &'a App,
+    writer: &'a Arc<dyn PlatformWriter>,
+    target: &'a ReviewTarget,
+    commit: &'a CommitSha,
+    run: &'a RunId,
+    link: &'a str,
+}
+
+/// What every lane of a review shares, ready once the read session is up.
+struct LaneInputs {
+    session: Arc<dyn McpSession>,
+    scope: Scope,
+    registry: Arc<Mutex<FindingRegistry>>,
+    diff: Arc<ReviewDiff>,
+    excluded: Vec<&'static str>,
+    fact_check: Option<Arc<dyn FactCheck>>,
+    title: String,
+    base_ref: String,
+    cancel: CancellationToken,
+}
+
 /// A request to review one pull/merge request.
 #[derive(Debug, Clone)]
 pub struct ReviewRequest {
@@ -107,18 +132,15 @@ pub async fn run_review(
         }
     };
 
-    let result = review_body(
+    let review = ReviewRun {
         app,
-        &writer,
-        &request.target,
-        &commit,
-        &info.title,
-        &info.base_ref,
-        &run,
-        &link,
-        cancel,
-    )
-    .await;
+        writer: &writer,
+        target: &request.target,
+        commit: &commit,
+        run: &run,
+        link: &link,
+    };
+    let result = review_body(review, &info.title, &info.base_ref, cancel).await;
 
     match result {
         Ok((outcome, summary)) => {
@@ -142,17 +164,7 @@ pub async fn run_review(
             })
         }
         Err(error) => {
-            report_failure(
-                app,
-                &writer,
-                &request.target,
-                &commit,
-                handle.as_ref(),
-                &run,
-                &link,
-                &error,
-            )
-            .await?;
+            report_failure(review, handle.as_ref(), &error).await?;
             Err(error)
         }
     }
@@ -192,20 +204,19 @@ async fn preflight(
     Ok((info, commit))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "until #14 bundles these into a ReviewScope"
-)]
 async fn report_failure(
-    app: &App,
-    writer: &Arc<dyn PlatformWriter>,
-    target: &ReviewTarget,
-    commit: &CommitSha,
+    review: ReviewRun<'_>,
     handle: Option<&henk_platform::ReviewHandle>,
-    run: &RunId,
-    link: &str,
     error: &anyhow::Error,
 ) -> anyhow::Result<()> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        link,
+    } = review;
     let message = format!("{error:#}");
     error!(error = %message, "review failed");
     let failed = ReviewOutcome {
@@ -237,21 +248,20 @@ async fn report_failure(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "until #14 bundles these into a ReviewScope"
-)]
 async fn review_body(
-    app: &App,
-    writer: &Arc<dyn PlatformWriter>,
-    target: &ReviewTarget,
-    commit: &CommitSha,
+    review: ReviewRun<'_>,
     title: &str,
     base_ref: &str,
-    run: &RunId,
-    link: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ReviewOutcome, String)> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        link,
+    } = review;
     let platform = target.platform();
 
     // Seed the shared registry from what is already on the pull request.
@@ -274,7 +284,7 @@ async fn review_body(
         },
     ))));
 
-    let diff = fetch_diff(app, writer, target, commit, base_ref, run).await?;
+    let diff = fetch_diff(review, base_ref).await?;
 
     // One read-only MCP session shared by the lanes of this review.
     let alias = app.read_mcp_alias(platform)?;
@@ -284,32 +294,36 @@ async fn review_body(
         number: target.number,
         commit: commit.clone(),
     };
-    let excluded = withheld_tools(app, &session, platform, &scope, target, run).await;
-    let fact_check = build_fact_check(
-        app, &session, &scope, target, commit, run, &diff, &excluded, &cancel,
-    )
-    .await?;
+    let excluded = withheld_tools(review, &session, &scope).await;
+    let mut lanes = LaneInputs {
+        session,
+        scope,
+        registry,
+        diff,
+        excluded,
+        fact_check: None,
+        title: title.to_owned(),
+        base_ref: base_ref.to_owned(),
+        cancel: cancel.clone(),
+    };
+    lanes.fact_check = build_fact_check(review, &lanes).await?;
 
-    let mut set = spawn_lanes(
-        app, &session, &scope, &registry, writer, target, commit, title, base_ref, run, &cancel,
-        diff, &excluded, fact_check,
-    )
-    .await?;
+    let mut set = spawn_lanes(review, &lanes).await?;
 
-    let mut lanes = Vec::new();
+    let mut results = Vec::new();
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok(result) => lanes.push(result),
+            Ok(result) => results.push(result),
             Err(error) => {
                 error!(%error, "a lane task panicked");
-                lanes.push(LaneResult {
+                results.push(LaneResult {
                     lane: henk_domain::review::LaneName::new("unknown"),
                     outcome: LaneOutcome::Dropped,
                 });
             }
         }
     }
-    lanes.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
+    results.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
     if cancel.is_cancelled() {
         return Err(Superseded.into());
     }
@@ -325,7 +339,7 @@ async fn review_body(
         .count();
     let outcome = ReviewOutcome {
         commit: commit.clone(),
-        lanes,
+        lanes: results,
         open_findings,
     };
 
@@ -351,13 +365,14 @@ async fn review_body(
 /// search indexes only some repositories; when one probe returns nothing,
 /// the tool is withheld so lanes do not spend turns on empty answers.
 async fn withheld_tools(
-    app: &App,
+    review: ReviewRun<'_>,
     session: &Arc<dyn McpSession>,
-    platform: Platform,
     scope: &Scope,
-    target: &ReviewTarget,
-    run: &RunId,
 ) -> Vec<&'static str> {
+    let ReviewRun {
+        app, target, run, ..
+    } = review;
+    let platform = target.platform();
     if platform != Platform::GitHub {
         return Vec::new();
     }
@@ -390,14 +405,15 @@ async fn withheld_tools(
 /// The diff, once, for every lane: handed out per file, and the check every
 /// finding passes before it is posted. Without it there is no review: the
 /// error ends the run as Henk's own failure, which the summary says.
-async fn fetch_diff(
-    app: &App,
-    writer: &Arc<dyn PlatformWriter>,
-    target: &ReviewTarget,
-    commit: &CommitSha,
-    base_ref: &str,
-    run: &RunId,
-) -> anyhow::Result<Arc<ReviewDiff>> {
+async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc<ReviewDiff>> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        ..
+    } = review;
     let patches = writer
         .diff(target, commit, base_ref)
         .await
@@ -421,49 +437,18 @@ async fn fetch_diff(
     Ok(Arc::new(diff))
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "until #14 bundles these into a ReviewScope"
-)]
 async fn spawn_lanes(
-    app: &App,
-    session: &Arc<dyn McpSession>,
-    scope: &Scope,
-    registry: &Arc<Mutex<FindingRegistry>>,
-    writer: &Arc<dyn PlatformWriter>,
-    target: &ReviewTarget,
-    commit: &CommitSha,
-    title: &str,
-    base_ref: &str,
-    run: &RunId,
-    cancel: &CancellationToken,
-    diff: Arc<ReviewDiff>,
-    excluded: &[&str],
-    fact_check: Option<Arc<dyn FactCheck>>,
+    review: ReviewRun<'_>,
+    lanes: &LaneInputs,
 ) -> anyhow::Result<JoinSet<LaneResult>> {
+    let ReviewRun { app, run, .. } = review;
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
-        let spec = build_lane(
-            app,
-            lane,
-            session,
-            scope,
-            Arc::clone(registry),
-            Arc::clone(writer),
-            target,
-            commit,
-            title,
-            base_ref,
-            run,
-            Arc::clone(&diff),
-            excluded,
-            fact_check.clone(),
-        )
-        .await?;
+        let spec = build_lane(review, lanes, lane).await?;
         let lane_name = lane.name.clone();
         let store = Arc::clone(&app.store);
         let run_id = run.clone();
-        let cancel = cancel.clone();
+        let cancel = lanes.cancel.clone();
         let context = Arc::clone(&spec.context);
         set.spawn(async move {
             let outcome = run_session(&store, &run_id, spec.session, cancel).await;
@@ -534,31 +519,29 @@ fn target_ref(platform: Platform, number: u64) -> String {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "until #14 bundles these into a ReviewScope"
-)]
 async fn build_lane(
-    app: &App,
+    review: ReviewRun<'_>,
+    lanes: &LaneInputs,
     lane: &LaneSpec,
-    session: &Arc<dyn McpSession>,
-    scope: &Scope,
-    registry: Arc<Mutex<FindingRegistry>>,
-    writer: Arc<dyn PlatformWriter>,
-    target: &ReviewTarget,
-    commit: &CommitSha,
-    title: &str,
-    base_ref: &str,
-    run: &RunId,
-    diff: Arc<ReviewDiff>,
-    excluded: &[&str],
-    fact_check: Option<Arc<dyn FactCheck>>,
 ) -> anyhow::Result<Lane> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        ..
+    } = review;
     let platform = target.platform();
     let model = app.model(lane.model.as_str())?;
-    let tools = platform_tools(Arc::clone(session), platform, scope.clone(), excluded)
-        .await
-        .context("listing MCP tools")?;
+    let tools = platform_tools(
+        Arc::clone(&lanes.session),
+        platform,
+        lanes.scope.clone(),
+        &lanes.excluded,
+    )
+    .await
+    .context("listing MCP tools")?;
     if tools.is_empty() {
         return Err(anyhow!(
             "the MCP server exposes none of the tools a review needs"
@@ -581,11 +564,11 @@ async fn build_lane(
         model: model_id(model.as_ref()),
         target: target.clone(),
         commit: commit.clone(),
-        registry,
-        writer,
+        registry: Arc::clone(&lanes.registry),
+        writer: Arc::clone(writer),
         store: Arc::clone(&app.store),
-        files: Arc::new(DiffFiles::new(diff)),
-        fact_check,
+        files: Arc::new(DiffFiles::new(Arc::clone(&lanes.diff))),
+        fact_check: lanes.fact_check.clone(),
         rejections: Mutex::new(BTreeMap::new()),
     });
     set.add(ListChangedFiles(Arc::clone(&context.files)));
@@ -608,8 +591,8 @@ async fn build_lane(
                 ("ref", &target_ref(platform, target.number)),
                 ("repo", &target.repo.path()),
                 ("commit", commit.as_str()),
-                ("base", base_ref),
-                ("title", title),
+                ("base", &lanes.base_ref),
+                ("title", &lanes.title),
             ],
         )
     );
@@ -642,21 +625,25 @@ async fn build_lane(
 
 /// The fact-check every lane's writes pass, when one is configured (§3.2).
 /// It reads the same diff and the same guarded file read as the lanes.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "until #14 bundles these into a ReviewScope"
-)]
 async fn build_fact_check(
-    app: &App,
-    session: &Arc<dyn McpSession>,
-    scope: &Scope,
-    target: &ReviewTarget,
-    commit: &CommitSha,
-    run: &RunId,
-    diff: &Arc<ReviewDiff>,
-    excluded: &[&str],
-    cancel: &CancellationToken,
+    review: ReviewRun<'_>,
+    lanes: &LaneInputs,
 ) -> anyhow::Result<Option<Arc<dyn FactCheck>>> {
+    let ReviewRun {
+        app,
+        target,
+        commit,
+        run,
+        ..
+    } = review;
+    let LaneInputs {
+        session,
+        scope,
+        diff,
+        excluded,
+        cancel,
+        ..
+    } = lanes;
     let Some(config) = &app.settings.review.fact_check else {
         return Ok(None);
     };
