@@ -200,13 +200,15 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": 2001, "node_id": "IC_1", "body": format!("No issues found.\n\n{}", marker(MarkerKind::Summary)), "user": {"login": "meneer-henk[bot]"}},
             {"id": 2002, "node_id": "IC_2", "body": format!("Hello.\n\n{}", marker(MarkerKind::Reply)), "user": {"login": "meneer-henk[bot]"}},
-            {"id": 2003, "node_id": "IC_3", "body": "lgtm", "user": {"login": "alice"}}
+            {"id": 2003, "node_id": "IC_3", "body": "lgtm", "user": {"login": "alice"}},
+            {"id": 2005, "node_id": "IC_5", "body": format!("Review did not complete.\n\n{}", marker(MarkerKind::Failure)), "user": {"login": "meneer-henk[bot]"}}
         ])))
         .mount(&server)
         .await;
     let summaries = writer.existing_summaries(&t).await.unwrap();
-    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries.len(), 2, "summaries and failure comments fold");
     assert_eq!(summaries[0].comment_id, "2001");
+    assert_eq!(summaries[1].comment_id, "2005");
 
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -246,6 +248,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         }],
         open_findings: 1,
         nothing_to_review: false,
+        superseded: false,
     };
     writer
         .finish_review(

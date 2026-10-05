@@ -364,7 +364,7 @@ impl PlatformWriter for GitLabWriter {
             let Some(marker) = Marker::parse(note_body(first)) else {
                 continue;
             };
-            if marker.kind != Some(MarkerKind::Summary) {
+            if !matches!(marker.kind, Some(MarkerKind::Summary | MarkerKind::Failure)) {
                 continue;
             }
             let Some(id) = note_id(first) else { continue };

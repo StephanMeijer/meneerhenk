@@ -171,6 +171,10 @@ pub async fn run_review(
                 summary: Some(summary),
             })
         }
+        Err(error) if error.is::<Superseded>() => {
+            report_superseded(review, handle.as_ref()).await?;
+            Err(error)
+        }
         Err(error) => {
             report_failure(review, handle.as_ref(), &error).await?;
             Err(error)
@@ -212,6 +216,33 @@ async fn preflight(
     Ok((info, commit))
 }
 
+/// A newer commit arrived: no comment, a neutral check, and the run ends
+/// `failed` with the reason (§3.3). Not Henk's failure, so nothing says it is.
+async fn report_superseded(
+    review: ReviewRun<'_>,
+    handle: Option<&henk_platform::ReviewHandle>,
+) -> anyhow::Result<()> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        link,
+    } = review;
+    info!(run = %run, "review superseded by a newer commit");
+    let outcome = ReviewOutcome::superseded(commit.clone());
+    if let Err(finish_error) = writer
+        .finish_review(target, commit, handle, &outcome, link)
+        .await
+    {
+        error!(%finish_error, "could not finish the check of a superseded review");
+    }
+    app.store
+        .finish_run(run, RunStatus::Failed, None, Some(&Superseded.to_string()))?;
+    Ok(())
+}
+
 async fn report_failure(
     review: ReviewRun<'_>,
     handle: Option<&henk_platform::ReviewHandle>,
@@ -232,6 +263,7 @@ async fn report_failure(
         lanes: Vec::new(),
         open_findings: 0,
         nothing_to_review: false,
+        superseded: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -320,6 +352,7 @@ async fn review_body(
         lanes: results,
         open_findings,
         nothing_to_review,
+        superseded: false,
     };
 
     fold_outdated(writer, target, &after).await;
@@ -963,7 +996,6 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// #8: a review superseded by a newer commit is not Henk's failure. It
     /// must not post the failure comment, and its check is neutral.
     #[tokio::test]
-    #[ignore = "fails until #8: a superseded review must not post a failure"]
     async fn a_superseded_review_posts_no_failure() {
         let run = RunId::parse("r-superseded").unwrap();
         let (f, result) = cancelled_review(&run).await;
@@ -974,6 +1006,12 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         let finished = f.writer.finished.lock().unwrap();
         assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+        let record = f.app.store.run(&run).unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("superseded by a review of a newer commit")
+        );
     }
 }
 

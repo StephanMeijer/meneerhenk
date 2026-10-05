@@ -258,7 +258,7 @@ impl PlatformWriter for GitHubWriter {
             .filter(|c| self.is_henk(c))
             .filter_map(|c| {
                 let marker = Marker::parse(body_of(c))?;
-                if marker.kind != Some(MarkerKind::Summary) {
+                if !matches!(marker.kind, Some(MarkerKind::Summary | MarkerKind::Failure)) {
                     return None;
                 }
                 Some(ExistingSummary {
