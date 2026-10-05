@@ -37,7 +37,8 @@ numbered line range at the reviewed commit), `list_existing_findings`,
 `improve_finding`. The planner has `write_plan`, the tracker tools and
 `web_fetch`. Lanes are kept honest and cheap by three things in
 `henk-agent`: old tool results are replaced by one-line stubs once the
-conversation passes a size budget, a lane that ends without opening every
+conversation passes a size budget (`review.max_conversation_chars` and
+`review.keep_recent_turns`), a lane that ends without opening every
 changed file is asked once to look at them, and an answer cut off at the
 output cap gets one chance to post what it was sure of. Code search is
 withheld for a repository GitHub does not index.

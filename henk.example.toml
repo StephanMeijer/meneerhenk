@@ -77,6 +77,11 @@ lanes = [
 ]
 lane_timeout_secs = 600
 lane_max_turns = 40
+# Every turn resends the conversation. Past this many characters, the oldest
+# tool results outside the last keep_recent_turns turns become one-line
+# stubs; the lane can call the tool again. Roughly 4 characters per token.
+max_conversation_chars = 160000
+keep_recent_turns = 2
 max_concurrent = 3
 github_drafts = false
 

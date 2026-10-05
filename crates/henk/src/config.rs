@@ -260,6 +260,14 @@ pub struct ReviewConfig {
     /// Model calls per lane.
     #[serde(default = "default_lane_max_turns")]
     pub lane_max_turns: u32,
+    /// Characters a lane's conversation may hold before old tool results
+    /// are replaced by stubs. Every turn resends the whole conversation, so
+    /// this bounds the cost of one turn.
+    #[serde(default = "default_max_conversation_chars")]
+    pub max_conversation_chars: usize,
+    /// Turns, counted from the end, whose tool results are never stubbed.
+    #[serde(default = "default_keep_recent_turns")]
+    pub keep_recent_turns: u32,
     /// Reviews running at once.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
@@ -270,6 +278,12 @@ pub struct ReviewConfig {
 
 fn default_lane_timeout_secs() -> u64 {
     600
+}
+fn default_max_conversation_chars() -> usize {
+    160_000
+}
+fn default_keep_recent_turns() -> u32 {
+    2
 }
 fn default_lane_max_turns() -> u32 {
     40
@@ -284,6 +298,8 @@ impl Default for ReviewConfig {
             lanes: Vec::new(),
             lane_timeout_secs: default_lane_timeout_secs(),
             lane_max_turns: default_lane_max_turns(),
+            max_conversation_chars: default_max_conversation_chars(),
+            keep_recent_turns: default_keep_recent_turns(),
             max_concurrent: default_max_concurrent(),
             github_drafts: false,
         }

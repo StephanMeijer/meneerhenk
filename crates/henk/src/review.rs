@@ -590,6 +590,8 @@ async fn build_lane(
     let limits = AgentConfig {
         max_turns: app.settings.review.lane_max_turns,
         timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
+        max_conversation_chars: app.settings.review.max_conversation_chars,
+        keep_recent_turns: app.settings.review.keep_recent_turns,
         ..AgentConfig::default()
     };
     let opening = ChatMessage::user(format!(
