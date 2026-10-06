@@ -73,6 +73,9 @@ pub struct Config {
     /// People Henk knows by id.
     #[serde(default)]
     pub people: Vec<PersonConfig>,
+    /// Limits every model session shares.
+    #[serde(default)]
+    pub agent: AgentFileConfig,
 }
 
 /// The HTTP server.
@@ -487,6 +490,25 @@ impl Default for ReviewConfig {
             github_drafts: false,
             fact_check: None,
             ignore: default_review_ignore(),
+        }
+    }
+}
+
+/// Limits every model session shares: review lanes, fact-checks, planners
+/// and address runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentFileConfig {
+    /// Identical tool calls in a row a session may make. The next one is
+    /// refused, and one more ends the session as stuck. 0 turns the guard
+    /// off.
+    pub max_repeated_calls: u32,
+}
+
+impl Default for AgentFileConfig {
+    fn default() -> Self {
+        Self {
+            max_repeated_calls: henk_domain::repeat::DEFAULT_LIMIT,
         }
     }
 }
@@ -958,6 +980,8 @@ pub struct Settings {
     pub skills_dir: Option<String>,
     /// The loaded skills. Empty until [`crate::skills::attach`] loads them.
     pub skills: std::sync::Arc<crate::skills::SkillCatalog>,
+    /// Limits every model session shares.
+    pub agent: AgentFileConfig,
 }
 
 impl Config {
@@ -1079,6 +1103,7 @@ impl Config {
             mcp: self.mcp,
             skills_dir,
             skills: std::sync::Arc::default(),
+            agent: self.agent,
         })
     }
 }
@@ -1658,6 +1683,33 @@ impl Settings {
         }
     }
 
+    /// Review limits, the repeat guard and what is not reviewed, for
+    /// [`Self::describe`].
+    fn describe_limits(&self, out: &mut String) {
+        let _ = writeln!(
+            out,
+            "Review limits:   {} at once, {}s and {} turns per lane",
+            self.review.max_concurrent, self.review.lane_timeout_secs, self.review.lane_max_turns
+        );
+        let _ = writeln!(
+            out,
+            "Agent guard:     {}",
+            match self.agent.max_repeated_calls {
+                0 => "off".to_owned(),
+                n => format!("{n} identical tool calls in a row, then the next is refused"),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Not reviewed:    {}",
+            if self.review.ignore.is_empty() {
+                "nothing ignored".to_owned()
+            } else {
+                self.review.ignore.join(", ")
+            }
+        );
+    }
+
     /// A plain-text description of what Henk would work with.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -1695,20 +1747,7 @@ impl Settings {
                 model.provider, model.model, model.base_url, model.api_key_env
             );
         }
-        let _ = writeln!(
-            out,
-            "Review limits:   {} at once, {}s and {} turns per lane",
-            self.review.max_concurrent, self.review.lane_timeout_secs, self.review.lane_max_turns
-        );
-        let _ = writeln!(
-            out,
-            "Not reviewed:    {}",
-            if self.review.ignore.is_empty() {
-                "nothing ignored".to_owned()
-            } else {
-                self.review.ignore.join(", ")
-            }
-        );
+        self.describe_limits(&mut out);
         self.describe_agents(&mut out);
         self.describe_workspace(&mut out);
         let _ = writeln!(out, "MCP servers:");
@@ -2320,6 +2359,37 @@ github_owners = ["docspec"]
             .unwrap();
         assert!(settings.lanes.is_empty());
         assert_eq!(settings.server.bind, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn the_repeat_guard_limit_reaches_the_settings() {
+        let settings = Config::parse(MINIMAL)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.agent.max_repeated_calls, 3, "the default");
+        assert!(
+            settings
+                .describe()
+                .contains("3 identical tool calls in a row")
+        );
+
+        let text = format!("{MINIMAL}\n[agent]\nmax_repeated_calls = 5\n");
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.agent.max_repeated_calls, 5);
+
+        let text = format!("{MINIMAL}\n[agent]\nmax_repeated_calls = 0\n");
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.agent.max_repeated_calls, 0);
+        assert!(settings.describe().contains("Agent guard:     off"));
+
+        let text = format!("{MINIMAL}\n[agent]\nmax_repeat = 5\n");
+        assert!(matches!(Config::parse(&text), Err(ConfigError::Syntax(_))));
+        let text = format!("{MINIMAL}\n[agent]\nmax_repeated_calls = -1\n");
+        assert!(matches!(Config::parse(&text), Err(ConfigError::Syntax(_))));
     }
 
     #[test]

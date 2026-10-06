@@ -146,4 +146,84 @@ mod tests {
         assert!(text.contains("warn  lane-a: could not post"));
         assert!(text.contains("             Second line."), "{text}");
     }
+
+    /// A model asking for the same call each turn, as `henk runs show`
+    /// sees it once the session is recorded.
+    #[tokio::test]
+    async fn the_repeat_guard_shows_on_the_run() {
+        use std::sync::Arc;
+
+        use henk_agent::{AgentConfig, ToolSet};
+        use henk_llm::testing::ScriptedClient;
+        use henk_llm::{
+            Block, ChatMessage, Completion, Role, StopReason, ToolArguments, ToolCall, Usage,
+        };
+        use henk_session::{SessionSpec, run_session};
+        use henk_store::{NewRun, RunStore, SqliteStore};
+        use tokio_util::sync::CancellationToken;
+
+        let same = || {
+            Ok(Completion {
+                message: ChatMessage {
+                    role: Role::Assistant,
+                    blocks: vec![Block::ToolCall(ToolCall {
+                        id: "c".into(),
+                        name: "get_file_diff".into(),
+                        arguments: ToolArguments::Parsed(serde_json::json!({"path": "a.rs"})),
+                    })],
+                },
+                stop: StopReason::ToolUse,
+                usage: Usage::default(),
+            })
+        };
+        let store = SqliteStore::in_memory().unwrap();
+        let id = RunId::parse("r-stuck").unwrap();
+        store
+            .create_run(&NewRun {
+                id: id.clone(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "o/r".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "test".into(),
+                link: "l".into(),
+            })
+            .await
+            .unwrap();
+        let spec = SessionSpec {
+            name: "lane-a".into(),
+            model: Arc::new(ScriptedClient::new("m", (0..5).map(|_| same()))),
+            system: "s".into(),
+            opening: vec![ChatMessage::user("go")],
+            tools: ToolSet::new(),
+            limits: AgentConfig::default(),
+            continuation: None,
+            turn_warning: None,
+        };
+        run_session(&store, &id, spec, CancellationToken::new()).await;
+
+        let text = render(
+            &store.run(&id).await.unwrap().unwrap(),
+            &store.lanes(&id).await.unwrap(),
+            &store.findings(&id).await.unwrap(),
+            &store.events(&id).await.unwrap(),
+        );
+        assert!(text.contains("stuck repeating get_file_diff"), "{text}");
+        assert!(
+            text.contains(
+                "warn  lane-a: the model called get_file_diff with the same arguments \
+                 4 times in a row; the call was refused"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "warn  lane-a: the model called get_file_diff with the same arguments \
+                 5 times in a row; the session was ended as stuck"
+            ),
+            "{text}"
+        );
+    }
 }

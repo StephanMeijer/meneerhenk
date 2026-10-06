@@ -350,6 +350,7 @@ async fn plan_body(
     let limits = AgentConfig {
         max_turns: planning.max_turns,
         timeout: Duration::from_secs(planning.timeout_secs),
+        max_repeated_calls: app.settings.agent.max_repeated_calls,
         ..AgentConfig::default()
     };
     let opening = ChatMessage::user(format!(

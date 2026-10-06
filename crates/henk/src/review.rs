@@ -746,6 +746,7 @@ async fn build_lane(
         timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
         max_conversation_chars: app.settings.review.max_conversation_chars,
         keep_recent_turns: app.settings.review.keep_recent_turns,
+        max_repeated_calls: app.settings.agent.max_repeated_calls,
         ..AgentConfig::default()
     };
     let opening = lane_opening(target, commit, &context.files.diff);
@@ -838,6 +839,7 @@ async fn build_fact_check(
             timeout: Duration::from_secs(config.timeout_secs),
             max_conversation_chars: app.settings.review.max_conversation_chars,
             keep_recent_turns: app.settings.review.keep_recent_turns,
+            max_repeated_calls: app.settings.agent.max_repeated_calls,
             ..AgentConfig::default()
         },
         cancel: cancel.clone(),
