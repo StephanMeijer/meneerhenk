@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.6...v0.1.7) - 2026-10-06
+
+### Added
+
+- *(dashboard)* start and cancel runs, with CSRF
+- *(agent)* refuse repeated tool calls and stop a stuck session
+- record repeat-guard firings on the run and configure the limit
+
+### Fixed
+
+- *(plan)* end a plan as cancelled only when the cancel stopped it
+- *(dashboard)* end a review cancelled while queued at once, with a run
+- *(address)* end a run as cancelled only when the cancel stopped it
+- *(agent)* end a session as stuck only after the model saw the refusal
+
+### Other
+
+- Merge pull request #109 from StephanMeijer/feat/repeat-guard
+- Merge pull request #152 from StephanMeijer/feat/dashboard-actions
+- *(address)* pass the platform to the dashboard cancel test helpers
+
 ## [0.1.6](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.5...v0.1.6) - 2026-10-06
 
 ### Added
