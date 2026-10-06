@@ -19,6 +19,7 @@ pub mod mail;
 pub mod marker;
 pub mod plan;
 pub mod queue;
+pub mod repeat;
 pub mod review;
 pub mod run;
 pub mod scope;
