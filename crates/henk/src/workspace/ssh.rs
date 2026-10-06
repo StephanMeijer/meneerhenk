@@ -347,6 +347,9 @@ fn new_workspace_id() -> String {
 #[derive(Clone)]
 pub struct SshProvider {
     runner: Arc<dyn Runner>,
+    /// Held to write by a sweep and to read by an open, so a sweep never
+    /// removes a workspace being made.
+    gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl std::fmt::Debug for SshProvider {
@@ -359,28 +362,41 @@ impl SshProvider {
     /// A provider that reaches `target` over SSH.
     #[must_use]
     pub fn new(target: SshTarget) -> Self {
+        Self::with_runner(Arc::new(SshRunner::new(target)))
+    }
+
+    pub(crate) fn with_runner(runner: Arc<dyn Runner>) -> Self {
         Self {
-            runner: Arc::new(SshRunner::new(target)),
+            runner,
+            gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_runner(runner: Arc<dyn Runner>) -> Self {
-        Self { runner }
-    }
-
     /// Removes every workspace on the host: what a process that died left.
-    /// One Henk per sandbox host.
+    /// One Henk per sandbox host, and only when it starts. The gate is taken
+    /// at this call, not when the future first runs, so a workspace opened
+    /// after it waits for the sweep; with workspaces being opened already,
+    /// the sweep is refused.
     ///
     /// # Errors
     ///
-    /// Returns [`WorkspaceError`] when the host cannot be reached.
-    pub async fn sweep(&self) -> Result<(), WorkspaceError> {
-        self.runner
-            .call(&["sweep".to_owned()], &[], None, REQUEST_WAIT)
-            .await?
-            .ok("sweeping the sandbox host")
-            .map(|_| ())
+    /// Returns [`WorkspaceError`] when the host cannot be reached or a
+    /// workspace is being opened.
+    pub fn sweep(&self) -> impl Future<Output = Result<(), WorkspaceError>> + Send + 'static {
+        let gate = Arc::clone(&self.gate).try_write_owned();
+        let runner = Arc::clone(&self.runner);
+        async move {
+            let _gate = gate.map_err(|_| {
+                WorkspaceError::Backend(
+                    "a workspace is being opened; the sandbox host is not swept".to_owned(),
+                )
+            })?;
+            runner
+                .call(&["sweep".to_owned()], &[], None, REQUEST_WAIT)
+                .await?
+                .ok("sweeping the sandbox host")
+                .map(|_| ())
+        }
     }
 
     /// What the runner says about itself and its tools.
@@ -420,22 +436,31 @@ impl WorkspaceProvider for SshProvider {
         let archive = tokio::task::spawn_blocking(move || pack(&source))
             .await
             .map_err(|e| WorkspaceError::Backend(format!("cannot pack the checkout: {e}")))??;
-        let id = new_workspace_id();
-        let created = self
-            .runner
-            .call(&["create".to_owned(), id.clone()], &[], None, REQUEST_WAIT)
-            .await?
-            .ok("making the workspace")?;
-        let work = String::from_utf8_lossy(&created.stdout).trim().to_owned();
-        let workspace = SshWorkspace {
+        // A sweep in progress ends first.
+        let _swept = self.gate.read().await;
+        // The workspace exists before the host makes it, so any failure from
+        // here on drops it, which removes whatever the host made: a `create`
+        // that failed after its user was added, or a failed import.
+        let mut workspace = SshWorkspace {
             runner: Arc::clone(&self.runner),
-            id,
-            work,
+            id: new_workspace_id(),
+            work: String::new(),
             budget: Budget::new(profile.limits.clone()),
             closed: AtomicBool::new(false),
         };
-        // A failed import leaves nothing: the workspace is dropped, which
-        // removes it on the host.
+        let created = workspace
+            .runner
+            .call(
+                &["create".to_owned(), workspace.id.clone()],
+                &[],
+                None,
+                REQUEST_WAIT,
+            )
+            .await?
+            .ok("making the workspace")?;
+        String::from_utf8_lossy(&created.stdout)
+            .trim()
+            .clone_into(&mut workspace.work);
         workspace
             .runner
             .call(
@@ -496,6 +521,14 @@ const SEARCH: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -siz
 xargs -0 -r grep -HIFn --null -e "$3" --
 s=$?
 [ "$s" -eq 0 ] || [ "$s" -eq 1 ] || [ "$s" -eq 123 ]"#;
+
+/// `limit` in seconds for the runner's `timeout`, to the millisecond as the
+/// host backend's limit is, rounded up: `timeout` reads 0 as no limit at all,
+/// so what is left of a run is never sent as `0.000`.
+fn seconds(limit: Duration) -> String {
+    let millis = limit.as_nanos().div_ceil(1_000_000).max(1);
+    format!("{}.{:03}", millis / 1000, millis % 1000)
+}
 
 /// A workspace on the sandbox host.
 pub struct SshWorkspace {
@@ -646,8 +679,7 @@ impl Workspace for SshWorkspace {
         let mut tokens = vec![
             "as".to_owned(),
             self.id.clone(),
-            // To the millisecond, as the host backend's limit is.
-            format!("{:.3}", limit.as_secs_f64()),
+            seconds(limit),
             token(dir.as_str()),
         ];
         tokens.extend(argv.iter().map(|a| token(a)));
@@ -1090,6 +1122,106 @@ pub(crate) mod tests {
         let probe = provider.probe().await.unwrap();
         assert!(probe.starts_with("henk-runner 1\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
+    }
+
+    /// The local runner, with a `create` that fails once its user exists
+    /// or a `sweep` that is slow to start.
+    struct Twisted {
+        inner: Arc<LocalRunner>,
+        create_fails: bool,
+        sweep_waits: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for Twisted {
+        async fn call(
+            &self,
+            tokens: &[String],
+            stdin: &[u8],
+            keep: Option<usize>,
+            wait: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            let first = tokens.first().map(String::as_str);
+            if first == Some("sweep") {
+                tokio::time::sleep(self.sweep_waits).await;
+            }
+            let reply = self.inner.call(tokens, stdin, keep, wait).await?;
+            if first == Some("create") && self.create_fails {
+                return Ok(Reply {
+                    code: Some(1),
+                    stderr: b"useradd worked, then something did not".to_vec(),
+                    ..Reply::default()
+                });
+            }
+            Ok(reply)
+        }
+    }
+
+    async fn emptied(base: &Path) -> bool {
+        for _ in 0..100 {
+            if std::fs::read_dir(base).unwrap().next().is_none() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_create_that_fails_after_its_user_exists_leaves_nothing() {
+        let inner = LocalRunner::new("henk-ssh-create-fails");
+        let runner = Arc::new(Twisted {
+            inner: Arc::clone(&inner),
+            create_fails: true,
+            sweep_waits: Duration::ZERO,
+        });
+        let provider = SshProvider::with_runner(runner as Arc<dyn Runner>);
+        let source = crate::workspace::contract::source("henk-ssh-create-fails-src");
+        let Err(failed) = provider.open(source.path(), &Profile::default()).await else {
+            panic!("the open failed");
+        };
+        assert!(
+            failed.to_string().contains("making the workspace"),
+            "{failed}"
+        );
+        assert!(
+            emptied(inner.base()).await,
+            "the half-made workspace is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_opened_while_the_sweep_runs_is_kept() {
+        let inner = LocalRunner::new("henk-ssh-sweep-race");
+        let runner = Arc::new(Twisted {
+            inner: Arc::clone(&inner),
+            create_fails: false,
+            sweep_waits: Duration::from_millis(500),
+        });
+        let provider = SshProvider::with_runner(runner as Arc<dyn Runner>);
+        // As `henk serve` does: the sweep starts, then runs come.
+        let sweeping = tokio::spawn(provider.sweep());
+        let source = crate::workspace::contract::source("henk-ssh-sweep-race-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        sweeping.await.unwrap().unwrap();
+        let read = ws
+            .read(&WorkspacePath::parse("src/a.rs").unwrap(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(read, b"fn main() {\n    let x = 1;\n}\n");
+        ws.close().await;
+    }
+
+    #[test]
+    fn a_limit_is_sent_rounded_up_to_the_millisecond_and_never_as_zero() {
+        assert_eq!(seconds(Duration::from_micros(3)), "0.001");
+        assert_eq!(seconds(Duration::from_nanos(1)), "0.001");
+        assert_eq!(seconds(Duration::from_millis(1500)), "1.500");
+        assert_eq!(seconds(Duration::from_nanos(2_000_000_001)), "2.001");
+        assert_eq!(seconds(Duration::from_mins(10)), "600.000");
     }
 
     #[tokio::test]

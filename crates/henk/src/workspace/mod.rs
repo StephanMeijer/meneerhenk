@@ -204,7 +204,19 @@ pub trait WorkspaceProvider: Send + Sync {
         source: &Path,
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError>;
+
+    /// Removes what a process that died left on a backend that outlives it,
+    /// or `None` when the backend keeps nothing. Called once, when Henk
+    /// starts: from this call on, a workspace being opened waits until the
+    /// sweep is done, so the sweep never takes a live one.
+    fn sweep(&self) -> Option<Sweep> {
+        None
+    }
 }
+
+/// A sweep in progress; see [`WorkspaceProvider::sweep`].
+pub type Sweep =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkspaceError>> + Send>>;
 
 /// Opens each workspace on the backend its profile names: the host always,
 /// the sandbox host when `[workspace.ssh]` is configured.
@@ -241,6 +253,10 @@ impl WorkspaceProvider for Backends {
                 )),
             },
         }
+    }
+
+    fn sweep(&self) -> Option<Sweep> {
+        self.ssh.as_ref().map(|ssh| Box::pin(ssh.sweep()) as Sweep)
     }
 }
 
