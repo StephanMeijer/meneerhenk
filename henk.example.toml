@@ -223,6 +223,11 @@ requester_id = 523456789012345678
 # that host's kernel, /tmp and network. The host key is pinned.
 # [workspace.profiles.sandbox]
 # backend = "ssh"
+# Before the model starts: the repository's own toolchain through mise
+# (`mise trust`, `mise install`, then `mise exec --` for every command), and
+# the operator's setup commands, in order. Never steps from the repository.
+# toolchain = "mise"
+# setup = [["npm", "ci"]]
 # [workspace.ssh]
 # host = "sandbox.example.com"
 # The host's key as `ssh-keyscan -t ed25519 sandbox.example.com` prints it.

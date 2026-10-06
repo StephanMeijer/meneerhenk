@@ -6,7 +6,9 @@
 #   podman run -d --rm -p 127.0.0.1:2222:22 henk-sandbox
 # Not for production: a real sandbox host is set up as the README says.
 FROM docker.io/library/debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git sudo procps findutils tar ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server git sudo procps findutils tar ca-certificates curl xz-utils && rm -rf /var/lib/apt/lists/*
+# mise for workspace profiles with toolchain = "mise" (#93), on the runner's PATH.
+RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
 RUN useradd --create-home --shell /bin/sh henk && mkdir -p /run/sshd /home/henk/.ssh
 COPY henk-runner /usr/local/sbin/henk-runner
 ARG HENK_PUBLIC_KEY

@@ -106,10 +106,14 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
                 .next()
                 .unwrap_or("henk-runner (no version)")
                 .to_owned();
+            // mise is needed only when a profile names it as its toolchain.
+            let wants_mise = settings
+                .workspace
+                .named()
+                .any(|(_, p)| p.toolchain == Some(henk_domain::workspace::Toolchain::Mise));
             let missing: Vec<&str> = lines
                 .filter_map(|l| l.strip_suffix(" missing"))
-                // mise is optional until a profile uses it (#93).
-                .filter(|tool| *tool != "mise")
+                .filter(|tool| *tool != "mise" || wants_mise)
                 .collect();
             let runner = if missing.is_empty() {
                 Check::ok("sandbox runner", version)

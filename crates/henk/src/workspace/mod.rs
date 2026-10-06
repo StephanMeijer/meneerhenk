@@ -22,6 +22,7 @@ pub mod contract;
 pub mod fake;
 pub mod host;
 pub mod ssh;
+pub mod toolchain;
 pub mod traced;
 
 /// Why a workspace operation failed. The text goes back to the model, so it

@@ -103,7 +103,8 @@ impl Limits {
     }
 }
 
-/// One way to run a workspace: a backend, its image and its limits.
+/// One way to run a workspace: a backend, its image, its limits and how it
+/// is prepared before the model starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     /// Where it runs.
@@ -112,6 +113,31 @@ pub struct Profile {
     pub image: Option<String>,
     /// What it may use.
     pub limits: Limits,
+    /// The operator's setup commands, run in order in the tree's root before
+    /// the model's first command (#93). They come from configuration only;
+    /// nothing in the repository adds or changes one (§8.3).
+    pub setup: Vec<Vec<String>>,
+    /// The tool manager that provides the repository's toolchain, if any.
+    pub toolchain: Option<Toolchain>,
+}
+
+/// A tool manager that installs what the repository's own configuration
+/// asks for (its `mise.toml` or `.tool-versions`), and runs every command
+/// with those tools. The repository's file is data the manager reads; the
+/// steps that read it are fixed here (§8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Toolchain {
+    /// mise (`mise trust`, `mise install`, then `mise exec --` per command).
+    Mise,
+}
+
+impl fmt::Display for Toolchain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Mise => "mise",
+        })
+    }
 }
 
 impl Default for Profile {
@@ -120,6 +146,8 @@ impl Default for Profile {
             backend: BackendKind::Host,
             image: None,
             limits: Limits::default(),
+            setup: Vec::new(),
+            toolchain: None,
         }
     }
 }
@@ -139,6 +167,15 @@ impl Profile {
         }
         if self.image.as_deref().is_some_and(|i| i.trim().is_empty()) {
             return Some(format!("workspace profile {name}: the image is empty"));
+        }
+        if self.setup.iter().any(|command| {
+            command
+                .first()
+                .is_none_or(|program| program.trim().is_empty())
+        }) {
+            return Some(format!(
+                "workspace profile {name}: a setup command is empty"
+            ));
         }
         None
     }

@@ -1072,6 +1072,49 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a sandbox host with henk-runner and mise (HENK_TEST_SSH_*)"]
+    async fn live_mise_gives_the_run_the_repositorys_own_toolchain() {
+        let provider = SshProvider::new(live_target());
+        let source = ScratchDir::new("henk-ssh-live-mise").unwrap();
+        std::fs::write(
+            source.path().join("mise.toml"),
+            "[tools]\nshellcheck = \"0.10.0\"\n",
+        )
+        .unwrap();
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        for step in [&["mise", "trust", "--all"][..], &["mise", "install"]] {
+            let step: Vec<String> = step.iter().map(|w| (*w).to_owned()).collect();
+            let ran = ws
+                .exec(&step, &WorkspacePath::root(), Duration::from_mins(5))
+                .await
+                .unwrap();
+            assert_eq!(ran.code, Some(0), "{step:?}: {}", ran.output);
+        }
+        let mised = crate::workspace::toolchain::Mise::wrap(Arc::clone(&ws));
+        let version = mised
+            .exec(
+                &["shellcheck".to_owned(), "--version".to_owned()],
+                &WorkspacePath::root(),
+                Duration::from_mins(1),
+            )
+            .await
+            .unwrap();
+        assert!(
+            version.output.contains("version: 0.10.0"),
+            "{}",
+            version.output
+        );
+        assert!(
+            ws.export().await.unwrap().is_empty(),
+            "what mise fetched is outside the tree"
+        );
+        ws.close().await;
+    }
+
+    #[tokio::test]
     #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
     async fn live_a_wrong_host_key_is_refused() {
         let target = SshTarget {
