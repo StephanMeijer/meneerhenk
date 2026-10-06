@@ -25,6 +25,12 @@ pub struct ReviewThread {
     pub id: String,
     /// Whether it is resolved.
     pub resolved: bool,
+    /// Whether the line it is on changed since.
+    pub outdated: bool,
+    /// The file it is on.
+    pub path: Option<String>,
+    /// The line it is on, when it still has one.
+    pub line: Option<u32>,
     /// The comments in the thread.
     pub comments: Vec<ThreadComment>,
 }
@@ -38,6 +44,10 @@ pub struct ThreadComment {
     pub author: String,
     /// Whether the author is a bot or App.
     pub is_bot: bool,
+    /// The author's stable account id (§2), when GitHub gives one.
+    pub author_id: Option<u64>,
+    /// The comment text.
+    pub body: String,
 }
 
 const USER_AGENT: &str = "meneer-henk (https://github.com/StephanMeijer/meneerhenk)";
@@ -104,6 +114,28 @@ impl GitHubApi {
         }
         serde_json::from_str(&body)
             .map_err(|e| PlatformError::Decode(format!("{e}: {}", truncate(&body))))
+    }
+
+    /// The token git uses to clone and push as the App: the same cached
+    /// installation token the API calls use. Never logged, never in argv.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when no token can be minted.
+    pub async fn git_token(&self) -> Result<secrecy::SecretString, PlatformError> {
+        self.auth.bearer(&self.http, &self.api_base).await
+    }
+
+    /// The HTTPS clone URL of `owner/name` on this GitHub: `github.com` for
+    /// the public API, the host of a GitHub Enterprise `/api/v3` base.
+    #[must_use]
+    pub fn git_remote(&self, repo: &str) -> String {
+        let web = if self.api_base == "https://api.github.com" {
+            "https://github.com".to_owned()
+        } else {
+            self.api_base.trim_end_matches("/api/v3").to_owned()
+        };
+        format!("{web}/{repo}.git")
     }
 
     /// `GET` a REST path.
@@ -316,8 +348,15 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
         nodes {
           id
           isResolved
+          isOutdated
+          path
+          line
           comments(first: 100) {
-            nodes { databaseId author { login __typename } }
+            nodes {
+              databaseId
+              body
+              author { login __typename ... on User { databaseId } ... on Bot { databaseId } }
+            }
           }
         }
       }
@@ -343,36 +382,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
                 .into_iter()
                 .flatten()
             {
-                let comments = node
-                    .pointer("/comments/nodes")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|c| {
-                        Some(ThreadComment {
-                            database_id: c.get("databaseId")?.as_u64()?,
-                            author: c
-                                .pointer("/author/login")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_owned(),
-                            is_bot: c.pointer("/author/__typename").and_then(Value::as_str)
-                                == Some("Bot"),
-                        })
-                    })
-                    .collect();
-                threads.push(ReviewThread {
-                    id: node
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_owned(),
-                    resolved: node
-                        .get("isResolved")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    comments,
-                });
+                threads.push(parse_thread(node));
             }
             let has_next = connection
                 .pointer("/pageInfo/hasNextPage")
@@ -419,5 +429,53 @@ mutation($id: ID!) {
 }";
         self.graphql(MUTATION, json!({"id": node_id})).await?;
         Ok(())
+    }
+}
+
+/// One `reviewThreads` node.
+fn parse_thread(node: &Value) -> ReviewThread {
+    let comments = node
+        .pointer("/comments/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            Some(ThreadComment {
+                database_id: c.get("databaseId")?.as_u64()?,
+                author: c
+                    .pointer("/author/login")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                is_bot: c.pointer("/author/__typename").and_then(Value::as_str) == Some("Bot"),
+                author_id: c.pointer("/author/databaseId").and_then(Value::as_u64),
+                body: c
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            })
+        })
+        .collect();
+    ReviewThread {
+        id: node
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        resolved: node
+            .get("isResolved")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        outdated: node
+            .get("isOutdated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        path: node.get("path").and_then(Value::as_str).map(str::to_owned),
+        line: node
+            .get("line")
+            .and_then(Value::as_u64)
+            .and_then(|l| u32::try_from(l).ok()),
+        comments,
     }
 }

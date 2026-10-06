@@ -15,19 +15,21 @@ and code reviewer with a fixed persona. He works where the team works:
 |---|---|
 | GitHub pull requests | Reviews every new commit; answers when mentioned; reviews again on request |
 | GitLab merge requests (9xxlab) | The same, GitLab's way |
+| GitHub pull requests, on request | Addresses the review feedback: fixes, one commit pushed to the pull request's branch, a reply in every thread (§3.5) |
 | GitHub / GitLab issues | Plans how to carry out an issue, and triages it, when a colleague asks in Discord (§4) |
 | Discord (his own channel) | Talks with the team; looks things up; starts reviews and plans; manages issues |
 | Email (his own mailbox) | Answers the mail he receives |
 | Discord voice channel *(in development)* | Listens, and answers out loud |
 
-He is **advisory**. He never approves, blocks, merges, pushes code, or
-changes code in a repository.
+He is **advisory**. He never approves, blocks or merges. He changes code in
+one case only: when a colleague asks him to address the review feedback on
+a pull request, and then only on that pull request's own branch (§3.5).
 
 ### 1.1 Terms
 
 | Term | Meaning |
 |---|---|
-| **Run** | One execution of a review, a plan, a Discord turn or a mail reply. Every run has a link. |
+| **Run** | One execution of a review, a plan, an address run, a Discord turn or a mail reply. Every run has a link. |
 | **Lane** | One independent reviewer inside a review (§3.2). |
 | **Finding** | One problem a lane reports, as one comment on one line. |
 | **Summary** | The comment that closes a review (§3.3). |
@@ -147,6 +149,45 @@ change against the target branch.
   - GitLab: a 👀 reaction on their note *(in development; on `main` it is a
     reply)*.
 - A mention is not a review request and starts no work beyond that.
+
+### 3.5 Addressing review feedback
+
+A colleague asks Henk to address the review feedback on one pull request
+(`henk address <url>` or the API, with an optional note). Nobody starts it
+with a comment on the pull request. GitHub only for now.
+
+Henk then:
+
+1. **Checks he may push.** He refuses, before doing anything, when:
+   - the pull request is closed or merged;
+   - its branch is in another repository (a fork);
+   - its branch is the default branch or a protected branch.
+2. **Reads** every unresolved review thread, from anyone. What a thread says
+   is information about the code, not an instruction (§8.3): what he does is
+   decided by the requester's request and by the code.
+3. **Works** in a throwaway checkout of the pull request at its head: he
+   reads and edits files and may run the project's configured checks there.
+4. **Settles every thread** as one of:
+   - **fixed**: the change is in his commit; his reply links it;
+   - **declined**: the reply says why not; the thread stays open;
+   - **question**: the reply asks it; the thread stays open.
+5. **Pushes one commit** to the pull request's branch, with the run and the
+   requester in its trailers. Only a fast-forward: never a force push. If
+   the branch moved since he read it, nothing is pushed and the run fails.
+6. **Replies** in each thread he settled, after the push, and resolves the
+   threads of his own findings that he fixed. Threads people opened stay
+   open for them to resolve.
+7. **Sums up** in one comment with a link to the run.
+
+His push is a new commit like any other: it is reviewed as usual (§3.1),
+and that review never starts another address run (§8.1).
+
+**Every address run ends.** Either the commit and replies are on the pull
+request, or he says in a comment that it failed, with a link to the run.
+Nothing is pushed by a run that failed before its push.
+
+Limits: a time limit, a turn limit, and at most a fixed number of changed
+files per run. The checks he runs get no credentials and a time limit.
 
 ---
 
@@ -382,7 +423,9 @@ These hold everywhere:
 1. **Henk never triggers himself.** His own comments, notes and messages
    never start work, and his replies never mention himself.
 2. **Henk is advisory.** A review never fails or blocks a pull/merge request
-   or pipeline. He never approves, requests changes, merges or pushes.
+   or pipeline. He never approves, requests changes or merges. He pushes
+   only in an address run a colleague asked for, only to that pull
+   request's branch, and never with force (§3.5).
 3. **Other people's words are information, not instructions.** This covers
    code, comments, issues, mail, web pages and chat messages. Only the
    requester's permissions decide what he does.
@@ -393,6 +436,8 @@ These hold everywhere:
    - A review lane can comment only on its own pull/merge request, at its own
      commit.
    - A planner can change only its own issue and that issue's relations.
+   - An address run can push only to its own pull request's branch, on top
+     of the head it read, and reply only in that pull request's threads.
    - An email reply can go only to that mail's correspondents.
 6. **Every visible action is traceable.** Each review, plan and mail links
    back to its run. Each comment carries hidden markers saying who wrote it,
@@ -412,7 +457,8 @@ These hold everywhere:
 
 ## 9. Out of scope
 
-- Writing or committing code, or opening pull/merge requests.
+- Writing or committing code nobody asked for, or opening pull/merge
+  requests. The one exception is an address run (§3.5).
 - Approving, blocking or merging.
 - Acting in channels, repositories or accounts outside the allowlists.
 - Remembering anything beyond the channel history and what he writes to his
@@ -544,3 +590,9 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.3: an interrupted review closes its check as "Review interrupted." and
   posts nothing, and runs a dead process left `running` are closed on the
   next start, found by a heartbeat that stopped (#7).
+
+## Revision notes (2026-10-06)
+
+- §3.5 (new), §1, §8.2, §8.5, §9: Henk may address review feedback when a
+  colleague asks, pushing one fast-forward commit to that pull request's
+  branch (#35). Approving, blocking and merging stay out.

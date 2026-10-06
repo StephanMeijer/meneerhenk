@@ -136,6 +136,22 @@ sub_issue_cap = 5
 # CLI and API plans run on behalf of this Team Lead.
 requester_id = 523456789012345678
 
+# Addressing review feedback (spec §3.5): `henk address <pull request URL>`.
+# Henk fixes what he can in a throwaway checkout, pushes one fast-forward
+# commit to the pull request's branch (never a fork, the default branch or
+# a protected branch) and replies in every thread. GitHub only for now; the
+# App needs "Contents: write". Leave the table out to switch it off.
+# [address]
+# model = "claude"
+# timeout_secs = 1800
+# max_turns = 80
+# max_changed_files = 20
+# The project's checks, run in the checkout with an empty environment and
+# check_timeout_secs each. They run the pull request's code on this host.
+# check_commands = [["cargo", "test", "--offline"]]
+# check_timeout_secs = 600
+# requester_id = 523456789012345678
+
 # External MCP servers. Henk is the client; nothing here is part of Henk.
 # The read session a lane sees: read-only toolsets, no write tool at all.
 [mcp.github]

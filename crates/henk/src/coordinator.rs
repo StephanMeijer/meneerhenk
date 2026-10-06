@@ -13,6 +13,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::address::{AddressRequest, run_address};
 use crate::app::App;
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
@@ -49,6 +50,7 @@ pub struct Coordinator {
     active: Arc<Mutex<HashMap<Key, Active>>>,
     review_slots: Arc<Semaphore>,
     generation: Mutex<u64>,
+    addressing: Arc<Mutex<std::collections::HashSet<Key>>>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -67,6 +69,7 @@ impl Coordinator {
             active: Arc::new(Mutex::new(HashMap::new())),
             review_slots: Arc::new(Semaphore::new(slots)),
             generation: Mutex::new(0),
+            addressing: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -178,5 +181,50 @@ impl Coordinator {
             }
         });
         run
+    }
+
+    /// Starts an address run (§3.5) in the background. One per pull request
+    /// at a time: a second request while one runs is refused, not queued, so
+    /// two runs never push to the same branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when an address run is already going on it.
+    pub fn submit_address(
+        &self,
+        target: ReviewTarget,
+        note: Option<String>,
+        trigger: String,
+    ) -> Result<RunId, String> {
+        let key = Key::of(&target);
+        {
+            let Ok(mut busy) = self.addressing.lock() else {
+                return Err("coordinator lock poisoned".to_owned());
+            };
+            if !busy.insert(key.clone()) {
+                return Err(format!(
+                    "an address run is already going on #{}",
+                    target.number
+                ));
+            }
+        }
+        let run = new_run_id();
+        let request = AddressRequest {
+            target,
+            note,
+            trigger,
+            run: Some(run.clone()),
+        };
+        let app = Arc::clone(&self.app);
+        let addressing = Arc::clone(&self.addressing);
+        tokio::spawn(async move {
+            if let Err(error) = run_address(&app, request, app.shutdown.child_token()).await {
+                warn!(%error, "address run ended with an error");
+            }
+            if let Ok(mut busy) = addressing.lock() {
+                busy.remove(&key);
+            }
+        });
+        Ok(run)
     }
 }

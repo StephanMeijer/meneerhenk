@@ -34,6 +34,12 @@ impl GitHubWriter {
         }
     }
 
+    /// The App's login.
+    #[must_use]
+    pub fn bot_login(&self) -> &str {
+        &self.bot_login
+    }
+
     /// The underlying API client.
     #[must_use]
     pub fn api(&self) -> &GitHubApi {

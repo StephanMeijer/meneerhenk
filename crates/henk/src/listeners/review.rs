@@ -163,6 +163,7 @@ impl Listener for ReviewListener {
                 self.submit(request, head)
             }
             EventKind::PlanRequested { .. }
+            | EventKind::AddressRequested { .. }
             | EventKind::Unmodelled { .. }
             | EventKind::Ignored(_) => Handled::Ignored("not a review event".to_owned()),
         }

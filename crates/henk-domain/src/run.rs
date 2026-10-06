@@ -128,6 +128,8 @@ pub enum RunKind {
     DiscordTurn,
     /// One mail reply (§6).
     MailReply,
+    /// Addressing the review feedback on one pull request (§3.5).
+    Address,
 }
 
 impl fmt::Display for RunKind {
@@ -137,6 +139,7 @@ impl fmt::Display for RunKind {
             Self::Plan => "plan",
             Self::DiscordTurn => "discord turn",
             Self::MailReply => "mail reply",
+            Self::Address => "address",
         })
     }
 }

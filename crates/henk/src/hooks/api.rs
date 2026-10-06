@@ -71,6 +71,7 @@ impl HttpHook for ApiHook {
         Router::new()
             .route("/review", post(review))
             .route("/plan", post(plan))
+            .route("/address", post(address))
             .with_state(self)
     }
 }
@@ -79,6 +80,12 @@ impl HttpHook for ApiHook {
 struct ReviewBody {
     url: String,
     commit: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressBody {
+    url: String,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +146,35 @@ async fn plan(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes)
             requester: hook.requester.clone(),
         },
         EventKind::PlanRequested {
+            target,
+            note: request.note,
+            requester: hook.requester.clone(),
+        },
+        None,
+    );
+    let id = publish(&hook.bus, event);
+    (StatusCode::ACCEPTED, axum::Json(json!({"event": id}))).into_response()
+}
+
+async fn address(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Some(response) = hook.unauthorized(&headers) {
+        return response;
+    }
+    let request: AddressBody = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, format!("bad body: {error}")).into_response();
+        }
+    };
+    let target = match parse_pull_request_url(&request.url) {
+        Ok(target) => target,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let event = new_event(
+        EventSource::Api {
+            requester: hook.requester.clone(),
+        },
+        EventKind::AddressRequested {
             target,
             note: request.note,
             requester: hook.requester.clone(),
