@@ -1406,7 +1406,7 @@ check_commands = [["true"]]
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_an_address_run_on_a_real_sandbox_host_pushes_its_fix() {
         let provider =
             crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());

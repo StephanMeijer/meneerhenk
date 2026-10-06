@@ -433,7 +433,8 @@ sequenceDiagram
 The model's tools talk only to a `Workspace` (`crates/henk/src/workspace`);
 the backend is a configuration choice (`[workspace]`, per repository
 through profiles): `host`, or `ssh` to a sandbox host where each run is a
-throwaway user driven through `henk-runner` (`deploy/sandbox`). Either way
+throwaway user, made and removed by a script Henk sends with every request
+as root (`workspace/sandbox.sh`; nothing is installed there). Either way
 the record of changes is a git directory outside the tree that nothing a
 check runs can write, `HOME` is outside the tree, and `.git` (the `ssh`
 backend leaves the checkout's own in the tree for the run's commands) is

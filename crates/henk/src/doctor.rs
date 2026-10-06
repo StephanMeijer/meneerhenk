@@ -75,8 +75,8 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
 }
 
 /// The `ssh` backend's sandbox host (#84): without `--probe`, only whether
-/// its key is set; with it, the connection, the host key and the runner,
-/// each on a line of its own.
+/// its key is set; with it, the connection, the host key and the tools the
+/// sandbox script needs there, each on a line of its own.
 async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
     let Some(ssh) = &settings.workspace_ssh else {
         return Vec::new();
@@ -104,7 +104,7 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
         Ok(report) => vec![
             Check::ok("sandbox connection", format!("{target}, signed in")),
             Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
-            runner_check(&report, &settings.workspace),
+            tools_check(&report, &settings.workspace),
         ],
         Err(error) => {
             let text = error.to_string();
@@ -121,12 +121,12 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
     }
 }
 
-/// The runner's probe report as a check: a tool it says is missing fails
-/// it, mise only when a profile on the sandbox host names it as its
+/// The sandbox script's probe report as a check: a tool it says is missing
+/// fails it, mise only when a profile on the sandbox host names it as its
 /// toolchain; a host-backed profile runs mise on Henk's own machine.
-fn runner_check(report: &str, workspace: &WorkspacePolicy) -> Check {
+fn tools_check(report: &str, workspace: &WorkspacePolicy) -> Check {
     let mut lines = report.lines();
-    let version = lines.next().unwrap_or("henk-runner (no version)");
+    let version = lines.next().unwrap_or("henk-sandbox (no version)");
     let wants_mise = workspace
         .named()
         .any(|(_, p)| p.backend == BackendKind::Ssh && p.toolchain == Some(Toolchain::Mise));
@@ -135,10 +135,10 @@ fn runner_check(report: &str, workspace: &WorkspacePolicy) -> Check {
         .filter(|tool| *tool != "mise" || wants_mise)
         .collect();
     if missing.is_empty() {
-        Check::ok("sandbox runner", version)
+        Check::ok("sandbox host tools", version)
     } else {
         Check::fail(
-            "sandbox runner",
+            "sandbox host tools",
             format!("{version}; missing on the host: {}", missing.join(", ")),
         )
     }
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn mise_is_wanted_on_the_sandbox_host_only_by_a_profile_there() {
         use henk_domain::workspace::Profile;
-        let report = "henk-runner 2\ngit /usr/bin/git\nmise missing\n";
+        let report = "henk-sandbox 4\ngit /usr/bin/git\nmise missing\n";
         let profile = |backend, toolchain| Profile {
             backend,
             toolchain,
@@ -530,8 +530,8 @@ mod tests {
             .profiles
             .insert("sandbox".to_owned(), profile(BackendKind::Ssh, None));
         assert_eq!(
-            runner_check(report, &workspace).verdict,
-            Verdict::Ok("henk-runner 2".to_owned()),
+            tools_check(report, &workspace).verdict,
+            Verdict::Ok("henk-sandbox 4".to_owned()),
             "only a host-backed profile wants mise"
         );
         workspace.profiles.insert(
@@ -539,8 +539,8 @@ mod tests {
             profile(BackendKind::Ssh, Some(Toolchain::Mise)),
         );
         assert_eq!(
-            runner_check(report, &workspace).verdict,
-            Verdict::Fail("henk-runner 2; missing on the host: mise".to_owned()),
+            tools_check(report, &workspace).verdict,
+            Verdict::Fail("henk-sandbox 4; missing on the host: mise".to_owned()),
             "a sandbox profile wants it"
         );
     }
