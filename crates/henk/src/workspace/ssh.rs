@@ -36,6 +36,11 @@ use super::{
 /// importing the checkout, reading the record, a file operation.
 const REQUEST_WAIT: Duration = Duration::from_mins(5);
 
+/// How long making the connection and signing in may take. The connection
+/// is shared, so a host that accepts and then says nothing must not hold
+/// every other request up for longer than this.
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
+
 /// What the runner's own `timeout` adds before it kills, plus slack for the
 /// connection: past this, Henk stops waiting.
 const COMMAND_SLACK: Duration = Duration::from_secs(15);
@@ -189,6 +194,8 @@ impl client::Handler for Client {
 pub(crate) struct SshRunner {
     target: SshTarget,
     connection: tokio::sync::Mutex<Option<Arc<client::Handle<Client>>>>,
+    /// At most [`CONNECT_WAIT`]; shorter in tests.
+    connect_wait: Duration,
 }
 
 impl SshRunner {
@@ -196,6 +203,7 @@ impl SshRunner {
         Self {
             target,
             connection: tokio::sync::Mutex::new(None),
+            connect_wait: CONNECT_WAIT,
         }
     }
 
@@ -206,6 +214,23 @@ impl SshRunner {
         {
             return Ok(Arc::clone(handle));
         }
+        let handle = tokio::time::timeout(self.connect_wait, self.sign_in())
+            .await
+            .map_err(|_| {
+                WorkspaceError::Backend(format!(
+                    "the sandbox host {}:{} did not answer within {}s",
+                    self.target.host,
+                    self.target.port,
+                    self.connect_wait.as_secs()
+                ))
+            })??;
+        let handle = Arc::new(handle);
+        *slot = Some(Arc::clone(&handle));
+        Ok(handle)
+    }
+
+    /// A new connection, its host key checked and Henk signed in.
+    async fn sign_in(&self) -> Result<client::Handle<Client>, WorkspaceError> {
         let failed = |what: &str, error: &dyn std::fmt::Display| {
             WorkspaceError::Backend(format!(
                 "{what} {}:{} failed: {error}",
@@ -243,8 +268,6 @@ impl SshRunner {
                 self.target.host, self.target.user
             )));
         }
-        let handle = Arc::new(handle);
-        *slot = Some(Arc::clone(&handle));
         Ok(handle)
     }
 
@@ -1277,6 +1300,44 @@ pub(crate) mod tests {
             "henk-ssh-live",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_host_that_accepts_and_says_nothing_is_given_up_on() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accepts, keeps the socket open and never speaks.
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                held.push(socket);
+            }
+        });
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]),
+        );
+        let target = SshTarget {
+            host: "127.0.0.1".to_owned(),
+            port,
+            user: "henk".to_owned(),
+            key: Arc::new(key),
+            host_key: PublicKey::from_openssh(&key_line(1)).unwrap(),
+        };
+        let runner = SshRunner {
+            connect_wait: Duration::from_millis(300),
+            ..SshRunner::new(target)
+        };
+        let provider = SshProvider::with_runner(Arc::new(runner) as Arc<dyn Runner>);
+        let given_up = tokio::time::timeout(Duration::from_secs(10), provider.probe())
+            .await
+            .expect("the probe ends on its own")
+            .unwrap_err();
+        assert!(
+            given_up.to_string().contains("did not answer"),
+            "{given_up}"
+        );
+        silent.abort();
     }
 
     #[tokio::test]
