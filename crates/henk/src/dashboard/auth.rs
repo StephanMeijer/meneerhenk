@@ -46,9 +46,38 @@ impl FromRequestParts<Arc<Dashboard>> for Viewer {
             None if parts.uri.path() == "/dashboard/running.json" => {
                 Err((StatusCode::UNAUTHORIZED, "sign in first").into_response())
             }
-            None => Err(redirect("/dashboard/login", None)),
+            None => {
+                // Back to this page after sign-in, so a run link posted on
+                // a pull request lands on that run (#69).
+                let here = parts
+                    .uri
+                    .path_and_query()
+                    .map_or("/dashboard", |p| p.as_str());
+                let to = match safe_next(here).filter(|next| *next != "/dashboard") {
+                    Some(next) => format!("/dashboard/login?next={}", encode(next)),
+                    None => "/dashboard/login".to_owned(),
+                };
+                Err(redirect(&to, None))
+            }
         }
     }
+}
+
+/// `next` when it is a dashboard path this server can safely send a
+/// browser to after sign-in: under `/dashboard`, printable ASCII, no
+/// backslash, short. Anything else is dropped, so sign-in can never
+/// redirect off the site.
+pub(super) fn safe_next(next: &str) -> Option<&str> {
+    let under =
+        next == "/dashboard" || next.starts_with("/dashboard/") || next.starts_with("/dashboard?");
+    let printable = next.bytes().all(|b| b.is_ascii_graphic() && b != b'\\');
+    (under && printable && next.len() <= 512).then_some(next)
+}
+
+/// What `/dashboard/login` takes.
+#[derive(Debug, Deserialize)]
+pub struct LoginQuery {
+    next: Option<String>,
 }
 
 fn redirect(to: &str, cookie: Option<String>) -> Response {
@@ -86,8 +115,12 @@ fn notice(status: StatusCode, title: &str, text: &str) -> Response {
     (status, page(title, "", &body)).into_response()
 }
 
-/// Sends the browser to GitHub with a fresh state, kept in a signed cookie.
-pub async fn login(State(dashboard): State<Arc<Dashboard>>) -> Response {
+/// Sends the browser to GitHub with a fresh state, kept in a signed cookie
+/// together with the page to return to.
+pub async fn login(
+    State(dashboard): State<Arc<Dashboard>>,
+    Query(query): Query<LoginQuery>,
+) -> Response {
     let mut bytes = [0_u8; 24];
     if SystemRandom::new().fill(&mut bytes).is_err() {
         return notice(
@@ -106,9 +139,10 @@ pub async fn login(State(dashboard): State<Arc<Dashboard>>) -> Response {
         encode(&dashboard.client_id),
         encode(&dashboard.redirect_uri()),
     );
+    let next = query.next.as_deref().and_then(safe_next).unwrap_or("");
     let cookie = dashboard.signer.cookie(
         STATE_COOKIE,
-        &dashboard.signer.state(&state),
+        &dashboard.signer.state(&format!("{state}|{next}")),
         Duration::from_mins(10),
     );
     redirect(&to, Some(cookie))
@@ -133,6 +167,10 @@ pub async fn callback(
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| cookie_value(cookies, STATE_COOKIE))
         .and_then(|value| dashboard.signer.read_state(value));
+    let (expected, next) = match expected.as_deref().and_then(|v| v.split_once('|')) {
+        Some((state, next)) => (Some(state.to_owned()), safe_next(next).map(str::to_owned)),
+        None => (None, None),
+    };
     let (Some(code), Some(state), Some(expected)) = (callback.code, callback.state, expected)
     else {
         return notice(
@@ -184,7 +222,7 @@ pub async fn callback(
         dashboard
             .signer
             .cookie(SESSION_COOKIE, &dashboard.signer.session(&user, ttl), ttl);
-    let mut response = redirect("/dashboard", Some(session));
+    let mut response = redirect(next.as_deref().unwrap_or("/dashboard"), Some(session));
     if let Ok(value) = HeaderValue::from_str(&clear_state) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }

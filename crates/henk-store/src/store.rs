@@ -6,8 +6,8 @@ use time::OffsetDateTime;
 
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, RunFilter, RunRecord, RunStatus,
-    StoreError,
+    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
+    RunStatus, StoreError,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -185,6 +185,15 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError>;
+
+    /// Deletes inbound events received before `older_than`, with their
+    /// outcomes, in one transaction. Runs are kept: links to them are
+    /// posted on the platforms (§8.6).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure; nothing is deleted then.
+    async fn prune_events(&self, older_than: OffsetDateTime) -> Result<PruneCounts, StoreError>;
 
     /// Runs matching `filter`, newest first, one page of them.
     ///

@@ -96,6 +96,10 @@ pub struct ServerConfig {
     /// Env var with the bearer token for `POST /plan` and `POST /review`.
     #[serde(default = "default_api_token_env")]
     pub api_token_env: String,
+    /// Inbound events and their outcomes older than this many days are
+    /// deleted while serving. Runs are kept: their links are posted.
+    #[serde(default = "default_keep_events_days")]
+    pub keep_events_days: u32,
 }
 
 fn default_bind() -> String {
@@ -116,6 +120,9 @@ fn default_gitlab_webhook_token_env() -> String {
 fn default_api_token_env() -> String {
     "HENK_API_TOKEN".to_owned()
 }
+const fn default_keep_events_days() -> u32 {
+    30
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -126,6 +133,7 @@ impl Default for ServerConfig {
             github_webhook_secret_env: default_github_webhook_secret_env(),
             gitlab_webhook_token_env: default_gitlab_webhook_token_env(),
             api_token_env: default_api_token_env(),
+            keep_events_days: default_keep_events_days(),
         }
     }
 }
@@ -754,6 +762,9 @@ pub enum ConfigError {
     /// The dashboard setting is unusable.
     #[error("{0}")]
     Dashboard(String),
+    /// The server setting is unusable.
+    #[error("{0}")]
+    Server(String),
     /// The database setting is unusable.
     #[error("{0}")]
     Database(String),
@@ -873,6 +884,11 @@ impl Config {
         let database = resolve_database(self.database, self.server.database_path.clone())?;
         if let Some(dashboard) = &self.dashboard {
             validate_dashboard(dashboard)?;
+        }
+        if !(1..=3650).contains(&self.server.keep_events_days) {
+            return Err(ConfigError::Server(
+                "server.keep_events_days must be between 1 and 3650".to_owned(),
+            ));
         }
 
         let people = People::new(
@@ -1288,6 +1304,11 @@ impl Settings {
             ""
         };
         let _ = writeln!(out, "Database:        {}{legacy}", self.database.describe());
+        let _ = writeln!(
+            out,
+            "Keep events:     {} days (runs are kept)",
+            self.server.keep_events_days
+        );
         if let Some(dashboard) = &self.dashboard {
             let _ = writeln!(
                 out,
@@ -1527,6 +1548,31 @@ address = "henk@example.com"
 [allowlist]
 github_owners = ["docspec"]
 "#;
+
+    #[test]
+    fn events_are_kept_thirty_days_unless_configured() {
+        let default = Config::parse(MINIMAL)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(default.server.keep_events_days, 30);
+        assert!(
+            default
+                .describe()
+                .contains("Keep events:     30 days (runs are kept)")
+        );
+        let week = format!("[server]\nkeep_events_days = 7\n{MINIMAL}");
+        let settings = Config::parse(&week)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.server.keep_events_days, 7);
+        for days in [0, 3651] {
+            let text = format!("[server]\nkeep_events_days = {days}\n{MINIMAL}");
+            let error = Config::parse(&text)
+                .and_then(Config::into_settings)
+                .unwrap_err();
+            assert!(matches!(error, ConfigError::Server(_)), "{days}: {error}");
+        }
+    }
 
     #[test]
     fn example_config_is_valid() {

@@ -17,9 +17,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::store::RunStore;
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, RawRun,
-    RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str, platform_str,
-    status_str, to_i64, to_u64,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str,
+    platform_str, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -604,6 +604,26 @@ impl RunStore for PgStore {
                 })
             })
             .collect()
+    }
+
+    async fn prune_events(&self, older_than: OffsetDateTime) -> Result<PruneCounts, StoreError> {
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await?;
+        let outcomes = transaction
+            .execute(
+                "DELETE FROM event_outcomes WHERE event_id IN
+                 (SELECT id FROM inbound_events WHERE received_at < $1)",
+                &[&older_than],
+            )
+            .await?;
+        let events = transaction
+            .execute(
+                "DELETE FROM inbound_events WHERE received_at < $1",
+                &[&older_than],
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(PruneCounts { events, outcomes })
     }
 
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError> {

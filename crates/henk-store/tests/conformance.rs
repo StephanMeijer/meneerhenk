@@ -15,7 +15,7 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     EventFilter, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
-    Page, PgStore, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
+    Page, PgStore, PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -75,6 +75,7 @@ macro_rules! for_each_scenario {
             dropping_running_lanes_leaves_finished_ones_alone,
             lanes_findings_and_events_attach_to_a_run,
             events_and_outcomes_round_trip,
+            old_events_and_their_outcomes_are_pruned,
             outcomes_and_linked_events_keep_their_order,
             a_duplicate_run_id_is_an_error,
             joining_is_accepted,
@@ -83,6 +84,68 @@ macro_rules! for_each_scenario {
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
         );
     };
+}
+
+async fn old_events_and_their_outcomes_are_pruned(store: &dyn RunStore) {
+    store.create_run(&new_run("r-pruned")).await.unwrap();
+    let now = OffsetDateTime::now_utc();
+    let recent = now.format(&Rfc3339).unwrap();
+    store
+        .record_event(&inbound("e-old", "2026-01-01T00:00:00Z"))
+        .await
+        .unwrap();
+    store
+        .record_event(&inbound("e-new", &recent))
+        .await
+        .unwrap();
+    for (event, listener) in [
+        ("e-old", "review"),
+        ("e-old", "mention"),
+        ("e-new", "review"),
+    ] {
+        store
+            .record_outcome(&outcome(event, listener, Some("r-pruned")))
+            .await
+            .unwrap();
+    }
+
+    let counts = store
+        .prune_events(now - time::Duration::days(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        counts,
+        PruneCounts {
+            events: 1,
+            outcomes: 2
+        }
+    );
+    assert!(
+        store
+            .inbound_event(&event_id("e-old"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.outcomes(&event_id("e-old")).await.unwrap().is_empty());
+    assert!(
+        store
+            .inbound_event(&event_id("e-new"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.outcomes(&event_id("e-new")).await.unwrap().len(), 1);
+    assert!(
+        store.run(&id("r-pruned")).await.unwrap().is_some(),
+        "runs are kept: their links are posted on the platforms"
+    );
+
+    let again = store
+        .prune_events(now - time::Duration::days(1))
+        .await
+        .unwrap();
+    assert_eq!(again, PruneCounts::default(), "nothing left to prune");
 }
 
 async fn run_round_trips(store: &dyn RunStore) {

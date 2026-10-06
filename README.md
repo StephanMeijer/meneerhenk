@@ -311,9 +311,11 @@ push.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in
-the service; nothing is sent anywhere. `GET /events/{id}` shows an event and
-its outcomes, `GET /runs/{id}` a run and the events that led to it. Pruning
-old recordings is a follow-up.
+the service; nothing is sent anywhere. While serving, Henk deletes events
+and their outcomes older than `server.keep_events_days` (30 by default) once
+an hour. Runs are kept, since their links are posted on the platforms. An
+event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
+run and the events that led to it at `/dashboard/runs/{id}`.
 
 ### Dashboard
 
@@ -339,8 +341,12 @@ when the public URL is https. The pages escape everything they show, since
 the text in them is other people's words. They allow scripts only from Henk
 himself, and cannot be framed. Without the table there is no `/dashboard`;
 with a secret missing, the server starts and logs why the dashboard is off.
-The run and event pages that comments link to, `/runs/{id}` and
-`/events/{id}`, stay reachable without signing in.
+The run links Henk posts, `/runs/{id}`, and `/events/{id}` lead to the
+same pages on the dashboard, behind sign-in: they show findings, plans and
+webhook payloads of private repositories, and an unguessable id is not
+access control. After signing in, the browser returns to the page it asked
+for. Without a dashboard these links are not served; `henk runs show <id>`
+reads a run on the server.
 
 ## Decisions taken for this version
 
