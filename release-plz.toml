@@ -15,6 +15,24 @@
 [workspace]
 git_only = true
 
+# Every crate's previous release is the workspace tag `vX.Y.Z`, not only
+# henk's. In git-only mode release-plz looks up each crate's last release by
+# that crate's own tag name, and in a multi-crate workspace the default is
+# `{{ package }}-v{{ version }}`. No `henk-domain-v*` tag ever exists, so each
+# library crate was "treated as initial release" (the CI log says so) and
+# `changelog_include` then pulled its whole history into henk's entry: about
+# 65 lines for a release of 8 commits. With the shared name, each crate's
+# commits are counted from the last `vX.Y.Z` tag. This only names the tag to
+# look for; the library crates still create none (`git_tag_enable` below).
+#
+# One gap is release-plz's own: up to 0.3.169 (the version ci.yml pins) its
+# walk back through a crate's history jumps by commit date at a merge and can
+# step over a pull request's commit, so the entry shows the merge commit
+# instead (902101d in 0.1.4). Fixed upstream in
+# https://github.com/release-plz/release-plz/pull/3078, not yet released;
+# raise `version:` in ci.yml when it is.
+git_tag_name = "v{{ version }}"
+
 # Tags and GitHub releases are off for the library crates and enabled for
 # `henk` below, so the workspace gets one `vX.Y.Z` tag instead of nine crates
 # racing to create it.
