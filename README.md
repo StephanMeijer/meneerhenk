@@ -363,7 +363,8 @@ memory, cpu, pids and disk are not limited: use a host that holds nothing
 else, and one Henk per host.
 
 To set one up, as root on the host (Debian or alike; it needs `git`, `sudo`,
-`useradd`/`userdel`, `runuser` and `pkill`):
+`useradd`/`userdel`, `runuser`, `pkill` and GNU `grep`, whose `-P` the
+`search` tool uses):
 1. Copy `deploy/sandbox/henk-runner` to `/usr/local/sbin/henk-runner`,
    mode 755, owned by root. It is the only program Henk's key may run.
 2. `useradd --create-home henk`, and put Henk's public key in
@@ -422,8 +423,14 @@ nothing), set up as above before the lanes start. They are opened in
 parallel, so a review waits about one setup, and closed when the lanes
 end. A review workspace is never exported, and a lane whose workspace
 could not be opened or set up reviews through the platform as before, with
-the reason on the run's timeline. The tools that use these workspaces are
-#90 (`read_file`, `list_files`, `search`) and #85 (`bash`).
+the reason on the run's timeline. In its workspace a lane, and the
+fact-checker, list files (`list_files`, with a glob), search them by
+regular expression (`search`) and read any file by line range
+(`read_file`), the same code tools an address run has; `bash` follows in
+#85. Without a workspace a lane reads through the platform as before.
+After updating Henk, copy `deploy/sandbox/henk-runner` to the host again:
+`henk doctor --probe` names the runner's version and says when `grep -P` is
+missing there.
 
 A review runs the setup stage on code that anyone who can open a pull
 request chose, from a fork too, so `review = true` needs a backend apart

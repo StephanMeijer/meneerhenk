@@ -16,7 +16,9 @@ use std::time::Duration;
 use henk_domain::address::WorkspacePath;
 use henk_domain::workspace::{FileMode, Limits, Profile};
 
-use super::{Workspace, WorkspaceError, WorkspaceProvider};
+use henk_domain::ignore::PathFilter;
+
+use super::{Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider};
 use crate::git::ScratchDir;
 
 /// A checkout to import: two files, one of them executable, and a `.git`
@@ -109,30 +111,86 @@ async fn files_are_read_written_listed_and_searched(
         Err(WorkspaceError::Refused(_))
     ));
 
-    let files = ws.list(&WorkspacePath::root(), 100).await.unwrap();
+    let root = WorkspacePath::root();
+    let files = ws.list(&root, None, 100).await.unwrap();
     assert_eq!(
         files,
         ["run.sh", "src/a.rs", "src/deep/new.rs"],
         ".git is never listed"
     );
-    assert_eq!(ws.list(&WorkspacePath::root(), 1).await.unwrap().len(), 1);
+    assert_eq!(ws.list(&root, None, 1).await.unwrap().len(), 1);
+    let rust = PathFilter::new(["*.rs"]);
+    assert_eq!(
+        ws.list(&root, Some(&rust), 100).await.unwrap(),
+        ["src/a.rs", "src/deep/new.rs"],
+        "a name glob matches at any depth"
+    );
+    let top = PathFilter::new(["src/*.rs"]);
+    assert_eq!(
+        ws.list(&root, Some(&top), 1).await.unwrap(),
+        ["src/a.rs"],
+        "the glob is applied before the cap"
+    );
 
+    let find = |source: &str| Pattern::parse(source).unwrap();
     let hits = ws
-        .search(&WorkspacePath::root(), "let x", 1024, 10)
+        .search(&root, &find("let x"), None, 1024, 10)
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!((hits[0].path.as_str(), hits[0].line), ("src/a.rs", 2));
     assert_eq!(hits[0].text, "let x = 1;");
+    let shown = |hits: Vec<Hit>| -> Vec<(String, usize)> {
+        hits.into_iter().map(|h| (h.path, h.line)).collect()
+    };
+    assert_eq!(
+        shown(
+            ws.search(&root, &find(r"\blet\s+x\s*=\s*\d+;$"), None, 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [("src/a.rs".to_owned(), 2)],
+        "classes, word boundaries and anchors"
+    );
+    assert_eq!(
+        shown(
+            ws.search(&root, &find("(?i)FN MAIN|^// NEW"), None, 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [
+            ("src/a.rs".to_owned(), 1),
+            ("src/deep/new.rs".to_owned(), 1)
+        ],
+        "any case and alternation, sorted by path"
+    );
+    let deep = PathFilter::new(["src/deep/**"]);
+    assert_eq!(
+        shown(
+            ws.search(&root, &find("."), Some(&deep), 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [("src/deep/new.rs".to_owned(), 1)],
+        "only the files the glob matches"
+    );
+    assert_eq!(
+        ws.search(&root, &find("."), None, 1024, 2)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "capped"
+    );
     assert!(
-        ws.search(&WorkspacePath::root(), "core", 1024, 10)
+        ws.search(&root, &find("core"), None, 1024, 10)
             .await
             .unwrap()
             .is_empty(),
         "nothing in .git is searched"
     );
     assert!(
-        ws.search(&WorkspacePath::root(), "let x", 5, 10)
+        ws.search(&root, &find("let x"), None, 5, 10)
             .await
             .unwrap()
             .is_empty(),

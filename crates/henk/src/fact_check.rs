@@ -108,6 +108,10 @@ pub struct SessionFactCheck {
     pub diff: Arc<ReviewDiff>,
     /// The guarded file read at the reviewed commit, when the platform has one.
     pub file_reader: Option<Arc<dyn Tool>>,
+    /// The checker's own workspace at the reviewed commit, when the review
+    /// has them (#170). With it, the code tools read there instead of the
+    /// platform (#90). Checks only read, so they share it.
+    pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
     /// The rendered system prompt, without skills.
     pub system: String,
     /// The skills the checker may load.
@@ -146,10 +150,14 @@ impl SessionFactCheck {
         let mut tools = ToolSet::new();
         tools.add(ListChangedFiles(Arc::clone(&files)));
         tools.add(GetFileDiff(files));
-        if let Some(inner) = &self.file_reader {
-            tools.add(ReadFile {
-                inner: Arc::clone(inner),
-            });
+        match (&self.workspace, &self.file_reader) {
+            (Some(workspace), _) => crate::code_tools::add(&mut tools, workspace),
+            (None, Some(inner)) => {
+                tools.add(ReadFile {
+                    inner: Arc::clone(inner),
+                });
+            }
+            (None, None) => {}
         }
         tools.add(GiveVerdict(Arc::clone(&slot)));
         let mut system = self.system.clone();
@@ -417,6 +425,7 @@ diff --git a/src/a.rs b/src/a.rs
             models,
             diff: Arc::new(ReviewDiff::from_unified(DIFF)),
             file_reader: None,
+            workspace: None,
             system: "check".into(),
             skills: crate::skill_tools::AgentSkills::new(),
             limits: AgentConfig {
@@ -439,6 +448,83 @@ diff --git a/src/a.rs b/src/a.rs
             side: DiffSide::Right,
             text: "x is never set.".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn with_a_workspace_the_checker_lists_searches_and_reads_it() {
+        use crate::workspace::WorkspaceProvider as _;
+        let dir = crate::git::ScratchDir::new("henk-check-ws").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "let x = 1;\n").unwrap();
+        let workspace = crate::workspace::fake::FakeProvider::default()
+            .open(dir.path(), &henk_domain::workspace::Profile::default())
+            .await
+            .unwrap();
+        let search = Ok(Completion {
+            message: ChatMessage {
+                role: henk_llm::Role::Assistant,
+                blocks: vec![henk_llm::Block::ToolCall(ToolCall {
+                    id: "s1".into(),
+                    name: "search".into(),
+                    arguments: ToolArguments::Parsed(json!({"pattern": "let x = \\d"})),
+                })],
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        });
+        let model = Arc::new(ScriptedClient::new(
+            "opus",
+            [
+                search,
+                verdict_call("rejected", "src/a.rs:1 sets x."),
+                done(),
+            ],
+        ));
+        let mut check = checker(vec![model.clone()]).await;
+        check.workspace = Some(workspace);
+        let verdict = check.check(&request("lane-model")).await;
+        assert!(
+            matches!(verdict, CheckVerdict::Rejected { .. }),
+            "{verdict:?}"
+        );
+        let requests = model.requests();
+        let names: Vec<String> = requests[0]
+            .tools
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for tool in ["list_files", "read_file", "search", "give_verdict"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        let answered = requests[1]
+            .messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .any(|b| matches!(b, henk_llm::Block::ToolResult(r) if r.content == "src/a.rs:1: let x = 1;\n"));
+        assert!(
+            answered,
+            "the search read the workspace: {:?}",
+            requests[1].messages
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_workspace_the_checker_has_no_code_tools() {
+        let model = Arc::new(ScriptedClient::new(
+            "opus",
+            [verdict_call("rejected", "no."), done()],
+        ));
+        let check = checker(vec![model.clone()]).await;
+        let _ = check.check(&request("lane-model")).await;
+        let names: Vec<String> = model.requests()[0]
+            .tools
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "search" || n == "list_files"),
+            "{names:?}"
+        );
     }
 
     #[tokio::test]

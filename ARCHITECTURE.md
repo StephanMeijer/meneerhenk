@@ -448,7 +448,12 @@ fact-checker, at the reviewed commit, through the same setup stage
 (`workspace/setup.rs`). They are wrapped by `workspace::for_lane`, which
 refuses `export` for every run but an address run
 (`henk_domain::workspace::EnvLane::exports`), so nothing a lane does in one
-can become a commit.
+can become a commit. The code tools on a workspace (`list_files`,
+`read_file`, `search`) are written once in `code_tools.rs` and shared by
+the address run, the review lanes and the fact-checker. A `search`
+pattern is checked in Henk (`workspace::Pattern`) in the syntax Rust's
+regex and PCRE read alike, since the host backend matches with the one and
+the `ssh` backend with `grep -P`.
 
 Every error happens before the push: a failed run posts a failure comment
 saying nothing was pushed. After the push, replies and the summary are

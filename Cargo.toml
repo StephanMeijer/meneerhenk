@@ -51,6 +51,10 @@ secrecy = "0.10"
 russh = { version = "0.64", default-features = false, features = ["ring"] }
 # Packs a checkout to send to the sandbox host; xattrs are not carried.
 tar = { version = "0.4", default-features = false }
+# The code tools' `search` pattern (#90): checked in Henk before any backend
+# sees it, and matched with it on the host backend. Already in the lockfile
+# through wiremock, a dev-dependency, so it adds no new crate.
+regex = { version = "1.13", default-features = false, features = ["std", "unicode", "perf"] }
 serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0"
 sha2 = "0.11"

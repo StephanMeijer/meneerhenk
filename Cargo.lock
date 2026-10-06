@@ -1045,6 +1045,7 @@ dependencies = [
  "henk-store",
  "hmac",
  "http-body-util",
+ "regex",
  "reqwest",
  "ring",
  "russh",

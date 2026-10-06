@@ -592,12 +592,12 @@ async fn run_lanes(
         base_ref: base_ref.to_owned(),
         cancel: cancel.clone(),
     };
-    lanes.fact_check = build_fact_check(review, &lanes).await?;
-
-    // Each lane's own workspace, when the profile reviews in one (#170).
-    // Lanes close theirs when they end; the rest closes once all have.
-    // On an early error they are dropped, which destroys them too.
+    // Each lane's own workspace, when the profile reviews in one (#170),
+    // and the fact-checker's. Lanes close theirs when they end; the rest
+    // closes once all have. On an early error they are dropped, which
+    // destroys them too.
     let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
+    lanes.fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
     let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
     let mut results = Vec::new();
@@ -833,7 +833,8 @@ async fn build_lane(
         ));
     }
     // The platform's whole-file read is wrapped by read_file (a numbered
-    // line range); every other read tool is exposed as it is.
+    // line range); every other read tool is exposed as it is. With a
+    // workspace, read_file and the other code tools read that instead (#90).
     let mut set = ToolSet::new();
     let mut file_reader: Option<Arc<dyn henk_agent::Tool>> = None;
     for tool in tools {
@@ -859,29 +860,19 @@ async fn build_lane(
     });
     set.add(ListChangedFiles(Arc::clone(&context.files)));
     set.add(GetFileDiff(Arc::clone(&context.files)));
-    if let Some(inner) = file_reader {
-        set.add(ReadFile { inner });
+    match (&context.workspace, file_reader) {
+        (Some(workspace), _) => crate::code_tools::add(&mut set, workspace),
+        (None, Some(inner)) => {
+            set.add(ReadFile { inner });
+        }
+        (None, None) => {}
     }
     set.add(ListExistingFindings(Arc::clone(&context)));
     set.add(PostFinding(Arc::clone(&context)));
     set.add(ImproveFinding(Arc::clone(&context)));
     set.add(WithdrawFinding(Arc::clone(&context)));
 
-    let mut system = format!(
-        "{}\n\n{}",
-        prompts::PERSONA,
-        prompts::render(
-            prompts::REVIEW_LANE,
-            &[
-                ("kind", kind_name(platform)),
-                ("ref", &target_ref(platform, target.number)),
-                ("repo", &target.repo.path()),
-                ("commit", commit.as_str()),
-                ("base", &lanes.base_ref),
-                ("title", &lanes.title),
-            ],
-        )
-    );
+    let mut system = lane_system(target, commit, lanes, context.workspace.is_some());
     crate::skill_tools::equip(
         &mut system,
         &mut set,
@@ -907,6 +898,36 @@ async fn build_lane(
     })
 }
 
+/// A lane's system prompt: the persona and the lane's instructions, and
+/// what its workspace offers when it has one (#90).
+fn lane_system(
+    target: &ReviewTarget,
+    commit: &CommitSha,
+    lanes: &LaneInputs,
+    workspace: bool,
+) -> String {
+    let platform = target.platform();
+    let mut system = format!(
+        "{}\n\n{}",
+        prompts::PERSONA,
+        prompts::render(
+            prompts::REVIEW_LANE,
+            &[
+                ("kind", kind_name(platform)),
+                ("ref", &target_ref(platform, target.number)),
+                ("repo", &target.repo.path()),
+                ("commit", commit.as_str()),
+                ("base", &lanes.base_ref),
+                ("title", &lanes.title),
+            ],
+        )
+    );
+    if workspace {
+        system = format!("{system}\n\n{}", prompts::REVIEW_WORKSPACE);
+    }
+    system
+}
+
 /// A lane's first message. The file list up front saves a turn, and the
 /// hint to read several diffs per call saves one per file for models that
 /// never batch calls.
@@ -926,6 +947,7 @@ fn lane_opening(target: &ReviewTarget, commit: &CommitSha, diff: &ReviewDiff) ->
 async fn build_fact_check(
     review: ReviewRun<'_>,
     lanes: &LaneInputs,
+    workspace: Option<Arc<dyn crate::workspace::Workspace>>,
 ) -> anyhow::Result<Option<Arc<dyn FactCheck>>> {
     let ReviewRun {
         app,
@@ -956,7 +978,7 @@ async fn build_fact_check(
         .into_iter()
         .find(|tool| tool.server_tool() == "get_file_contents")
         .map(|tool| Arc::new(tool) as Arc<dyn henk_agent::Tool>);
-    let system = prompts::render(
+    let mut system = prompts::render(
         prompts::FACT_CHECK,
         &[
             ("kind", kind_name(platform)),
@@ -965,12 +987,16 @@ async fn build_fact_check(
             ("commit", commit.as_str()),
         ],
     );
+    if workspace.is_some() {
+        system = format!("{system}\n\n{}", prompts::REVIEW_WORKSPACE);
+    }
     Ok(Some(Arc::new(SessionFactCheck {
         store: Arc::clone(&app.store),
         run: run.clone(),
         models,
         diff: Arc::clone(diff),
         file_reader,
+        workspace,
         system,
         skills: app.settings.skills.select(&config.skills),
         limits: AgentConfig {
@@ -1070,6 +1096,8 @@ lanes = [{ name = "lane-a", model = "m" }]
     struct Fixture {
         app: App,
         writer: Arc<FakeWriter>,
+        /// The model every lane and check talks to, with what it was asked.
+        model: Arc<ScriptedClient>,
     }
 
     /// An app whose writer, read session and model are fakes. `patches`
@@ -1109,8 +1137,9 @@ lanes = [{ name = "lane-a", model = "m" }]
             echo_behaviour(),
         );
         let session: Arc<dyn McpSession> = Arc::new(server.connect("github").await);
+        let model = Arc::new(model);
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
-        models.insert("m".to_owned(), Arc::new(model));
+        models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         Fixture {
             app: App {
                 settings,
@@ -1128,6 +1157,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 test_issue_writer: None,
             },
             writer,
+            model,
         }
     }
 
@@ -1931,6 +1961,96 @@ lanes = [{ name = "lane-a", model = "m" }]
                 .any(|e| e.message.starts_with("exec make deps exit 0")),
             "setup is on the timeline: {events:?}"
         );
+    }
+
+    fn call(name: &str, arguments: serde_json::Value) -> Result<Completion, henk_llm::LlmError> {
+        Ok(Completion {
+            message: henk_llm::ChatMessage {
+                role: henk_llm::Role::Assistant,
+                blocks: vec![henk_llm::Block::ToolCall(henk_llm::ToolCall {
+                    id: format!("call-{name}"),
+                    name: name.to_owned(),
+                    arguments: henk_llm::ToolArguments::Parsed(arguments),
+                })],
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        })
+    }
+
+    /// The tool names of the first request, and every tool result the
+    /// model was sent.
+    fn seen(model: &ScriptedClient) -> (Vec<String>, Vec<String>, String) {
+        let requests = model.requests();
+        let first = requests.first().unwrap();
+        let names = first.tools.iter().map(|t| t.name.to_string()).collect();
+        let results = requests
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                henk_llm::Block::ToolResult(r) => Some(r.content.clone()),
+                _ => None,
+            })
+            .collect();
+        (names, results, first.system.clone().unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn a_lane_with_a_workspace_searches_and_reads_the_reviewed_commit() {
+        let config = reviewing_config("").replace(", { name = \"lane-b\", model = \"m\" }", "");
+        let model = ScriptedClient::new(
+            "scripted",
+            [
+                call(
+                    "search",
+                    serde_json::json!({"pattern": "let x = \\d", "glob": "*.rs"}),
+                ),
+                call(
+                    "read_file",
+                    serde_json::json!({"path": "src/a.rs", "start_line": 2, "end_line": 2}),
+                ),
+                done(),
+                done(),
+                done(),
+            ],
+        );
+        let r = reviewed("henk-review-tools", &config, model, 0).await;
+        let run = RunId::parse("r-tools").unwrap();
+        run_review(&r.f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (names, results, system) = seen(&r.f.model);
+        for tool in ["list_files", "read_file", "search", "get_file_diff"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        assert!(system.contains("# Your copy of the tree"), "{system}");
+        assert!(
+            results.iter().any(|r| r == "src/a.rs:2: let x = 1;\n"),
+            "the reviewed commit, not the moved branch: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r == "    2|     let x = 1;\n[3 lines; continue with start_line = 3]\n"),
+            "{results:?}"
+        );
+        assert_eq!(r.peek.inner.live(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lane_without_a_workspace_keeps_its_tools() {
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done(), done()])).await;
+        let run = RunId::parse("r-notools").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (names, _, system) = seen(&f.model);
+        assert!(
+            !names.iter().any(|n| n == "list_files" || n == "search"),
+            "{names:?}"
+        );
+        assert!(!system.contains("# Your copy of the tree"));
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ mod address_tools;
 mod app;
 mod cancel;
 mod checks;
+mod code_tools;
 mod config;
 mod coordinator;
 mod dashboard;

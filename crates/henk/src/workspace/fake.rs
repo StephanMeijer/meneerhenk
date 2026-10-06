@@ -11,7 +11,9 @@ use std::time::Duration;
 use henk_domain::address::WorkspacePath;
 use henk_domain::workspace::{FileMode, Profile, RawChange};
 
-use super::{ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider};
+use henk_domain::ignore::PathFilter;
+
+use super::{ExecResult, Exported, Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider};
 
 /// What a scripted command does: its exit code and output, and the files it
 /// writes, as a check that changes the tree would.
@@ -209,11 +211,16 @@ impl Workspace for FakeWorkspace {
         Ok(())
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let files = self.files()?;
         Ok(files
             .keys()
-            .filter(|p| under(dir, p))
+            .filter(|p| under(dir, p) && only.is_none_or(|o| o.matches(p)))
             .take(cap)
             .cloned()
             .collect())
@@ -222,13 +229,17 @@ impl Workspace for FakeWorkspace {
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let files = self.files()?;
         let mut hits = Vec::new();
-        for (path, (content, _)) in files.iter().filter(|(p, _)| under(dir, p)) {
+        for (path, (content, _)) in files
+            .iter()
+            .filter(|(p, _)| under(dir, p) && only.is_none_or(|o| o.matches(p)))
+        {
             if u64::try_from(content.len()).unwrap_or(u64::MAX) > max_file_bytes {
                 continue;
             }
@@ -236,7 +247,7 @@ impl Workspace for FakeWorkspace {
                 continue;
             };
             for (index, line) in text.lines().enumerate() {
-                if line.contains(needle) {
+                if pattern.is_match(line) {
                     hits.push(Hit {
                         path: path.clone(),
                         line: index + 1,

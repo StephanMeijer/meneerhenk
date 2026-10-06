@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use henk_domain::address::WorkspacePath;
 
-use super::{ExecResult, Exported, Hit, Workspace, WorkspaceError};
+use henk_domain::ignore::PathFilter;
+
+use super::{ExecResult, Exported, Hit, Pattern, Workspace, WorkspaceError};
 
 /// A workspace whose commands run through mise.
 pub struct Mise {
@@ -81,18 +83,26 @@ impl Workspace for Mise {
         self.inner.write(path, content).await
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
-        self.inner.list(dir, cap).await
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.inner.list(dir, only, cap).await
     }
 
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
-        self.inner.search(dir, needle, max_file_bytes, cap).await
+        self.inner
+            .search(dir, pattern, only, max_file_bytes, cap)
+            .await
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {

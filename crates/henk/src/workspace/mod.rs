@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::address::{PathError, WorkspacePath};
+use henk_domain::ignore::PathFilter;
 use henk_domain::workspace::{
     BackendKind, Change, ChangeKind, EnvLane, FileMode, Limits, Profile, RawChange,
     changeset_refusal,
@@ -65,6 +66,68 @@ pub struct ExecResult {
     pub output: String,
     /// How long it ran.
     pub duration: Duration,
+}
+
+/// What `search` looks for: a regular expression, checked here before any
+/// backend sees it. The syntax is what Rust's `regex` and PCRE (`grep -P`,
+/// which the `ssh` backend runs) read alike: classes, `\b`, `\d`, `\w`,
+/// `(?i)`, alternation, repetition. Class set operations, which only Rust
+/// has, are refused, so the backends never disagree on what matches.
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    source: String,
+    regex: regex::Regex,
+}
+
+/// Bytes a compiled search pattern may take.
+const PATTERN_SIZE: usize = 1 << 20;
+/// Characters a search pattern may have.
+const PATTERN_LENGTH: usize = 500;
+
+impl Pattern {
+    /// Checks and compiles `source`.
+    ///
+    /// # Errors
+    ///
+    /// Says, in words for the model, why the pattern is refused.
+    pub fn parse(source: &str) -> Result<Self, String> {
+        if source.is_empty() {
+            return Err("the pattern is empty".to_owned());
+        }
+        if source.chars().count() > PATTERN_LENGTH {
+            return Err(format!(
+                "the pattern is longer than {PATTERN_LENGTH} characters"
+            ));
+        }
+        if source.contains('\n') {
+            return Err("the pattern spans lines; search matches one line at a time".to_owned());
+        }
+        if ["&&", "--", "~~"].iter().any(|op| source.contains(op)) && source.contains('[') {
+            return Err(
+                "class set operations (&&, --, ~~ inside [...]) are not supported; escape the characters or use a simpler class".to_owned(),
+            );
+        }
+        let regex = regex::RegexBuilder::new(source)
+            .size_limit(PATTERN_SIZE)
+            .build()
+            .map_err(|e| format!("not a regular expression: {e}"))?;
+        Ok(Self {
+            source: source.to_owned(),
+            regex,
+        })
+    }
+
+    /// The pattern as given.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether `line` has a match.
+    #[must_use]
+    pub fn is_match(&self, line: &str) -> bool {
+        self.regex.is_match(line)
+    }
 }
 
 /// One search hit.
@@ -157,16 +220,23 @@ pub trait Workspace: Send + Sync {
     /// Returns [`WorkspaceError`] when the path is refused or the write fails.
     async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError>;
 
-    /// The files under `dir`, sorted, at most `cap`. `.git` is left out and
+    /// The files under `dir`, sorted, at most `cap`; with `only`, just
+    /// the paths it matches, counted before the cap. `.git` is left out and
     /// symbolic links are not followed.
     ///
     /// # Errors
     ///
     /// Returns [`WorkspaceError`] when `dir` is refused or missing.
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError>;
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError>;
 
-    /// Lines containing `needle` in the files under `dir`, at most `cap`.
-    /// Files larger than `max_file_bytes` or not text are skipped.
+    /// Lines matching `pattern` in the files under `dir` (with `only`, just
+    /// the files it matches), sorted by path and line, at most `cap`. Files
+    /// larger than `max_file_bytes` or not text are skipped.
     ///
     /// # Errors
     ///
@@ -174,7 +244,8 @@ pub trait Workspace: Send + Sync {
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError>;
@@ -310,18 +381,26 @@ impl Workspace for NoExport {
         self.inner.write(path, content).await
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
-        self.inner.list(dir, cap).await
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.inner.list(dir, only, cap).await
     }
 
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
-        self.inner.search(dir, needle, max_file_bytes, cap).await
+        self.inner
+            .search(dir, pattern, only, max_file_bytes, cap)
+            .await
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {

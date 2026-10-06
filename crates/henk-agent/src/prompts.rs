@@ -9,6 +9,10 @@ pub const REVIEW_LANE: &str = include_str!("../prompts/review_lane.md");
 /// Instructions for a fact-check of one finding (§3.2).
 pub const FACT_CHECK: &str = include_str!("../prompts/fact_check.md");
 
+/// Appended to a review lane's and the fact-checker's instructions when
+/// they have a workspace at the reviewed commit (#90).
+pub const REVIEW_WORKSPACE: &str = include_str!("../prompts/review_workspace.md");
+
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
@@ -63,6 +67,10 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLANNER));
         assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
+        assert!(henk_domain::text::is_in_style(REVIEW_WORKSPACE));
+        for tool in ["list_files", "search", "read_file"] {
+            assert!(REVIEW_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
+        }
         assert!(henk_domain::text::is_in_style(GREETINGS));
         assert!(greeting(7).contains("review"));
         assert_eq!(greeting(1), greeting(1 + 4));

@@ -22,13 +22,14 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use henk_domain::address::WorkspacePath;
+use henk_domain::ignore::PathFilter;
 use henk_domain::workspace::Profile;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, client};
 use tracing::warn;
 
 use super::{
-    Budget, ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider,
+    Budget, ExecResult, Exported, Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider,
     parse_raw_diff, tail,
 };
 
@@ -537,11 +538,11 @@ const WRITE: &str = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
 /// `.git` directory left out.
 const LIST: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -print0 \)"#;
 
-/// Lines with `$3` in the text files under `$1` of fewer than `$2` bytes, as
-/// `path NUL line:text`. No match is not a failure: grep says 1, and xargs
+/// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), in the
+/// text files under `$1` of fewer than `$2` bytes, as `path NUL line:text`. No match is not a failure: grep says 1, and xargs
 /// 123 for a grep that said 1 or could not read a file.
 const SEARCH: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \) |
-xargs -0 -r grep -HIFn --null -e "$3" --
+xargs -0 -r grep -HIPn --null -e "$3" --
 s=$?
 [ "$s" -eq 0 ] || [ "$s" -eq 1 ] || [ "$s" -eq 123 ]"#;
 
@@ -778,7 +779,12 @@ impl Workspace for SshWorkspace {
             .map(|_| ())
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let (_, real) = self.existing(dir).await?;
         let reply = self
             .script(LIST, &[&real], &[])
@@ -789,6 +795,7 @@ impl Workspace for SshWorkspace {
             .split(|b| *b == 0)
             .filter_map(|f| std::str::from_utf8(f).ok())
             .filter_map(|f| self.relative(f))
+            .filter(|f| only.is_none_or(|o| o.matches(f)))
             .collect();
         files.sort();
         files.truncate(cap);
@@ -798,14 +805,15 @@ impl Workspace for SshWorkspace {
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let (_, real) = self.existing(dir).await?;
         let under = max_file_bytes.saturating_add(1).to_string();
         let reply = self
-            .script(SEARCH, &[&real, &under, needle], &[])
+            .script(SEARCH, &[&real, &under, pattern.as_str()], &[])
             .await?
             .ok("searching")?;
         let mut hits = Vec::new();
@@ -829,6 +837,9 @@ impl Workspace for SshWorkspace {
                 continue;
             };
             let Ok(number) = number.parse() else { continue };
+            if only.is_some_and(|o| !o.matches(&path)) {
+                continue;
+            }
             hits.push(Hit {
                 path,
                 line: number,
@@ -1157,7 +1168,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner 2\n"), "{probe}");
+        assert!(probe.starts_with("henk-runner 3\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 

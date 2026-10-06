@@ -41,7 +41,7 @@
 set -eu
 umask 022
 
-VERSION=2
+VERSION=3
 RUN_PATH=${HENK_RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin}
 RECORDS=/var/lib/henk-runner
 
@@ -280,6 +280,13 @@ probe)
             echo "$tool missing"
         fi
     done
+    # The code tools' search reads its pattern as PCRE (grep -P), which
+    # GNU grep has and busybox's has not.
+    if printf 'x\n' | PATH=$RUN_PATH grep -qP '\x78' 2>/dev/null; then
+        echo "grep-pcre yes"
+    else
+        echo "grep-pcre missing"
+    fi
     # What the runner itself needs as root, on its own PATH.
     if [ -z "$BASE" ]; then
         for tool in runuser useradd userdel pkill; do
