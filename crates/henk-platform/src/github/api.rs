@@ -206,12 +206,12 @@ impl GitHubApi {
     }
 
     /// `GET` every page of a REST list, to its end: a page shorter than
-    /// [`PAGE_SIZE`] is the last.
+    /// `PAGE_SIZE` (100) is the last.
     ///
     /// # Errors
     ///
     /// Returns [`PlatformError`] on transport, status or decode failure, and
-    /// [`PlatformError::TooMany`] past [`MAX_PAGES`] full pages.
+    /// [`PlatformError::TooMany`] past `MAX_PAGES` (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
         let separator = if path.contains('?') { '&' } else { '?' };
@@ -351,7 +351,7 @@ impl GitHubApi {
     /// # Errors
     ///
     /// Returns [`PlatformError`] on failure, and [`PlatformError::TooMany`]
-    /// past [`MAX_PAGES`] pages of threads or of one thread's comments.
+    /// past `MAX_PAGES` (100) pages of threads or of one thread's comments.
     pub async fn review_threads(
         &self,
         owner: &str,
