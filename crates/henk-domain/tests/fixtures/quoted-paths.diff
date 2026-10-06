@@ -1,0 +1,44 @@
+diff --git a/plain.rs "b/caf\303\251.rs"
+similarity index 90%
+rename from plain.rs
+rename to "caf\303\251.rs"
+index 0ff3bbb..fb3ced1 100644
+--- a/plain.rs
++++ "b/caf\303\251.rs"
+@@ -2,7 +2,7 @@
+ 2
+ 3
+ 4
+-5
++five
+ 6
+ 7
+ 8
+diff --git "a/new \303\251.rs" "b/new \303\251.rs"
+new file mode 100644
+index 0000000..3e75765
+--- /dev/null
++++ "b/new \303\251.rs"	
+@@ -0,0 +1 @@
++new
+diff --git a/path with space.rs b/path with space.rs
+index 5626abf..f719efd 100644
+--- a/path with space.rs	
++++ b/path with space.rs	
+@@ -1 +1 @@
+-one
++two
+diff --git "a/q\"uote\\.rs" "b/q\"uote\\.rs"
+index 5626abf..f719efd 100644
+--- "a/q\"uote\\.rs"
++++ "b/q\"uote\\.rs"
+@@ -1 +1 @@
+-one
++two
+diff --git "a/\303\251 \303\251.rs" "b/\303\251 \303\251.rs"
+index 5626abf..f719efd 100644
+--- "a/\303\251 \303\251.rs"	
++++ "b/\303\251 \303\251.rs"	
+@@ -1 +1 @@
+-one
++two
