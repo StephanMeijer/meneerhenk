@@ -96,7 +96,7 @@ fn auth_header(token: &SecretString) -> String {
 
 /// A git command with nothing inherited: no user or system config, no
 /// prompt, and the token only when `token` is given.
-fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString>) -> Command {
+pub(crate) fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString>) -> Command {
     let mut command = Command::new("git");
     command
         .args(args)
