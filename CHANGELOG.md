@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.7...v0.1.8) - 2026-10-06
+
+### Added
+
+- *(workspace)* ssh backend, a throwaway user and checkout per run
+
+### Fixed
+
+- *(workspace)* a silent sandbox host no longer hangs the connection
+- *(workspace)* no sweep of a live workspace, no user left by a failed create
+- *(workspace)* root never reads the tree a run's user controls
+
+### Other
+
+- Merge pull request #163 from StephanMeijer/fix/read-every-page
+
 ## [0.1.7](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.6...v0.1.7) - 2026-10-06
 
 ### Added
