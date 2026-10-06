@@ -59,6 +59,20 @@ impl Cancels {
     }
 }
 
+/// The error of a run that stopped because its cancellation token fired.
+/// Only this error ends a run as cancelled from the dashboard: a run that
+/// failed for another reason after someone asked for a cancel is reported
+/// as the failure it is.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("cancelled")]
+pub struct Cancelled;
+
+/// Whether `failure` is a run stopping for its cancellation token.
+#[must_use]
+pub fn is_cancelled(failure: &anyhow::Error) -> bool {
+    failure.downcast_ref::<Cancelled>().is_some()
+}
+
 /// Keeps a run in [`Cancels`] until dropped.
 #[derive(Debug)]
 pub struct Registered {

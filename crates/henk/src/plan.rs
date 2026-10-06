@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 use crate::app::App;
+use crate::cancel::{Cancelled, is_cancelled};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
 use crate::plan_tools::{
@@ -146,8 +147,9 @@ pub async fn run_plan(
     )
     .await;
 
-    if result.is_err()
-        && let Some(ended) = ended_early(app, &writer, &request, &run, &link, &context.model).await
+    if let Err(failure) = &result
+        && let Some(ended) =
+            ended_early(app, &writer, &request, &run, &link, &context.model, failure).await
     {
         return ended;
     }
@@ -268,7 +270,8 @@ async fn finish_plan(
 
 /// How a plan that failed ends when it was stopped rather than failing:
 /// cancelled by a person, or interrupted by a shutdown. `None` when it
-/// simply failed.
+/// simply failed. It is cancelled only when the session stopped for its
+/// token; a real failure after someone asked for a cancel stays a failure.
 async fn ended_early(
     app: &App,
     writer: &Arc<dyn henk_platform::IssueWriter>,
@@ -276,8 +279,11 @@ async fn ended_early(
     run: &RunId,
     link: &str,
     model_id: &ModelId,
+    failure: &anyhow::Error,
 ) -> Option<anyhow::Result<PlanReport>> {
-    if let Some(by) = app.cancels.cancelled_by(run) {
+    if is_cancelled(failure)
+        && let Some(by) = app.cancels.cancelled_by(run)
+    {
         return Some(end_cancelled(app, writer, request, run, link, model_id, &by).await);
     }
     if app.shutdown.is_cancelled() {
@@ -441,7 +447,7 @@ fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
     match stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
         StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
-        StopCause::Cancelled => Err(anyhow!("cancelled")),
+        StopCause::Cancelled => Err(Cancelled.into()),
         StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
         StopCause::Refused(why) => Err(anyhow!("the model declined to plan ({why})")),
     }
@@ -704,6 +710,69 @@ requester_id = 3
         assert!(!comments[0].contains("Planning failed"), "{}", comments[0]);
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Cancelled);
+    }
+
+    /// A model that has a person cancel the run and then fails for its own
+    /// reason: the session stops on the model error, not the cancel.
+    struct CancelThenFail {
+        cancels: crate::cancel::Cancels,
+        run: RunId,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for CancelThenFail {
+        fn model(&self) -> &'static str {
+            "scripted"
+        }
+        async fn complete(
+            &self,
+            _: &henk_llm::CompletionRequest,
+        ) -> Result<Completion, henk_llm::LlmError> {
+            assert!(self.cancels.cancel(&self.run, "github:1234".to_owned()));
+            Err(henk_llm::LlmError::Overloaded)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_plan_failure_after_a_cancel_was_asked_for_is_reported_as_one() {
+        let mut f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs."),
+            vec![],
+        )
+        .await;
+        let run = RunId::parse("r-plan-10").unwrap();
+        f.app.models.insert(
+            "m".to_owned(),
+            Arc::new(CancelThenFail {
+                cancels: f.app.cancels.clone(),
+                run: run.clone(),
+            }),
+        );
+        let cancel = CancellationToken::new();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let error = run_plan(&f.app, request("r-plan-10"), cancel)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("model error"), "{error}");
+        assert_eq!(
+            f.app.cancels.cancelled_by(&run).as_deref(),
+            Some("github:1234"),
+            "a cancel was asked for"
+        );
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1);
+        assert!(
+            comments[0].starts_with("Planning failed."),
+            "{}",
+            comments[0]
+        );
+        assert!(
+            !comments[0].contains("Cancelled from the dashboard"),
+            "{}",
+            comments[0]
+        );
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
     }
 
     #[tokio::test]

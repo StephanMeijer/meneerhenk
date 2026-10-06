@@ -26,6 +26,7 @@ use tracing::{error, info, instrument, warn};
 
 use crate::address_tools::{AddressContext, AddressState, Settled, address_tools};
 use crate::app::App;
+use crate::cancel::{Cancelled, is_cancelled};
 use crate::checks::{describe, run_checks};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
@@ -177,17 +178,6 @@ pub async fn run_address(
             Err(anyhow!("address run failed: {reason}"))
         }
     }
-}
-
-/// The error of a run that stopped because its cancellation token fired.
-/// Only this error ends a run as cancelled from the dashboard.
-#[derive(Debug, thiserror::Error)]
-#[error("cancelled")]
-struct Cancelled;
-
-/// Whether `failure` is the run stopping for its cancellation token.
-fn is_cancelled(failure: &anyhow::Error) -> bool {
-    failure.downcast_ref::<Cancelled>().is_some()
 }
 
 /// Stops the run when its token fired. Checked where the run would
