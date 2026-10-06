@@ -431,12 +431,16 @@ sequenceDiagram
 ```
 
 The model's tools talk only to a `Workspace` (`crates/henk/src/workspace`);
-the backend is a configuration choice (`[workspace]`) and only `host`
-exists today. Its tree has no `.git`: its record of changes is a git
-directory outside the tree, so nothing a check runs can reach it, and
-`HOME` is a scratch directory outside the tree too. What is pushed is
+the backend is a configuration choice (`[workspace]`, per repository
+through profiles): `host`, or `ssh` to a sandbox host where each run is a
+throwaway user driven through `henk-runner` (`deploy/sandbox`). Either way
+the record of changes is a git directory outside the tree that nothing a
+check runs can write, `HOME` is outside the tree, and `.git` (the `ssh`
+backend leaves the checkout's own in the tree for the run's commands) is
+never something a tool reads or the changeset carries. What is pushed is
 never the tree the checks ran in, only the checked changeset applied to a
-fresh checkout.
+fresh checkout. Every backend passes the same contract tests
+(`workspace/contract.rs`).
 
 Every error happens before the push: a failed run posts a failure comment
 saying nothing was pushed. After the push, replies and the summary are

@@ -45,6 +45,12 @@ rusqlite_migration = "2.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
 secrecy = "0.10"
+# SSH to the sandbox host (workspace backend "ssh", #84). Pure Rust on ring,
+# so Henk's distroless image needs no ssh binary and deny.toml's aws-lc ban
+# holds; compression and RSA keys are left out.
+russh = { version = "0.64", default-features = false, features = ["ring"] }
+# Packs a checkout to send to the sandbox host; xattrs are not carried.
+tar = { version = "0.4", default-features = false }
 serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0"
 sha2 = "0.11"

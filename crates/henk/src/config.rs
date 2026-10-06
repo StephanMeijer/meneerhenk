@@ -695,6 +695,78 @@ pub struct WorkspaceConfig {
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
     pub repositories: BTreeMap<String, String>,
+    /// The sandbox host the `ssh` backend uses (#84).
+    pub ssh: Option<SshConfig>,
+}
+
+/// The sandbox host of the `ssh` backend: where it is, who Henk signs in
+/// as, where his key is and which host key to expect. No secret is in this
+/// file (§8.4): the key's path comes from the variable `key_path_env` names.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    /// Host name or address.
+    pub host: String,
+    /// SSH port.
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// The user whose key may run `henk-runner` there.
+    #[serde(default = "default_ssh_user")]
+    pub user: String,
+    /// The variable holding the path of Henk's private key.
+    #[serde(default = "default_ssh_key_path_env")]
+    pub key_path_env: String,
+    /// The host's public key as an OpenSSH line (`ssh-ed25519 AAAA...`),
+    /// pinned: any other key is refused, and there is no trust on first use.
+    pub host_key: String,
+}
+
+const fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_ssh_user() -> String {
+    "henk".to_owned()
+}
+
+fn default_ssh_key_path_env() -> String {
+    "HENK_SANDBOX_KEY_PATH".to_owned()
+}
+
+impl SshConfig {
+    /// The sandbox host is usable, and present when a profile needs it.
+    fn check(ssh: Option<&Self>, workspace: &WorkspacePolicy) -> Result<(), ConfigError> {
+        match ssh {
+            Some(ssh) => ssh.validate(),
+            None if workspace
+                .named()
+                .any(|(_, profile)| profile.backend == BackendKind::Ssh) =>
+            {
+                Err(ConfigError::Workspace(
+                    "a workspace profile uses the ssh backend, but [workspace.ssh] is missing"
+                        .to_owned(),
+                ))
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let refuse = |what: &str| Err(ConfigError::Workspace(format!("workspace.ssh: {what}")));
+        if self.host.trim().is_empty() {
+            return refuse("host is empty");
+        }
+        if self.user.trim().is_empty() {
+            return refuse("user is empty");
+        }
+        if self.key_path_env.trim().is_empty() {
+            return refuse("key_path_env names no variable");
+        }
+        if russh::keys::PublicKey::from_openssh(self.host_key.trim()).is_err() {
+            return refuse("host_key is not an OpenSSH public key line");
+        }
+        Ok(())
+    }
 }
 
 impl Default for WorkspaceConfig {
@@ -712,6 +784,7 @@ impl Default for WorkspaceConfig {
             disk_mib: profile.limits.disk_mib,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
+            ssh: None,
         }
     }
 }
@@ -748,6 +821,18 @@ impl WorkspaceConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError::Workspace`] when the policy is unusable.
+    /// The policy and the sandbox host, checked together: a profile on the
+    /// ssh backend needs `[workspace.ssh]`.
+    fn into_parts(
+        mut self,
+        check_timeout_secs: Option<u64>,
+    ) -> Result<(WorkspacePolicy, Option<SshConfig>), ConfigError> {
+        let ssh = self.ssh.take();
+        let policy = self.into_policy(check_timeout_secs)?;
+        SshConfig::check(ssh.as_ref(), &policy)?;
+        Ok((policy, ssh))
+    }
+
     fn into_policy(self, check_timeout_secs: Option<u64>) -> Result<WorkspacePolicy, ConfigError> {
         let default = Profile {
             backend: self.backend,
@@ -969,6 +1054,8 @@ pub struct Settings {
     pub address: Option<AddressConfig>,
     /// Where an address run's tools and checks run, per repository.
     pub workspace: WorkspacePolicy,
+    /// The sandbox host of the `ssh` backend, when configured.
+    pub workspace_ssh: Option<SshConfig>,
     /// True when the command limit came from the deprecated
     /// `address.check_timeout_secs`.
     pub legacy_check_timeout: bool,
@@ -1044,7 +1131,7 @@ impl Config {
             .collect::<Result<BTreeMap<_, _>, ConfigError>>()?;
         let legacy_database_path = self.server.database_path.is_some();
         let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
-        let workspace = self.workspace.into_policy(check_timeout_secs)?;
+        let (workspace, workspace_ssh) = self.workspace.into_parts(check_timeout_secs)?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
         if let Some(dashboard) = &self.dashboard {
             validate_dashboard(dashboard)?;
@@ -1090,6 +1177,7 @@ impl Config {
             planning: self.planning,
             address: self.address,
             workspace,
+            workspace_ssh,
             legacy_check_timeout: check_timeout_secs.is_some(),
             committers,
             mcp: self.mcp,
@@ -1564,12 +1652,28 @@ impl Settings {
                 weak.push(profile.backend);
             }
         }
-        for backend in weak {
+        if let Some(ssh) = &self.workspace_ssh {
             let _ = writeln!(
                 out,
-                "Warning: the {backend} backend is not isolated; checks run as Henk's user, and {} limits are not enforced.",
-                and_list(&Limits::unenforced_on(backend))
+                "  sandbox host: {}@{}:{} (key from ${})",
+                ssh.user, ssh.host, ssh.port, ssh.key_path_env
             );
+        }
+        for backend in weak {
+            let unenforced = and_list(&Limits::unenforced_on(backend));
+            let _ = match backend {
+                BackendKind::Host => writeln!(
+                    out,
+                    "Warning: the host backend is not isolated; checks run as Henk's user, and {unenforced} limits are not enforced."
+                ),
+                BackendKind::Ssh => writeln!(
+                    out,
+                    "Warning: the ssh backend runs each run as its own user on {}; runs share its kernel, /tmp and network, and {unenforced} limits are not enforced.",
+                    self.workspace_ssh
+                        .as_ref()
+                        .map_or("the sandbox host", |s| s.host.as_str())
+                ),
+            };
         }
     }
 
@@ -2259,6 +2363,66 @@ github_owners = ["docspec"]
             "{}",
             legacy.describe()
         );
+    }
+
+    fn host_key_line() -> String {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        key.public_key().to_openssh().unwrap()
+    }
+
+    #[test]
+    fn the_ssh_backend_needs_its_sandbox_host_and_says_what_it_shares() {
+        let ssh = format!(
+            "[workspace.profiles.sandbox]\nbackend = \"ssh\"\n[workspace.repositories]\n\"docspec/app\" = \"sandbox\"\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            host_key_line()
+        );
+        let settings = database(&format!("[workspace]\n{ssh}")).unwrap();
+        let config = settings.workspace_ssh.as_ref().unwrap();
+        assert_eq!(
+            (
+                config.port,
+                config.user.as_str(),
+                config.key_path_env.as_str()
+            ),
+            (22, "henk", "HENK_SANDBOX_KEY_PATH")
+        );
+        let text = settings.describe();
+        assert!(text.contains("  sandbox: ssh, 600s per command"), "{text}");
+        assert!(
+            text.contains(
+                "  sandbox host: henk@sandbox.example:22 (key from $HENK_SANDBOX_KEY_PATH)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Warning: the ssh backend runs each run as its own user on sandbox.example; runs share its kernel, /tmp and network, and memory, cpu, pids and disk limits are not enforced."
+            ),
+            "{text}"
+        );
+        assert!(henk_domain::text::is_in_style(&text), "{text}");
+
+        let missing = database("[workspace.profiles.sandbox]\nbackend = \"ssh\"\n").unwrap_err();
+        assert!(
+            missing.to_string().contains("[workspace.ssh] is missing"),
+            "{missing}"
+        );
+        for (bad, why) in [
+            ("host = \"\"\nhost_key = \"x\"", "host is empty"),
+            (
+                "host = \"h\"\nhost_key = \"not a key\"",
+                "host_key is not an OpenSSH public key line",
+            ),
+            (
+                "host = \"h\"\nhost_key = \"x\"\npassword = \"no\"",
+                "unknown field",
+            ),
+        ] {
+            let error = database(&format!("[workspace.ssh]\n{bad}\n")).unwrap_err();
+            assert!(error.to_string().contains(why), "{bad}: {error}");
+        }
     }
 
     #[test]

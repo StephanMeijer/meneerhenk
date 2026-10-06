@@ -16,10 +16,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use henk_domain::address::WorkspacePath;
-use henk_domain::workspace::{FileMode, Limits, Profile, RawChange};
+use henk_domain::workspace::Profile;
 use tokio::process::Command;
 
-use super::{ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider, tail};
+use super::{
+    Budget, ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider,
+    parse_raw_diff, tail,
+};
 use crate::git::{ScratchDir, git_command};
 
 /// How long one git command on the workspace's record may take.
@@ -68,9 +71,7 @@ struct Paths {
 #[derive(Debug)]
 pub struct HostWorkspace {
     dirs: Mutex<Option<Dirs>>,
-    limits: Limits,
-    /// Time commands have used so far, against `limits.run_secs`.
-    used: Mutex<Duration>,
+    budget: Budget,
 }
 
 fn io(path: &impl std::fmt::Display) -> impl FnOnce(std::io::Error) -> WorkspaceError {
@@ -165,8 +166,7 @@ impl HostWorkspace {
             .map_err(|e| WorkspaceError::Backend(format!("cannot copy the checkout: {e}")))?;
         let workspace = Self {
             dirs: Mutex::new(Some(dirs)),
-            limits: profile.limits.clone(),
-            used: Mutex::new(Duration::ZERO),
+            budget: Budget::new(profile.limits.clone()),
         };
         // `--force`: the copy holds only what the checkout tracks, ignored
         // patterns included; later changes to those files are still seen.
@@ -293,29 +293,6 @@ impl HostWorkspace {
             .canonicalize()
             .map_err(|e| WorkspaceError::Backend(format!("the tree is unavailable: {e}")))
     }
-
-    /// How long the next command may run: its own limit, the profile's
-    /// command limit and what is left of the run's.
-    fn budget(&self, asked: Duration) -> Result<Duration, WorkspaceError> {
-        let used = *self
-            .used
-            .lock()
-            .map_err(|_| WorkspaceError::Backend("the workspace is unavailable".to_owned()))?;
-        let left = Duration::from_secs(self.limits.run_secs).saturating_sub(used);
-        Ok(asked
-            .min(Duration::from_secs(self.limits.command_secs))
-            .min(left))
-    }
-
-    fn spend(&self, spent: Duration) {
-        if let Ok(mut used) = self.used.lock() {
-            *used += spent;
-        }
-    }
-
-    fn cap(&self) -> usize {
-        usize::try_from(self.limits.output_bytes).unwrap_or(usize::MAX)
-    }
 }
 
 #[async_trait::async_trait]
@@ -331,17 +308,9 @@ impl Workspace for HostWorkspace {
         let Some((program, rest)) = argv.split_first() else {
             return Err(WorkspaceError::Refused("an empty command".to_owned()));
         };
-        let limit = self.budget(timeout)?;
+        let limit = self.budget.next(timeout)?;
         if limit.is_zero() {
-            return Ok(ExecResult {
-                code: None,
-                timed_out: true,
-                output: format!(
-                    "not started: the run's {}s for commands are used up",
-                    self.limits.run_secs
-                ),
-                duration: Duration::ZERO,
-            });
+            return Ok(self.budget.used_up());
         }
         let started = Instant::now();
         let child = Command::new(program)
@@ -374,7 +343,7 @@ impl Workspace for HostWorkspace {
                 ExecResult {
                     code: output.status.code(),
                     timed_out: false,
-                    output: tail(&text, self.cap()),
+                    output: tail(&text, self.budget.output_cap()),
                     duration: started.elapsed(),
                 }
             }
@@ -392,7 +361,7 @@ impl Workspace for HostWorkspace {
                 duration: started.elapsed(),
             },
         };
-        self.spend(result.duration);
+        self.budget.spend(result.duration);
         Ok(result)
     }
 
@@ -461,8 +430,7 @@ impl Workspace for HostWorkspace {
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
         self.git(&["add", "--all"]).await?;
-        // `:old new old-sha new-sha status NUL path NUL`, one per change.
-        let raw = self
+        let diff = self
             .git(&[
                 "diff",
                 "--cached",
@@ -475,39 +443,13 @@ impl Workspace for HostWorkspace {
                 "HEAD",
             ])
             .await?;
-        let mut fields = raw
-            .split(|b| *b == 0)
-            .map(|f| String::from_utf8_lossy(f).into_owned());
         let mut changes = Vec::new();
-        while let Some(meta) = fields.next() {
-            if meta.is_empty() {
-                continue;
-            }
-            let path = fields
-                .next()
-                .ok_or_else(|| WorkspaceError::Backend("git diff ended early".to_owned()))?;
-            let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
-            let (Some(old_mode), Some(new_mode), Some(new_sha), Some(status)) =
-                (parts.first(), parts.get(1), parts.get(3), parts.get(4))
-            else {
-                return Err(WorkspaceError::Backend(format!("git diff said {meta:?}")));
+        for (raw, blob) in parse_raw_diff(&diff)? {
+            let content = match blob {
+                Some(sha) => self.git(&["cat-file", "blob", &sha]).await?,
+                None => Vec::new(),
             };
-            let deleted = status.starts_with('D');
-            let mode = FileMode::from_git(if deleted { old_mode } else { new_mode })
-                .ok_or_else(|| WorkspaceError::Backend(format!("unknown mode in {meta:?}")))?;
-            let content = if !deleted && matches!(mode, FileMode::Regular | FileMode::Executable) {
-                self.git(&["cat-file", "blob", new_sha]).await?
-            } else {
-                Vec::new()
-            };
-            changes.push(Exported {
-                raw: RawChange {
-                    path,
-                    mode,
-                    deleted,
-                },
-                content,
-            });
+            changes.push(Exported { raw, content });
         }
         Ok(changes)
     }
@@ -529,6 +471,8 @@ mod tests {
     )]
 
     use std::os::unix::fs::PermissionsExt as _;
+
+    use henk_domain::workspace::{FileMode, Limits};
 
     use super::*;
 
@@ -843,5 +787,19 @@ mod tests {
         let paths = dropped.paths().unwrap();
         drop(dropped);
         assert!(!paths.tree.exists() && !paths.record.exists() && !paths.home.exists());
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use std::sync::Arc;
+
+    use super::HostProvider;
+    use crate::workspace::WorkspaceProvider;
+
+    #[tokio::test]
+    async fn the_host_backend_keeps_the_workspace_contract() {
+        let provider: Arc<dyn WorkspaceProvider> = Arc::new(HostProvider);
+        crate::workspace::contract::every_backend_does_this(provider, "henk-host").await;
     }
 }

@@ -1,8 +1,8 @@
 //! Workspaces (§3.5): where a model's file tools and a project's checks run,
 //! what limits hold there, and which changes may leave it.
 //!
-//! A workspace is a backend choice. Today there is one, the host; a
-//! container or a microVM is added as another [`BackendKind`]. Whatever the
+//! A workspace is a backend choice: the host, or a sandbox host reached over
+//! SSH; a container or a microVM is added as another [`BackendKind`]. Whatever the
 //! backend, only a changeset leaves the workspace, and Henk's code checks it
 //! here before it is applied to a fresh checkout and pushed.
 
@@ -19,6 +19,9 @@ use crate::address::WorkspacePath;
 pub enum BackendKind {
     /// Processes on Henk's own host, as Henk's user. Not isolated.
     Host,
+    /// A throwaway user per run on a sandbox host, over SSH (#84). Apart
+    /// from Henk, but runs share that host's kernel, `/tmp` and network.
+    Ssh,
 }
 
 impl BackendKind {
@@ -27,7 +30,7 @@ impl BackendKind {
     #[must_use]
     pub fn is_isolated(self) -> bool {
         match self {
-            Self::Host => false,
+            Self::Host | Self::Ssh => false,
         }
     }
 }
@@ -36,6 +39,7 @@ impl fmt::Display for BackendKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Host => "host",
+            Self::Ssh => "ssh",
         })
     }
 }
@@ -79,7 +83,7 @@ impl Limits {
     #[must_use]
     pub fn unenforced_on(backend: BackendKind) -> Vec<&'static str> {
         match backend {
-            BackendKind::Host => vec!["memory", "cpu", "pids", "disk"],
+            BackendKind::Host | BackendKind::Ssh => vec!["memory", "cpu", "pids", "disk"],
         }
     }
 
@@ -127,9 +131,10 @@ impl Profile {
                 "workspace profile {name}: {limit} must be above zero"
             ));
         }
-        if self.backend == BackendKind::Host && self.image.is_some() {
+        if self.image.is_some() {
             return Some(format!(
-                "workspace profile {name}: the host backend has no image"
+                "workspace profile {name}: the {} backend has no image",
+                self.backend
             ));
         }
         if self.image.as_deref().is_some_and(|i| i.trim().is_empty()) {
@@ -458,6 +463,15 @@ mod tests {
         );
         assert!(!BackendKind::Host.is_isolated());
         assert_eq!(BackendKind::Host.to_string(), "host");
+        assert!(
+            !BackendKind::Ssh.is_isolated(),
+            "runs share the sandbox host"
+        );
+        assert_eq!(BackendKind::Ssh.to_string(), "ssh");
+        assert_eq!(
+            Limits::unenforced_on(BackendKind::Ssh),
+            ["memory", "cpu", "pids", "disk"]
+        );
     }
 
     #[test]

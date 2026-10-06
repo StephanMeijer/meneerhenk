@@ -1364,6 +1364,67 @@ check_commands = [["true"]]
         }
     }
 
+    /// The ssh backend with the runner script run here in its test mode:
+    /// the whole address run, through the runner, without a sandbox host.
+    fn ssh_backend(
+        name: &str,
+    ) -> (
+        Arc<crate::workspace::ssh::tests::LocalRunner>,
+        Arc<dyn WorkspaceProvider>,
+    ) {
+        use crate::workspace::ssh::tests::LocalRunner;
+        let runner = LocalRunner::new(name);
+        let provider = crate::workspace::ssh::SshProvider::with_runner(
+            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+        );
+        (runner, Arc::new(provider))
+    }
+
+    fn left_on_the_host(runner: &crate::workspace::ssh::tests::LocalRunner) -> usize {
+        std::fs::read_dir(runner.base()).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn a_fix_is_pushed_as_one_commit_on_the_ssh_backend() {
+        for platform in PLATFORMS {
+            let (runner, provider) =
+                ssh_backend(&format!("henk-address-ssh-fix-{}", tag(platform)));
+            fix_is_pushed(provider, "ssh", platform).await;
+            assert_eq!(left_on_the_host(&runner), 0, "the workspace is removed");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    async fn live_an_address_run_on_a_real_sandbox_host_pushes_its_fix() {
+        let provider =
+            crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
+        for platform in PLATFORMS {
+            fix_is_pushed(Arc::new(provider.clone()), "ssh-live", platform).await;
+            no_change_no_push(Arc::new(provider.clone()), "ssh-live", platform).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_change_nothing_is_pushed_on_the_ssh_backend() {
+        for platform in PLATFORMS {
+            let (runner, provider) =
+                ssh_backend(&format!("henk-address-ssh-nochange-{}", tag(platform)));
+            no_change_no_push(provider, "ssh", platform).await;
+            assert_eq!(left_on_the_host(&runner), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_gets_nothing_pushed_on_the_ssh_backend() {
+        for platform in PLATFORMS {
+            let (runner, provider) =
+                ssh_backend(&format!("henk-address-ssh-moved-{}", tag(platform)));
+            branch_moved(provider, "ssh", platform).await;
+            assert_eq!(left_on_the_host(&runner), 0);
+        }
+    }
+
     #[tokio::test]
     async fn a_fix_is_pushed_as_one_commit_on_the_fake_backend() {
         for platform in PLATFORMS {

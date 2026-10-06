@@ -218,6 +218,18 @@ requester_id = 523456789012345678
 # command_secs = 1800
 # [workspace.repositories]
 # "docspec/big-repo" = "slow"
+# The "ssh" backend runs each run as a throwaway user on a sandbox host
+# through henk-runner (deploy/sandbox; README, "Sandbox host"). Runs share
+# that host's kernel, /tmp and network. The host key is pinned.
+# [workspace.profiles.sandbox]
+# backend = "ssh"
+# [workspace.ssh]
+# host = "sandbox.example.com"
+# The host's key as `ssh-keyscan -t ed25519 sandbox.example.com` prints it.
+# host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHwggB+uDymUchQomPhkEutCeWIK/K4839d+5Gh4tMbx"
+# port = 22
+# user = "henk"
+# key_path_env = "HENK_SANDBOX_KEY_PATH"
 
 # Limits every model session shares. A session that calls one tool with the
 # same arguments max_repeated_calls times in a row has its next such call

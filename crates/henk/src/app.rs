@@ -18,8 +18,8 @@ use tracing::warn;
 
 use crate::config::{DatabaseConfig, Settings};
 use crate::liveness::LiveRuns;
+use crate::workspace::Backends;
 use crate::workspace::WorkspaceProvider;
-use crate::workspace::host::HostProvider;
 
 /// The shared application state.
 pub struct App {
@@ -41,8 +41,8 @@ pub struct App {
     pub live_runs: LiveRuns,
     /// The runs a person may cancel from the dashboard, and who did (#69).
     pub cancels: crate::cancel::Cancels,
-    /// Opens the workspaces address runs work in (§3.5). The host backend
-    /// in production; tests swap in another.
+    /// Opens the workspaces address runs work in (§3.5), on the backend
+    /// each profile names; tests swap in another.
     pub workspace_provider: Arc<dyn WorkspaceProvider>,
     /// Tests: the writer `writer` returns for every platform.
     #[cfg(test)]
@@ -168,6 +168,10 @@ impl App {
             None => None,
         };
 
+        // The sandbox host's key is read now, so a missing or broken one
+        // stops Henk at start instead of failing the first address run.
+        let ssh = crate::workspace::ssh_provider(&settings)?;
+
         Ok(Self {
             settings,
             store,
@@ -177,7 +181,7 @@ impl App {
             shutdown: CancellationToken::new(),
             live_runs: LiveRuns::default(),
             cancels: crate::cancel::Cancels::default(),
-            workspace_provider: Arc::new(HostProvider),
+            workspace_provider: Arc::new(Backends::new(ssh)),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]
