@@ -1,7 +1,9 @@
 //! Style rules for Henk's own text (§7): no emoji, no em-dash.
 //!
 //! A platform reaction such as 👀 is an acknowledgement, not text, and is not
-//! checked here.
+//! checked here. Typographic symbols that are emoji only when followed by a
+//! variation selector (™ © ↔ ‼) are prose and pass; with the selector they
+//! are caught by it.
 
 /// A style rule a piece of text breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,13 @@ fn is_emoji(c: char) -> bool {
             | 0x2600..=0x27BF // miscellaneous symbols, dingbats
             | 0x2B00..=0x2BFF // arrows and shapes
             | 0xFE0F          // variation selector 16
+            | 0x20E3          // combining keycap
+            | 0x231A..=0x231B // watch, hourglass
+            | 0x23E9..=0x23F3 // media and timer symbols
+            | 0x23F8..=0x23FA // pause, stop, record
+            | 0x25FD..=0x25FE // medium small squares
+            | 0x3030 | 0x303D // wavy dash, part alternation mark
+            | 0x3297 | 0x3299 // circled ideographs
     )
 }
 
@@ -75,5 +84,51 @@ mod tests {
                 character: '👀'
             }]
         );
+    }
+
+    /// #52: one character per range, so dropping a range fails here.
+    #[test]
+    fn every_emoji_range_is_flagged() {
+        for text in [
+            "\u{1F004}",
+            "👀",
+            "☀",
+            "✅",
+            "⭐",
+            "⌚",
+            "⌛",
+            "⏩",
+            "⏰",
+            "⏳",
+            "⏸",
+            "◽",
+            "◾",
+            "〰",
+            "〽",
+            "㊗",
+            "㊙",
+            "1\u{20E3}",
+            "™\u{FE0F}",
+        ] {
+            let found = style_violations(text);
+            assert!(
+                found
+                    .iter()
+                    .any(|v| matches!(v, StyleViolation::Emoji { .. })),
+                "{text:?} ({:X?}) is not flagged",
+                text.chars().map(u32::from).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The other side of the boundary: ordinary typographic symbols are
+    /// prose, not emoji.
+    #[test]
+    fn typographic_symbols_are_not_emoji() {
+        for text in [
+            "™", "©", "®", "↔", "→", "▪", "‼", "ℹ", "⌘", "¶", "§", "°", "€", "1.",
+        ] {
+            assert!(is_in_style(text), "{text:?} is flagged");
+        }
     }
 }
