@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use henk_domain::repeat::{self, CallArguments, RepeatGuard, RepeatVerdict};
 use henk_llm::{
     ChatMessage, CompletionRequest, LlmError, ModelClient, StopReason, ToolArguments, ToolChoice,
     ToolResult, Usage,
@@ -30,6 +31,11 @@ pub struct AgentConfig {
     pub max_conversation_chars: usize,
     /// Turns whose tool results are never stubbed, counted from the end.
     pub keep_recent_turns: u32,
+    /// Identical tool calls in a row that are let through. The next one is
+    /// refused, and one more in a later turn ends the run with
+    /// [`StopCause::Stuck`]. 0 turns the guard off (see
+    /// [`henk_domain::repeat`]).
+    pub max_repeated_calls: u32,
 }
 
 impl Default for AgentConfig {
@@ -40,6 +46,7 @@ impl Default for AgentConfig {
             max_tool_output_chars: 60_000,
             max_conversation_chars: 240_000,
             keep_recent_turns: 2,
+            max_repeated_calls: repeat::DEFAULT_LIMIT,
         }
     }
 }
@@ -65,6 +72,26 @@ pub enum AgentEvent {
         /// How long it took.
         elapsed: Duration,
     },
+    /// The repeat guard refused a call that repeated the ones before it.
+    RepeatRefused {
+        /// Model-facing name.
+        tool: String,
+        /// Identical calls in a row, the refused one included.
+        repeats: u32,
+        /// Whether the run ends because of it.
+        ended: bool,
+    },
+}
+
+/// One time the repeat guard fired, for the run record (§8.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatFiring {
+    /// Model-facing name of the repeated tool.
+    pub tool: String,
+    /// Identical calls in a row, the refused one included.
+    pub repeats: u32,
+    /// Whether the run ended because of it.
+    pub ended: bool,
 }
 
 /// Why the model stopped calling tools, as offered to a [`Continuation`].
@@ -120,6 +147,14 @@ pub enum StopCause {
     /// The provider's safety layer declined to answer (raw reason). Not a
     /// clean end: whatever the run was for did not happen (§8.8).
     Refused(String),
+    /// The model kept calling one tool with the same arguments after the
+    /// repeat guard refused it. Not a clean end.
+    Stuck {
+        /// Model-facing name of the repeated tool.
+        tool: String,
+        /// Identical calls in a row, the last one included.
+        repeats: u32,
+    },
 }
 
 impl StopCause {
@@ -143,6 +178,19 @@ pub struct AgentOutcome {
     pub stop: StopCause,
     /// The full conversation, for diagnosis.
     pub messages: Vec<ChatMessage>,
+    /// Every time the repeat guard fired, in order.
+    pub repeats: Vec<RepeatFiring>,
+}
+
+/// How a turn's tool calls went.
+enum ToolRound {
+    /// Every call has a result.
+    Done(Vec<ToolResult>),
+    /// Cancelled midway.
+    Cancelled,
+    /// The repeat guard ended the run with [`StopCause::Stuck`]. Every call
+    /// still has a result, so the conversation stays well formed.
+    Stuck(Vec<ToolResult>, StopCause),
 }
 
 /// One model, one tool set, one system prompt.
@@ -228,6 +276,9 @@ impl Agent {
         let mut usage = Usage::default();
         let mut turns = 0;
         let definitions = self.tools.definitions();
+        // One guard for the whole run, so repeats across turns count.
+        let mut guard = RepeatGuard::new(self.config.max_repeated_calls);
+        let mut repeats = Vec::new();
 
         let stop = loop {
             if turns >= self.config.max_turns {
@@ -306,8 +357,18 @@ impl Agent {
             // being posted lands, and nothing is left half done. Only a
             // cancel interrupts them. The deadline is checked again before
             // the next model call.
-            let Some(results) = self.call_tools(calls, turns, &cancel).await else {
-                return Self::finish(messages, turns, usage, StopCause::Cancelled);
+            let results = match self
+                .call_tools(calls, turns, &cancel, &mut guard, &mut repeats)
+                .await
+            {
+                ToolRound::Done(results) => results,
+                ToolRound::Cancelled => {
+                    return Self::finish(messages, turns, usage, StopCause::Cancelled, repeats);
+                }
+                ToolRound::Stuck(results, stop) => {
+                    messages.push(ChatMessage::tool_results(results));
+                    break stop;
+                }
             };
             messages.push(ChatMessage::tool_results(results));
             self.compact(&mut messages, turns);
@@ -315,22 +376,71 @@ impl Agent {
                 break StopCause::Timeout;
             }
         };
-        Self::finish(messages, turns, usage, stop)
+        Self::finish(messages, turns, usage, stop, repeats)
     }
 
-    /// Runs the model's tool calls in order. `None` when cancelled midway.
+    /// Runs the model's tool calls in order, each first past the repeat
+    /// guard. A refused call is not dispatched; its result tells the model
+    /// to change course. A call the guard calls stuck ends the run, and the
+    /// calls after it in the turn are not run.
     async fn call_tools(
         &self,
         calls: Vec<henk_llm::ToolCall>,
         turn: u32,
         cancel: &CancellationToken,
-    ) -> Option<Vec<ToolResult>> {
+        guard: &mut RepeatGuard,
+        firings: &mut Vec<RepeatFiring>,
+    ) -> ToolRound {
         let mut results = Vec::with_capacity(calls.len());
+        let mut stuck: Option<(String, u32)> = None;
         for call in calls {
+            if stuck.is_some() {
+                results.push(ToolResult {
+                    call_id: call.id,
+                    content: "Not run: the session is ending.".to_owned(),
+                    is_error: true,
+                });
+                continue;
+            }
+            let arguments = match &call.arguments {
+                ToolArguments::Parsed(value) => CallArguments::Json(value),
+                ToolArguments::Malformed(raw) => CallArguments::Raw(raw),
+            };
+            let refusal = match guard.observe(&call.name, arguments) {
+                RepeatVerdict::Allow => None,
+                RepeatVerdict::Refuse { repeats } => {
+                    Some((repeat::refusal_message(&call.name, repeats), repeats, false))
+                }
+                RepeatVerdict::Stuck { repeats } => {
+                    Some((repeat::stuck_message(&call.name, repeats), repeats, true))
+                }
+            };
+            if let Some((message, repeats, ended)) = refusal {
+                warn!(turn, tool = %call.name, repeats, ended, "repeated tool call refused");
+                self.emit(AgentEvent::RepeatRefused {
+                    tool: call.name.clone(),
+                    repeats,
+                    ended,
+                });
+                firings.push(RepeatFiring {
+                    tool: call.name.clone(),
+                    repeats,
+                    ended,
+                });
+                if ended {
+                    stuck = Some((call.name.clone(), repeats));
+                }
+                results.push(ToolResult {
+                    call_id: call.id,
+                    content: message,
+                    is_error: true,
+                });
+                continue;
+            }
             let started = Instant::now();
             let output = tokio::select! {
                 biased;
-                () = cancel.cancelled() => return None,
+                () = cancel.cancelled() => return ToolRound::Cancelled,
                 output = self.dispatch(&call.name, &call.arguments) => output,
             };
             let elapsed = started.elapsed();
@@ -354,7 +464,12 @@ impl Agent {
                 is_error: output.is_error,
             });
         }
-        Some(results)
+        // The results, refusals included, now go back to the model.
+        guard.end_turn();
+        match stuck {
+            Some((tool, repeats)) => ToolRound::Stuck(results, StopCause::Stuck { tool, repeats }),
+            None => ToolRound::Done(results),
+        }
     }
 
     fn compact(&self, messages: &mut [ChatMessage], turn: u32) {
@@ -410,6 +525,7 @@ impl Agent {
         turns: u32,
         usage: Usage,
         stop: StopCause,
+        repeats: Vec<RepeatFiring>,
     ) -> AgentOutcome {
         let final_text = messages
             .iter()
@@ -425,6 +541,7 @@ impl Agent {
             usage,
             stop,
             messages,
+            repeats,
         }
     }
 }

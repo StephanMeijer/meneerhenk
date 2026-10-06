@@ -13,8 +13,8 @@ pub mod prompts;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentConfig, AgentEvent, AgentOutcome, Continuation, EndReason, Ending, StopCause,
-    TurnWarning,
+    Agent, AgentConfig, AgentEvent, AgentOutcome, Continuation, EndReason, Ending, RepeatFiring,
+    StopCause, TurnWarning,
 };
 pub use mcp_tools::{Guard, Verdict, mcp_tools};
 pub use tool::{Tool, ToolOutput, ToolSet};

@@ -115,6 +115,7 @@ mod tests {
             },
             stop: StopCause::EndTurn,
             messages: vec![ChatMessage::user("go"), ChatMessage::assistant("done")],
+            repeats: Vec::new(),
         };
         let run = RunId::parse("r-1").unwrap();
         let path = write(&dir, &run, "lane a/../x", "m", "system prompt", &outcome).unwrap();

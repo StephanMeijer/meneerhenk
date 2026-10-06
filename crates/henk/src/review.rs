@@ -724,8 +724,9 @@ async fn spawn_lanes(
             }
             // The lane row (henk-session) says finished for a time limit;
             // the summary distinguishes it as stopped, from `stop`. A model
-            // that declined (`StopCause::Refused`) is a dropped lane: the
-            // summary names it instead of reading as a clean review (#40).
+            // that declined (`StopCause::Refused`) or kept repeating one
+            // tool call (`StopCause::Stuck`) is a dropped lane: the summary
+            // names it instead of reading as a clean review (#40).
             let lane_outcome = match outcome.stop {
                 StopCause::Timeout => LaneOutcome::Stopped,
                 _ if outcome.finished() => LaneOutcome::Finished,
@@ -775,6 +776,18 @@ fn target_ref(platform: Platform, number: u64) -> String {
     match platform {
         Platform::GitHub => format!("#{number}"),
         Platform::GitLab => format!("!{number}"),
+    }
+}
+
+/// A review lane's session limits, from the settings.
+fn lane_limits(settings: &crate::config::Settings) -> AgentConfig {
+    AgentConfig {
+        max_turns: settings.review.lane_max_turns,
+        timeout: Duration::from_secs(settings.review.lane_timeout_secs),
+        max_conversation_chars: settings.review.max_conversation_chars,
+        keep_recent_turns: settings.review.keep_recent_turns,
+        max_repeated_calls: settings.agent.max_repeated_calls,
+        ..AgentConfig::default()
     }
 }
 
@@ -860,13 +873,7 @@ async fn build_lane(
         &mut set,
         app.settings.skills.select(&lane.skills),
     );
-    let limits = AgentConfig {
-        max_turns: app.settings.review.lane_max_turns,
-        timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
-        max_conversation_chars: app.settings.review.max_conversation_chars,
-        keep_recent_turns: app.settings.review.keep_recent_turns,
-        ..AgentConfig::default()
-    };
+    let limits = lane_limits(&app.settings);
     let opening = lane_opening(target, commit, &context.files.diff);
     Ok(Lane {
         session: SessionSpec {
@@ -957,6 +964,7 @@ async fn build_fact_check(
             timeout: Duration::from_secs(config.timeout_secs),
             max_conversation_chars: app.settings.review.max_conversation_chars,
             keep_recent_turns: app.settings.review.keep_recent_turns,
+            max_repeated_calls: app.settings.agent.max_repeated_calls,
             ..AgentConfig::default()
         },
         cancel: cancel.clone(),

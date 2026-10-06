@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use henk_agent::mcp_tools::McpTool;
 use henk_agent::{
-    Agent, AgentConfig, Continuation, StopCause, ToolSet, TurnWarning, Verdict, mcp_tools,
+    Agent, AgentConfig, Continuation, RepeatFiring, StopCause, ToolSet, TurnWarning, Verdict,
+    mcp_tools,
 };
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
@@ -138,6 +139,9 @@ pub async fn run_session(
             LaneStatus::Dropped,
             Some(format!("the model declined ({why})")),
         ),
+        StopCause::Stuck { tool, .. } => {
+            (LaneStatus::Dropped, Some(format!("stuck repeating {tool}")))
+        }
     };
     if let Err(store_error) = store
         .finish_lane(
@@ -154,6 +158,14 @@ pub async fn run_session(
         .await
     {
         tracing::warn!(error = %store_error, "could not record the lane end");
+    }
+    // Each time the repeat guard fired goes on the run (§8.6), so
+    // `henk runs show` says which tool, how often and whether it ended
+    // the session.
+    for firing in &outcome.repeats {
+        let _ = store
+            .event(run, "warn", &repeat_event(&spec.name, firing))
+            .await;
     }
     let last_words: String = outcome.final_text.chars().take(200).collect();
     let level = if error.is_some() || matches!(outcome.stop, StopCause::Timeout) {
@@ -196,6 +208,19 @@ pub async fn run_session(
         status,
         error,
     }
+}
+
+/// The timeline line for one firing of the repeat guard.
+fn repeat_event(lane: &str, firing: &RepeatFiring) -> String {
+    let what = if firing.ended {
+        "the session was ended as stuck"
+    } else {
+        "the call was refused"
+    };
+    format!(
+        "{lane}: the model called {} with the same arguments {} times in a row; {what}",
+        firing.tool, firing.repeats
+    )
 }
 
 /// The read tools of one platform MCP session that `scope` allows, each
@@ -305,6 +330,7 @@ mod tests {
                 max_tool_output_chars: 100,
                 max_conversation_chars: 100_000,
                 keep_recent_turns: 2,
+                max_repeated_calls: 3,
             },
             continuation: None,
             turn_warning: None,
@@ -390,6 +416,67 @@ mod tests {
         assert_eq!(
             lanes[0].error.as_deref(),
             Some("the model declined (refusal)")
+        );
+    }
+
+    fn same_call(id: &str) -> Result<Completion, LlmError> {
+        Ok(Completion {
+            message: ChatMessage {
+                role: henk_llm::Role::Assistant,
+                blocks: vec![henk_llm::Block::ToolCall(henk_llm::ToolCall {
+                    id: id.into(),
+                    // No such tool: the guard looks at the call, not at
+                    // whether it could run.
+                    name: "read".into(),
+                    arguments: henk_llm::ToolArguments::Parsed(json!({"path": "a.rs"})),
+                })],
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn repeat_guard_firings_are_recorded_on_the_run() {
+        let store = store_with_run().await;
+        let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new(
+            "m",
+            [same_call("c1"), same_call("c2"), same_call("c3")],
+        ));
+        let mut spec = spec(model);
+        spec.limits.max_repeated_calls = 1;
+        let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
+        assert!(matches!(&outcome.stop, StopCause::Stuck { tool, repeats: 3 } if tool == "read"));
+        assert_eq!(outcome.status, LaneStatus::Dropped);
+        assert_eq!(outcome.error.as_deref(), Some("stuck repeating read"));
+        let lanes = store.lanes(&run_id()).await.unwrap();
+        assert_eq!(lanes[0].error.as_deref(), Some("stuck repeating read"));
+        let events = store.events(&run_id()).await.unwrap();
+        let timeline: Vec<(&str, &str)> = events
+            .iter()
+            .map(|e| (e.level.as_str(), e.message.as_str()))
+            .collect();
+        assert_eq!(
+            timeline[..2],
+            [
+                (
+                    "warn",
+                    "planner: the model called read with the same arguments 2 times in a row; \
+                     the call was refused"
+                ),
+                (
+                    "warn",
+                    "planner: the model called read with the same arguments 3 times in a row; \
+                     the session was ended as stuck"
+                ),
+            ]
+        );
+        assert_eq!(events.len(), 3, "and the session summary");
+        assert_eq!(events[2].level, "warn");
+        assert!(
+            events
+                .iter()
+                .all(|e| henk_domain::text::is_in_style(&e.message))
         );
     }
 
