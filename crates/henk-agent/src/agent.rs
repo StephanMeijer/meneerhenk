@@ -117,6 +117,9 @@ pub enum StopCause {
     Cancelled,
     /// The model endpoint failed after its own retries.
     ModelError(LlmError),
+    /// The provider's safety layer declined to answer (raw reason). Not a
+    /// clean end: whatever the run was for did not happen (§8.8).
+    Refused(String),
 }
 
 impl StopCause {
@@ -271,6 +274,12 @@ impl Agent {
             messages.push(completion.message);
 
             if calls.is_empty() {
+                // A refusal ends the run as one. No nudge: that would be a
+                // second try at what the provider's safety layer stopped.
+                if let StopReason::Refused(why) = &completion.stop {
+                    warn!(reason = %why, "the model declined");
+                    break StopCause::Refused(why.clone());
+                }
                 let reason = if completion.stop == StopReason::MaxTokens {
                     warn!("model hit its output cap without tool calls");
                     EndReason::OutputCap

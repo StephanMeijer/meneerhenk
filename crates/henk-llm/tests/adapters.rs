@@ -583,3 +583,31 @@ async fn live_smoke() {
         "{second:?}"
     );
 }
+
+#[test]
+fn a_refusal_or_content_filter_decodes_as_refused() {
+    let anthropic = anthropic::decode(&json!({
+        "content": [], "stop_reason": "refusal", "usage": {"input_tokens": 9, "output_tokens": 0}
+    }))
+    .unwrap();
+    assert_eq!(anthropic.stop, StopReason::Refused("refusal".to_owned()));
+    let openai = openai::decode(&json!({
+        "choices": [{"finish_reason": "content_filter", "message": {"role": "assistant", "content": null}}],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 0}
+    }))
+    .unwrap();
+    assert_eq!(
+        openai.stop,
+        StopReason::Refused("content_filter".to_owned())
+    );
+    let unknown = anthropic::decode(&json!({
+        "content": [{"type": "text", "text": "..."}], "stop_reason": "pause_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }))
+    .unwrap();
+    assert_eq!(
+        unknown.stop,
+        StopReason::Other("pause_turn".to_owned()),
+        "unknown stays unknown"
+    );
+}

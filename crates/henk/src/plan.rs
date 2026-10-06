@@ -361,13 +361,37 @@ async fn plan_body(
         turn_warning: None,
     };
     let outcome = run_session(app.store.as_ref(), &context.run, spec, cancel).await;
-    match outcome.stop {
+    session_result(outcome.stop, planning.timeout_secs)
+}
+
+/// Whether the planner's session ended in a way a plan can come from. A
+/// refusal is a failed plan, said on the issue, not a quiet success (#40).
+fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
+    match stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
-        StopCause::Timeout => Err(anyhow!(
-            "the time limit of {}s was reached",
-            planning.timeout_secs
-        )),
+        StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
         StopCause::Cancelled => Err(anyhow!("cancelled")),
         StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
+        StopCause::Refused(why) => Err(anyhow!("the model declined to plan ({why})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_refused_plan_fails_and_says_why() {
+        let error = session_result(StopCause::Refused("refusal".to_owned()), 60).unwrap_err();
+        assert_eq!(error.to_string(), "the model declined to plan (refusal)");
+        assert!(session_result(StopCause::EndTurn, 60).is_ok());
+        assert!(
+            session_result(StopCause::Timeout, 60)
+                .unwrap_err()
+                .to_string()
+                .contains("60s")
+        );
     }
 }

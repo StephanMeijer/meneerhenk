@@ -134,6 +134,10 @@ pub async fn run_session(
         }
         StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
         StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
+        StopCause::Refused(why) => (
+            LaneStatus::Dropped,
+            Some(format!("the model declined ({why})")),
+        ),
     };
     if let Err(store_error) = store
         .finish_lane(
@@ -342,6 +346,32 @@ mod tests {
         assert!(outcome.error.as_deref().unwrap_or("").contains("401"));
         let lanes = store.lanes(&run_id()).await.unwrap();
         assert_eq!(lanes[0].status, LaneStatus::Dropped);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_drops_the_session_and_says_the_model_declined() {
+        let store = store_with_run().await;
+        let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new(
+            "m",
+            [Ok(Completion {
+                message: henk_llm::ChatMessage::assistant(""),
+                stop: henk_llm::StopReason::Refused("refusal".into()),
+                usage: henk_llm::Usage::default(),
+            })],
+        ));
+        let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
+        assert!(!outcome.finished(), "a refusal is not a finished lane");
+        assert_eq!(outcome.status, LaneStatus::Dropped);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("the model declined (refusal)")
+        );
+        let lanes = store.lanes(&run_id()).await.unwrap();
+        assert_eq!(lanes[0].status, LaneStatus::Dropped);
+        assert_eq!(
+            lanes[0].error.as_deref(),
+            Some("the model declined (refusal)")
+        );
     }
 
     #[tokio::test]
