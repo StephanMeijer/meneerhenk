@@ -25,7 +25,8 @@ pub struct Scripted {
     pub output: String,
     /// Files it writes, by path.
     pub writes: Vec<(String, Vec<u8>)>,
-    /// How long it takes.
+    /// How long it takes; past the command's time limit it is stopped
+    /// there, as a backend would.
     pub delay: Duration,
 }
 
@@ -163,7 +164,7 @@ impl Workspace for FakeWorkspace {
         &self,
         argv: &[String],
         _cwd: &WorkspacePath,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<ExecResult, WorkspaceError> {
         let line = argv.join(" ");
         if let Ok(mut ran) = self.provider.ran.lock() {
@@ -177,6 +178,15 @@ impl Workspace for FakeWorkspace {
                 duration: Duration::ZERO,
             });
         };
+        if scripted.delay > timeout {
+            tokio::time::sleep(timeout).await;
+            return Ok(ExecResult {
+                code: None,
+                timed_out: true,
+                output: format!("stopped after {}s", timeout.as_secs()),
+                duration: timeout,
+            });
+        }
         tokio::time::sleep(scripted.delay).await;
         let mut files = self.files()?;
         for (path, content) in &scripted.writes {

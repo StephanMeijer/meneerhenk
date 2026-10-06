@@ -19,13 +19,29 @@ pub struct Traced {
     inner: Arc<dyn Workspace>,
     store: Arc<dyn RunStore>,
     run: RunId,
+    /// Which of the run's workspaces this is, such as a review lane's name,
+    /// when the run has more than one.
+    label: Option<String>,
 }
 
 impl Traced {
     /// Records `inner`'s commands on `run`.
     #[must_use]
     pub fn new(inner: Arc<dyn Workspace>, store: Arc<dyn RunStore>, run: RunId) -> Self {
-        Self { inner, store, run }
+        Self {
+            inner,
+            store,
+            run,
+            label: None,
+        }
+    }
+
+    /// Starts every line with `label`, so a run with several workspaces,
+    /// a review's lanes (#85), says which ran what.
+    #[must_use]
+    pub fn labelled(mut self, label: String) -> Self {
+        self.label = Some(label);
+        self
     }
 }
 
@@ -60,11 +76,11 @@ impl Workspace for Traced {
         timeout: Duration,
     ) -> Result<ExecResult, WorkspaceError> {
         let result = self.inner.exec(argv, cwd, timeout).await;
-        if let Err(error) = self
-            .store
-            .event(&self.run, "info", &line(argv, &result))
-            .await
-        {
+        let text = match &self.label {
+            Some(label) => format!("{label}: {}", line(argv, &result)),
+            None => line(argv, &result),
+        };
+        if let Err(error) = self.store.event(&self.run, "info", &text).await {
             warn!(%error, "could not record a command");
         }
         result
@@ -178,5 +194,20 @@ mod tests {
         );
         ws.close().await;
         assert!(provider.closed());
+
+        let inner = provider
+            .open(src.path(), &Profile::default())
+            .await
+            .unwrap();
+        let lane =
+            Traced::new(inner, Arc::clone(&store), run.clone()).labelled("lane-a".to_owned());
+        lane.exec(&argv, &WorkspacePath::root(), Duration::from_secs(1))
+            .await
+            .unwrap();
+        let events = store.events(&run).await.unwrap();
+        assert_eq!(
+            events[1].message, "lane-a: exec cargo test exit 101 in 1 ms\ntest failed",
+            "a review's lanes say which ran what"
+        );
     }
 }

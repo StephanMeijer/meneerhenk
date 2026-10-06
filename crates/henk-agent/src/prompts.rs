@@ -68,7 +68,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
         assert!(henk_domain::text::is_in_style(REVIEW_WORKSPACE));
-        for tool in ["list_files", "search", "read_file"] {
+        for tool in ["list_files", "search", "read_file", "bash"] {
             assert!(REVIEW_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
         }
         assert!(henk_domain::text::is_in_style(GREETINGS));

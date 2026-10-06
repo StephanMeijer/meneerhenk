@@ -78,7 +78,13 @@ struct LaneInputs {
     title: String,
     base_ref: String,
     cancel: CancellationToken,
+    /// The profile's limits on commands in the review's workspaces.
+    limits: henk_domain::workspace::Limits,
 }
+
+/// Appended to the fact-checker's prompt when it has a workspace: its copy
+/// serves every check of the review, some at the same time.
+const SHARED_COPY: &str = "Your copy is shared with the other checks of this review, some running at the same time: run what you need, but do not change files in it. A file you write goes outside it, at a fresh path from `mktemp`.";
 
 /// A request to review one pull/merge request.
 #[derive(Debug, Clone)]
@@ -591,12 +597,14 @@ async fn run_lanes(
         title: title.to_owned(),
         base_ref: base_ref.to_owned(),
         cancel: cancel.clone(),
+        limits: henk_domain::workspace::Limits::default(),
     };
     // Each lane's own workspace, when the profile reviews in one (#170),
     // and the fact-checker's. Lanes close theirs when they end; the rest
     // closes once all have. On an early error they are dropped, which
     // destroys them too.
     let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
+    lanes.limits = workspaces.limits();
     lanes.fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
     let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
@@ -861,7 +869,15 @@ async fn build_lane(
     set.add(ListChangedFiles(Arc::clone(&context.files)));
     set.add(GetFileDiff(Arc::clone(&context.files)));
     match (&context.workspace, file_reader) {
-        (Some(workspace), _) => crate::code_tools::add(&mut set, workspace),
+        (Some(workspace), _) => {
+            crate::code_tools::add(&mut set, workspace);
+            crate::code_tools::add_bash(
+                &mut set,
+                workspace,
+                Duration::from_secs(lanes.limits.command_secs),
+                crate::code_tools::Sharing::Own,
+            );
+        }
         (None, Some(inner)) => {
             set.add(ReadFile { inner });
         }
@@ -988,7 +1004,7 @@ async fn build_fact_check(
         ],
     );
     if workspace.is_some() {
-        system = format!("{system}\n\n{}", prompts::REVIEW_WORKSPACE);
+        system = format!("{system}\n\n{}\n\n{SHARED_COPY}", prompts::REVIEW_WORKSPACE);
     }
     Ok(Some(Arc::new(SessionFactCheck {
         store: Arc::clone(&app.store),
@@ -997,6 +1013,7 @@ async fn build_fact_check(
         diff: Arc::clone(diff),
         file_reader,
         workspace,
+        check_limits: lanes.limits.clone(),
         system,
         skills: app.settings.skills.select(&config.skills),
         limits: AgentConfig {
@@ -1922,6 +1939,59 @@ lanes = [{ name = "lane-a", model = "m" }]
         review_on_ssh("ssh-live", Arc::new(provider)).await;
     }
 
+    /// A one-lane review on `provider` whose lane asks `bash` for the
+    /// checked-out commit: it gets the reviewed sha, as the run user, in
+    /// its own copy.
+    async fn bash_on_ssh(name: &str, provider: Arc<dyn crate::workspace::WorkspaceProvider>) {
+        let config = reviewing_config("")
+            .replace(", { name = \"lane-b\", model = \"m\" }", "")
+            .replace("[[\"make\", \"deps\"]]", "[[\"true\"]]");
+        let model = ScriptedClient::new(
+            "scripted",
+            [
+                call(
+                    "bash",
+                    serde_json::json!({"command": "git log -1 --format=%H"}),
+                ),
+                done(),
+                done(),
+                done(),
+            ],
+        );
+        let (f, _remote) = reviewed_on(name, &config, model, provider).await;
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (_, results, _) = seen(&f.model);
+        let expected = format!("\n{}\n", f.writer.head);
+        assert!(
+            results
+                .iter()
+                .any(|r| r.starts_with("exit 0 in ") && r.ends_with(&expected)),
+            "the lane's bash sees the reviewed commit: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_on_the_ssh_backend_sees_the_reviewed_commit() {
+        use crate::workspace::ssh::tests::LocalRunner;
+        let runner = LocalRunner::new("henk-review-ssh-bash");
+        let provider = crate::workspace::ssh::SshProvider::with_runner(
+            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+        );
+        bash_on_ssh("ssh-local-bash", Arc::new(provider)).await;
+        assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
+    async fn live_a_review_lane_runs_bash_on_a_real_sandbox_host() {
+        let provider =
+            crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
+        bash_on_ssh("ssh-live-bash", Arc::new(provider)).await;
+    }
+
     fn many_done() -> ScriptedClient {
         ScriptedClient::new("scripted", (0..12).map(|_| done()))
     }
@@ -1955,12 +2025,14 @@ lanes = [{ name = "lane-a", model = "m" }]
                     .starts_with("review workspaces: 3 of 3 ready on ssh at ")),
             "{events:?}"
         );
-        assert!(
-            events
-                .iter()
-                .any(|e| e.message.starts_with("exec make deps exit 0")),
-            "setup is on the timeline: {events:?}"
-        );
+        for lane in ["lane-a", "lane-b", "fact-check"] {
+            assert!(
+                events.iter().any(|e| e
+                    .message
+                    .starts_with(&format!("{lane}: exec make deps exit 0"))),
+                "setup is on the timeline, by lane: {events:?}"
+            );
+        }
     }
 
     fn call(name: &str, arguments: serde_json::Value) -> Result<Completion, henk_llm::LlmError> {
@@ -2039,6 +2111,71 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_lane_runs_a_command_and_the_timeline_says_which_lane() {
+        let config = reviewing_config("").replace(", { name = \"lane-b\", model = \"m\" }", "");
+        let model = ScriptedClient::new(
+            "scripted",
+            [
+                call(
+                    "bash",
+                    serde_json::json!({"command": "cargo test -q parse"}),
+                ),
+                done(),
+                done(),
+                done(),
+            ],
+        );
+        let mut inner = crate::workspace::fake::FakeProvider::default();
+        for (command, output) in [
+            ("make deps", "deps ready"),
+            ("bash -c cargo test -q parse", "1 passed"),
+        ] {
+            inner.script.insert(
+                command.to_owned(),
+                crate::workspace::fake::Scripted {
+                    output: output.to_owned(),
+                    ..crate::workspace::fake::Scripted::default()
+                },
+            );
+        }
+        let peek = Arc::new(Peek {
+            inner,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let (f, _remote) = reviewed_on(
+            "henk-review-bash",
+            &config,
+            model,
+            Arc::clone(&peek) as Arc<dyn crate::workspace::WorkspaceProvider>,
+        )
+        .await;
+        let run = RunId::parse("r-bash").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (names, results, system) = seen(&f.model);
+        assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(
+            system.contains("`bash` runs a command in your copy"),
+            "{system}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.starts_with("exit 0 in ") && r.ends_with("\n1 passed\n")),
+            "{results:?}"
+        );
+        let events = f.app.store.events(&run).await.unwrap();
+        assert!(
+            events.iter().any(|e| e
+                .message
+                .starts_with("lane-a: exec bash -c cargo test -q parse exit 0")),
+            "henk runs show lists the lane's command: {events:?}"
+        );
+        assert_eq!(peek.inner.live(), 0);
+    }
+
+    #[tokio::test]
     async fn a_lane_without_a_workspace_keeps_its_tools() {
         let f = fixture(DIFF, ScriptedClient::new("scripted", [done(), done()])).await;
         let run = RunId::parse("r-notools").unwrap();
@@ -2047,7 +2184,9 @@ lanes = [{ name = "lane-a", model = "m" }]
             .unwrap();
         let (names, _, system) = seen(&f.model);
         assert!(
-            !names.iter().any(|n| n == "list_files" || n == "search"),
+            !names
+                .iter()
+                .any(|n| n == "list_files" || n == "search" || n == "bash"),
             "{names:?}"
         );
         assert!(!system.contains("# Your copy of the tree"));
@@ -2218,6 +2357,11 @@ lanes = [{ name = "lane-a", model = "m" }]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_copy_note_is_in_style() {
+        assert!(henk_domain::text::is_in_style(SHARED_COPY));
+    }
 
     #[test]
     fn the_lane_turn_warning_is_in_style_and_says_what_to_do() {
