@@ -2435,9 +2435,13 @@ github_owners = ["docspec"]
 
     #[test]
     fn reviews_get_workspaces_only_where_a_profile_turns_them_on() {
-        let settings = database(
-            "[workspace.profiles.reviewed]\nreview = true\n[workspace.profiles.inherits]\ncommand_secs = 60\n",
-        )
+        let ssh = format!(
+            "[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            host_key_line()
+        );
+        let settings = database(&format!(
+            "[workspace.profiles.reviewed]\nbackend = \"ssh\"\nreview = true\n[workspace.profiles.inherits]\ncommand_secs = 60\n{ssh}"
+        ))
         .unwrap();
         let policy = &settings.workspace;
         assert!(!policy.default.review, "off by default");
@@ -2445,7 +2449,7 @@ github_owners = ["docspec"]
         assert!(!policy.profiles.get("inherits").unwrap().review);
         let text = settings.describe();
         assert!(
-            text.contains("  reviewed: host, 600s per command, 1800s per run, 20480 bytes of output, reviews in a workspace"),
+            text.contains("  reviewed: ssh, 600s per command, 1800s per run, 20480 bytes of output, reviews in a workspace"),
             "{text}"
         );
         assert!(
@@ -2455,13 +2459,35 @@ github_owners = ["docspec"]
             "{text}"
         );
 
-        let all = database("[workspace]\nreview = true\n[workspace.profiles.quiet]\nreview = false\n[workspace.profiles.loud]\n").unwrap();
+        let all = database(&format!("[workspace]\nbackend = \"ssh\"\nreview = true\n[workspace.profiles.quiet]\nreview = false\n[workspace.profiles.loud]\n{ssh}")).unwrap();
         assert!(all.workspace.default.review);
         assert!(!all.workspace.profiles.get("quiet").unwrap().review);
         assert!(
             all.workspace.profiles.get("loud").unwrap().review,
             "inherited"
         );
+    }
+
+    #[test]
+    fn a_review_workspace_on_the_host_backend_is_refused() {
+        for (bad, profile) in [
+            ("[workspace]\nreview = true\n", "default"),
+            ("[workspace.profiles.p]\nreview = true\n", "p"),
+            (
+                "[workspace]\nreview = true\n[workspace.profiles.p]\nbackend = \"ssh\"\n",
+                "default",
+            ),
+        ] {
+            let error = database(bad).unwrap_err();
+            assert!(matches!(error, ConfigError::Workspace(_)), "{bad}: {error}");
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!(
+                    "workspace profile {profile}: review = true needs a backend apart from Henk"
+                )),
+                "{bad}: {text}"
+            );
+        }
     }
 
     fn host_key_line() -> String {

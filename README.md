@@ -425,6 +425,11 @@ could not be opened or set up reviews through the platform as before, with
 the reason on the run's timeline. The tools that use these workspaces are
 #90 (`read_file`, `list_files`, `search`) and #85 (`bash`).
 
+A review runs the setup stage on code that anyone who can open a pull
+request chose, from a fork too, so `review = true` needs a backend apart
+from Henk: `henk config check` refuses it on the `host` backend, where that
+code would run as Henk's own user next to his configuration and keys.
+
 `henk doctor --probe` connects and reports the connection, the host key and
 the runner's tools on lines of their own. The live tests run against such a
 host: `deploy/sandbox/test-host.Containerfile` builds one, and

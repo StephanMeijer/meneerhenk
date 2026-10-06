@@ -229,7 +229,8 @@ requester_id = 523456789012345678
 # toolchain = "mise"
 # setup = [["npm", "ci"]]
 # Reviews get workspaces too: one per lane and one for the fact-checker, at
-# the reviewed commit, set up as above, never exported.
+# the reviewed commit, set up as above, never exported. Refused on the
+# host backend: a review runs setup on the pull request's code.
 # review = true
 # [workspace.ssh]
 # host = "sandbox.example.com"

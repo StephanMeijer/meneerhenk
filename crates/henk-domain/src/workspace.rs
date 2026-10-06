@@ -121,7 +121,8 @@ pub struct Profile {
     pub toolchain: Option<Toolchain>,
     /// Whether reviews of the repository get workspaces too (#170): one
     /// per lane and one for the fact-checker, at the reviewed commit. Off
-    /// by default, so a review reads through its MCP session only.
+    /// by default, so a review reads through its MCP session only. Never on
+    /// the host backend: see [`Profile::serves`].
     pub review: bool,
 }
 
@@ -160,13 +161,21 @@ impl Default for Profile {
 
 impl Profile {
     /// Whether a run of this kind opens a workspace with this profile. An
-    /// address run always does; a review only when the profile says so;
-    /// a planner not yet.
+    /// address run always does; a review only when the profile says so and
+    /// not on the host backend; a planner not yet.
+    ///
+    /// A review workspace runs the setup stage on the pull request's code,
+    /// and anyone who can open a pull request, from a fork too, decides
+    /// what that code is. On the host it would run as Henk's own user,
+    /// beside his configuration, database and keys (§8.4), so a review
+    /// gets a workspace only on a backend apart from Henk. An address run
+    /// is asked for by a colleague and touches only the repository's own
+    /// branches (§3.5).
     #[must_use]
     pub const fn serves(&self, lane: EnvLane) -> bool {
         match lane {
             EnvLane::Address => true,
-            EnvLane::Review => self.review,
+            EnvLane::Review => self.review && !matches!(self.backend, BackendKind::Host),
             EnvLane::Plan => false,
         }
     }
@@ -181,6 +190,11 @@ impl Profile {
             return Some(format!(
                 "workspace profile {name}: the {} backend has no image",
                 self.backend
+            ));
+        }
+        if self.review && self.backend == BackendKind::Host {
+            return Some(format!(
+                "workspace profile {name}: review = true needs a backend apart from Henk, such as ssh; on the host, a pull request's setup would run as Henk's own user"
             ));
         }
         if self.image.as_deref().is_some_and(|i| i.trim().is_empty()) {
@@ -518,6 +532,15 @@ mod tests {
         let mut image = policy();
         image.default.image = Some("rust:1".to_owned());
         assert!(image.validate().unwrap_err().contains("no image"));
+
+        let mut review_on_host = policy();
+        review_on_host.profiles.get_mut("big").unwrap().review = true;
+        let refused = review_on_host.validate().unwrap_err();
+        assert!(refused.contains("workspace profile big"), "{refused}");
+        assert!(refused.contains("apart from Henk"), "{refused}");
+        assert!(crate::text::is_in_style(&refused), "{refused}");
+        review_on_host.profiles.get_mut("big").unwrap().backend = BackendKind::Ssh;
+        assert_eq!(review_on_host.validate(), Ok(()));
     }
 
     #[test]
@@ -555,12 +578,29 @@ mod tests {
 
     #[test]
     fn a_review_opens_a_workspace_only_when_its_profile_says_so() {
-        let mut profile = Profile::default();
+        let mut profile = Profile {
+            backend: BackendKind::Ssh,
+            ..Profile::default()
+        };
         assert!(profile.serves(EnvLane::Address));
         assert!(!profile.serves(EnvLane::Review));
         assert!(!profile.serves(EnvLane::Plan));
         profile.review = true;
         assert!(profile.serves(EnvLane::Review));
         assert!(!profile.serves(EnvLane::Plan));
+    }
+
+    #[test]
+    fn a_review_never_opens_a_workspace_on_the_host() {
+        let profile = Profile {
+            review: true,
+            ..Profile::default()
+        };
+        assert_eq!(profile.backend, BackendKind::Host);
+        assert!(
+            !profile.serves(EnvLane::Review),
+            "the pull request's setup would run as Henk"
+        );
+        assert!(profile.serves(EnvLane::Address));
     }
 }

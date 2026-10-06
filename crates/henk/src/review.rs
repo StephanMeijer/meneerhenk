@@ -1730,10 +1730,14 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// Two lanes and the fact-checker, reviewing in a workspace with one
     /// setup step.
     fn reviewing_config(extra: &str) -> String {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let host_key = key.public_key().to_openssh().unwrap();
         CONFIG.replace(
             "lanes = [{ name = \"lane-a\", model = \"m\" }]\n",
             &format!(
-                "lanes = [{{ name = \"lane-a\", model = \"m\" }}, {{ name = \"lane-b\", model = \"m\" }}]\n[review.fact_check]\nmodel = \"m\"\n[workspace]\nreview = true\nsetup = [[\"make\", \"deps\"]]\n{extra}"
+                "lanes = [{{ name = \"lane-a\", model = \"m\" }}, {{ name = \"lane-b\", model = \"m\" }}]\n[review.fact_check]\nmodel = \"m\"\n[workspace]\nbackend = \"ssh\"\nreview = true\nsetup = [[\"make\", \"deps\"]]\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{host_key}\"\n{extra}"
             ),
         )
     }
@@ -1918,7 +1922,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert!(
             events.iter().any(|e| e.level == "info"
                 && e.message
-                    .starts_with("review workspaces: 3 of 3 ready on host at ")),
+                    .starts_with("review workspaces: 3 of 3 ready on ssh at ")),
             "{events:?}"
         );
         assert!(
