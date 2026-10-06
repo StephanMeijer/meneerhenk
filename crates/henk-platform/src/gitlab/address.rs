@@ -5,6 +5,7 @@
 //! write-mode MCP session as review findings do.
 
 use henk_domain::address::PushFacts;
+use henk_domain::commit::noreply;
 use henk_domain::review::CommitSha;
 use serde_json::{Value, json};
 
@@ -199,13 +200,20 @@ impl AddressWriter for GitLabWriter {
     }
 
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {
-        let host = self.rest()?.host();
+        let host = self.noreply_host()?;
         let bot = self.bot_user().await?;
+        // GitLab's private commit email ties the commit to the account; a
+        // requester's is built by the same rule.
+        let email = noreply::gitlab(bot.id, &bot.username, &host)
+            .map_err(|e| PlatformError::Decode(e.to_string()))?;
         Ok(CommitIdentity {
             name: bot.username.clone(),
-            // GitLab's private commit email ties the commit to the account.
-            email: format!("{}-{}@users.noreply.{host}", bot.id, bot.username),
+            email: email.to_string(),
         })
+    }
+
+    fn noreply_host(&self) -> Result<String, PlatformError> {
+        Ok(self.rest()?.host())
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {

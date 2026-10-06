@@ -124,6 +124,16 @@ pub trait AddressWriter: Send + Sync {
     /// looked up by id, so a display name never stands in for it (§2).
     async fn user_login(&self, id: u64) -> Result<String, PlatformError>;
 
+    /// The host of the platform's private commit addresses: `github.com`, or
+    /// for GitLab the instance's own host, so a self-hosted instance's
+    /// accounts get its `users.noreply.{host}` domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when the writer has no API endpoint to take
+    /// the host from.
+    fn noreply_host(&self) -> Result<String, PlatformError>;
+
     /// The link to a commit on the pull request's repository.
     fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String;
 

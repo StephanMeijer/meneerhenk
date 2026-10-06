@@ -124,6 +124,10 @@ impl AddressWriter for GitHubWriter {
         })
     }
 
+    fn noreply_host(&self) -> Result<String, PlatformError> {
+        Ok("github.com".to_owned())
+    }
+
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
         let user = self.api().get(&format!("/user/{id}")).await?;
         user.get("login")

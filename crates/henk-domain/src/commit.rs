@@ -20,6 +20,9 @@ pub enum IdentityError {
     /// Not a platform login or username.
     #[error("{0:?} is not a platform login")]
     Login(String),
+    /// Not a plain host name such as `gitlab.com`.
+    #[error("{0:?} is not a platform host")]
+    Host(String),
 }
 
 /// An email address for a commit: one `@`, a non-empty local part, a domain
@@ -135,17 +138,27 @@ pub mod noreply {
         Email::parse(&format!("{id}+{login}@users.noreply.github.com"))
     }
 
-    /// GitLab: `{id}-{username}@users.noreply.gitlab.com`. A username is
-    /// letters, digits, `-`, `_` and `.`.
+    /// GitLab: `{id}-{username}@users.noreply.{host}`, where `host` is the
+    /// instance's host, `gitlab.com` or a self-hosted one such as
+    /// `gitlab.example.org`. A username is letters, digits, `-`, `_` and `.`.
     ///
     /// # Errors
     ///
-    /// Returns [`IdentityError::Login`] for anything else.
-    pub fn gitlab(id: u64, username: &str) -> Result<Email, IdentityError> {
+    /// Returns [`IdentityError::Login`] for another username and
+    /// [`IdentityError::Host`] for a host that is not dot-separated labels
+    /// of letters, digits and `-`.
+    pub fn gitlab(id: u64, username: &str, host: &str) -> Result<Email, IdentityError> {
         if !handle(username, &['-', '_', '.']) {
             return Err(IdentityError::Login(username.to_owned()));
         }
-        Email::parse(&format!("{id}-{username}@users.noreply.gitlab.com"))
+        if !host_name(host) {
+            return Err(IdentityError::Host(host.to_owned()));
+        }
+        Email::parse(&format!("{id}-{username}@users.noreply.{host}"))
+    }
+
+    fn host_name(host: &str) -> bool {
+        host.split('.').all(|label| handle(label, &['-']))
     }
 
     fn handle(value: &str, extra: &[char]) -> bool {
@@ -403,14 +416,41 @@ mod tests {
             "1+meneer-henk[bot]@users.noreply.github.com"
         );
         assert_eq!(
-            noreply::gitlab(9, "jan.de_vries").unwrap().as_str(),
+            noreply::gitlab(9, "jan.de_vries", "gitlab.com")
+                .unwrap()
+                .as_str(),
             "9-jan.de_vries@users.noreply.gitlab.com"
+        );
+        assert_eq!(
+            noreply::gitlab(9, "jan", "gitlab.example.org")
+                .unwrap()
+                .as_str(),
+            "9-jan@users.noreply.gitlab.example.org",
+            "a self-hosted instance has its own noreply domain"
         );
         for login in ["", "Jan de Vries", "a<b", "x@y", "a\nb", "[bot]"] {
             assert!(noreply::github(1, login).is_err(), "{login:?}");
         }
         for username in ["", "Jan de Vries", "a+b"] {
-            assert!(noreply::gitlab(1, username).is_err(), "{username:?}");
+            assert!(
+                noreply::gitlab(1, username, "gitlab.com").is_err(),
+                "{username:?}"
+            );
+        }
+        for host in [
+            "",
+            "gitlab..com",
+            ".gitlab.com",
+            "gitlab.com/x",
+            "a@b.c",
+            "[::1]",
+            "h st",
+        ] {
+            assert_eq!(
+                noreply::gitlab(1, "jan", host),
+                Err(IdentityError::Host(host.to_owned())),
+                "{host:?}"
+            );
         }
     }
 

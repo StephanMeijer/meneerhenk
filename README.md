@@ -326,7 +326,8 @@ identity is author, committer and Henk's sign-off alike. The requester is
 credited by the `github_id` or `gitlab_id` in their `[[people]]` entry,
 for the platform of the run: Henk reads that account's current login by id
 and uses `<id>+<login>@users.noreply.github.com` on GitHub and
-`<id>-<username>@users.noreply.gitlab.com` on GitLab.
+`<id>-<username>@users.noreply.<host>` on GitLab, with the host of
+`[gitlab].api_url`, as for Henk's own address there.
 `commit_name` and `commit_email` in the same entry override both. A
 requester with neither gets no trailers of their own, the run notes why,
 and `henk config check` warns about it. Trailer values come only from ids

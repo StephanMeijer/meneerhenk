@@ -956,6 +956,11 @@ async fn a_requester_is_credited_by_the_username_their_id_has_now() {
         writer.user_login(79).await.is_err(),
         "a user without a username"
     );
+    assert_eq!(
+        writer.noreply_host().unwrap(),
+        "127.0.0.1",
+        "the instance's own host, for its noreply addresses"
+    );
 }
 
 #[tokio::test]

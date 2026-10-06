@@ -249,9 +249,10 @@ discord_id = 523456789012345678
 name = "Stephan"
 role = "team lead"
 # Platform user ids (not logins): an address-run commit Stephan asked for
-# credits him as <id>+<login>@users.noreply.github.com, with the login read
-# from GitHub at run time. `curl https://api.github.com/users/<login>` shows
-# the id.
+# credits him as <id>+<login>@users.noreply.github.com on GitHub, or
+# <id>-<username>@users.noreply.<host> on GitLab with the host of
+# [gitlab].api_url, with the login read from the platform at run time.
+# `curl https://api.github.com/users/<login>` shows a GitHub id.
 # github_id = 1234567
 # gitlab_id = 7654321
 # Or credit him with this name and email instead; set both or neither.

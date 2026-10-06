@@ -514,7 +514,7 @@ impl Session<'_> {
             .context("reading the requester's login")?;
         let email = match platform {
             Platform::GitHub => noreply::github(id, &login),
-            Platform::GitLab => noreply::gitlab(id, &login),
+            Platform::GitLab => noreply::gitlab(id, &login, &self.writer.noreply_host()?),
         }
         .context("the requester's noreply address")?;
         Ok(Some(
@@ -770,6 +770,9 @@ check_commands = [["true"]]
                 name: "meneer-henk[bot]".to_owned(),
                 email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
             })
+        }
+        fn noreply_host(&self) -> Result<String, PlatformError> {
+            Ok("gitlab.com".to_owned())
         }
         async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
             match id {
@@ -1860,7 +1863,7 @@ check_commands = [["true"]]
         assert_eq!(
             pushed_trailers(remote.path()).await[2..],
             [
-                "Co-authored-by: alice <77-alice@users.noreply.gitlab.com>",
+                "Co-authored-by: alice <77-alice@users.noreply.127.0.0.1>",
                 "Signed-off-by: meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>",
             ],
             "the requester by the username their gitlab_id has, never the display name"
