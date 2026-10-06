@@ -663,7 +663,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "henk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "henk-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "henk-domain",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "henk-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "henk-events"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "henk-domain",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "henk-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "henk-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "henk-mcp",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "henk-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "henk-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "henk-agent",
  "henk-domain",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "henk-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "deadpool-postgres",
