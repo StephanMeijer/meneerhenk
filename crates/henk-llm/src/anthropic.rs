@@ -45,7 +45,16 @@ impl AnthropicClient {
             json!(request.max_tokens.unwrap_or(self.config.max_tokens)),
         );
         if let Some(system) = &request.system {
-            body.insert("system".into(), json!(system));
+            if self.config.prompt_cache {
+                // A block, so it can carry the marker: the tools and the
+                // system prompt are the same on every turn of a run.
+                body.insert(
+                    "system".into(),
+                    json!([{"type": "text", "text": system, "cache_control": ephemeral()}]),
+                );
+            } else {
+                body.insert("system".into(), json!(system));
+            }
         }
         if let Some(effort) = self.config.effort {
             // Thinking models reject sampling parameters, so temperature is
@@ -55,10 +64,11 @@ impl AnthropicClient {
         } else if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
-        body.insert(
-            "messages".into(),
-            Value::Array(encode_messages(&request.messages)),
-        );
+        let mut messages = encode_messages(&request.messages);
+        if self.config.prompt_cache {
+            mark_conversation_end(&mut messages);
+        }
+        body.insert("messages".into(), Value::Array(messages));
         if !request.tools.is_empty() {
             let tools: Vec<Value> = request
                 .tools
@@ -84,6 +94,34 @@ impl AnthropicClient {
         }
         Value::Object(body)
     }
+}
+
+/// Marks the last block of the last message that may carry a cache marker
+/// (a thinking block may not), so the next turn reads the whole
+/// conversation so far from the cache.
+fn mark_conversation_end(messages: &mut [Value]) {
+    let Some(content) = messages
+        .last_mut()
+        .and_then(|m| m.get_mut("content"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let markable = content.iter_mut().rev().find(|block| {
+        !matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        )
+    });
+    if let Some(Value::Object(block)) = markable {
+        block.insert("cache_control".into(), ephemeral());
+    }
+}
+
+/// The prompt-cache marker: the 5-minute cache, which every turn of a lane
+/// refreshes well within its lifetime.
+fn ephemeral() -> Value {
+    json!({"type": "ephemeral"})
 }
 
 /// Encodes messages, merging consecutive same-role messages because the
@@ -191,18 +229,16 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
         Some("refusal") => StopReason::Refused("refusal".to_owned()),
         Some(other) => StopReason::Other(other.to_owned()),
     };
-    let usage = response
-        .get("usage")
-        .map_or_else(Usage::default, |usage| Usage {
-            input_tokens: usage
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            output_tokens: usage
-                .get("output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        });
+    let usage = response.get("usage").map_or_else(Usage::default, |usage| {
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Usage {
+            // Anthropic's input_tokens is already the uncached remainder.
+            input_tokens: count("input_tokens"),
+            output_tokens: count("output_tokens"),
+            cache_read_tokens: count("cache_read_input_tokens"),
+            cache_write_tokens: count("cache_creation_input_tokens"),
+        }
+    });
     Ok(Completion {
         message: ChatMessage {
             role: Role::Assistant,

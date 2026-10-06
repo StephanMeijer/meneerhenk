@@ -293,6 +293,15 @@ pub struct ModelFileConfig {
     /// `xhigh` or `max`. Left out, the model's own default applies.
     #[serde(default)]
     pub effort: Option<Effort>,
+    /// Prompt caching (Anthropic style only): the system prompt and the end
+    /// of the conversation are marked, so each turn reads what the last one
+    /// wrote. Set false for a proxy that rejects `cache_control`.
+    #[serde(default = "default_prompt_cache")]
+    pub prompt_cache: bool,
+}
+
+fn default_prompt_cache() -> bool {
+    true
 }
 
 fn default_max_tokens() -> u32 {
@@ -1132,6 +1141,7 @@ impl ModelFileConfig {
             retry: RetryPolicy::default(),
             max_tokens_param: self.max_tokens_param,
             effort: self.effort,
+            prompt_cache: self.prompt_cache,
         })
     }
 }

@@ -262,8 +262,7 @@ impl Agent {
                     Err(error) => break StopCause::ModelError(error),
                 },
             };
-            usage.input_tokens += completion.usage.input_tokens;
-            usage.output_tokens += completion.usage.output_tokens;
+            usage.add(&completion.usage);
             let calls: Vec<_> = completion.message.tool_calls().cloned().collect();
             self.emit(AgentEvent::ModelAnswered {
                 turn: turns,

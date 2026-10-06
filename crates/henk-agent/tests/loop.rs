@@ -30,6 +30,7 @@ fn text(text: &str) -> Result<Completion, henk_llm::LlmError> {
         usage: Usage {
             input_tokens: 10,
             output_tokens: 2,
+            ..Usage::default()
         },
     })
 }
@@ -48,6 +49,7 @@ fn call(id: &str, name: &str, arguments: Value) -> Result<Completion, henk_llm::
         usage: Usage {
             input_tokens: 10,
             output_tokens: 5,
+            ..Usage::default()
         },
     })
 }

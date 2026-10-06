@@ -42,9 +42,11 @@ tasks under an issue. The `gitlab-write` server needs the work item tools
 in `GITLAB_TOOLS`: `get_work_item`, `update_work_item`, `create_work_item`,
 `convert_work_item_type` and `create_work_item_note` (see
 `henk.example.toml`). Lanes are kept honest and cheap by three things in
-`henk-agent`: old tool results are replaced by one-line stubs once the
-conversation passes a size budget (`review.max_conversation_chars` and
-`review.keep_recent_turns`), a lane that ends without opening every
+`henk-agent`: once the conversation passes a size budget
+(`review.max_conversation_chars` and `review.keep_recent_turns`), old tool
+results are replaced by one-line stubs until it is well under it, so the
+history stays append-only for several turns and the provider's prompt cache
+keeps paying (Anthropic models are marked for caching), a lane that ends without opening every
 changed file is asked once to look at them, and an answer cut off at the
 output cap gets one chance to post what it was sure of. Code search is
 withheld for a repository GitHub does not index.

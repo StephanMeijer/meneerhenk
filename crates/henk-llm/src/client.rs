@@ -101,6 +101,10 @@ pub struct ModelConfig {
     /// Anthropic style only: thinking effort. `None` sends neither
     /// `thinking` nor `output_config`, leaving the model's default.
     pub effort: Option<Effort>,
+    /// Anthropic style only: mark the system prompt and the end of the
+    /// conversation for prompt caching. Off for a proxy that rejects
+    /// `cache_control`.
+    pub prompt_cache: bool,
 }
 
 impl ModelConfig {

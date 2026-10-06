@@ -111,6 +111,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 4,
+                ..Usage::default()
             },
             stop: StopCause::EndTurn,
             messages: vec![ChatMessage::user("go"), ChatMessage::assistant("done")],

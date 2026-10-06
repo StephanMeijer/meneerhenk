@@ -213,7 +213,13 @@ that ends without opening every changed file is asked once to look at them,
 and the conversation is kept under a size budget by stubbing old tool
 results (`henk_agent::compact`). Stubbing edits earlier turns, and current
 Claude models refuse a thinking block replayed after its history changed, so
-a compaction that stubs anything also drops every thinking block.
+a compaction that stubs anything also drops every thinking block. An edit
+also restarts the provider's prefix cache, so once over budget compaction
+stubs down to a low-water mark (75% of the budget): the history then stays
+append-only for several turns between edits. On an Anthropic model with
+`prompt_cache` (the default), the system prompt and the end of the
+conversation carry a cache marker, so each turn reads what the last one
+wrote; the run timeline records how much of the prompt came from the cache.
 Findings are posted inside the loop by `post_finding`, not collected until the
 end (§3.2). With `[review.fact_check]`, every post, rewrite and withdrawal
 first passes a check session on another model (`crate::fact_check`): a

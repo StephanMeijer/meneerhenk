@@ -145,7 +145,9 @@ pub async fn run_session(
             &spec.name,
             status,
             u64::from(outcome.turns),
-            outcome.usage.input_tokens,
+            // The whole prompt, cached or not, so lanes stay comparable
+            // with runs from before caching.
+            outcome.usage.prompt_tokens(),
             outcome.usage.output_tokens,
             error.as_deref(),
         )
@@ -169,6 +171,22 @@ pub async fn run_session(
             ),
         )
         .await;
+    let usage = &outcome.usage;
+    if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
+        let _ = store
+            .event(
+                run,
+                "info",
+                &format!(
+                    "{}: cache: {} of {} prompt tokens read from cache, {} written",
+                    spec.name,
+                    usage.cache_read_tokens,
+                    usage.prompt_tokens(),
+                    usage.cache_write_tokens
+                ),
+            )
+            .await;
+    }
     info!(turns = outcome.turns, ?status, "session ended");
     SessionOutcome {
         stop: outcome.stop,
@@ -246,6 +264,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 12,
                 output_tokens: 3,
+                ..Usage::default()
             },
         })
     }

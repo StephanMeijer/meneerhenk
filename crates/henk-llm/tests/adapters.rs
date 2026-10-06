@@ -40,6 +40,7 @@ fn config(provider: Provider, base_url: &str) -> ModelConfig {
         },
         max_tokens_param: MaxTokensParam::MaxTokens,
         effort: None,
+        prompt_cache: true,
     }
 }
 
@@ -421,7 +422,11 @@ fn anthropic_encodes_system_top_level_and_echoes_thinking() {
         temperature: None,
     };
     let body = client.body(&request);
-    assert_eq!(body["system"], "You are Henk.");
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "You are Henk.", "cache_control": {"type": "ephemeral"}}]),
+        "the frozen prefix carries a cache marker"
+    );
     assert_eq!(body["max_tokens"], 256);
     assert_eq!(body["tool_choice"], json!({"type": "any"}));
     let messages = body["messages"].as_array().unwrap();
@@ -436,7 +441,71 @@ fn anthropic_encodes_system_top_level_and_echoes_thinking() {
     assert_eq!(messages[2]["content"][0]["type"], "tool_result");
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_1");
     assert_eq!(messages[2]["content"][0]["is_error"], false);
+    assert_eq!(
+        messages[2]["content"][0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "the end of the conversation carries the moving marker"
+    );
+    assert!(messages[1]["content"][0].get("cache_control").is_none());
     assert!(body["tools"][0]["input_schema"].get("$schema").is_none());
+}
+
+#[test]
+fn the_cache_marker_never_lands_on_a_thinking_block_and_can_be_switched_off() {
+    let mut messages = conversation();
+    messages.truncate(2); // ends on the assistant turn: thinking, then tool_use
+    if let Some(last) = messages.last_mut() {
+        last.blocks.push(Block::Opaque(
+            json!({"type": "thinking", "thinking": "", "signature": "s2"}),
+        ));
+    }
+    let request = CompletionRequest {
+        system: Some("You are Henk.".to_owned()),
+        messages,
+        ..CompletionRequest::default()
+    };
+    let client =
+        anthropic::AnthropicClient::new(config(Provider::Anthropic, "https://x.test")).unwrap();
+    let body = client.body(&request);
+    let last = body["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    let marked: Vec<&str> = last
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b.get("cache_control").is_some())
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(marked, ["tool_use"], "the last block that may carry it");
+
+    let mut off = config(Provider::Anthropic, "https://x.test");
+    off.prompt_cache = false;
+    let body = anthropic::AnthropicClient::new(off).unwrap().body(&request);
+    assert_eq!(body["system"], "You are Henk.");
+    assert!(!body.to_string().contains("cache_control"));
+}
+
+#[test]
+fn cache_usage_is_read_from_both_providers() {
+    let anthropic = anthropic::decode(&json!({
+        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+        "usage": {"input_tokens": 40, "output_tokens": 5,
+                  "cache_read_input_tokens": 30_000, "cache_creation_input_tokens": 1_200}
+    }))
+    .unwrap();
+    assert_eq!(anthropic.usage.input_tokens, 40, "the uncached remainder");
+    assert_eq!(anthropic.usage.cache_read_tokens, 30_000);
+    assert_eq!(anthropic.usage.cache_write_tokens, 1_200);
+    assert_eq!(anthropic.usage.prompt_tokens(), 31_240);
+
+    let openai = openai::decode(&json!({
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 31_240, "completion_tokens": 5,
+                  "prompt_tokens_details": {"cached_tokens": 30_000}}
+    }))
+    .unwrap();
+    assert_eq!(openai.usage.input_tokens, 1_240, "the uncached remainder");
+    assert_eq!(openai.usage.cache_read_tokens, 30_000);
+    assert_eq!(openai.usage.prompt_tokens(), 31_240);
 }
 
 #[test]
