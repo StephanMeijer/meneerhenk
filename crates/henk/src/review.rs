@@ -131,7 +131,7 @@ pub async fn run_review(
         })
         .await?;
     info!(run = %run, commit = %commit.short(), "review started");
-    let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
+    let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
 
     if let Some((comment_id, is_review_comment)) = &request.acknowledge
         && let Err(error) = writer
@@ -950,6 +950,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 github: None,
                 gitlab: None,
                 shutdown: CancellationToken::new(),
+                live_runs: crate::liveness::LiveRuns::default(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
                 test_address_writer: None,
@@ -1187,6 +1188,93 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert_eq!(
             f.app.store.lanes(&live).await.unwrap()[0].status,
             LaneStatus::Running
+        );
+    }
+
+    /// #47: a process that died and came back within the staleness window
+    /// finds its old run still fresh at start. The serving reaper closes it
+    /// on a later pass, with its check.
+    #[tokio::test]
+    async fn a_quick_restart_is_reaped_while_serving() {
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done()])).await;
+        let crashed = RunId::parse("r-crashed").unwrap();
+        f.app.store.create_run(&new_run(&crashed)).await.unwrap();
+        f.app.store.set_check(&crashed, "4242").await.unwrap();
+        f.app
+            .store
+            .start_lane(&crashed, "lane-a", "m")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::liveness::reap_orphans(&f.app).await,
+            0,
+            "at restart the heartbeat is still fresh"
+        );
+
+        let writer = Arc::clone(&f.writer);
+        let app = Arc::new(f.app);
+        let cancel = CancellationToken::new();
+        let reaper = tokio::spawn(crate::liveness::reap_every(
+            Arc::clone(&app),
+            cancel.clone(),
+            Duration::from_millis(10),
+            Duration::ZERO,
+        ));
+        let mut status = RunStatus::Running;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&crashed).await.unwrap().unwrap().status;
+            if status != RunStatus::Running {
+                break;
+            }
+        }
+        cancel.cancel();
+        reaper.await.unwrap();
+
+        assert_eq!(status, RunStatus::Failed);
+        let record = app.store.run(&crashed).await.unwrap().unwrap();
+        assert_eq!(
+            record.error.as_deref(),
+            Some("interrupted: the process ended")
+        );
+        assert_eq!(
+            app.store.lanes(&crashed).await.unwrap()[0].status,
+            LaneStatus::Dropped
+        );
+        assert_eq!(
+            *writer.finished_checks.lock().unwrap(),
+            [Some("4242".to_owned())]
+        );
+        assert_eq!(
+            writer.finished.lock().unwrap()[0].headline(),
+            "Review interrupted."
+        );
+    }
+
+    /// #47: a periodic reaper must not close a run this process is still
+    /// working on, even when its heartbeat lags (a store that was
+    /// unreachable for a while). Once the run is let go, it may.
+    #[tokio::test]
+    async fn the_reaper_leaves_a_run_this_process_is_working_on() {
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done()])).await;
+        let run = RunId::parse("r-working").unwrap();
+        f.app.store.create_run(&new_run(&run)).await.unwrap();
+        let alive = KeepAlive::start(Arc::clone(&f.app.store), &f.app.live_runs, run.clone());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let cutoff = time::OffsetDateTime::now_utc();
+
+        assert_eq!(crate::liveness::reap_silent_since(&f.app, cutoff).await, 0);
+        assert_eq!(
+            f.app.store.run(&run).await.unwrap().unwrap().status,
+            RunStatus::Running
+        );
+
+        drop(alive);
+        assert_eq!(crate::liveness::reap_silent_since(&f.app, cutoff).await, 1);
+        assert_eq!(
+            f.app.store.run(&run).await.unwrap().unwrap().status,
+            RunStatus::Failed
         );
     }
 

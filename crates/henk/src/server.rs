@@ -137,10 +137,12 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 ///
 /// Returns an error when the bind address is unusable.
 pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
-    crate::liveness::reap_orphans(&app).await;
     let bind = app.settings.server.bind.clone();
     let composed = compose(&app);
     let cancel = CancellationToken::new();
+    // Reaps at once, then every minute: a crash followed by a restart
+    // within the staleness window is closed too (#47).
+    let reaper = crate::liveness::spawn_reaper(Arc::clone(&app), cancel.clone());
     let mut hook_tasks = tokio::task::JoinSet::new();
     for hook in composed.hooks {
         info!(hook = hook.name(), "hook ready");
@@ -162,6 +164,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     }
     cancel.cancel();
     while hook_tasks.join_next().await.is_some() {}
+    let _ = reaper.await;
     info!("stopped");
     Ok(())
 }

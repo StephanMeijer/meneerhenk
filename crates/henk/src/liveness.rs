@@ -1,9 +1,12 @@
 //! Runs a dead process left behind (#7). A running review or plan
-//! refreshes its heartbeat; on start, Henk closes every run whose heartbeat
-//! stopped, and the review's check with it. A run another live process is
-//! working on keeps a fresh heartbeat and is never touched.
+//! refreshes its heartbeat; on start, and every minute while serving, Henk
+//! closes every run whose heartbeat stopped, and the review's check with it.
+//! A run another live process is working on keeps a fresh heartbeat and is
+//! never touched, and a run this process is working on is never touched
+//! even when its heartbeat lags (#47).
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use henk_domain::allowlist::RepoRef;
@@ -12,6 +15,7 @@ use henk_domain::run::{RunId, RunKind};
 use henk_platform::{ReviewHandle, ReviewTarget};
 use henk_store::{RunRecord, RunStatus, RunStore};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::app::App;
@@ -23,16 +27,58 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 /// six missed heartbeats.
 const STALE_AFTER: Duration = Duration::from_mins(3);
 
+/// How often a serving process looks for orphaned runs. A process that
+/// died and was restarted within [`STALE_AFTER`] finds its old run still
+/// fresh at start; this catches it soon after (#47).
+const REAP_EVERY: Duration = Duration::from_mins(1);
+
 /// What an orphaned run and its lanes end with.
 const REAPED: &str = "interrupted: the process ended";
 
-/// Keeps a run's heartbeat fresh until dropped.
-pub struct KeepAlive(JoinHandle<()>);
+/// The runs this process is working on. The reaper never closes one of
+/// them, even when its heartbeat lags behind (a store that was unreachable
+/// for a while), since the run is plainly not orphaned.
+#[derive(Debug, Default, Clone)]
+pub struct LiveRuns(Arc<Mutex<HashSet<RunId>>>);
+
+impl LiveRuns {
+    fn insert(&self, run: RunId) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(run);
+    }
+
+    fn remove(&self, run: &RunId) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(run);
+    }
+
+    fn contains(&self, run: &RunId) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(run)
+    }
+}
+
+/// Keeps a run's heartbeat fresh, and the run in [`LiveRuns`], until
+/// dropped.
+pub struct KeepAlive {
+    beat: JoinHandle<()>,
+    live: LiveRuns,
+    run: RunId,
+}
 
 impl KeepAlive {
     /// Starts the heartbeat of `run`. `create_run` already set the first.
-    pub fn start(store: Arc<dyn RunStore>, run: RunId) -> Self {
-        Self(tokio::spawn(async move {
+    pub fn start(store: Arc<dyn RunStore>, live: &LiveRuns, run: RunId) -> Self {
+        live.insert(run.clone());
+        let beating = run.clone();
+        let beat = tokio::spawn(async move {
+            let run = beating;
             let mut every = tokio::time::interval(HEARTBEAT_EVERY);
             every.tick().await;
             loop {
@@ -41,13 +87,44 @@ impl KeepAlive {
                     warn!(%error, run = %run, "could not record a heartbeat");
                 }
             }
-        }))
+        });
+        Self {
+            beat,
+            live: live.clone(),
+            run,
+        }
     }
 }
 
 impl Drop for KeepAlive {
     fn drop(&mut self) {
-        self.0.abort();
+        self.beat.abort();
+        self.live.remove(&self.run);
+    }
+}
+
+/// Reaps orphaned runs now and every [`REAP_EVERY`] until `cancel`.
+pub fn spawn_reaper(app: Arc<App>, cancel: CancellationToken) -> JoinHandle<()> {
+    tokio::spawn(reap_every(app, cancel, REAP_EVERY, STALE_AFTER))
+}
+
+/// The reaper's loop: every `every`, closes the runs silent for longer than
+/// `stale_after`. The first pass is immediate.
+pub(crate) async fn reap_every(
+    app: Arc<App>,
+    cancel: CancellationToken,
+    every: Duration,
+    stale_after: Duration,
+) {
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = ticks.tick() => {
+                reap_silent_since(&app, time::OffsetDateTime::now_utc() - stale_after).await;
+            }
+        }
     }
 }
 
@@ -68,6 +145,9 @@ pub(crate) async fn reap_silent_since(app: &App, cutoff: time::OffsetDateTime) -
     };
     let mut reaped = 0;
     for run in orphans {
+        if app.live_runs.contains(&run.id) {
+            continue;
+        }
         let closed = match app.store.drop_running_lanes(&run.id, REAPED).await {
             Ok(()) => {
                 app.store
