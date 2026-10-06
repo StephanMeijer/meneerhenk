@@ -537,7 +537,8 @@ async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
         writer.commit_url(&target(), "abc"),
         format!("{}/docspec/app/commit/abc", server.uri())
     );
-    assert!(writer.git_token().await.unwrap().is_some());
+    let credential = writer.git_credential().await.unwrap().unwrap();
+    assert_eq!(credential.username, "x-access-token");
 
     let thread = OpenThread {
         thread_id: "PRRT_1".to_owned(),

@@ -2,10 +2,11 @@
 
 use henk_domain::address::PushFacts;
 use henk_domain::review::CommitSha;
-use secrecy::SecretString;
 use serde_json::Value;
 
-use crate::address::{AddressWriter, CommitIdentity, OpenThread, PullFacts, ThreadNote};
+use crate::address::{
+    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, ThreadNote,
+};
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
 use crate::writer::{PlatformWriter as _, PostedComment, ReviewTarget};
@@ -106,8 +107,8 @@ impl AddressWriter for GitHubWriter {
         })
     }
 
-    async fn git_token(&self) -> Result<Option<SecretString>, PlatformError> {
-        Ok(Some(self.api().git_token().await?))
+    async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
+        Ok(Some(GitCredential::github(self.api().git_token().await?)))
     }
 
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {

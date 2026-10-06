@@ -18,7 +18,7 @@ use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, OpenThread};
+use henk_platform::address::{AddressWriter, GitCredential, OpenThread};
 use henk_session::{SessionSpec, model_id, run_session};
 use henk_store::{NewRun, RunStatus};
 use tokio_util::sync::CancellationToken;
@@ -224,12 +224,12 @@ impl Session<'_> {
             return Ok(report);
         }
 
-        let token = self
+        let credential = self
             .writer
-            .git_token()
+            .git_credential()
             .await
-            .context("getting a token for git")?;
-        let workspace = self.import(facts, token.clone()).await?;
+            .context("getting a credential for git")?;
+        let workspace = self.import(facts, credential.clone()).await?;
         // Closed on every path; a run future that is dropped instead drops
         // the workspace, and every backend destroys itself then too.
         let worked = self.in_workspace(&workspace, &threads, cancel).await;
@@ -244,10 +244,15 @@ impl Session<'_> {
             // reaches it, and it is what Henk commits and pushes.
             let dir = ScratchDir::new(&format!("henk-address-{}-push", self.run))
                 .context("making the checkout directory")?;
-            let checkout =
-                Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
-                    .await
-                    .context("checking out the pull request to push")?;
+            let checkout = Checkout::clone_at(
+                dir,
+                &facts.remote,
+                &facts.push.head_ref,
+                &facts.head,
+                credential,
+            )
+            .await
+            .context("checking out the pull request to push")?;
             Some(
                 self.commit_and_push(&checkout, facts, &threads, &settled, &changes)
                     .await?,
@@ -265,14 +270,19 @@ impl Session<'_> {
     async fn import(
         &self,
         facts: &henk_platform::address::PullFacts,
-        token: Option<secrecy::SecretString>,
+        credential: Option<GitCredential>,
     ) -> anyhow::Result<Arc<dyn Workspace>> {
         let dir = ScratchDir::new(&format!("henk-address-{}", self.run))
             .context("making the checkout directory")?;
-        let checkout =
-            Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
-                .await
-                .context("checking out the pull request")?;
+        let checkout = Checkout::clone_at(
+            dir,
+            &facts.remote,
+            &facts.push.head_ref,
+            &facts.head,
+            credential,
+        )
+        .await
+        .context("checking out the pull request")?;
         let repo = self.request.target.repo.path();
         let profile = self.app.settings.workspace.profile_for(&repo);
         let opened = self
@@ -597,7 +607,8 @@ mod tests {
         clippy::panic,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::too_many_lines
     )]
 
     use std::collections::BTreeMap;
@@ -611,7 +622,7 @@ mod tests {
         Block, ChatMessage, Completion, ModelClient, Role, StopReason, ToolArguments, ToolCall,
         Usage,
     };
-    use henk_platform::address::{CommitIdentity, PullFacts, ThreadNote};
+    use henk_platform::address::{CommitIdentity, GitCredential, PullFacts, ThreadNote};
     use henk_platform::{PlatformError, PostedComment};
     use secrecy::SecretString;
     use serde_json::{Value, json};
@@ -633,6 +644,7 @@ team_lead_ids = [3]
 address = "henk@example.com"
 [allowlist]
 github_owners = ["o"]
+gitlab_projects = ["g/p"]
 [models.m]
 provider = "open_ai"
 base_url = "https://x.test/v1"
@@ -668,7 +680,7 @@ check_commands = [["true"]]
         async fn open_threads(&self, _: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
             Ok(self.threads.clone())
         }
-        async fn git_token(&self) -> Result<Option<SecretString>, PlatformError> {
+        async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
             Ok(None)
         }
         async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {
@@ -730,12 +742,30 @@ check_commands = [["true"]]
         }
     }
 
-    fn facts(remote: &std::path::Path, head: &CommitSha) -> PullFacts {
+    /// Every #35 case runs on both platforms: the run does not know which.
+    const PLATFORMS: [Platform; 2] = [Platform::GitHub, Platform::GitLab];
+
+    fn repo(platform: Platform) -> &'static str {
+        match platform {
+            Platform::GitHub => "o/r",
+            Platform::GitLab => "g/p",
+        }
+    }
+
+    /// A short tag for names that must differ per platform.
+    fn tag(platform: Platform) -> &'static str {
+        match platform {
+            Platform::GitHub => "gh",
+            Platform::GitLab => "gl",
+        }
+    }
+
+    fn facts(platform: Platform, remote: &std::path::Path, head: &CommitSha) -> PullFacts {
         PullFacts {
             push: PushFacts {
                 open: true,
-                head_repo: Some("o/r".to_owned()),
-                base_repo: "o/r".to_owned(),
+                head_repo: Some(repo(platform).to_owned()),
+                base_repo: repo(platform).to_owned(),
                 head_ref: "feature".to_owned(),
                 default_branch: "main".to_owned(),
                 head_protected: false,
@@ -818,10 +848,10 @@ check_commands = [["true"]]
         provider
     }
 
-    fn request(run: &str) -> AddressRequest {
+    fn request(platform: Platform, run: &str) -> AddressRequest {
         AddressRequest {
             target: ReviewTarget {
-                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+                repo: RepoRef::parse(platform, repo(platform)).unwrap(),
                 number: 7,
             },
             note: None,
@@ -830,9 +860,14 @@ check_commands = [["true"]]
         }
     }
 
-    fn hub(remote: &std::path::Path, head: &CommitSha, later: Option<PullFacts>) -> Arc<FakeHub> {
+    fn hub(
+        platform: Platform,
+        remote: &std::path::Path,
+        head: &CommitSha,
+        later: Option<PullFacts>,
+    ) -> Arc<FakeHub> {
         Arc::new(FakeHub {
-            facts: facts(remote, head),
+            facts: facts(platform, remote, head),
             later,
             reads: AtomicUsize::new(0),
             threads: vec![thread("T1", true), thread("T2", false)],
@@ -878,10 +913,15 @@ check_commands = [["true"]]
         );
     }
 
-    async fn fix_is_pushed(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
-        let run = format!("r-addr-1-{backend}");
-        let (remote, head) = bare_remote(&format!("henk-address-fix-{backend}")).await;
-        let hub = hub(remote.path(), &head, None);
+    async fn fix_is_pushed(
+        provider: Arc<dyn WorkspaceProvider>,
+        backend: &str,
+        platform: Platform,
+    ) {
+        let run = format!("r-addr-1-{backend}-{}", tag(platform));
+        let (remote, head) =
+            bare_remote(&format!("henk-address-fix-{backend}-{}", tag(platform))).await;
+        let hub = hub(platform, remote.path(), &head, None);
         let app = app_on(
             Arc::clone(&hub),
             vec![
@@ -899,7 +939,7 @@ check_commands = [["true"]]
             provider,
             CONFIG,
         );
-        let report = run_address(&app, request(&run), CancellationToken::new())
+        let report = run_address(&app, request(platform, &run), CancellationToken::new())
             .await
             .unwrap();
         let sha = report.commit.clone().unwrap();
@@ -925,7 +965,8 @@ check_commands = [["true"]]
         assert_eq!(replies[0].0, "T1");
         assert!(
             replies[0].1.starts_with(&format!(
-                "Fixed in https://github.example/o/r/commit/{sha}: Set x to 2."
+                "Fixed in https://github.example/{}/commit/{sha}: Set x to 2.",
+                repo(platform)
             )),
             "{}",
             replies[0].1
@@ -959,6 +1000,7 @@ check_commands = [["true"]]
             .unwrap();
         assert_eq!(record.status, RunStatus::Finished);
         assert_eq!(record.kind, RunKind::Address);
+        assert_eq!(record.platform, platform);
         let execs = execs(&app, &run).await;
         assert_eq!(execs.len(), 1, "one exec event per check: {execs:?}");
         assert!(execs[0].starts_with("exec true exit 0 in "), "{execs:?}");
@@ -966,20 +1008,32 @@ check_commands = [["true"]]
 
     #[tokio::test]
     async fn a_fix_is_pushed_as_one_commit_and_every_thread_hears_how_it_ended() {
-        fix_is_pushed(Arc::new(HostProvider), "host").await;
+        for platform in PLATFORMS {
+            fix_is_pushed(Arc::new(HostProvider), "host", platform).await;
+        }
     }
 
     #[tokio::test]
     async fn a_fix_is_pushed_as_one_commit_on_the_fake_backend() {
-        let provider = fake();
-        fix_is_pushed(Arc::new(provider.clone()), "fake").await;
-        assert!(provider.closed(), "the workspace is destroyed on success");
+        for platform in PLATFORMS {
+            let provider = fake();
+            fix_is_pushed(Arc::new(provider.clone()), "fake", platform).await;
+            assert!(provider.closed(), "the workspace is destroyed on success");
+        }
     }
 
-    async fn no_change_no_push(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
-        let run = format!("r-addr-2-{backend}");
-        let (remote, head) = bare_remote(&format!("henk-address-nochange-{backend}")).await;
-        let hub = hub(remote.path(), &head, None);
+    async fn no_change_no_push(
+        provider: Arc<dyn WorkspaceProvider>,
+        backend: &str,
+        platform: Platform,
+    ) {
+        let run = format!("r-addr-2-{backend}-{}", tag(platform));
+        let (remote, head) = bare_remote(&format!(
+            "henk-address-nochange-{backend}-{}",
+            tag(platform)
+        ))
+        .await;
+        let hub = hub(platform, remote.path(), &head, None);
         let app = app_on(
             Arc::clone(&hub),
             vec![
@@ -996,7 +1050,7 @@ check_commands = [["true"]]
             provider,
             CONFIG,
         );
-        let report = run_address(&app, request(&run), CancellationToken::new())
+        let report = run_address(&app, request(platform, &run), CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(report.commit, None);
@@ -1024,22 +1078,27 @@ check_commands = [["true"]]
 
     #[tokio::test]
     async fn without_a_change_nothing_is_pushed_and_a_claimed_fix_is_not_believed() {
-        no_change_no_push(Arc::new(HostProvider), "host").await;
+        for platform in PLATFORMS {
+            no_change_no_push(Arc::new(HostProvider), "host", platform).await;
+        }
     }
 
     #[tokio::test]
     async fn without_a_change_nothing_is_pushed_on_the_fake_backend() {
-        let provider = fake();
-        no_change_no_push(Arc::new(provider.clone()), "fake").await;
-        assert!(provider.closed());
+        for platform in PLATFORMS {
+            let provider = fake();
+            no_change_no_push(Arc::new(provider.clone()), "fake", platform).await;
+            assert!(provider.closed());
+        }
     }
 
-    async fn branch_moved(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
-        let run = format!("r-addr-3-{backend}");
-        let (remote, head) = bare_remote(&format!("henk-address-moved-{backend}")).await;
-        let mut later = facts(remote.path(), &head);
+    async fn branch_moved(provider: Arc<dyn WorkspaceProvider>, backend: &str, platform: Platform) {
+        let run = format!("r-addr-3-{backend}-{}", tag(platform));
+        let (remote, head) =
+            bare_remote(&format!("henk-address-moved-{backend}-{}", tag(platform))).await;
+        let mut later = facts(platform, remote.path(), &head);
         later.head = CommitSha::parse("1111111111111111111111111111111111111111").unwrap();
-        let hub = hub(remote.path(), &head, Some(later));
+        let hub = hub(platform, remote.path(), &head, Some(later));
         let app = app_on(
             Arc::clone(&hub),
             vec![
@@ -1053,7 +1112,7 @@ check_commands = [["true"]]
             provider,
             CONFIG,
         );
-        let error = run_address(&app, request(&run), CancellationToken::new())
+        let error = run_address(&app, request(platform, &run), CancellationToken::new())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("the branch moved"), "{error}");
@@ -1074,14 +1133,18 @@ check_commands = [["true"]]
 
     #[tokio::test]
     async fn a_branch_that_moved_while_henk_worked_gets_nothing_pushed() {
-        branch_moved(Arc::new(HostProvider), "host").await;
+        for platform in PLATFORMS {
+            branch_moved(Arc::new(HostProvider), "host", platform).await;
+        }
     }
 
     #[tokio::test]
     async fn a_branch_that_moved_gets_nothing_pushed_on_the_fake_backend() {
-        let provider = fake();
-        branch_moved(Arc::new(provider.clone()), "fake").await;
-        assert!(provider.closed(), "the workspace is destroyed on failure");
+        for platform in PLATFORMS {
+            let provider = fake();
+            branch_moved(Arc::new(provider.clone()), "fake", platform).await;
+            assert!(provider.closed(), "the workspace is destroyed on failure");
+        }
     }
 
     #[tokio::test]
@@ -1126,7 +1189,7 @@ check_commands = [["true"]]
         ] {
             let run = format!("r-addr-5-{case}");
             let (remote, head) = bare_remote(&format!("henk-address-refused-{case}")).await;
-            let hub = hub(remote.path(), &head, None);
+            let hub = hub(Platform::GitHub, remote.path(), &head, None);
             let mut provider = fake();
             provider.inject = inject;
             let app = app_on(
@@ -1142,9 +1205,13 @@ check_commands = [["true"]]
                 Arc::new(provider.clone()),
                 CONFIG,
             );
-            let error = run_address(&app, request(&run), CancellationToken::new())
-                .await
-                .unwrap_err();
+            let error = run_address(
+                &app,
+                request(Platform::GitHub, &run),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
             assert!(error.to_string().contains(why), "{case}: {error}");
             assert_eq!(
                 remote_feature(remote.path()).await.0,
@@ -1168,7 +1235,7 @@ check_commands = [["true"]]
             ),
         );
         let (remote, head) = bare_remote("henk-address-clean").await;
-        let hub = hub(remote.path(), &head, None);
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
         let app = app_on(
             Arc::clone(&hub),
             vec![
@@ -1182,9 +1249,13 @@ check_commands = [["true"]]
             Arc::new(HostProvider),
             &config,
         );
-        let report = run_address(&app, request("r-addr-6"), CancellationToken::new())
-            .await
-            .unwrap();
+        let report = run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-6"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let sha = report.commit.unwrap();
         assert_eq!(remote_feature(remote.path()).await.0, sha);
         // What the check left in the tree is part of the changeset and its
@@ -1230,7 +1301,7 @@ check_commands = [["true"]]
     #[tokio::test]
     async fn a_cancelled_run_destroys_its_workspace_and_says_so() {
         let (remote, head) = bare_remote("henk-address-cancel").await;
-        let hub = hub(remote.path(), &head, None);
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
         let asked = Arc::new(tokio::sync::Notify::new());
         let provider = fake();
         let app = app_with_model(
@@ -1245,8 +1316,10 @@ check_commands = [["true"]]
             assert!(!provider.closed(), "open while the model works");
             cancel.cancel();
         };
-        let (result, ()) =
-            tokio::join!(run_address(&app, request("r-addr-7"), cancel.clone()), stop);
+        let (result, ()) = tokio::join!(
+            run_address(&app, request(Platform::GitHub, "r-addr-7"), cancel.clone()),
+            stop
+        );
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(provider.closed());
         assert_failed_visibly(&hub, "cancelled");
@@ -1255,7 +1328,7 @@ check_commands = [["true"]]
     #[tokio::test]
     async fn a_dropped_run_destroys_its_workspace() {
         let (remote, head) = bare_remote("henk-address-dropped").await;
-        let hub = hub(remote.path(), &head, None);
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
         let asked = Arc::new(tokio::sync::Notify::new());
         let provider = fake();
         let app = app_with_model(
@@ -1265,7 +1338,7 @@ check_commands = [["true"]]
             CONFIG,
         );
         tokio::select! {
-            _ = run_address(&app, request("r-addr-8"), CancellationToken::new()) => {
+            _ = run_address(&app, request(Platform::GitHub, "r-addr-8"), CancellationToken::new()) => {
                 panic!("the stalled run finished");
             }
             () = asked.notified() => {}
@@ -1274,55 +1347,270 @@ check_commands = [["true"]]
     }
 
     #[tokio::test]
-    async fn a_fork_or_protected_branch_is_refused_before_anything_runs() {
-        let (remote, head) = bare_remote("henk-address-refused").await;
+    async fn a_fork_protected_or_default_branch_or_closed_pull_is_refused_before_anything_runs() {
+        for platform in PLATFORMS {
+            refused(platform).await;
+        }
+    }
+
+    async fn refused(platform: Platform) {
+        let (remote, head) = bare_remote(&format!("henk-address-refused-{}", tag(platform))).await;
+        let base = || facts(platform, remote.path(), &head);
         for (case, change) in [
             (
                 "fork",
                 PushFacts {
                     head_repo: Some("fork/r".to_owned()),
-                    ..facts(remote.path(), &head).push
+                    ..base().push
+                },
+            ),
+            (
+                "gone",
+                PushFacts {
+                    head_repo: None,
+                    ..base().push
                 },
             ),
             (
                 "protected",
                 PushFacts {
                     head_protected: true,
-                    ..facts(remote.path(), &head).push
+                    ..base().push
+                },
+            ),
+            (
+                "default",
+                PushFacts {
+                    default_branch: "feature".to_owned(),
+                    ..base().push
                 },
             ),
             (
                 "closed",
                 PushFacts {
                     open: false,
-                    ..facts(remote.path(), &head).push
+                    ..base().push
                 },
             ),
         ] {
             let hub = Arc::new(FakeHub {
                 facts: PullFacts {
                     push: change,
-                    ..facts(remote.path(), &head)
+                    ..base()
                 },
-                ..Arc::into_inner(hub(remote.path(), &head, None)).unwrap()
+                ..Arc::into_inner(hub(platform, remote.path(), &head, None)).unwrap()
             });
             let app = app(Arc::clone(&hub), vec![]);
-            let error = run_address(&app, request("r-addr-4"), CancellationToken::new())
+            let run = format!("r-addr-4-{}", tag(platform));
+            let error = run_address(&app, request(platform, &run), CancellationToken::new())
                 .await
                 .unwrap_err();
             assert!(
                 error.to_string().starts_with("I will not push"),
-                "{case}: {error}"
+                "{platform:?} {case}: {error}"
             );
             assert!(hub.comments.lock().unwrap().is_empty(), "{case}");
             assert!(
                 app.store
-                    .run(&RunId::parse("r-addr-4").unwrap())
+                    .run(&RunId::parse(&run).unwrap())
                     .await
                     .unwrap()
                     .is_none(),
                 "{case}: no run"
             );
+        }
+    }
+
+    const TOKEN: &str = "glpat-never-shown";
+
+    /// GitLab's REST API for merge request g/p!7, project 11, whose branch
+    /// `feature` lives at `remote`. Only a request with the token in its
+    /// header gets an answer.
+    async fn gitlab_rest(remote: &std::path::Path, head: &CommitSha) -> wiremock::MockServer {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (at, body) in [
+            (
+                "/api/v4/projects/g%2Fp/merge_requests/7",
+                json!({"iid": 7, "state": "opened", "sha": head.as_str(), "source_branch": "feature",
+                       "target_branch": "main", "source_project_id": 11, "target_project_id": 11}),
+            ),
+            (
+                "/api/v4/projects/g%2Fp",
+                json!({"id": 11, "path_with_namespace": "g/p", "default_branch": "main",
+                       "http_url_to_repo": remote.to_string_lossy()}),
+            ),
+            (
+                "/api/v4/projects/11/repository/branches/feature",
+                json!({"name": "feature", "protected": false, "default": false}),
+            ),
+            ("/api/v4/user", json!({"id": 42, "username": "meneerhenk"})),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(at))
+                .and(header("PRIVATE-TOKEN", TOKEN))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    /// The write-mode `gitlab-mcp` session: Henk's finding `dh` (account 42)
+    /// and Alice's `dp`, both on `src/a.rs`.
+    fn gitlab_mcp(head: &CommitSha) -> henk_mcp::testing::FakeServer {
+        use henk_mcp::testing::{FakeServer, json_result};
+
+        let head = head.as_str().to_owned();
+        let tools = [
+            "get_merge_request",
+            "mr_discussions",
+            "create_merge_request_discussion_note",
+            "create_merge_request_note",
+            "resolve_merge_request_thread",
+        ]
+        .iter()
+        .map(|name| FakeServer::tool(name, "", &[]))
+        .collect();
+        FakeServer::new(tools, move |name, args| match name {
+            "get_merge_request" => {
+                json_result(&json!({"iid": "7", "state": "opened", "sha": head}))
+            }
+            "mr_discussions" if args["page"] == json!(1) => json_result(&json!({"items": [
+                {"id": "dh", "individual_note": false, "notes": [
+                    {"id": "11", "body": "x should be 2.", "author": {"id": "42", "username": "meneerhenk"},
+                     "resolvable": true, "resolved": false,
+                     "position": {"new_path": "src/a.rs", "new_line": 2, "head_sha": head}}
+                ]},
+                {"id": "dp", "individual_note": false, "notes": [
+                    {"id": "12", "body": "Why x at all?", "author": {"id": "7", "username": "alice"},
+                     "resolvable": true, "resolved": false,
+                     "position": {"new_path": "src/a.rs", "new_line": 2, "head_sha": head}}
+                ]}
+            ]})),
+            "mr_discussions" => json_result(&json!({"items": []})),
+            "create_merge_request_discussion_note" => json_result(&json!({"id": "302"})),
+            "create_merge_request_note" => json_result(&json!({"id": "301"})),
+            _ => json_result(&json!({"id": args["discussion_id"], "resolved": true})),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_whole_run_works_on_gitlab_through_the_gitlab_writer() {
+        use henk_platform::gitlab::{GitLabRest, GitLabWriter};
+
+        let (remote, head) = bare_remote("henk-address-gitlab").await;
+        let rest = gitlab_rest(remote.path(), &head).await;
+        let mcp = gitlab_mcp(&head);
+        let writer = GitLabWriter::new(Arc::new(mcp.connect("gitlab-write").await), "meneerhenk")
+            .with_rest(
+                GitLabRest::new(
+                    &format!("{}/api/v4", rest.uri()),
+                    SecretString::from(TOKEN.to_owned()),
+                )
+                .unwrap(),
+            );
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            [
+                call(
+                    "edit_file",
+                    json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}),
+                ),
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "dh", "outcome": "fixed", "reply": "Set x to 2."}),
+                ),
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "dp", "outcome": "declined", "reply": "x is used below."}),
+                ),
+                done(),
+            ]
+            .into_iter()
+            .map(Ok),
+        ));
+        let mut app = app(hub(Platform::GitLab, remote.path(), &head, None), vec![]);
+        app.test_address_writer = None;
+        app.models
+            .insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
+        let unready = Arc::new(GitLabWriter::new(
+            Arc::new(mcp.connect("gitlab-write").await),
+            "meneerhenk",
+        ));
+        app.gitlab = Some(unready);
+        let refused = app.address_writer(Platform::GitLab).err().unwrap();
+        assert!(
+            refused.to_string().contains("needs the token in $"),
+            "{refused}"
+        );
+        app.gitlab = Some(Arc::new(writer));
+        assert!(app.address_writer(Platform::GitLab).is_ok());
+
+        let report = run_address(
+            &app,
+            request(Platform::GitLab, "r-addr-gl-real"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let sha = report.commit.clone().unwrap();
+        assert_eq!((report.fixed, report.declined, report.unsettled), (1, 1, 0));
+        let (remote_head, log) = remote_feature(remote.path()).await;
+        assert_eq!(remote_head, sha, "one commit, pushed as a fast-forward");
+        assert!(
+            log.starts_with("meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>"),
+            "{log}"
+        );
+
+        let calls = mcp.calls();
+        let replies: Vec<&Value> = calls
+            .iter()
+            .filter(|c| c.name == "create_merge_request_discussion_note")
+            .map(|c| &c.arguments)
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["discussion_id"], "dh");
+        assert!(
+            replies[0]["body"].as_str().unwrap().starts_with(&format!(
+                "Fixed in {}/g/p/-/commit/{sha}: Set x to 2.",
+                rest.uri()
+            )),
+            "{}",
+            replies[0]["body"]
+        );
+        assert_eq!(replies[1]["discussion_id"], "dp");
+        let resolved: Vec<&Value> = calls
+            .iter()
+            .filter(|c| c.name == "resolve_merge_request_thread")
+            .map(|c| &c.arguments)
+            .collect();
+        assert_eq!(resolved.len(), 1, "only the thread Henk started");
+        assert_eq!(resolved[0]["discussion_id"], "dh");
+        assert_eq!(resolved[0]["resolved"], true);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.name == "create_merge_request_note")
+                .count(),
+            1,
+            "one summary"
+        );
+
+        assert!(
+            !format!("{:?}", model.requests()).contains(TOKEN),
+            "the model never sees the token"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| !c.arguments.to_string().contains(TOKEN)),
+            "nor does anything Henk posts"
+        );
+        for request in rest.received_requests().await.unwrap() {
+            assert!(!request.url.as_str().contains(TOKEN), "{}", request.url);
         }
     }
 

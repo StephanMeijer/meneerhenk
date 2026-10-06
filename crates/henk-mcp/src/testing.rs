@@ -136,6 +136,13 @@ impl ServerHandler for FakeServer {
     }
 }
 
+/// A successful result with `value` as JSON text, the way most servers
+/// answer.
+#[must_use]
+pub fn json_result(value: &Value) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+}
+
 /// A behaviour that answers every call with a text block naming the tool.
 pub fn echo_behaviour() -> impl Fn(&str, &Value) -> CallToolResult + Send + Sync + 'static {
     |name, arguments| {

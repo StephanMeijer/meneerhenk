@@ -9,10 +9,12 @@ use henk_llm::{ModelClient, client_for};
 use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
 use henk_platform::address::AddressWriter;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
-use henk_platform::gitlab::GitLabWriter;
+use henk_platform::gitlab::{GitLabRest, GitLabWriter};
 use henk_platform::{IssueWriter, PlatformWriter};
 use henk_store::{PgStore, RunStore, SqliteStore};
+use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::config::{DatabaseConfig, Settings};
 use crate::liveness::LiveRuns;
@@ -143,10 +145,23 @@ impl App {
                 let session = RmcpSession::connect(&gitlab.write_mcp_server, config, env_var)
                     .await
                     .with_context(|| format!("MCP server {}", gitlab.write_mcp_server))?;
-                Some(Arc::new(GitLabWriter::new(
-                    Arc::new(session),
-                    gitlab.username.clone(),
-                )))
+                let writer = GitLabWriter::new(Arc::new(session), gitlab.username.clone());
+                // Address runs (§3.5) push with the token and read what the
+                // MCP server does not give; it goes to git's environment and
+                // a request header, never to argv, a log or a model.
+                let writer = if let Some(token) = env_var(&gitlab.token_env) {
+                    writer.with_rest(
+                        GitLabRest::new(&gitlab.api_url, SecretString::from(token))
+                            .context("GitLab client")?,
+                    )
+                } else {
+                    warn!(
+                        variable = %gitlab.token_env,
+                        "not set; address runs on GitLab are refused"
+                    );
+                    writer
+                };
+                Some(Arc::new(writer))
             }
             None => None,
         };
@@ -257,7 +272,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform is not configured or not built yet.
+    /// Returns an error when the platform is not configured, or GitLab is
+    /// without its token.
     pub fn address_writer(
         &self,
         platform: henk_domain::allowlist::Platform,
@@ -272,9 +288,19 @@ impl App {
                 .clone()
                 .map(|w| w as Arc<dyn AddressWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
-            henk_domain::allowlist::Platform::GitLab => Err(anyhow!(
-                "addressing review feedback on GitLab is not built yet (#67)"
-            )),
+            henk_domain::allowlist::Platform::GitLab => match &self.gitlab {
+                Some(writer) if writer.can_address() => {
+                    Ok(Arc::clone(writer) as Arc<dyn AddressWriter>)
+                }
+                Some(_) => Err(anyhow!(
+                    "addressing review feedback on GitLab needs the token in ${}",
+                    self.settings
+                        .gitlab
+                        .as_ref()
+                        .map_or("GITLAB_PERSONAL_ACCESS_TOKEN", |g| g.token_env.as_str())
+                )),
+                None => Err(anyhow!("GitLab is not configured")),
+            },
         }
     }
 

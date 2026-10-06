@@ -12,15 +12,19 @@
 
 use std::sync::Arc;
 
+use henk_domain::address::push_refusal;
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult, ReviewOutcome};
 use henk_domain::run::RunId;
 use henk_mcp::testing::FakeServer;
-use henk_platform::gitlab::GitLabWriter;
+use henk_platform::gitlab::{GitLabRest, GitLabWriter};
 use henk_platform::{DiffSide, PlatformWriter as _, ReviewTarget};
 use rmcp::model::{CallToolResult, ContentBlock};
+use secrecy::SecretString;
 use serde_json::{Value, json};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const BASE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -580,4 +584,384 @@ async fn a_short_items_page_is_the_last() {
     let names = writer.repo_labels(&repo).await.unwrap();
     assert_eq!(names, ["bug", "team::core"]);
     assert_eq!(fake.calls().len(), 1);
+}
+
+// Address runs (§3.5): discussions through MCP, facts through REST.
+
+const TOKEN: &str = "glpat-test-token";
+const PROJECT: &str = "/api/v4/projects/9xxlab%2Ftools%2Fcli";
+
+/// Discussions the way `@zereight/mcp-gitlab` returns them: ids and author
+/// ids as strings. Henk's account is id 42.
+fn address_fake() -> FakeServer {
+    let tools = [
+        "get_merge_request",
+        "mr_discussions",
+        "create_merge_request_discussion_note",
+        "create_merge_request_note",
+        "resolve_merge_request_thread",
+    ]
+    .iter()
+    .map(|name| FakeServer::tool(name, "", &[]))
+    .collect();
+    FakeServer::new(tools, |name, args| match name {
+        "get_merge_request" => text(json!({
+            "iid": "5", "state": "opened", "source_branch": "feature", "target_branch": "main",
+            "sha": SHA, "diff_refs": {"base_sha": BASE, "start_sha": BASE, "head_sha": SHA}
+        })),
+        "mr_discussions" => {
+            if args["page"] != json!(1) {
+                return text(json!({"items": []}));
+            }
+            text(json!({"items": [
+                {"id": "dh", "individual_note": false, "notes": [
+                    {"id": "201", "type": "DiffNote", "body": format!("Off by one.\n\n{}", marker(MarkerKind::Finding)),
+                     "author": {"id": "42", "username": "meneerhenk"}, "resolvable": true, "resolved": false,
+                     "position": {"new_path": "src/a.rs", "new_line": 10, "head_sha": SHA}},
+                    {"id": "202", "system": true, "body": "changed this line"},
+                    {"id": "203", "body": "Agreed.", "author": {"id": "7", "username": "alice"}}
+                ]},
+                {"id": "dp", "individual_note": false, "notes": [
+                    {"id": "211", "type": "DiffNote", "body": format!("Rename this.\n\n{}", marker(MarkerKind::Finding)),
+                     "author": {"id": "7", "username": "meneerhenk-fan"}, "resolvable": true, "resolved": false,
+                     "position": {"old_path": "src/b.rs", "old_line": 4, "head_sha": BASE}}
+                ]},
+                {"id": "dr", "individual_note": false, "notes": [
+                    {"id": "221", "type": "DiffNote", "body": "done", "author": {"id": "7", "username": "alice"},
+                     "resolvable": true, "resolved": true, "position": {"new_path": "c.rs", "new_line": 1}}
+                ]},
+                {"id": "dn", "individual_note": true, "notes": [
+                    {"id": "231", "body": "General remark.", "author": {"id": "7", "username": "alice"}}
+                ]},
+                {"id": "ds", "individual_note": true, "notes": [
+                    {"id": "241", "system": true, "body": "added 1 commit", "position": {"new_path": "x", "new_line": 1}}
+                ]}
+            ]}))
+        }
+        "create_merge_request_discussion_note" => text(json!({"id": "302"})),
+        "create_merge_request_note" => text(json!({"id": "301"})),
+        "resolve_merge_request_thread" => {
+            text(json!({"id": args["discussion_id"], "resolved": true}))
+        }
+        other => CallToolResult::error(vec![ContentBlock::text(format!("unexpected {other}"))]),
+    })
+}
+
+/// GitLab's REST API for merge request 5 of project 11 at `SHA`, with the
+/// source project, its branch and the bot's account. Every request must
+/// carry the token in `PRIVATE-TOKEN`; a request without it gets 401.
+async fn gitlab_rest(mr: Value, source: Option<Value>, branch: Option<Value>) -> MockServer {
+    let server = MockServer::start().await;
+    let respond = |value: Option<Value>| match value {
+        Some(value) => ResponseTemplate::new(200).set_body_json(value),
+        None => ResponseTemplate::new(404).set_body_json(json!({"message": "404 Not found"})),
+    };
+    let source_id = mr["source_project_id"].as_u64().unwrap_or(11);
+    let mounts = [
+        (format!("{PROJECT}/merge_requests/5"), Some(mr.clone())),
+        (
+            PROJECT.to_owned(),
+            Some(json!({
+                "id": 11, "path_with_namespace": "9xxlab/tools/cli", "default_branch": "main",
+                "http_url_to_repo": "https://gitlab.example/9xxlab/tools/cli.git"
+            })),
+        ),
+        (format!("/api/v4/projects/{source_id}"), source),
+        (
+            format!("/api/v4/projects/{source_id}/repository/branches/feat%2Fx"),
+            branch,
+        ),
+        (
+            "/api/v4/user".to_owned(),
+            Some(json!({"id": 42, "username": "meneerhenk"})),
+        ),
+    ];
+    for (at, value) in mounts {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .and(header("PRIVATE-TOKEN", TOKEN))
+            .respond_with(respond(value))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(10)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn mr(state: &str, source_project_id: u64) -> Value {
+    json!({
+        "iid": 5, "state": state, "sha": SHA, "source_branch": "feat/x", "target_branch": "main",
+        "source_project_id": source_project_id, "target_project_id": 11
+    })
+}
+
+fn branch(protected: Option<bool>, default: bool) -> Value {
+    let mut value = json!({"name": "feat/x", "default": default});
+    if let Some(protected) = protected {
+        value["protected"] = json!(protected);
+    }
+    value
+}
+
+async fn address_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
+    let fake = address_fake();
+    let session = Arc::new(fake.connect("gitlab-write").await);
+    let rest = GitLabRest::new(
+        &format!("{}/api/v4", server.uri()),
+        SecretString::from(TOKEN.to_owned()),
+    )
+    .unwrap();
+    (
+        fake,
+        GitLabWriter::new(session, "meneerhenk").with_rest(rest),
+    )
+}
+
+#[tokio::test]
+async fn open_discussions_parse_into_threads_known_by_author_id() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    let (_fake, writer) = address_writer(&server).await;
+    let threads = writer.open_threads(&target()).await.unwrap();
+    assert_eq!(
+        threads
+            .iter()
+            .map(|t| t.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["dh", "dp"],
+        "unresolved diff discussions only"
+    );
+
+    let henk = &threads[0];
+    assert_eq!(henk.path.as_deref(), Some("src/a.rs"));
+    assert_eq!(henk.line, Some(10));
+    assert!(!henk.outdated);
+    assert!(henk.started_by_henk(), "Henk's account id is 42");
+    assert_eq!(henk.notes.len(), 2, "system notes are left out");
+    assert_eq!(henk.notes[0].comment_id, "201");
+    assert_eq!(henk.notes[0].author_id, Some(42));
+    assert_eq!(henk.notes[1].author, "alice");
+    assert_eq!(henk.notes[1].author_id, Some(7));
+    assert!(!henk.notes[1].by_henk);
+
+    let pasted = &threads[1];
+    assert_eq!(pasted.path.as_deref(), Some("src/b.rs"));
+    assert_eq!(pasted.line, Some(4));
+    assert!(pasted.outdated, "started on an older head");
+    assert!(
+        !pasted.started_by_henk(),
+        "a pasted marker and a look-alike name do not make a note Henk's"
+    );
+}
+
+#[tokio::test]
+async fn merge_request_facts_decide_the_push() {
+    use henk_platform::address::AddressWriter as _;
+
+    let target = target();
+    let refusal = |facts: &henk_platform::address::PullFacts| push_refusal(&facts.push);
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert_eq!(facts.head.as_str(), SHA);
+    assert_eq!(facts.push.head_ref, "feat/x");
+    assert_eq!(facts.push.head_repo.as_deref(), Some("9xxlab/tools/cli"));
+    assert_eq!(facts.push.base_repo, "9xxlab/tools/cli");
+    assert_eq!(facts.push.default_branch, "main");
+    assert!(!facts.push.head_protected);
+    assert_eq!(facts.remote, "https://gitlab.example/9xxlab/tools/cli.git");
+    assert_eq!(refusal(&facts), None, "a branch of its own project");
+
+    let fork = json!({"id": 99, "path_with_namespace": "someone/cli", "http_url_to_repo": "https://gitlab.example/someone/cli.git"});
+    let server = gitlab_rest(
+        mr("opened", 99),
+        Some(fork),
+        Some(branch(Some(false), false)),
+    )
+    .await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert_eq!(facts.push.head_repo.as_deref(), Some("someone/cli"));
+    assert!(refusal(&facts).unwrap().contains("another repository"));
+
+    let server = gitlab_rest(mr("opened", 99), None, None).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert_eq!(facts.push.head_repo, None, "a fork out of reach");
+    assert!(refusal(&facts).is_some());
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(true), false))).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert!(refusal(&facts).unwrap().contains("protected"));
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(None, false))).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert!(
+        facts.push.head_protected,
+        "unknown protection counts as protected"
+    );
+
+    let server = gitlab_rest(mr("opened", 11), None, None).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert!(
+        facts.push.head_protected,
+        "a branch that is gone counts as protected"
+    );
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), true))).await;
+    let facts = address_writer(&server)
+        .await
+        .1
+        .pull_facts(&target)
+        .await
+        .unwrap();
+    assert!(refusal(&facts).unwrap().contains("default branch"));
+
+    for state in ["closed", "merged", "locked"] {
+        let server = gitlab_rest(mr(state, 11), None, Some(branch(Some(false), false))).await;
+        let facts = address_writer(&server)
+            .await
+            .1
+            .pull_facts(&target)
+            .await
+            .unwrap();
+        assert!(refusal(&facts).unwrap().contains("not open"), "{state}");
+    }
+}
+
+#[tokio::test]
+async fn replies_go_to_the_discussion_and_resolving_sets_resolved() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    let (fake, writer) = address_writer(&server).await;
+    let threads = writer.open_threads(&target()).await.unwrap();
+    let posted = writer
+        .reply_in_thread(&target(), &threads[0], "Fixed in abc: done.")
+        .await
+        .unwrap();
+    assert_eq!(posted.id, "302");
+    writer.resolve_thread(&target(), "dh").await.unwrap();
+    let summary =
+        henk_platform::address::AddressWriter::post_comment(&writer, &target(), "Addressed.")
+            .await
+            .unwrap();
+    assert_eq!(summary.id, "301");
+
+    let calls = fake.calls();
+    let reply = calls
+        .iter()
+        .find(|c| c.name == "create_merge_request_discussion_note")
+        .unwrap();
+    assert_eq!(
+        reply.arguments,
+        json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5", "discussion_id": "dh", "body": "Fixed in abc: done."})
+    );
+    let resolve = calls
+        .iter()
+        .find(|c| c.name == "resolve_merge_request_thread")
+        .unwrap();
+    assert_eq!(
+        resolve.arguments,
+        json!({"project_id": "9xxlab/tools/cli", "merge_request_iid": "5", "discussion_id": "dh", "resolved": true})
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|c| !c.arguments.to_string().contains(TOKEN)),
+        "the token never goes to the MCP session"
+    );
+}
+
+#[tokio::test]
+async fn henk_commits_as_his_account_with_its_noreply_address() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    let (_fake, writer) = address_writer(&server).await;
+    let identity = writer.commit_identity().await.unwrap();
+    assert_eq!(identity.name, "meneerhenk");
+    assert_eq!(identity.email, "42-meneerhenk@users.noreply.127.0.0.1");
+    assert_eq!(
+        writer.commit_url(&target(), "abc"),
+        format!("{}/9xxlab/tools/cli/-/commit/abc", server.uri())
+    );
+    let credential = writer.git_credential().await.unwrap().unwrap();
+    assert_eq!(credential.username, "oauth2");
+}
+
+#[tokio::test]
+async fn the_token_goes_only_in_its_header() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    let (_fake, writer) = address_writer(&server).await;
+    writer.pull_facts(&target()).await.unwrap();
+    writer.commit_identity().await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.len() >= 4);
+    for request in &requests {
+        assert_eq!(
+            request
+                .headers
+                .get("PRIVATE-TOKEN")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            TOKEN
+        );
+        assert!(!request.url.as_str().contains(TOKEN), "{}", request.url);
+        assert!(request.headers.get("authorization").is_none());
+    }
+    assert!(
+        !format!("{writer:?}").contains(TOKEN),
+        "a logged writer does not show the token"
+    );
+    let credential = writer.git_credential().await.unwrap().unwrap();
+    assert!(!format!("{credential:?}").contains(TOKEN));
+}
+
+#[tokio::test]
+async fn without_the_token_a_gitlab_writer_reviews_but_does_not_address() {
+    use henk_platform::address::AddressWriter as _;
+
+    let fake = address_fake();
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    assert!(!writer.can_address());
+    let error = writer.pull_facts(&target()).await.unwrap_err();
+    assert!(error.to_string().contains("token"), "{error}");
+    assert!(writer.git_credential().await.is_err());
 }

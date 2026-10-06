@@ -405,7 +405,7 @@ sequenceDiagram
     autonumber
     participant U as CLI or POST /address
     participant R as address.rs
-    participant W as AddressWriter (GitHub)
+    participant W as AddressWriter (GitHub, GitLab)
     participant G as git.rs (checkout)
     participant S as workspace (host)
     participant A as Agent
@@ -414,8 +414,8 @@ sequenceDiagram
     U->>R: run_address(pull request, note)
     R->>W: pull_facts; push_refusal: fork, default, protected, closed
     R->>DB: create_run (kind address)
-    R->>W: open_threads (authors by login, never by marker)
-    R->>G: clone_at head, token via env only
+    R->>W: open_threads (Henk's notes by author, never by marker)
+    R->>G: clone_at head, credential via env only
     R->>S: open: copy the files without .git; the clone is removed
     R->>A: tools on the workspace: read, search, edit, write, run_checks, settle_thread
     A-->>R: edits in the workspace, an outcome per thread
@@ -596,7 +596,7 @@ carries it, and the deployment fills those variables from OpenBao.
 |---|---|---|
 | `[models.*].api_key_env` | `App::build` | the model client, as a bearer token or `x-api-key` |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting |
-| `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children | the children only |
+| `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for address runs | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
 | `HENK_GITHUB_WEBHOOK_SECRET`, `HENK_GITLAB_WEBHOOK_TOKEN` | `server::router` | signature and token checks |
 | `HENK_API_TOKEN` | `server::router` | `POST /review` and `POST /plan` |
 
