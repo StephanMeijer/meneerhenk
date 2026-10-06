@@ -86,8 +86,9 @@ pub fn attach(settings: &mut Settings, config_dir: &Path) -> Result<(), ConfigEr
     Ok(())
 }
 
-/// Reads every `<dir>/<name>/SKILL.md`. A folder without one is skipped; a
-/// file directly in `dir` is ignored.
+/// Reads every `<dir>/<name>/SKILL.md`. A folder without one is skipped, a
+/// `SKILL.md` that is a symbolic link is refused, and a file directly in
+/// `dir` is ignored.
 fn load(dir: &Path) -> Result<SkillCatalog, ConfigError> {
     let fail = |what: String| ConfigError::Skill(format!("{}: {what}", dir.display()));
     let entries = std::fs::read_dir(dir).map_err(|e| fail(e.to_string()))?;
@@ -104,7 +105,20 @@ fn load(dir: &Path) -> Result<SkillCatalog, ConfigError> {
     };
     for folder in folders {
         let file = folder.join(SKILL_FILE);
-        if !file.is_file() {
+        // `symlink_metadata` does not follow links, so a linked `SKILL.md`
+        // is refused instead of read from wherever it points.
+        let meta = match std::fs::symlink_metadata(&file) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(fail(format!("{}: {e}", file.display()))),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(fail(format!(
+                "{} is a symbolic link; a skill's {SKILL_FILE} must be a plain file",
+                file.display()
+            )));
+        }
+        if !meta.is_file() {
             continue;
         }
         let folder_name = folder
@@ -247,6 +261,31 @@ mod tests {
         let ignored = other_files(&skill).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(ignored, ["dir-link", "file-link", "sub/loop"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_skill_file_is_refused() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("henk-skill-file-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let skills = root.join("skills");
+        let outside = root.join("outside.md");
+        std::fs::create_dir_all(skills.join("rust-errors")).unwrap();
+        std::fs::copy(
+            Path::new(FIXTURES)
+                .join("skills/rust-errors")
+                .join(SKILL_FILE),
+            &outside,
+        )
+        .unwrap();
+        symlink(&outside, skills.join("rust-errors").join(SKILL_FILE)).unwrap();
+
+        let result = load(&skills);
+        std::fs::remove_dir_all(&root).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("symbolic link"), "{error}");
     }
 
     #[test]
