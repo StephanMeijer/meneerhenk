@@ -300,6 +300,108 @@ pub struct OutcomeRecord {
     pub at: String,
 }
 
+/// Which runs a listing shows. `None` matches anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunFilter {
+    /// Review, plan, and so on.
+    pub kind: Option<RunKind>,
+    /// Where it stands.
+    pub status: Option<RunStatus>,
+    /// Platform.
+    pub platform: Option<Platform>,
+    /// `owner/name`, exactly.
+    pub repo: Option<String>,
+}
+
+/// Which inbound events a listing shows. `None` matches anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventFilter {
+    /// Source name, such as `github_webhook` or `api`.
+    pub source: Option<String>,
+    /// Kind name, such as `pull_request`.
+    pub kind: Option<String>,
+    /// `owner/name`, exactly.
+    pub repo: Option<String>,
+}
+
+/// One page of a listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    limit: u32,
+    offset: u32,
+}
+
+impl Page {
+    /// The most rows one page holds.
+    pub const MAX: u32 = 100;
+
+    /// `limit` rows from `offset`; the limit is capped at [`Page::MAX`] and is
+    /// at least 1.
+    #[must_use]
+    pub fn new(limit: u32, offset: u32) -> Self {
+        Self {
+            limit: limit.clamp(1, Self::MAX),
+            offset,
+        }
+    }
+
+    /// Rows per page.
+    #[must_use]
+    pub fn limit(self) -> u32 {
+        self.limit
+    }
+
+    /// Rows skipped.
+    #[must_use]
+    pub fn offset(self) -> u32 {
+        self.offset
+    }
+}
+
+/// An inbound event with what each listener did with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventWithOutcomes {
+    /// The event.
+    pub event: InboundEvent,
+    /// Its outcomes, in recording order.
+    pub outcomes: Vec<OutcomeRecord>,
+}
+
+/// One `event_outcomes` row as a backend read it, for [`attach_outcomes`].
+pub(crate) struct OutcomeRow {
+    pub(crate) event_id: String,
+    pub(crate) listener: String,
+    pub(crate) outcome: String,
+    pub(crate) detail: String,
+    pub(crate) run_id: Option<String>,
+    pub(crate) at: String,
+}
+
+/// Puts each outcome row under its event, keeping the rows' order.
+pub(crate) fn attach_outcomes(
+    events: Vec<InboundEvent>,
+    rows: &[OutcomeRow],
+) -> Vec<EventWithOutcomes> {
+    events
+        .into_iter()
+        .map(|event| {
+            let outcomes = rows
+                .iter()
+                .filter(|row| row.event_id == event.id.as_str())
+                .map(|row| OutcomeRecord {
+                    event_id: event.id.clone(),
+                    listener: row.listener.clone(),
+                    outcome: row.outcome.clone(),
+                    detail: row.detail.clone(),
+                    run_id: row.run_id.clone(),
+                    at: row.at.clone(),
+                })
+                .collect();
+            EventWithOutcomes { event, outcomes }
+        })
+        .collect()
+}
+
 /// Payloads larger than this are not recorded; the event still is.
 pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
@@ -309,6 +411,11 @@ pub(crate) fn now() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+/// The stored name of a status.
+pub(crate) fn status_str(status: RunStatus) -> &'static str {
+    status.as_str()
 }
 
 pub(crate) fn kind_str(kind: RunKind) -> &'static str {

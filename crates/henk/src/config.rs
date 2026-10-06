@@ -33,6 +33,9 @@ pub struct Config {
     /// Where run records live.
     #[serde(default)]
     pub database: Option<DatabaseConfig>,
+    /// The web dashboard; absent means none.
+    #[serde(default)]
+    pub dashboard: Option<DashboardConfig>,
     /// Discord ids.
     pub discord: DiscordConfig,
     /// Henk's mailbox.
@@ -125,6 +128,52 @@ impl Default for ServerConfig {
             api_token_env: default_api_token_env(),
         }
     }
+}
+
+/// The web dashboard (#36): who may sign in with GitHub, and where the
+/// secrets are. Only ids and variable names live here (§2, §8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardConfig {
+    /// GitHub user ids that may sign in.
+    pub allowed_github_ids: Vec<u64>,
+    /// Env var with the GitHub OAuth App's client id.
+    #[serde(default = "default_dashboard_client_id_env")]
+    pub client_id_env: String,
+    /// Env var with the GitHub OAuth App's client secret.
+    #[serde(default = "default_dashboard_client_secret_env")]
+    pub client_secret_env: String,
+    /// Env var with the key that signs sessions, at least 32 bytes.
+    #[serde(default = "default_dashboard_session_key_env")]
+    pub session_key_env: String,
+    /// How long a sign-in lasts.
+    #[serde(default = "default_session_hours")]
+    pub session_hours: u32,
+    /// GitHub's web address, for the sign-in page.
+    #[serde(default = "default_github_web_base")]
+    pub github_web_base: String,
+    /// GitHub's API, for who signed in.
+    #[serde(default = "default_github_api_base")]
+    pub github_api_base: String,
+}
+
+fn default_dashboard_client_id_env() -> String {
+    "HENK_DASHBOARD_CLIENT_ID".to_owned()
+}
+fn default_dashboard_client_secret_env() -> String {
+    "HENK_DASHBOARD_CLIENT_SECRET".to_owned()
+}
+fn default_dashboard_session_key_env() -> String {
+    "HENK_DASHBOARD_SESSION_KEY".to_owned()
+}
+fn default_session_hours() -> u32 {
+    12
+}
+fn default_github_web_base() -> String {
+    "https://github.com".to_owned()
+}
+fn default_github_api_base() -> String {
+    "https://api.github.com".to_owned()
 }
 
 /// Where run records live.
@@ -231,9 +280,6 @@ pub struct GitHubConfig {
 
 fn default_github_key_env() -> String {
     "GITHUB_APP_PRIVATE_KEY_PATH".to_owned()
-}
-fn default_github_api_base() -> String {
-    "https://api.github.com".to_owned()
 }
 fn default_github_mcp() -> String {
     "github".to_owned()
@@ -704,6 +750,9 @@ pub enum ConfigError {
     /// The address setting is unusable.
     #[error("{0}")]
     Address(String),
+    /// The dashboard setting is unusable.
+    #[error("{0}")]
+    Dashboard(String),
     /// The database setting is unusable.
     #[error("{0}")]
     Database(String),
@@ -724,6 +773,8 @@ pub struct Settings {
     pub database: DatabaseConfig,
     /// True when `database` came from the deprecated `server.database_path`.
     pub legacy_database_path: bool,
+    /// The web dashboard, when configured.
+    pub dashboard: Option<DashboardConfig>,
     /// Henk on Discord.
     pub henk: HenkIdentity,
     /// Henk's mail address.
@@ -819,6 +870,9 @@ impl Config {
         let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
         let workspace = self.workspace.into_policy(check_timeout_secs)?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
+        if let Some(dashboard) = &self.dashboard {
+            validate_dashboard(dashboard)?;
+        }
 
         let people = People::new(
             self.discord.team_lead_ids.iter().copied(),
@@ -838,6 +892,7 @@ impl Config {
             server: self.server,
             database,
             legacy_database_path,
+            dashboard: self.dashboard,
             henk: HenkIdentity {
                 user: henk_id,
                 role: self.discord.henk_role_id,
@@ -927,6 +982,53 @@ fn validate_address(
         ));
     }
     Ok(())
+}
+
+fn validate_dashboard(dashboard: &DashboardConfig) -> Result<(), ConfigError> {
+    let problem = if dashboard.allowed_github_ids.is_empty() {
+        Some("dashboard.allowed_github_ids is empty; nobody could sign in")
+    } else if !(1..=168).contains(&dashboard.session_hours) {
+        Some("dashboard.session_hours must be between 1 and 168")
+    } else if [
+        &dashboard.client_id_env,
+        &dashboard.client_secret_env,
+        &dashboard.session_key_env,
+    ]
+    .iter()
+    .any(|name| name.trim().is_empty())
+    {
+        Some("a dashboard secret has no variable name")
+    } else if ![&dashboard.github_web_base, &dashboard.github_api_base]
+        .iter()
+        .all(|url| is_github_base(url))
+    {
+        Some("dashboard GitHub addresses must be https, or http to a loopback address")
+    } else {
+        None
+    };
+    problem.map_or(Ok(()), |p| Err(ConfigError::Dashboard(p.to_owned())))
+}
+
+/// Whether `raw` may be a GitHub address the dashboard signs in through:
+/// https to any host, or plain http only to a loopback IP literal (a local
+/// test server). The URL is parsed so that hosts like
+/// `127.0.0.1.evil.com` or `127.0.0.1@evil.com` are judged by their real host.
+fn is_github_base(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        _ => false,
+    }
 }
 
 fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), ConfigError> {
@@ -1185,6 +1287,14 @@ impl Settings {
             ""
         };
         let _ = writeln!(out, "Database:        {}{legacy}", self.database.describe());
+        if let Some(dashboard) = &self.dashboard {
+            let _ = writeln!(
+                out,
+                "Dashboard:       /dashboard for {} GitHub account(s), sign-in via ${}",
+                dashboard.allowed_github_ids.len(),
+                dashboard.client_id_env
+            );
+        }
     }
 
     /// The workspace profiles, for [`Self::describe`], with a warning for
@@ -1677,6 +1787,83 @@ github_owners = ["docspec"]
         );
         assert_eq!(text.matches("Warning:").count(), 1, "{text}");
         assert!(henk_domain::text::is_in_style(&text), "{text}");
+    }
+
+    #[test]
+    fn the_dashboard_is_optional_and_checked() {
+        assert!(database("").unwrap().dashboard.is_none());
+        let settings = database("[dashboard]\nallowed_github_ids = [1234]\n").unwrap();
+        let dashboard = settings.dashboard.as_ref().unwrap();
+        assert_eq!(dashboard.session_hours, 12);
+        assert_eq!(dashboard.client_secret_env, "HENK_DASHBOARD_CLIENT_SECRET");
+        assert!(
+            settings
+                .describe()
+                .contains("Dashboard:       /dashboard for 1 GitHub account(s)")
+        );
+        for (bad, why) in [
+            ("[dashboard]\nallowed_github_ids = []\n", "nobody"),
+            (
+                "[dashboard]\nallowed_github_ids = [1]\nsession_hours = 0\n",
+                "zero hours",
+            ),
+            (
+                "[dashboard]\nallowed_github_ids = [1]\nsession_key_env = \" \"\n",
+                "no name",
+            ),
+            (
+                "[dashboard]\nallowed_github_ids = [1]\ngithub_web_base = \"http://github.com\"\n",
+                "plain http",
+            ),
+            (
+                "[dashboard]\nallowed_github_ids = [\"alice\"]\n",
+                "a login, not an id",
+            ),
+        ] {
+            assert!(database(bad).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn dashboard_github_addresses_are_judged_by_their_parsed_host() {
+        for good in [
+            "https://github.com",
+            "https://api.github.com/",
+            "https://ghe.example.test/api/v3",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.2:9000",
+            "http://[::1]:8080",
+        ] {
+            assert!(is_github_base(good), "{good}");
+        }
+        for bad in [
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1.evil.com:8080/",
+            "http://127.0.0.1@evil.com",
+            "http://127.0.0.1:80@evil.com",
+            "http://localhost:8080",
+            "http://github.com",
+            "http://10.0.0.1",
+            "ftp://127.0.0.1",
+            "https://",
+            "127.0.0.1:8080",
+            "",
+        ] {
+            assert!(!is_github_base(bad), "{bad}");
+        }
+        assert!(
+            database(
+                "[dashboard]\nallowed_github_ids = [1]\ngithub_api_base = \"http://127.0.0.1.evil.com\"\n"
+            )
+            .is_err()
+        );
+        assert!(
+            database(
+                "[dashboard]\nallowed_github_ids = [1]\ngithub_api_base = \"http://127.0.0.1:9000\"\n"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

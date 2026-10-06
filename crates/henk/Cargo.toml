@@ -50,6 +50,7 @@ tracing-subscriber = { workspace = true }
 henk-llm = { workspace = true, features = ["testing"] }
 henk-mcp = { workspace = true, features = ["testing"] }
 hmac = { workspace = true }
+wiremock = { workspace = true }
 sha2 = { workspace = true }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 http-body-util = "0.1"

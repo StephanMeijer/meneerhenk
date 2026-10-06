@@ -110,6 +110,8 @@ OpenBao.
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan`, `POST /address` |
+| `HENK_DASHBOARD_CLIENT_ID`, `HENK_DASHBOARD_CLIENT_SECRET` | The GitHub OAuth App the dashboard signs in with |
+| `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
 | `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
@@ -305,6 +307,33 @@ did with it, and the payload as received (up to 256 KB). Recordings stay in
 the service; nothing is sent anywhere. `GET /events/{id}` shows an event and
 its outcomes, `GET /runs/{id}` a run and the events that led to it. Pruning
 old recordings is a follow-up.
+
+### Dashboard
+
+With a `[dashboard]` table and its three secrets set, `henk serve` also
+serves `/dashboard`:
+- the runs, with what is running now updating itself, filters by kind,
+  status, platform and repository, and paging;
+- each run with its lanes, findings, timeline and the events that led to it;
+- the inbound events with what each listener did;
+- a health page from configuration and the database.
+
+It is read-only. People sign in with GitHub, and only the GitHub user ids in
+`allowed_github_ids` get in. The id is checked on every request, so taking an
+id off the list ends that access at once. To set it up:
+1. Create a GitHub OAuth App (Settings, Developer settings, OAuth Apps).
+2. Set its callback URL to `{public_base_url}/dashboard/auth/callback`.
+3. Put its client id and secret in the two variables, and a random key in
+   the third.
+
+GitHub's token is used once, to read who signed in, and is not kept. The
+session is a signed `HttpOnly` cookie scoped to `/dashboard`, and `Secure`
+when the public URL is https. The pages escape everything they show, since
+the text in them is other people's words. They allow scripts only from Henk
+himself, and cannot be framed. Without the table there is no `/dashboard`;
+with a secret missing, the server starts and logs why the dashboard is off.
+The run and event pages that comments link to, `/runs/{id}` and
+`/events/{id}`, stay reachable without signing in.
 
 ## Decisions taken for this version
 

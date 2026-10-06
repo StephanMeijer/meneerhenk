@@ -5,8 +5,9 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun,
-    OutcomeRecord, RunRecord, RunStatus, StoreError,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, RunFilter, RunRecord, RunStatus,
+    StoreError,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -184,4 +185,31 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError>;
+
+    /// Runs matching `filter`, newest first, one page of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn list_runs(&self, filter: &RunFilter, page: Page)
+    -> Result<Vec<RunRecord>, StoreError>;
+
+    /// How many runs match `filter`, across every page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError>;
+
+    /// Inbound events matching `filter`, newest first, one page of them,
+    /// each with its outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn list_inbound_events(
+        &self,
+        filter: &EventFilter,
+        page: Page,
+    ) -> Result<Vec<EventWithOutcomes>, StoreError>;
 }
