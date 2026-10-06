@@ -112,6 +112,8 @@ pub struct SessionFactCheck {
     /// has them (#170). With it, the code tools read there instead of the
     /// platform (#90). Checks only read, so they share it.
     pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
+    /// How long one `bash` command may run in that workspace (#85).
+    pub command_limit: std::time::Duration,
     /// The rendered system prompt, without skills.
     pub system: String,
     /// The skills the checker may load.
@@ -151,7 +153,10 @@ impl SessionFactCheck {
         tools.add(ListChangedFiles(Arc::clone(&files)));
         tools.add(GetFileDiff(files));
         match (&self.workspace, &self.file_reader) {
-            (Some(workspace), _) => crate::code_tools::add(&mut tools, workspace),
+            (Some(workspace), _) => {
+                crate::code_tools::add(&mut tools, workspace);
+                crate::code_tools::add_bash(&mut tools, workspace, self.command_limit);
+            }
             (None, Some(inner)) => {
                 tools.add(ReadFile {
                     inner: Arc::clone(inner),
@@ -426,6 +431,7 @@ diff --git a/src/a.rs b/src/a.rs
             diff: Arc::new(ReviewDiff::from_unified(DIFF)),
             file_reader: None,
             workspace: None,
+            command_limit: Duration::from_secs(10),
             system: "check".into(),
             skills: crate::skill_tools::AgentSkills::new(),
             limits: AgentConfig {
@@ -493,7 +499,7 @@ diff --git a/src/a.rs b/src/a.rs
             .iter()
             .map(|t| t.name.to_string())
             .collect();
-        for tool in ["list_files", "read_file", "search", "give_verdict"] {
+        for tool in ["list_files", "read_file", "search", "bash", "give_verdict"] {
             assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
         }
         let answered = requests[1]
@@ -522,7 +528,9 @@ diff --git a/src/a.rs b/src/a.rs
             .map(|t| t.name.to_string())
             .collect();
         assert!(
-            !names.iter().any(|n| n == "search" || n == "list_files"),
+            !names
+                .iter()
+                .any(|n| n == "search" || n == "list_files" || n == "bash"),
             "{names:?}"
         );
     }

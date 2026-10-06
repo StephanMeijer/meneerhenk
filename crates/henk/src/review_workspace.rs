@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use henk_domain::review::{CommitSha, LaneName};
@@ -36,6 +37,8 @@ const FACT_CHECK: &str = "fact-check";
 pub struct ReviewWorkspaces {
     lanes: BTreeMap<String, Arc<dyn Workspace>>,
     fact_check: Option<Arc<dyn Workspace>>,
+    /// The profile's limit per command, for `bash` (#85).
+    command_limit: Duration,
 }
 
 impl ReviewWorkspaces {
@@ -91,7 +94,10 @@ impl ReviewWorkspaces {
                 name.clone(),
             ));
         }
-        let mut workspaces = Self::default();
+        let mut workspaces = Self {
+            command_limit: Duration::from_secs(profile.limits.command_secs),
+            ..Self::default()
+        };
         let mut failed = Vec::new();
         loop {
             let joined = tokio::select! {
@@ -153,6 +159,11 @@ impl ReviewWorkspaces {
         self.fact_check.clone()
     }
 
+    /// How long one command in these workspaces may run.
+    pub const fn command_limit(&self) -> Duration {
+        self.command_limit
+    }
+
     /// Closes every workspace still held. Closing one twice does nothing,
     /// so a lane may close its own first.
     pub async fn close_all(self) {
@@ -207,7 +218,8 @@ async fn open_one(
             );
         }
     };
-    let traced: Arc<dyn Workspace> = Arc::new(Traced::new(opened, store, run));
+    let traced: Arc<dyn Workspace> =
+        Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
     match setup::prepare(&traced, &profile).await {
         Ok(ready) => (name, Ok(for_lane(ready, EnvLane::Review))),
         Err(error) => {
