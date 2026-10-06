@@ -155,7 +155,12 @@ impl SessionFactCheck {
         match (&self.workspace, &self.file_reader) {
             (Some(workspace), _) => {
                 crate::code_tools::add(&mut tools, workspace);
-                crate::code_tools::add_bash(&mut tools, workspace, self.command_limit);
+                crate::code_tools::add_bash(
+                    &mut tools,
+                    workspace,
+                    self.command_limit,
+                    crate::code_tools::Sharing::Shared,
+                );
             }
             (None, Some(inner)) => {
                 tools.add(ReadFile {
@@ -502,6 +507,16 @@ diff --git a/src/a.rs b/src/a.rs
         for tool in ["list_files", "read_file", "search", "bash", "give_verdict"] {
             assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
         }
+        let bash = requests[0]
+            .tools
+            .iter()
+            .find(|t| t.name.as_str() == "bash")
+            .map(|t| t.description.clone())
+            .unwrap_or_default();
+        assert!(
+            bash.contains("Other checks use the same copy") && !bash.contains("own copy"),
+            "the checks share the copy: {bash}"
+        );
         let answered = requests[1]
             .messages
             .iter()

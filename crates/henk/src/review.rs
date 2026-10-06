@@ -84,7 +84,7 @@ struct LaneInputs {
 
 /// Appended to the fact-checker's prompt when it has a workspace: its copy
 /// serves every check of the review, some at the same time.
-const SHARED_COPY: &str = "Your copy is shared with the other checks of this review: run what you need, but do not change files in it.";
+const SHARED_COPY: &str = "Your copy is shared with the other checks of this review, some running at the same time: run what you need, but do not change files in it. A file you write goes outside it, at a fresh path from `mktemp`.";
 
 /// A request to review one pull/merge request.
 #[derive(Debug, Clone)]
@@ -871,7 +871,12 @@ async fn build_lane(
     match (&context.workspace, file_reader) {
         (Some(workspace), _) => {
             crate::code_tools::add(&mut set, workspace);
-            crate::code_tools::add_bash(&mut set, workspace, lanes.command_limit);
+            crate::code_tools::add_bash(
+                &mut set,
+                workspace,
+                lanes.command_limit,
+                crate::code_tools::Sharing::Own,
+            );
         }
         (None, Some(inner)) => {
             set.add(ReadFile { inner });
