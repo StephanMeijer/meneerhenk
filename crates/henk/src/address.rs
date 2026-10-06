@@ -1417,6 +1417,19 @@ check_commands = [["true"]]
     }
 
     #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_an_address_run_in_a_pod_pushes_its_fix() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        for platform in PLATFORMS {
+            fix_is_pushed(Arc::new(provider.clone()), "kube-live", platform).await;
+            no_change_no_push(Arc::new(provider.clone()), "kube-live", platform).await;
+        }
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
     async fn without_a_change_nothing_is_pushed_on_the_ssh_backend() {
         for platform in PLATFORMS {
             let (runner, provider) =

@@ -1922,6 +1922,16 @@ lanes = [{ name = "lane-a", model = "m" }]
         review_on_ssh("ssh-live", Arc::new(provider)).await;
     }
 
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_a_review_opens_and_closes_a_pod_per_lane() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        review_on_ssh("kube-live", Arc::new(provider.clone())).await;
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
+    }
+
     fn many_done() -> ScriptedClient {
         ScriptedClient::new("scripted", (0..12).map(|_| done()))
     }

@@ -493,7 +493,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-sandbox 4\n"), "{probe}");
+        assert!(probe.starts_with("henk-sandbox 5\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 

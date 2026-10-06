@@ -23,6 +23,7 @@ pub mod contract;
 #[cfg(test)]
 pub mod fake;
 pub mod host;
+pub mod kubernetes;
 pub mod remote;
 pub mod setup;
 pub mod ssh;
@@ -402,20 +403,26 @@ pub type Sweep =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkspaceError>> + Send>>;
 
 /// Opens each workspace on the backend its profile names: the host always,
-/// the sandbox host when `[workspace.ssh]` is configured.
+/// the sandbox host when `[workspace.ssh]` is configured, the cluster when
+/// `[workspace.kubernetes]` is.
 #[derive(Debug)]
 pub struct Backends {
     host: host::HostProvider,
     ssh: Option<ssh::SshProvider>,
+    kubernetes: Option<kubernetes::KubernetesProvider>,
 }
 
 impl Backends {
     /// The backends there are.
     #[must_use]
-    pub fn new(ssh: Option<ssh::SshProvider>) -> Self {
+    pub fn new(
+        ssh: Option<ssh::SshProvider>,
+        kubernetes: Option<kubernetes::KubernetesProvider>,
+    ) -> Self {
         Self {
             host: host::HostProvider,
             ssh,
+            kubernetes,
         }
     }
 }
@@ -435,11 +442,36 @@ impl WorkspaceProvider for Backends {
                     "the ssh backend is not configured: [workspace.ssh] is missing".to_owned(),
                 )),
             },
+            BackendKind::Kubernetes => match &self.kubernetes {
+                Some(kubernetes) => kubernetes.open(source, profile).await,
+                None => Err(WorkspaceError::Backend(
+                    "the kubernetes backend is not configured: [workspace.kubernetes] is missing"
+                        .to_owned(),
+                )),
+            },
         }
     }
 
     fn sweep(&self) -> Option<Sweep> {
-        self.ssh.as_ref().map(|ssh| Box::pin(ssh.sweep()) as Sweep)
+        let ssh = self.ssh.as_ref().map(|ssh| Box::pin(ssh.sweep()) as Sweep);
+        let kubernetes = self
+            .kubernetes
+            .as_ref()
+            .map(|kubernetes| Box::pin(kubernetes.sweep()) as Sweep);
+        match (ssh, kubernetes) {
+            (None, None) => None,
+            (ssh, kubernetes) => Some(Box::pin(async move {
+                let ssh = match ssh {
+                    Some(sweep) => sweep.await,
+                    None => Ok(()),
+                };
+                let kubernetes = match kubernetes {
+                    Some(sweep) => sweep.await,
+                    None => Ok(()),
+                };
+                ssh.and(kubernetes)
+            })),
+        }
     }
 }
 
@@ -515,6 +547,47 @@ impl Workspace for NoExport {
     async fn close(&self) {
         self.inner.close().await;
     }
+}
+
+/// The cluster's provider from the settings, when `[workspace.kubernetes]`
+/// is there: Henk's own service account in the cluster, or the kubeconfig
+/// whose path the configured variable holds.
+///
+/// # Errors
+///
+/// Returns an error when the variable is unset or the configuration cannot
+/// be read.
+pub async fn kubernetes_provider(
+    settings: &crate::config::Settings,
+) -> anyhow::Result<Option<kubernetes::KubernetesProvider>> {
+    use anyhow::Context as _;
+    let Some(config) = &settings.workspace_kubernetes else {
+        return Ok(None);
+    };
+    let client_config = match &config.kubeconfig_env {
+        Some(variable) => {
+            let path = crate::app::env_var(variable)
+                .ok_or_else(|| anyhow::anyhow!("environment variable {variable} is not set"))?;
+            let kubeconfig = kube::config::Kubeconfig::read_from(&path)
+                .with_context(|| format!("reading the kubeconfig {path}"))?;
+            kube::Config::from_custom_kubeconfig(kubeconfig, &kube::config::KubeConfigOptions::default())
+                .await
+                .with_context(|| format!("using the kubeconfig {path}"))?
+        }
+        None => kube::Config::incluster()
+            .context("reading the ServiceAccount Henk runs as (set workspace.kubernetes.kubeconfig_env outside a cluster)")?,
+    };
+    let client = kube::Client::try_from(client_config).context("making the Kubernetes client")?;
+    Ok(Some(kubernetes::KubernetesProvider::new(
+        client,
+        kubernetes::PodSettings {
+            namespace: config.namespace.clone(),
+            image: config.image.clone(),
+            run_as_user: config.run_as_user,
+            runtime_class: config.runtime_class.clone(),
+            node_selector: config.node_selector.clone(),
+        },
+    )))
 }
 
 /// The sandbox host's provider from the settings, when `[workspace.ssh]` is

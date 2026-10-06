@@ -71,6 +71,7 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks.extend(check_mcp(settings).await);
     checks.push(check_database(settings).await);
     checks.extend(check_sandbox(settings, probe_models).await);
+    checks.extend(check_kubernetes(settings, probe_models).await);
     checks
 }
 
@@ -104,7 +105,12 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
         Ok(report) => vec![
             Check::ok("sandbox connection", format!("{target}, signed in")),
             Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
-            tools_check(&report, &settings.workspace),
+            tools_check(
+                "sandbox host tools",
+                &report,
+                &settings.workspace,
+                BackendKind::Ssh,
+            ),
         ],
         Err(error) => {
             let text = error.to_string();
@@ -121,25 +127,111 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
     }
 }
 
-/// The sandbox script's probe report as a check: a tool it says is missing
-/// fails it, mise only when a profile on the sandbox host names it as its
-/// toolchain; a host-backed profile runs mise on Henk's own machine.
-fn tools_check(report: &str, workspace: &WorkspacePolicy) -> Check {
+/// The sandbox script's probe report as a check named `name`: a tool it
+/// says is missing fails it, mise only when a profile on `backend` names it
+/// as its toolchain; a host-backed profile runs mise on Henk's own machine.
+fn tools_check(
+    name: &str,
+    report: &str,
+    workspace: &WorkspacePolicy,
+    backend: BackendKind,
+) -> Check {
     let mut lines = report.lines();
     let version = lines.next().unwrap_or("henk-sandbox (no version)");
     let wants_mise = workspace
         .named()
-        .any(|(_, p)| p.backend == BackendKind::Ssh && p.toolchain == Some(Toolchain::Mise));
+        .any(|(_, p)| p.backend == backend && p.toolchain == Some(Toolchain::Mise));
     let missing: Vec<&str> = lines
         .filter_map(|l| l.strip_suffix(" missing"))
         .filter(|tool| *tool != "mise" || wants_mise)
         .collect();
     if missing.is_empty() {
-        Check::ok("sandbox host tools", version)
+        Check::ok(name, version)
     } else {
         Check::fail(
-            "sandbox host tools",
-            format!("{version}; missing on the host: {}", missing.join(", ")),
+            name,
+            format!("{version}; missing there: {}", missing.join(", ")),
+        )
+    }
+}
+
+/// The `kubernetes` backend's cluster (#89): without `--probe`, only the
+/// namespace; with it, what Henk may do there, as the API server says, and
+/// the tools of every image a profile starts its Pods from, each on a line
+/// of its own.
+async fn check_kubernetes(settings: &Settings, probe: bool) -> Vec<Check> {
+    let Some(config) = &settings.workspace_kubernetes else {
+        return Vec::new();
+    };
+    let namespace = &config.namespace;
+    if !probe {
+        return vec![Check::ok(
+            "sandbox cluster",
+            format!("namespace {namespace}; --probe asks the API server"),
+        )];
+    }
+    let provider = match crate::workspace::kubernetes_provider(settings).await {
+        Ok(Some(provider)) => provider,
+        Ok(None) => return Vec::new(),
+        Err(error) => return vec![Check::fail("sandbox cluster", format!("{error:#}"))],
+    };
+    let access = match provider.access().await {
+        Ok(access) => access,
+        Err(error) => return vec![Check::fail("sandbox cluster", error.to_string())],
+    };
+    let mut checks = vec![Check::ok(
+        "sandbox cluster",
+        format!("reached; Pods go to namespace {namespace}"),
+    )];
+    checks.push(access_check(namespace, &access));
+    let mut images: Vec<&str> = settings
+        .workspace
+        .named()
+        .filter(|(_, p)| p.backend == BackendKind::Kubernetes)
+        .filter_map(|(_, p)| config.image_for(p))
+        .collect();
+    images.sort_unstable();
+    images.dedup();
+    for image in images {
+        let name = format!("sandbox image {image}");
+        checks.push(match provider.probe(image).await {
+            Ok(report) => tools_check(&name, &report, &settings.workspace, BackendKind::Kubernetes),
+            Err(error) => Check::fail(name, error.to_string()),
+        });
+    }
+    checks
+}
+
+/// What Henk may do in the sandbox namespace as a check: everything the
+/// backend needs, and no Secrets.
+fn access_check(namespace: &str, access: &[(String, bool)]) -> Check {
+    let missing: Vec<&str> = access
+        .iter()
+        .filter(|(what, allowed)| !allowed && what != "get secrets")
+        .map(|(what, _)| what.as_str())
+        .collect();
+    let secrets = access
+        .iter()
+        .any(|(what, allowed)| *allowed && what == "get secrets");
+    if !missing.is_empty() {
+        Check::fail(
+            "sandbox access",
+            format!(
+                "Henk may not {} in namespace {namespace}; apply deploy/kubernetes/sandbox-namespace.yaml",
+                missing.join(", ")
+            ),
+        )
+    } else if secrets {
+        Check::fail(
+            "sandbox access",
+            format!(
+                "Henk may read Secrets in namespace {namespace}; give him Pods and pods/exec there and nothing more"
+            ),
+        )
+    } else {
+        Check::ok(
+            "sandbox access",
+            format!("Pods and pods/exec in namespace {namespace}, no Secrets"),
         )
     }
 }
@@ -530,7 +622,7 @@ mod tests {
             .profiles
             .insert("sandbox".to_owned(), profile(BackendKind::Ssh, None));
         assert_eq!(
-            tools_check(report, &workspace).verdict,
+            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
             Verdict::Ok("henk-sandbox 4".to_owned()),
             "only a host-backed profile wants mise"
         );
@@ -539,10 +631,37 @@ mod tests {
             profile(BackendKind::Ssh, Some(Toolchain::Mise)),
         );
         assert_eq!(
-            tools_check(report, &workspace).verdict,
-            Verdict::Fail("henk-sandbox 4; missing on the host: mise".to_owned()),
+            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
+            Verdict::Fail("henk-sandbox 4; missing there: mise".to_owned()),
             "a sandbox profile wants it"
         );
+    }
+
+    #[test]
+    fn henk_needs_pods_and_exec_in_the_sandbox_and_no_secrets() {
+        let answer = |secrets: bool, exec: bool| {
+            vec![
+                ("create pods".to_owned(), true),
+                ("create pods/exec".to_owned(), exec),
+                ("get secrets".to_owned(), secrets),
+            ]
+        };
+        assert!(matches!(
+            access_check("box", &answer(false, true)).verdict,
+            Verdict::Ok(_)
+        ));
+        let Verdict::Fail(why) = access_check("box", &answer(false, false)).verdict else {
+            panic!("exec is needed")
+        };
+        assert!(
+            why.contains("create pods/exec") && why.contains("sandbox-namespace.yaml"),
+            "{why}"
+        );
+        let Verdict::Fail(why) = access_check("box", &answer(true, true)).verdict else {
+            panic!("secrets are too much")
+        };
+        assert!(why.contains("Secrets"), "{why}");
+        assert!(henk_domain::text::is_in_style(&why));
     }
 
     #[test]

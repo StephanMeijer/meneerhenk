@@ -1,0 +1,17 @@
+# A default image for the kubernetes workspace backend (#89): what Henk's
+# sandbox script needs (sh, coreutils, findutils, GNU grep with PCRE2, tar),
+# bash for the `bash` tool, git for the record of changes and the run's own
+# commands, and mise for profiles with toolchain = "mise". Nothing of Henk's
+# is in it: the script comes with every request. Build your own from this,
+# with the toolchains your repositories need, and pin it by digest:
+#   docker build -f deploy/kubernetes/sandbox-image/Containerfile \
+#     -t registry.example/henk-sandbox:1 deploy/kubernetes/sandbox-image
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash coreutils findutils grep tar git ca-certificates curl xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+# The Pod runs as this user (workspace.kubernetes.run_as_user), never root.
+RUN useradd --uid 1000 --user-group --no-create-home --home-dir /sandbox sandbox
+USER 1000:1000
+WORKDIR /sandbox

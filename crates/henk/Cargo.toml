@@ -36,6 +36,8 @@ ring = { workspace = true }
 secrecy = { workspace = true }
 russh = { workspace = true }
 tar = { workspace = true }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

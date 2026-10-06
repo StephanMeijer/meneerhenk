@@ -240,6 +240,17 @@ requester_id = 523456789012345678
 # port = 22
 # user = "root"
 # key_path_env = "HENK_SANDBOX_KEY_PATH"
+# The "kubernetes" backend makes a Pod per workspace in a sandbox namespace
+# of its own, apart from Henk's (README, "Workspaces on Kubernetes";
+# deploy/kubernetes/). A profile's `image` overrides the one here.
+# [workspace.profiles.pods]
+# backend = "kubernetes"
+# [workspace.kubernetes]
+# namespace = "henk-sandbox"
+# image = "registry.example/henk-sandbox:1"
+# run_as_user = 1000
+# runtime_class = "gvisor"
+# kubeconfig_env = "KUBECONFIG"
 
 # Limits every model session shares. A session that calls one tool with the
 # same arguments max_repeated_calls times in a row has its next such call

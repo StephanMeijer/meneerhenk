@@ -151,6 +151,27 @@ pub(crate) fn token(text: &str) -> String {
 /// installed on the host.
 pub(crate) const SCRIPT: &str = include_str!("sandbox.sh");
 
+/// Refuses a request with a token outside `A-Z a-z 0-9 + / = _ . -`
+/// before anything is sent: the script splits on nothing else, and a shell
+/// on the way evaluates none of these.
+///
+/// # Errors
+///
+/// Names the first token refused.
+pub(crate) fn check_tokens(tokens: &[String]) -> Result<(), WorkspaceError> {
+    let safe = |t: &String| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=_.-".contains(&b))
+    };
+    match tokens.iter().find(|t| !safe(t)) {
+        Some(bad) => Err(WorkspaceError::Backend(format!(
+            "refused to send a request with the token {bad:?}"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// The shell line that runs one request on the host: the script, quoted,
 /// then its tokens, which may only hold `A-Z a-z 0-9 + / = _ . -`, so the
 /// shell takes each as one word and evaluates none. Signed in as anyone but
@@ -160,16 +181,7 @@ pub(crate) const SCRIPT: &str = include_str!("sandbox.sh");
 ///
 /// Refuses a token with any other character before anything is sent.
 pub(crate) fn command_line(user: &str, tokens: &[String]) -> Result<String, WorkspaceError> {
-    let safe = |t: &String| {
-        !t.is_empty()
-            && t.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"+/=_.-".contains(&b))
-    };
-    if let Some(bad) = tokens.iter().find(|t| !safe(t)) {
-        return Err(WorkspaceError::Backend(format!(
-            "refused to send a request with the token {bad:?}"
-        )));
-    }
+    check_tokens(tokens)?;
     let quoted = SCRIPT.replace('\'', "'\\''");
     let sudo = if user == "root" { "" } else { "sudo -n " };
     Ok(format!(
