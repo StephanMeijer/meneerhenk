@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use henk_domain::allowlist::{AllowRule, Allowlist, Platform, RepoRef};
+use henk_domain::commit::{CommitPerson, Email, IdentityError, TrailerPolicy};
 use henk_domain::discord::HenkIdentity;
 use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person};
 use henk_domain::mail::EmailAddress;
@@ -553,6 +554,88 @@ pub struct AddressConfig {
     pub check_timeout_secs: Option<u64>,
     /// The Team Lead on whose behalf CLI and API runs push.
     pub requester_id: DiscordUserId,
+    /// Who Henk commits as, author and committer alike. Absent: the App's
+    /// own `meneer-henk[bot]` noreply address.
+    #[serde(default)]
+    pub identity: Option<CommitIdentityConfig>,
+    /// The trailers of every commit, unless a repository says otherwise.
+    #[serde(default)]
+    pub trailers: TrailerConfig,
+    /// Trailer settings per repository, by `owner/name`.
+    #[serde(default)]
+    pub repositories: BTreeMap<String, TrailerConfig>,
+}
+
+/// A name and email to commit as.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitIdentityConfig {
+    /// The name, such as `Meneer Henk`.
+    pub name: String,
+    /// The email address.
+    pub email: String,
+}
+
+impl CommitIdentityConfig {
+    fn person(&self) -> Result<CommitPerson, IdentityError> {
+        CommitPerson::new(&self.name, Email::parse(&self.email)?)
+    }
+}
+
+/// Which trailers an address-run commit carries. A switch left out keeps
+/// the default, or for a repository the `[address.trailers]` value.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrailerConfig {
+    /// Henk's `Signed-off-by`. Default on.
+    pub henk_signoff: Option<bool>,
+    /// The requester's `Co-authored-by`. Default on.
+    pub requester_coauthor: Option<bool>,
+    /// The requester's `Signed-off-by`. Default off: turning it on states
+    /// that requesters certify the DCO for changes they asked for.
+    pub requester_signoff: Option<bool>,
+}
+
+impl TrailerConfig {
+    fn over(self, base: TrailerPolicy) -> TrailerPolicy {
+        TrailerPolicy {
+            henk_signoff: self.henk_signoff.unwrap_or(base.henk_signoff),
+            requester_coauthor: self.requester_coauthor.unwrap_or(base.requester_coauthor),
+            requester_signoff: self.requester_signoff.unwrap_or(base.requester_signoff),
+        }
+    }
+}
+
+impl AddressConfig {
+    /// The trailers for a commit to `repo`: its override, over
+    /// `[address.trailers]`, over the defaults.
+    #[must_use]
+    pub fn trailer_policy(&self, repo: &RepoRef) -> TrailerPolicy {
+        let base = self.trailers.over(TrailerPolicy::default());
+        self.repositories
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(&repo.path()))
+            .map_or(base, |(_, config)| config.over(base))
+    }
+
+    /// Who Henk commits as when configured; `None` for the App's account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityError`] for a bad name or email; `config check`
+    /// refuses those first.
+    pub fn henk_identity(&self) -> Result<Option<CommitPerson>, IdentityError> {
+        self.identity
+            .as_ref()
+            .map(CommitIdentityConfig::person)
+            .transpose()
+    }
+
+    /// Every trailer setting in force: the default, then each repository.
+    fn policies(&self) -> impl Iterator<Item = TrailerPolicy> + '_ {
+        let base = self.trailers.over(TrailerPolicy::default());
+        std::iter::once(base).chain(self.repositories.values().map(move |c| c.over(base)))
+    }
 }
 
 fn default_address_timeout_secs() -> u64 {
@@ -711,6 +794,56 @@ pub struct PersonConfig {
     pub name: String,
     /// What they do on the team.
     pub role: String,
+    /// Their GitHub user id: the address-run commit credits them with the
+    /// noreply address of this account.
+    #[serde(default)]
+    pub github_id: Option<u64>,
+    /// Their GitLab user id.
+    #[serde(default)]
+    pub gitlab_id: Option<u64>,
+    /// The name their trailers use instead of the account's login. Set
+    /// together with `commit_email`.
+    #[serde(default)]
+    pub commit_name: Option<String>,
+    /// The email their trailers use instead of the noreply address.
+    #[serde(default)]
+    pub commit_email: Option<String>,
+}
+
+/// What a person's commit trailers are built from (§3.5): platform ids and
+/// configured values, never a display name (§2).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Committer {
+    /// GitHub user id.
+    pub github_id: Option<u64>,
+    /// GitLab user id.
+    pub gitlab_id: Option<u64>,
+    /// A configured name and email, which wins over the noreply address.
+    pub commit_as: Option<CommitPerson>,
+}
+
+impl PersonConfig {
+    fn committer(&self) -> Result<Committer, ConfigError> {
+        let refused = |why: String| ConfigError::Person(self.discord_id, why);
+        let commit_as = match (&self.commit_name, &self.commit_email) {
+            (None, None) => None,
+            (Some(name), Some(email)) => Some(
+                Email::parse(email)
+                    .and_then(|email| CommitPerson::new(name, email))
+                    .map_err(|e| refused(e.to_string()))?,
+            ),
+            _ => {
+                return Err(refused(
+                    "commit_name and commit_email are set together".to_owned(),
+                ));
+            }
+        };
+        Ok(Committer {
+            github_id: self.github_id,
+            gitlab_id: self.gitlab_id,
+            commit_as,
+        })
+    }
 }
 
 /// Why a configuration is unusable.
@@ -765,6 +898,9 @@ pub enum ConfigError {
     /// The server setting is unusable.
     #[error("{0}")]
     Server(String),
+    /// A `[[people]]` entry is unusable.
+    #[error("people entry {0}: {1}")]
+    Person(DiscordUserId, String),
     /// The database setting is unusable.
     #[error("{0}")]
     Database(String),
@@ -814,6 +950,8 @@ pub struct Settings {
     /// True when the command limit came from the deprecated
     /// `address.check_timeout_secs`.
     pub legacy_check_timeout: bool,
+    /// What commit trailers credit each known person with, by Discord id.
+    pub committers: BTreeMap<DiscordUserId, Committer>,
     /// MCP servers by alias.
     pub mcp: BTreeMap<String, McpServerConfig>,
     /// `[skills].dir` as written, when configured.
@@ -874,10 +1012,20 @@ impl Config {
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
         if let Some(address) = &self.address {
-            validate_address(address, &self.models, &self.discord.team_lead_ids)?;
+            validate_address(
+                address,
+                &self.models,
+                &self.discord.team_lead_ids,
+                &allowlist,
+            )?;
         }
         let skills_dir = self.skills.map(|s| s.dir);
         validate_skill_references(skills_dir.as_deref(), &self.review, self.planning.as_ref())?;
+        let committers = self
+            .people
+            .iter()
+            .map(|person| Ok((person.discord_id, person.committer()?)))
+            .collect::<Result<BTreeMap<_, _>, ConfigError>>()?;
         let legacy_database_path = self.server.database_path.is_some();
         let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
         let workspace = self.workspace.into_policy(check_timeout_secs)?;
@@ -927,6 +1075,7 @@ impl Config {
             address: self.address,
             workspace,
             legacy_check_timeout: check_timeout_secs.is_some(),
+            committers,
             mcp: self.mcp,
             skills_dir,
             skills: std::sync::Arc::default(),
@@ -967,6 +1116,7 @@ fn validate_address(
     address: &AddressConfig,
     models: &BTreeMap<String, ModelFileConfig>,
     team_leads: &[DiscordUserId],
+    allowlist: &Allowlist,
 ) -> Result<(), ConfigError> {
     if !models.contains_key(&address.model) {
         return Err(ConfigError::UnknownModel {
@@ -997,6 +1147,21 @@ fn validate_address(
         return Err(ConfigError::Address(
             "address.check_commands has an empty command".to_owned(),
         ));
+    }
+    address
+        .henk_identity()
+        .map_err(|e| ConfigError::Address(format!("address.identity: {e}")))?;
+    for key in address.repositories.keys() {
+        let allowed = [Platform::GitHub, Platform::GitLab]
+            .into_iter()
+            .any(|platform| {
+                RepoRef::parse(platform, key).is_ok_and(|repo| allowlist.allows(&repo))
+            });
+        if !allowed {
+            return Err(ConfigError::Address(format!(
+                "address.repositories.{key:?} is not an owner/name repository on the allowlist"
+            )));
+        }
     }
     Ok(())
 }
@@ -1427,6 +1592,7 @@ impl Settings {
                 address.max_changed_files,
                 address.check_commands.len()
             );
+            self.describe_commits(address, out);
         }
         self.describe_skills(out);
     }
@@ -1450,6 +1616,46 @@ impl Settings {
                     let _ = writeln!(out, "  {name}");
                 }
             }
+        }
+    }
+
+    /// Henk's commit identity and trailers, for [`Self::describe`], with a
+    /// warning when a requester trailer is on but the requester has no
+    /// account to credit.
+    fn describe_commits(&self, address: &AddressConfig, out: &mut String) {
+        let identity = match address.henk_identity() {
+            Ok(Some(person)) => person.to_string(),
+            Ok(None) => "the GitHub App's noreply address".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let _ = writeln!(out, "Commits as:      {identity}");
+        let _ = writeln!(
+            out,
+            "Trailers:        {}",
+            describe_policy(address.trailers.over(TrailerPolicy::default()))
+        );
+        for key in address.repositories.keys() {
+            // Resolved the way a run resolves it, so this shows what applies.
+            if let Ok(repo) = RepoRef::parse(Platform::GitHub, key)
+                .or_else(|_| RepoRef::parse(Platform::GitLab, key))
+            {
+                let policy = address.trailer_policy(&repo);
+                let _ = writeln!(out, "  {key}: {}", describe_policy(policy));
+            }
+        }
+        let credits_requester = address
+            .policies()
+            .any(|p| p.requester_coauthor || p.requester_signoff);
+        let creditable = self
+            .committers
+            .get(&address.requester_id)
+            .is_some_and(|c| c.github_id.is_some() || c.commit_as.is_some());
+        if credits_requester && !creditable {
+            let _ = writeln!(
+                out,
+                "Warning:         requester {} has no github_id or commit_email in [[people]]; their commits get no requester trailers",
+                address.requester_id
+            );
         }
     }
 
@@ -1530,6 +1736,16 @@ impl Settings {
         }
         out.trim_end().to_owned()
     }
+}
+
+fn describe_policy(policy: TrailerPolicy) -> String {
+    let on = |yes: bool| if yes { "on" } else { "off" };
+    format!(
+        "Henk's sign-off {}, requester co-author {}, requester sign-off {}",
+        on(policy.henk_signoff),
+        on(policy.requester_coauthor),
+        on(policy.requester_signoff)
+    )
 }
 
 #[cfg(test)]
@@ -1741,6 +1957,189 @@ github_owners = ["docspec"]
         ] {
             assert!(parse(bad).is_err(), "{why}");
         }
+    }
+
+    /// The example with its commented `[address]` settings and the commented
+    /// fields of `[[people]]` switched on.
+    fn example_with_address() -> String {
+        let mut in_address = false;
+        EXAMPLE
+            .lines()
+            .map(|line| {
+                in_address |= line == "# [address]";
+                let setting = line
+                    .strip_prefix("# ")
+                    .filter(|rest| rest.starts_with('[') || rest.contains(" = "));
+                match setting {
+                    Some(rest) if in_address => rest.to_owned(),
+                    _ => line.to_owned(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_example_commit_settings_are_valid() {
+        let settings = Config::parse(&example_with_address())
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let address = settings.address.as_ref().unwrap();
+        let henk = address.henk_identity().unwrap().unwrap();
+        assert_eq!(henk.to_string(), "Meneer Henk <henk@example.com>");
+        let scratch = RepoRef::parse(Platform::GitHub, "StephanMeijer/scratch-repo").unwrap();
+        assert!(address.trailer_policy(&scratch).requester_signoff);
+        let stephan = settings.committers.values().next().unwrap();
+        assert_eq!(stephan.github_id, Some(1_234_567));
+        assert_eq!(
+            stephan.commit_as.as_ref().unwrap().to_string(),
+            "Stephan Meijer <stephan@example.com>"
+        );
+        let described = settings.describe();
+        assert!(
+            described.contains("Commits as:      Meneer Henk <henk@example.com>"),
+            "{described}"
+        );
+        assert!(
+            described.contains("  StephanMeijer/scratch-repo: Henk's sign-off on, requester co-author on, requester sign-off on"),
+            "{described}"
+        );
+        assert!(!described.contains("Warning:"), "{described}");
+    }
+
+    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[address]\nmodel = \"m\"\nrequester_id = 3\n";
+
+    fn address(person: &str, extra: &str) -> Result<Settings, ConfigError> {
+        let text = format!("{MINIMAL}{}{extra}", ADDRESS.replace("PERSON", person));
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn trailers_default_and_resolve_per_repository() {
+        let settings = address(
+            "github_id = 77\n",
+            "[address.trailers]\nhenk_signoff = false\n[address.repositories.\"docspec/dco\"]\nrequester_signoff = true\n",
+        )
+        .unwrap();
+        let config = settings.address.as_ref().unwrap();
+        assert_eq!(config.henk_identity().unwrap(), None);
+        let other = RepoRef::parse(Platform::GitHub, "docspec/other").unwrap();
+        assert_eq!(
+            config.trailer_policy(&other),
+            TrailerPolicy {
+                henk_signoff: false,
+                requester_coauthor: true,
+                requester_signoff: false,
+            }
+        );
+        let dco = RepoRef::parse(Platform::GitHub, "DocSpec/DCO").unwrap();
+        assert_eq!(
+            config.trailer_policy(&dco),
+            TrailerPolicy {
+                henk_signoff: false,
+                requester_coauthor: true,
+                requester_signoff: true,
+            },
+            "the repository's switch over [address.trailers], case aside"
+        );
+        let described = settings.describe();
+        assert!(
+            described.contains("Commits as:      the GitHub App's noreply address"),
+            "{described}"
+        );
+
+        let plain = address("", "").unwrap();
+        assert_eq!(
+            plain.address.as_ref().unwrap().trailer_policy(&other),
+            TrailerPolicy::default()
+        );
+    }
+
+    #[test]
+    fn a_requester_without_an_account_is_warned_about() {
+        let warning = "Warning:         requester 3 has no github_id";
+        let described = address("", "").unwrap().describe();
+        assert!(described.contains(warning), "{described}");
+        let off = address("", "[address.trailers]\nrequester_coauthor = false\n")
+            .unwrap()
+            .describe();
+        assert!(!off.contains(warning), "nothing to credit: {off}");
+        let on_somewhere = address(
+            "",
+            "[address.trailers]\nrequester_coauthor = false\n[address.repositories.\"docspec/r\"]\nrequester_signoff = true\n",
+        )
+        .unwrap()
+        .describe();
+        assert!(on_somewhere.contains(warning), "{on_somewhere}");
+        for person in [
+            "github_id = 77\n",
+            "commit_name = \"Lead\"\ncommit_email = \"lead@example.com\"\n",
+        ] {
+            let described = address(person, "").unwrap().describe();
+            assert!(!described.contains(warning), "{person}: {described}");
+        }
+    }
+
+    #[test]
+    fn bad_commit_identities_and_repositories_are_refused() {
+        for (person, extra, why) in [
+            (
+                "",
+                "[address.identity]\nname = \"Henk\"\nemail = \"not-an-address\"\n",
+                "bad identity email",
+            ),
+            (
+                "",
+                "[address.identity]\nname = \"Henk <h@x.nl>\"\nemail = \"h@x.nl\"\n",
+                "bad identity name",
+            ),
+            (
+                "",
+                "[address.identity]\nname = \"Henk\"\n",
+                "identity without email",
+            ),
+            (
+                "commit_name = \"Lead\"\ncommit_email = \"lead@localhost\"\n",
+                "",
+                "person email without a domain dot",
+            ),
+            (
+                "commit_name = \"Lead\"\ncommit_email = \"Lead <lead@example.com>\"\n",
+                "",
+                "person email with a name",
+            ),
+            (
+                "commit_name = \"a>b\"\ncommit_email = \"lead@example.com\"\n",
+                "",
+                "person name with a bracket",
+            ),
+            (
+                "commit_email = \"lead@example.com\"\n",
+                "",
+                "email without name",
+            ),
+            (
+                "",
+                "[address.repositories.\"elsewhere/r\"]\nrequester_signoff = true\n",
+                "repository not on the allowlist",
+            ),
+            (
+                "",
+                "[address.repositories.\"docspec\"]\nrequester_signoff = true\n",
+                "not owner/name",
+            ),
+            (
+                "",
+                "[address.repositories.\"docspec/r\"]\nrequester_sign_off = true\n",
+                "unknown switch",
+            ),
+        ] {
+            assert!(address(person, extra).is_err(), "{why}");
+        }
+        assert!(matches!(
+            address("commit_email = \"x\"\ncommit_name = \"y\"\n", ""),
+            Err(ConfigError::Person(id, _)) if id.get() == 3
+        ));
     }
 
     #[test]

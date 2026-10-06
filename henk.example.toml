@@ -179,6 +179,28 @@ requester_id = 523456789012345678
 # [workspace] command_secs each. They run the pull request's code.
 # check_commands = [["cargo", "test", "--offline"]]
 # requester_id = 523456789012345678
+#
+# Who Henk commits as, author and committer alike; his Signed-off-by uses
+# the same. Left out, he commits as the App: meneer-henk[bot] with its
+# GitHub noreply address.
+# [address.identity]
+# name = "Meneer Henk"
+# email = "henk@example.com"
+#
+# The trailers of the one commit, after Henk-Run and Requested-by. The
+# requester is credited by the platform id in their [[people]] entry, never
+# by a display name; without one they get no trailers of their own.
+# [address.trailers]
+# henk_signoff = true          # Signed-off-by: Henk, for DCO checks
+# requester_coauthor = true    # Co-authored-by: the colleague who asked
+# requester_signoff = false    # Signed-off-by: the colleague who asked
+#
+# Per repository, by owner/name on the allowlist; a switch left out keeps
+# the value above. A requester sign-off states that the requester certifies
+# the DCO for a change they asked for but did not type: turning it on is
+# the operator's statement that requesters in this repository agree to that.
+# [address.repositories."StephanMeijer/scratch-repo"]
+# requester_signoff = true
 
 # Where an address run's file tools and checks run. Henk copies the pull
 # request's files into a workspace; only a checked changeset comes back, and
@@ -226,3 +248,12 @@ call_timeout_secs = 60
 discord_id = 523456789012345678
 name = "Stephan"
 role = "team lead"
+# Platform user ids (not logins): an address-run commit Stephan asked for
+# credits him as <id>+<login>@users.noreply.github.com, with the login read
+# from GitHub at run time. `curl https://api.github.com/users/<login>` shows
+# the id.
+# github_id = 1234567
+# gitlab_id = 7654321
+# Or credit him with this name and email instead; set both or neither.
+# commit_name = "Stephan Meijer"
+# commit_email = "stephan@example.com"
