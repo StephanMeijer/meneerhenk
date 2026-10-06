@@ -65,9 +65,11 @@ fn fixture(github: &str) -> Fixture {
         github: None,
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
+        live_runs: crate::liveness::LiveRuns::default(),
         test_writer: None,
         test_session: None,
         test_address_writer: None,
+        test_issue_writer: None,
     });
     let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
     let secrets = DashboardSecrets {
