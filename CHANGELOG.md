@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.8...v0.1.9) - 2026-10-06
+
+### Added
+
+- *(workspace)* setup stage before the model, with mise for the toolchain
+
+### Fixed
+
+- *(workspace)* setup leftovers stay out of the change, mise runs in safe mode
+
+### Other
+
+- Merge branch 'feat/workspace-ssh' into feat/workspace-setup-mise
+
 ## [0.1.8](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.7...v0.1.8) - 2026-10-06
 
 ### Added
