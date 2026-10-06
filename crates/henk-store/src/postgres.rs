@@ -16,13 +16,17 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RawRun, RunRecord, RunStatus, StoreError, kind_str,
-    platform_str, to_i64, to_u64,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, RawRun,
+    RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str, platform_str,
+    status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/postgres/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/postgres/001_initial.sql"),
+    include_str!("../migrations/postgres/002_dashboard.sql"),
+];
 
 /// Serialises migrations between Henk processes starting together.
 const MIGRATION_LOCK: i64 = 0x4865_6e6b; // "Henk"
@@ -616,5 +620,87 @@ impl RunStore for PgStore {
             )
             .await?;
         rows.iter().map(inbound_event).collect()
+    }
+
+    async fn list_runs(
+        &self,
+        filter: &RunFilter,
+        page: Page,
+    ) -> Result<Vec<RunRecord>, StoreError> {
+        let kind = filter.kind.map(kind_str);
+        let status = filter.status.map(status_str);
+        let platform = filter.platform.map(platform_str);
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {RUN_COLUMNS} FROM runs
+                     WHERE ($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
+                       AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)
+                     ORDER BY started_at DESC, id DESC LIMIT $5 OFFSET $6"
+                ),
+                &[
+                    &kind,
+                    &status,
+                    &platform,
+                    &filter.repo,
+                    &i64::from(page.limit()),
+                    &i64::from(page.offset()),
+                ],
+            )
+            .await?
+            .iter()
+            .map(|row| raw_run(row)?.into_record())
+            .collect()
+    }
+
+    async fn list_inbound_events(
+        &self,
+        filter: &EventFilter,
+        page: Page,
+    ) -> Result<Vec<EventWithOutcomes>, StoreError> {
+        let client = self.client().await?;
+        let events = client
+            .query(
+                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events
+                 WHERE ($1::text IS NULL OR source = $1) AND ($2::text IS NULL OR kind = $2)
+                   AND ($3::text IS NULL OR repo = $3)
+                 ORDER BY received_at DESC, id DESC LIMIT $4 OFFSET $5",
+                &[
+                    &filter.source,
+                    &filter.kind,
+                    &filter.repo,
+                    &i64::from(page.limit()),
+                    &i64::from(page.offset()),
+                ],
+            )
+            .await?
+            .iter()
+            .map(inbound_event)
+            .collect::<Result<Vec<_>, _>>()?;
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One query for every outcome of the page, not one per event.
+        let ids: Vec<String> = events.iter().map(|e| e.id.as_str().to_owned()).collect();
+        let rows = client
+            .query(
+                "SELECT event_id, listener, outcome, detail, run_id, at FROM event_outcomes
+                 WHERE event_id = ANY($1) ORDER BY id",
+                &[&ids],
+            )
+            .await?;
+        let mut outcomes = Vec::with_capacity(rows.len());
+        for row in &rows {
+            outcomes.push(OutcomeRow {
+                event_id: row.try_get(0)?,
+                listener: row.try_get(1)?,
+                outcome: row.try_get(2)?,
+                detail: row.try_get(3)?,
+                run_id: row.try_get(4)?,
+                at: text(row.try_get(5)?),
+            });
+        }
+        Ok(attach_outcomes(events, &outcomes))
     }
 }

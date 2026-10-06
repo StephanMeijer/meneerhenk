@@ -1,7 +1,6 @@
 //! The HTTP server: composition of hooks, listeners and the bus, plus the
 //! pages that make runs and events traceable (§8.6).
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +8,7 @@ use anyhow::Context as _;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use henk_domain::run::{EventId, RunId};
 use henk_events::{EventBus, Hook};
@@ -21,8 +20,10 @@ use tracing::{info, warn};
 
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
+use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
 use crate::listeners::{AddressListener, MentionListener, PlanListener, ReviewListener, Writers};
+use crate::pages;
 use crate::recorder::StoreRecorder;
 
 /// What the server's own pages can reach.
@@ -70,7 +71,31 @@ pub fn compose(app: &Arc<App>) -> Composed {
             );
         }
     }
-    compose_with_secrets(app, github_secret, gitlab_token, api_token)
+    let mut composed = compose_with_secrets(app, github_secret, gitlab_token, api_token);
+    if let Some(config) = &app.settings.dashboard {
+        let built = DashboardSecrets::from_env(config)
+            .map_err(anyhow::Error::msg)
+            .and_then(|secrets| {
+                Dashboard::new(
+                    Arc::clone(app),
+                    Arc::clone(&composed.coordinator),
+                    composed.bus.listeners().collect(),
+                    config.clone(),
+                    &secrets,
+                )
+            });
+        match built {
+            Ok(dashboard) => {
+                composed.router = composed
+                    .router
+                    .merge(dashboard::routes(Arc::new(dashboard)))
+                    .layer(TraceLayer::new_for_http());
+                info!("dashboard at /dashboard");
+            }
+            Err(error) => warn!(%error, "dashboard disabled"),
+        }
+    }
+    composed
 }
 
 /// Builds the server with explicit secrets, for tests and for [`compose`].
@@ -202,172 +227,28 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
     .into_response()
 }
 
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-const STYLE: &str = "body{font:15px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#222}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.3rem .6rem;border-bottom:1px solid #ddd;vertical-align:top}code{background:#f3f3f3;padding:0 .2rem}pre{background:#f3f3f3;padding:.6rem;overflow:auto;max-height:30rem}";
-
-fn page(title: &str, body: &str) -> Response {
-    Html(format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{}</title><style>{STYLE}</style></head><body>{body}</body></html>",
-        escape(title)
-    ))
-    .into_response()
-}
-
 async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
     let Ok(run_id) = RunId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad run id").into_response();
     };
-    let store = &shared.coordinator.app().store;
-    let run = match store.run(&run_id).await {
-        Ok(Some(run)) => run,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
-        Err(error) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
-        }
-    };
-    let lanes = store.lanes(&run_id).await.unwrap_or_default();
-    let events = store.events(&run_id).await.unwrap_or_default();
-    let inbound = store
-        .inbound_events_for_run(&run_id)
-        .await
-        .unwrap_or_default();
-
-    let mut html = String::new();
-    let _ = write!(
-        html,
-        "<h1>Meneer Henk: {} {}</h1><p><b>{}</b> {} #{} {}<br>Status: <b>{:?}</b><br>Started {}{}<br>Trigger: {}{}</p>",
-        escape(&format!("{:?}", run.kind).to_lowercase()),
-        escape(run.id.as_str()),
-        escape(&format!("{:?}", run.platform)),
-        escape(&run.repo),
-        run.target,
-        run.commit
-            .as_deref()
-            .map(|c| format!("at <code>{}</code>", escape(c)))
-            .unwrap_or_default(),
-        run.status,
-        escape(&run.started_at),
-        run.finished_at
-            .as_deref()
-            .map(|f| format!(", finished {}", escape(f)))
-            .unwrap_or_default(),
-        escape(&run.trigger),
-        run.requester
-            .as_deref()
-            .map(|r| format!(" (asked by {})", escape(r)))
-            .unwrap_or_default(),
-    );
-    if let Some(summary) = &run.summary {
-        let _ = write!(html, "<p><b>Summary:</b> {}</p>", escape(summary));
-    }
-    if let Some(error) = &run.error {
-        let _ = write!(html, "<p><b>Error:</b> <code>{}</code></p>", escape(error));
-    }
-    if !inbound.is_empty() {
-        html.push_str("<h2>Events</h2><table><tr><th>Event</th><th>Received</th><th>Source</th><th>Kind</th></tr>");
-        for event in &inbound {
-            let _ = write!(
-                html,
-                "<tr><td><a href=\"/events/{0}\">{0}</a></td><td>{1}</td><td>{2}</td><td>{3}</td></tr>",
-                escape(event.id.as_str()),
-                escape(&event.received_at),
-                escape(&event.source),
-                escape(&event.kind)
-            );
-        }
-        html.push_str("</table>");
-    }
-    if !lanes.is_empty() {
-        html.push_str("<h2>Lanes</h2><table><tr><th>Lane</th><th>Model</th><th>Status</th><th>Turns</th><th>Tokens in</th><th>Tokens out</th><th>Error</th></tr>");
-        for lane in &lanes {
-            let _ = write!(
-                html,
-                "<tr><td>{}</td><td>{}</td><td>{:?}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                escape(&lane.name),
-                escape(&lane.model),
-                lane.status,
-                lane.turns,
-                lane.input_tokens,
-                lane.output_tokens,
-                escape(lane.error.as_deref().unwrap_or(""))
-            );
-        }
-        html.push_str("</table>");
-    }
-    if !events.is_empty() {
-        html.push_str("<h2>Timeline</h2><table>");
-        for event in &events {
-            let _ = write!(
-                html,
-                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                escape(&event.at),
-                escape(&event.level),
-                escape(&event.message)
-            );
-        }
-        html.push_str("</table>");
-    }
-    page(&format!("Run {}", run.id), &html)
+    pages::run_page(
+        shared.coordinator.app().store.as_ref(),
+        &run_id,
+        pages::Links::PUBLIC,
+    )
+    .await
 }
 
 async fn event_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
     let Ok(event_id) = EventId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad event id").into_response();
     };
-    let store = &shared.coordinator.app().store;
-    let event = match store.inbound_event(&event_id).await {
-        Ok(Some(event)) => event,
-        Ok(None) => return (StatusCode::NOT_FOUND, "no such event").into_response(),
-        Err(error) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
-        }
-    };
-    let outcomes = store.outcomes(&event_id).await.unwrap_or_default();
-    let mut html = String::new();
-    let _ = write!(
-        html,
-        "<h1>Event {}</h1><p>Received {}<br>Source: <b>{}</b><br>Kind: <b>{}</b>{}</p>",
-        escape(event.id.as_str()),
-        escape(&event.received_at),
-        escape(&event.source),
-        escape(&event.kind),
-        match (&event.repo, event.target) {
-            (Some(repo), Some(target)) => format!("<br>About: {} #{target}", escape(repo)),
-            (Some(repo), None) => format!("<br>About: {}", escape(repo)),
-            _ => String::new(),
-        }
-    );
-    html.push_str("<h2>What the listeners did</h2><table><tr><th>Listener</th><th>Outcome</th><th>Detail</th><th>Run</th><th>At</th></tr>");
-    for outcome in &outcomes {
-        let _ = write!(
-            html,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape(&outcome.listener),
-            escape(&outcome.outcome),
-            escape(&outcome.detail),
-            outcome
-                .run_id
-                .as_deref()
-                .map(|r| format!("<a href=\"/runs/{0}\">{0}</a>", escape(r)))
-                .unwrap_or_default(),
-            escape(&outcome.at)
-        );
-    }
-    html.push_str("</table>");
-    if let Some(payload) = &event.payload {
-        let _ = write!(
-            html,
-            "<h2>Payload as received</h2><pre>{}</pre>",
-            escape(payload)
-        );
-    }
-    page(&format!("Event {}", event.id), &html)
+    pages::event_page(
+        shared.coordinator.app().store.as_ref(),
+        &event_id,
+        pages::Links::PUBLIC,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -379,6 +260,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use std::fmt::Write as _;
     use std::time::Duration;
 
     use axum::body::Body;
@@ -637,5 +519,15 @@ github_owners = ["docspec"]
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call(
+            compose(&app).router,
+            Request::get("/dashboard").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "no [dashboard], no dashboard"
+        );
     }
 }

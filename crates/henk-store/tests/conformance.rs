@@ -14,8 +14,8 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, PgStore,
-    RunRecord, RunStatus, RunStore, SqliteStore,
+    EventFilter, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
+    Page, PgStore, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -78,6 +78,8 @@ macro_rules! for_each_scenario {
             outcomes_and_linked_events_keep_their_order,
             a_duplicate_run_id_is_an_error,
             joining_is_accepted,
+            runs_are_listed_newest_first_by_filter_and_page,
+            inbound_events_are_listed_with_their_outcomes,
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
         );
     };
@@ -380,6 +382,164 @@ async fn a_number_beyond_i64_is_refused_not_stored_as_something_else(store: &dyn
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
+    let plan = |id: &str| NewRun {
+        kind: RunKind::Plan,
+        repo: "o/other".into(),
+        ..new_run(id)
+    };
+    for run in [new_run("r-1"), plan("r-2"), new_run("r-3"), new_run("r-4")] {
+        store.create_run(&run).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    store
+        .finish_run(&id("r-3"), RunStatus::Failed, None, Some("boom"))
+        .await
+        .unwrap();
+    let ids = |runs: Vec<RunRecord>| {
+        runs.into_iter()
+            .map(|r| r.id.to_string())
+            .collect::<Vec<_>>()
+    };
+    let all = RunFilter::default();
+
+    assert_eq!(
+        ids(store.list_runs(&all, Page::new(50, 0)).await.unwrap()),
+        ["r-4", "r-3", "r-2", "r-1"]
+    );
+    assert_eq!(
+        ids(store.list_runs(&all, Page::new(2, 0)).await.unwrap()),
+        ["r-4", "r-3"]
+    );
+    assert_eq!(
+        ids(store.list_runs(&all, Page::new(2, 2)).await.unwrap()),
+        ["r-2", "r-1"]
+    );
+    assert!(
+        store
+            .list_runs(&all, Page::new(2, 4))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let failed = RunFilter {
+        status: Some(RunStatus::Failed),
+        ..RunFilter::default()
+    };
+    assert_eq!(
+        ids(store.list_runs(&failed, Page::new(50, 0)).await.unwrap()),
+        ["r-3"]
+    );
+    let plans = RunFilter {
+        kind: Some(RunKind::Plan),
+        ..RunFilter::default()
+    };
+    assert_eq!(
+        ids(store.list_runs(&plans, Page::new(50, 0)).await.unwrap()),
+        ["r-2"]
+    );
+    let running_reviews = RunFilter {
+        kind: Some(RunKind::Review),
+        status: Some(RunStatus::Running),
+        platform: Some(Platform::GitHub),
+        repo: Some("o/r".into()),
+    };
+    assert_eq!(
+        ids(store
+            .list_runs(&running_reviews, Page::new(50, 0))
+            .await
+            .unwrap()),
+        ["r-4", "r-1"]
+    );
+    let gitlab = RunFilter {
+        platform: Some(Platform::GitLab),
+        ..RunFilter::default()
+    };
+    assert!(
+        store
+            .list_runs(&gitlab, Page::new(50, 0))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(Page::new(1000, 0).limit(), Page::MAX, "a page is capped");
+    assert_eq!(Page::new(0, 0).limit(), 1);
+}
+
+async fn inbound_events_are_listed_with_their_outcomes(store: &dyn RunStore) {
+    store.create_run(&new_run("r-7")).await.unwrap();
+    store
+        .record_event(&inbound("e-old", "2026-10-03T00:00:01Z"))
+        .await
+        .unwrap();
+    store
+        .record_event(&inbound("e-new", "2026-10-03T00:00:02Z"))
+        .await
+        .unwrap();
+    let api = InboundEvent {
+        source: "api".into(),
+        kind: "plan_requested".into(),
+        ..inbound("e-api", "2026-10-03T00:00:03Z")
+    };
+    store.record_event(&api).await.unwrap();
+    store
+        .record_outcome(&outcome("e-new", "review", Some("r-7")))
+        .await
+        .unwrap();
+    store
+        .record_outcome(&outcome("e-new", "mention", None))
+        .await
+        .unwrap();
+    store
+        .record_outcome(&outcome("e-old", "review", None))
+        .await
+        .unwrap();
+
+    let listed = store
+        .list_inbound_events(&EventFilter::default(), Page::new(50, 0))
+        .await
+        .unwrap();
+    let ids: Vec<_> = listed.iter().map(|e| e.event.id.to_string()).collect();
+    assert_eq!(ids, ["e-api", "e-new", "e-old"]);
+    assert!(listed[0].outcomes.is_empty());
+    let listeners: Vec<_> = listed[1]
+        .outcomes
+        .iter()
+        .map(|o| o.listener.as_str())
+        .collect();
+    assert_eq!(
+        listeners,
+        ["review", "mention"],
+        "each event gets its own, in order"
+    );
+    assert_eq!(listed[1].outcomes[0].run_id.as_deref(), Some("r-7"));
+    assert_eq!(listed[2].outcomes.len(), 1);
+
+    let webhooks = EventFilter {
+        source: Some("github_webhook".into()),
+        ..EventFilter::default()
+    };
+    let listed = store
+        .list_inbound_events(&webhooks, Page::new(1, 1))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].event.id.to_string(), "e-old");
+    let plans = EventFilter {
+        kind: Some("plan_requested".into()),
+        repo: Some("o/r".into()),
+        ..EventFilter::default()
+    };
+    assert_eq!(
+        store
+            .list_inbound_events(&plans, Page::new(50, 0))
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }
 

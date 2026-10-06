@@ -72,7 +72,7 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks
 }
 
-fn check_secrets(settings: &Settings) -> Vec<Check> {
+pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {
     let server = &settings.server;
     [
         (

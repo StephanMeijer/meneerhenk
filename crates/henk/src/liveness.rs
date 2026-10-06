@@ -25,7 +25,7 @@ const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
 
 /// How long a heartbeat may be silent before its run counts as orphaned:
 /// six missed heartbeats.
-const STALE_AFTER: Duration = Duration::from_mins(3);
+pub(crate) const STALE_AFTER: Duration = Duration::from_mins(3);
 
 /// How often a serving process looks for orphaned runs. A process that
 /// died and was restarted within [`STALE_AFTER`] finds its old run still

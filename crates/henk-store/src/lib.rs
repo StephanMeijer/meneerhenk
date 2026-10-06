@@ -13,6 +13,7 @@ pub use postgres::{PgStore, describe_url};
 pub use sqlite::SqliteStore;
 pub use store::RunStore;
 pub use types::{
-    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RunRecord, RunStatus, StoreError,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, RunFilter, RunRecord,
+    RunStatus, StoreError,
 };

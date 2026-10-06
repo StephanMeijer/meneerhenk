@@ -13,9 +13,10 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::store::RunStore;
 use crate::types::{
-    EventRecord, FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, RawRun, RunRecord, RunStatus, StoreError, kind_str,
-    now, platform_str, to_i64, to_u64,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, RawRun,
+    RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str, now, platform_str,
+    status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -29,6 +30,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/001_initial.sql")),
         M::up(include_str!("../migrations/sqlite/002_inbound_events.sql")),
         M::up(include_str!("../migrations/sqlite/003_run_liveness.sql")),
+        M::up(include_str!("../migrations/sqlite/004_dashboard.sql")),
     ])
 }
 
@@ -377,33 +379,10 @@ impl RunStore for SqliteStore {
             c.query_row(
                 "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events WHERE id = ?1",
                 params![id.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                    ))
-                },
+                raw_inbound,
             )
             .optional()?
-            .map(|(id, received_at, source, kind, repo, target, payload)| {
-                let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt { column: "inbound_events.id", value: id })?;
-                Ok(InboundEvent {
-                    id,
-                    received_at,
-                    source,
-                    kind,
-                    repo,
-                    target: target
-                        .map(|t| to_u64("inbound_events.target", t))
-                        .transpose()?,
-                    payload,
-                })
-            })
+            .map(RawInbound::into_event)
             .transpose()
         })
     }
@@ -446,6 +425,129 @@ impl RunStore for SqliteStore {
             }
         }
         Ok(events)
+    }
+
+    async fn list_runs(
+        &self,
+        filter: &RunFilter,
+        page: Page,
+    ) -> Result<Vec<RunRecord>, StoreError> {
+        let kind = filter.kind.map(kind_str);
+        let status = filter.status.map(status_str);
+        let platform = filter.platform.map(platform_str);
+        self.with(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs
+                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
+                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
+                 ORDER BY started_at DESC, id DESC LIMIT ?5 OFFSET ?6"
+            ))?;
+            let raw = statement
+                .query_map(
+                    params![
+                        kind,
+                        status,
+                        platform,
+                        filter.repo,
+                        page.limit(),
+                        page.offset()
+                    ],
+                    raw_run,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            raw.into_iter().map(RawRun::into_record).collect()
+        })
+    }
+
+    async fn list_inbound_events(
+        &self,
+        filter: &EventFilter,
+        page: Page,
+    ) -> Result<Vec<EventWithOutcomes>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events
+                 WHERE (?1 IS NULL OR source = ?1) AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR repo = ?3)
+                 ORDER BY received_at DESC, id DESC LIMIT ?4 OFFSET ?5",
+            )?;
+            let rows = statement
+                .query_map(
+                    params![filter.source, filter.kind, filter.repo, page.limit(), page.offset()],
+                    raw_inbound,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let events = rows
+                .into_iter()
+                .map(RawInbound::into_event)
+                .collect::<Result<Vec<_>, _>>()?;
+            if events.is_empty() {
+                return Ok(Vec::new());
+            }
+            // One query for every outcome of the page, not one per event.
+            let marks = vec!["?"; events.len()].join(", ");
+            let mut statement = c.prepare(&format!(
+                "SELECT event_id, listener, outcome, detail, run_id, at FROM event_outcomes
+                 WHERE event_id IN ({marks}) ORDER BY rowid"
+            ))?;
+            let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+            let outcomes = statement
+                .query_map(rusqlite::params_from_iter(ids), |row| {
+                    Ok(OutcomeRow {
+                        event_id: row.get(0)?,
+                        listener: row.get(1)?,
+                        outcome: row.get(2)?,
+                        detail: row.get(3)?,
+                        run_id: row.get(4)?,
+                        at: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(attach_outcomes(events, &outcomes))
+        })
+    }
+}
+
+/// An inbound event row before its values are checked.
+struct RawInbound {
+    id: String,
+    received_at: String,
+    source: String,
+    kind: String,
+    repo: Option<String>,
+    target: Option<i64>,
+    payload: Option<String>,
+}
+
+fn raw_inbound(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawInbound> {
+    Ok(RawInbound {
+        id: row.get(0)?,
+        received_at: row.get(1)?,
+        source: row.get(2)?,
+        kind: row.get(3)?,
+        repo: row.get(4)?,
+        target: row.get(5)?,
+        payload: row.get(6)?,
+    })
+}
+
+impl RawInbound {
+    fn into_event(self) -> Result<InboundEvent, StoreError> {
+        let id = EventId::parse(self.id.clone()).map_err(|_| StoreError::Corrupt {
+            column: "inbound_events.id",
+            value: self.id,
+        })?;
+        Ok(InboundEvent {
+            id,
+            received_at: self.received_at,
+            source: self.source,
+            kind: self.kind,
+            repo: self.repo,
+            target: self
+                .target
+                .map(|t| to_u64("inbound_events.target", t))
+                .transpose()?,
+            payload: self.payload,
+        })
     }
 }
 

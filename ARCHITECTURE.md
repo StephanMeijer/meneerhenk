@@ -131,7 +131,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,views}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -565,6 +565,13 @@ flowchart LR
 | 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run and every inbound event with its outcomes, `/runs/{id}` and `/events/{id}` |
 | 7. Allowlists bound the world | `Allowlist::allows` in `listeners/filter.rs`, `run_review` and `run_plan` |
 | 8. Failure is visible | `report_failure` posts a failure comment and closes the check; `run_plan` posts "Planning failed"; both record the error on the run |
+
+The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth
+says who someone is; the configured GitHub user ids decide, on every
+request, whether they may look. It only reads the store and the settings:
+no page starts, stops or changes anything, and every value it shows is
+escaped. The run and event pages linked from comments are outside it and
+need no sign-in.
 
 ## 10. GitHub and GitLab differences
 
