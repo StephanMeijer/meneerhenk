@@ -5,6 +5,34 @@
 use henk_domain::diff::{DiffSide, FileStatus, ReviewDiff};
 
 const PR3: &str = include_str!("fixtures/meneerhenk-pr3.diff");
+/// `git diff -M` output with C-quoted paths: a rename to `café.rs`, a
+/// quote and backslash in a name, spaces with and without quoting.
+const QUOTED: &str = include_str!("fixtures/quoted-paths.diff");
+
+#[test]
+fn quoted_paths_are_decoded() {
+    let diff = ReviewDiff::from_unified(QUOTED);
+    let mut paths: Vec<&str> = diff.paths().collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        [
+            "caf\u{e9}.rs",
+            "new \u{e9}.rs",
+            "path with space.rs",
+            "q\"uote\\.rs",
+            "\u{e9} \u{e9}.rs",
+        ]
+    );
+    let renamed = diff.file("caf\u{e9}.rs").unwrap();
+    assert_eq!(renamed.status, FileStatus::Renamed);
+    assert_eq!(renamed.old_path.as_deref(), Some("plain.rs"));
+    assert_eq!(diff.commentable("caf\u{e9}.rs", 5, DiffSide::Right), Ok(()));
+    assert_eq!(
+        diff.file("new \u{e9}.rs").unwrap().status,
+        FileStatus::Added
+    );
+}
 
 #[test]
 fn parses_every_file_of_a_real_diff() {

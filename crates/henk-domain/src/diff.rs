@@ -213,10 +213,10 @@ fn parse_section(lines: &[&str]) -> Option<FilePatch> {
             status = FileStatus::Removed;
         } else if let Some(from) = line.strip_prefix("rename from ") {
             status = FileStatus::Renamed;
-            old_path = Some(from.to_owned());
+            old_path = Some(unquote_git_path(from));
         } else if let Some(to) = line.strip_prefix("rename to ") {
             status = FileStatus::Renamed;
-            new_path = Some(to.to_owned());
+            new_path = Some(unquote_git_path(to));
         } else if let Some(path) = line.strip_prefix("--- ") {
             if path == "/dev/null" {
                 status = FileStatus::Added;
@@ -251,29 +251,117 @@ fn parse_section(lines: &[&str]) -> Option<FilePatch> {
 }
 
 /// `diff --git a/x b/y` gives both paths; the fallback for binary files
-/// and other sections without `---`/`+++` lines.
+/// and other sections without `---`/`+++` lines. Either side may be
+/// C-quoted (`"a/caf\303\251.rs"`).
 fn git_header_paths(line: &str) -> (Option<String>, Option<String>) {
     let rest = line.strip_prefix("diff --git ").unwrap_or_default();
-    let Some(a) = rest.strip_prefix("a/") else {
+    let Some((old, new)) = split_header_tokens(rest) else {
         return (None, None);
     };
-    match a.find(" b/") {
-        Some(at) => {
-            let old = a.get(..at).unwrap_or_default().to_owned();
-            let new = a.get(at + 3..).unwrap_or_default().to_owned();
-            (Some(old), Some(new))
-        }
-        None => (None, None),
+    let old = unquote_git_path(old);
+    let new = unquote_git_path(new);
+    match (old.strip_prefix("a/"), new.strip_prefix("b/")) {
+        (Some(old), Some(new)) => (Some(old.to_owned()), Some(new.to_owned())),
+        _ => (None, None),
     }
 }
 
-/// `a/path` or `b/path` to `path`; a trailing tab and timestamp is dropped.
+/// The two raw (possibly quoted) paths of a `diff --git` header.
+fn split_header_tokens(rest: &str) -> Option<(&str, &str)> {
+    let at = if rest.starts_with('"') {
+        // The closing quote is the first `"` not escaped by a backslash.
+        let mut escaped = false;
+        let mut close = None;
+        for (index, c) in rest.char_indices().skip(1) {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => {
+                    close = Some(index + 1);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        close?
+    } else if rest.ends_with('"') {
+        rest.find(" \"b/")?
+    } else {
+        rest.find(" b/")?
+    };
+    let (old, new) = rest.split_at_checked(at)?;
+    Some((old, new.strip_prefix(' ')?))
+}
+
+/// `a/path` or `b/path` to `path`; a trailing tab and timestamp is dropped
+/// and a C-quoted path is decoded.
 fn strip_prefix_letter(path: &str) -> String {
-    let path = path.split('\t').next().unwrap_or_default();
-    path.strip_prefix("a/")
-        .or_else(|| path.strip_prefix("b/"))
-        .unwrap_or(path)
-        .to_owned()
+    // A quoted path never holds a raw tab, so cutting first is safe.
+    let path = unquote_git_path(path.split('\t').next().unwrap_or_default());
+    match path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")) {
+        Some(stripped) => stripped.to_owned(),
+        None => path,
+    }
+}
+
+/// Decodes a path git C-quoted (`core.quotePath`): `"caf\303\251.rs"` to
+/// `café.rs`. A path without surrounding quotes is returned unchanged;
+/// bytes that are not UTF-8 after decoding are replaced, not refused, so
+/// the file is still listed.
+fn unquote_git_path(path: &str) -> String {
+    let Some(inner) = path
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return path.to_owned();
+    };
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut iter = inner.bytes().peekable();
+    while let Some(byte) = iter.next() {
+        if byte != b'\\' {
+            bytes.push(byte);
+            continue;
+        }
+        let Some(&next) = iter.peek() else {
+            bytes.push(byte);
+            break;
+        };
+        let simple = match next {
+            b'\\' => Some(b'\\'),
+            b'"' => Some(b'"'),
+            b'a' => Some(0x07),
+            b'b' => Some(0x08),
+            b't' => Some(b'\t'),
+            b'n' => Some(b'\n'),
+            b'v' => Some(0x0b),
+            b'f' => Some(0x0c),
+            b'r' => Some(b'\r'),
+            _ => None,
+        };
+        if let Some(decoded) = simple {
+            iter.next();
+            bytes.push(decoded);
+        } else if let Some(decoded) = octal_escape(&mut iter) {
+            bytes.push(decoded);
+        } else {
+            // Unknown or truncated escape: keep the backslash as written.
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Three octal digits (`303`) to one byte; consumes them only on success.
+fn octal_escape(iter: &mut std::iter::Peekable<std::str::Bytes<'_>>) -> Option<u8> {
+    let mut lookahead = iter.clone();
+    let mut value: u32 = 0;
+    for _ in 0..3 {
+        let digit = lookahead.next().filter(|d| (b'0'..=b'7').contains(d))?;
+        value = value * 8 + u32::from(digit - b'0');
+    }
+    let decoded = u8::try_from(value).ok()?;
+    *iter = lookahead;
+    Some(decoded)
 }
 
 impl FileDiff {
@@ -427,19 +515,22 @@ fn parse_hunk_header(header: &str) -> (u32, u32) {
     let mut old_start = 1;
     let mut new_start = 1;
     for part in header.split_whitespace().take(2) {
-        let (sign, numbers) = part.split_at(1);
-        let start = numbers
-            .split(',')
-            .next()
-            .and_then(|n| n.parse::<u32>().ok())
-            .unwrap_or(1);
-        match sign {
-            "-" => old_start = start,
-            "+" => new_start = start,
-            _ => {}
+        if let Some(numbers) = part.strip_prefix('-') {
+            old_start = range_start(numbers);
+        } else if let Some(numbers) = part.strip_prefix('+') {
+            new_start = range_start(numbers);
         }
     }
     (old_start, new_start)
+}
+
+/// `12,5` or `12` to `12`; anything unreadable to 1.
+fn range_start(numbers: &str) -> u32 {
+    numbers
+        .split(',')
+        .next()
+        .and_then(|n| n.parse::<u32>().ok())
+        .unwrap_or(1)
 }
 
 impl ReviewDiff {
@@ -756,5 +847,70 @@ Binary files /dev/null and b/img.png differ
         assert_eq!(git_header_paths("diff --cc merged"), (None, None));
         assert!(split_unified("").is_empty());
         assert!(split_unified("not a diff at all\n").is_empty());
+    }
+
+    #[test]
+    fn unquotes_git_c_quoted_paths() {
+        assert_eq!(unquote_git_path("src/a.rs"), "src/a.rs");
+        assert_eq!(unquote_git_path("\"abc"), "\"abc", "unbalanced is kept");
+        assert_eq!(unquote_git_path("\"a b.rs\""), "a b.rs");
+        assert_eq!(
+            unquote_git_path(r#""a/new \303\251.rs""#),
+            "a/new \u{e9}.rs"
+        );
+        assert_eq!(unquote_git_path(r#""q\"uote\\.rs""#), "q\"uote\\.rs");
+        assert_eq!(unquote_git_path(r#""tab\there""#), "tab\there");
+        assert_eq!(unquote_git_path(r#""\377.rs""#), "\u{fffd}.rs");
+        assert_eq!(unquote_git_path(r#""\39.rs""#), "\\39.rs", "not octal");
+        assert_eq!(unquote_git_path(r#""end\""#), "end\\", "truncated escape");
+    }
+
+    #[test]
+    fn header_paths_with_quoted_sides() {
+        let both = (Some("x \u{e9}.rs".into()), Some("x \u{e9}.rs".into()));
+        assert_eq!(
+            git_header_paths(r#"diff --git "a/x \303\251.rs" "b/x \303\251.rs""#),
+            both
+        );
+        assert_eq!(
+            git_header_paths(r#"diff --git a/plain.rs "b/caf\303\251.rs""#),
+            (Some("plain.rs".into()), Some("caf\u{e9}.rs".into()))
+        );
+        assert_eq!(
+            git_header_paths(r#"diff --git "a/caf\303\251.rs" b/plain.rs"#),
+            (Some("caf\u{e9}.rs".into()), Some("plain.rs".into()))
+        );
+        assert_eq!(
+            git_header_paths(r#"diff --git "a/q\"b/ \\.rs" "b/q\"b/ \\.rs""#),
+            (Some("q\"b/ \\.rs".into()), Some("q\"b/ \\.rs".into()))
+        );
+        assert_eq!(
+            strip_prefix_letter("\"b/new \\303\\251.rs\"\t"),
+            "new \u{e9}.rs"
+        );
+    }
+
+    #[test]
+    fn rename_to_a_quoted_path() {
+        let text = r#"diff --git a/plain.rs "b/caf\303\251.rs"
+similarity index 90%
+rename from plain.rs
+rename to "caf\303\251.rs"
+index 0ff3bbb..fb3ced1 100644
+--- a/plain.rs
++++ "b/caf\303\251.rs"
+@@ -4,3 +4,3 @@
+ 4
+-5
++five
+ 6
+"#;
+        let patches = split_unified(text);
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].status, FileStatus::Renamed);
+        assert_eq!(patches[0].old_path.as_deref(), Some("plain.rs"));
+        assert_eq!(patches[0].new_path.as_deref(), Some("caf\u{e9}.rs"));
+        let diff = ReviewDiff::from_patches(&patches);
+        assert_eq!(diff.commentable("caf\u{e9}.rs", 5, DiffSide::Right), Ok(()));
     }
 }
