@@ -54,7 +54,7 @@ pub fn size(messages: &[ChatMessage]) -> usize {
 }
 
 /// When `messages` is over `budget` characters, brings it down to the
-/// low-water mark ([`LOW_WATER_PERCENT`] of the budget) by stubbing old tool
+/// low-water mark (75 percent of the budget) by stubbing old tool
 /// results, oldest first, leaving the last `keep_recent_turns` turns intact.
 /// A turn starts at an assistant message. Returns how many results were
 /// stubbed. When that is more than zero, opaque blocks are dropped too.
