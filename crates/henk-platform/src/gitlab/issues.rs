@@ -187,21 +187,9 @@ impl IssueWriter for GitLabWriter {
     }
 
     async fn repo_labels(&self, repo: &RepoRef) -> Result<Vec<String>, PlatformError> {
-        let value = self
-            .call_tool(
-                "list_labels",
-                json!({"project_id": repo.path(), "per_page": 100}),
-            )
-            .await?;
-        let items = match value {
-            Value::Array(items) => items,
-            Value::Object(map) => map
-                .get("items")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
+        let mut args = serde_json::Map::new();
+        args.insert("project_id".into(), json!(repo.path()));
+        let items = self.call_tool_all("list_labels", args, &["items"]).await?;
         Ok(items
             .iter()
             .filter_map(|l| l.get("name").and_then(Value::as_str).map(str::to_owned))
