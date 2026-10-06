@@ -392,15 +392,7 @@ impl Session<'_> {
             turn_warning: None,
         };
         let outcome = run_session(self.app.store.as_ref(), self.run, spec, cancel).await;
-        match outcome.stop {
-            StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
-            StopCause::Timeout => Err(anyhow!(
-                "the time limit of {}s was reached",
-                config.timeout_secs
-            )),
-            StopCause::Cancelled => Err(anyhow!("cancelled")),
-            StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
-        }
+        session_result(outcome.stop, config.timeout_secs)
     }
 
     /// Replies in every settled thread and posts the summary. Best-effort:
@@ -495,6 +487,18 @@ impl Session<'_> {
         if let Err(error) = self.writer.post_comment(&self.request.target, &body).await {
             warn!(%error, "could not post the summary");
         }
+    }
+}
+
+/// How the address session ended, as the run's result. A model that
+/// declined fails the run; it did not finish.
+fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
+    match stop {
+        StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
+        StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
+        StopCause::Cancelled => Err(anyhow!("cancelled")),
+        StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
+        StopCause::Refused(why) => Err(anyhow!("the model declined to address ({why})")),
     }
 }
 
@@ -936,5 +940,12 @@ check_commands = [["true"]]
                 "{case}: no run"
             );
         }
+    }
+
+    #[test]
+    fn a_refused_address_session_fails_and_says_why() {
+        let error = session_result(StopCause::Refused("refusal".to_owned()), 60).unwrap_err();
+        assert_eq!(error.to_string(), "the model declined to address (refusal)");
+        assert!(session_result(StopCause::EndTurn, 60).is_ok());
     }
 }
