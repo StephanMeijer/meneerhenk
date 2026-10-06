@@ -415,6 +415,11 @@ async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
         ["r-4", "r-3"]
     );
     assert_eq!(
+        store.count_runs(&all).await.unwrap(),
+        4,
+        "the count spans every page"
+    );
+    assert_eq!(
         ids(store.list_runs(&all, Page::new(2, 2)).await.unwrap()),
         ["r-2", "r-1"]
     );
@@ -454,6 +459,9 @@ async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
             .unwrap()),
         ["r-4", "r-1"]
     );
+    assert_eq!(store.count_runs(&running_reviews).await.unwrap(), 2);
+    assert_eq!(store.count_runs(&failed).await.unwrap(), 1);
+    assert_eq!(store.count_runs(&plans).await.unwrap(), 1);
     let gitlab = RunFilter {
         platform: Some(Platform::GitLab),
         ..RunFilter::default()
@@ -465,6 +473,7 @@ async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
             .unwrap()
             .is_empty()
     );
+    assert_eq!(store.count_runs(&gitlab).await.unwrap(), 0);
     assert_eq!(Page::new(1000, 0).limit(), Page::MAX, "a page is capped");
     assert_eq!(Page::new(0, 0).limit(), 1);
 }

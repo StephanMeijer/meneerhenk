@@ -194,6 +194,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     async fn list_runs(&self, filter: &RunFilter, page: Page)
     -> Result<Vec<RunRecord>, StoreError>;
 
+    /// How many runs match `filter`, across every page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError>;
+
     /// Inbound events matching `filter`, newest first, one page of them,
     /// each with its outcomes.
     ///

@@ -654,6 +654,24 @@ impl RunStore for PgStore {
             .collect()
     }
 
+    async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
+        let kind = filter.kind.map(kind_str);
+        let status = filter.status.map(status_str);
+        let platform = filter.platform.map(platform_str);
+        let count: i64 = self
+            .client()
+            .await?
+            .query_one(
+                "SELECT COUNT(*) FROM runs
+                 WHERE ($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
+                   AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)",
+                &[&kind, &status, &platform, &filter.repo],
+            )
+            .await?
+            .try_get(0)?;
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
     async fn list_inbound_events(
         &self,
         filter: &EventFilter,

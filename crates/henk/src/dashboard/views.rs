@@ -179,14 +179,7 @@ pub async fn overview(
 ) -> Response {
     let store = &dashboard.app.store;
     let settings = &dashboard.app.settings;
-    let running_filter = RunFilter {
-        status: Some(RunStatus::Running),
-        ..RunFilter::default()
-    };
-    let running = store
-        .list_runs(&running_filter, Page::new(Page::MAX, 0))
-        .await
-        .unwrap_or_default();
+    let (running, running_total) = running_now(&dashboard).await;
     let filter = RunFilter {
         kind: lookup(KINDS, query.get("kind")),
         status: lookup(STATUSES, query.get("status")),
@@ -210,9 +203,14 @@ pub async fn overview(
     );
     let _ = write!(
         html,
-        "<h2>Running now (<span id=\"running-count\">{}</span>)</h2>{}",
-        running.len(),
+        "<h2>Running now (<span id=\"running-count\">{running_total}</span>)</h2>{}",
         runs_table(settings, &running, "running")
+    );
+    let more = more_running(running_total, running.len());
+    let _ = write!(
+        html,
+        "<p class=\"muted\" id=\"running-more\"{}>{more}</p>",
+        if more.is_empty() { " hidden" } else { "" }
     );
     html.push_str("<h2>Runs</h2><form class=\"filters\" method=\"get\">");
     html.push_str(&select(
@@ -425,18 +423,40 @@ pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) ->
     page("Health", NAV, &html)
 }
 
-/// The running runs, for the overview's poller.
-pub async fn running_json(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) -> Response {
+/// The newest page of running runs, and how many are running in all: the
+/// list stops at [`Page::MAX`], the count does not.
+async fn running_now(dashboard: &Dashboard) -> (Vec<RunRecord>, u64) {
     let filter = RunFilter {
         status: Some(RunStatus::Running),
         ..RunFilter::default()
     };
-    let runs = dashboard
-        .app
-        .store
+    let store = &dashboard.app.store;
+    let runs = store
         .list_runs(&filter, Page::new(Page::MAX, 0))
         .await
         .unwrap_or_default();
+    let shown = u64::try_from(runs.len()).unwrap_or(u64::MAX);
+    // A run can finish between the two queries; never report fewer than shown.
+    let total = store
+        .count_runs(&filter)
+        .await
+        .map_or(shown, |total| total.max(shown));
+    (runs, total)
+}
+
+/// The line under a running list that does not show every running run.
+fn more_running(total: u64, shown: usize) -> String {
+    let shown = u64::try_from(shown).unwrap_or(u64::MAX);
+    match total.saturating_sub(shown) {
+        0 => String::new(),
+        more => format!("And {more} more not shown."),
+    }
+}
+
+/// The running runs, for the overview's poller: `total` is how many are
+/// running, `runs` the newest of them.
+pub async fn running_json(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) -> Response {
+    let (runs, total) = running_now(&dashboard).await;
     let settings = &dashboard.app.settings;
     let rows: Vec<_> = runs
         .iter()
@@ -452,7 +472,7 @@ pub async fn running_json(State(dashboard): State<Arc<Dashboard>>, _viewer: View
             })
         })
         .collect();
-    Json(rows).into_response()
+    Json(json!({ "total": total, "runs": rows })).into_response()
 }
 
 /// Refreshes "Running now" every five seconds. Builds the rows with
@@ -461,7 +481,8 @@ const APP_JS: &str = r#""use strict";
 (function () {
   const body = document.getElementById("running");
   const count = document.getElementById("running-count");
-  if (!body || !count) return;
+  const more = document.getElementById("running-more");
+  if (!body || !count || !more) return;
   function cell(text, href) {
     const td = document.createElement("td");
     if (href) {
@@ -490,9 +511,12 @@ const APP_JS: &str = r#""use strict";
     try {
       const response = await fetch("/dashboard/running.json", { credentials: "same-origin" });
       if (!response.ok) return;
-      const runs = await response.json();
-      body.replaceChildren(...runs.map(row));
-      count.textContent = String(runs.length);
+      const running = await response.json();
+      body.replaceChildren(...running.runs.map(row));
+      count.textContent = String(running.total);
+      const hidden = running.total - running.runs.length;
+      more.textContent = hidden > 0 ? "And " + hidden + " more not shown." : "";
+      more.hidden = hidden <= 0;
     } catch (_) {
       // The next tick tries again.
     }

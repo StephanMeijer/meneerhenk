@@ -459,6 +459,22 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
+        let kind = filter.kind.map(kind_str);
+        let status = filter.status.map(status_str);
+        let platform = filter.platform.map(platform_str);
+        self.with(|c| {
+            let count: i64 = c.query_row(
+                "SELECT COUNT(*) FROM runs
+                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
+                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)",
+                params![kind, status, platform, filter.repo],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(count).unwrap_or_default())
+        })
+    }
+
     async fn list_inbound_events(
         &self,
         filter: &EventFilter,

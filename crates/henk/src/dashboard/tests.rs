@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
-use henk_store::{FindingAction, InboundEvent, LaneStatus, NewRun, OutcomeRecord, RunStatus};
+use henk_store::{FindingAction, InboundEvent, LaneStatus, NewRun, OutcomeRecord, Page, RunStatus};
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -419,6 +419,11 @@ async fn the_overview_lists_runs_by_filter_and_escapes_what_it_shows() {
             .contains("Running now (<span id=\"running-count\">1</span>)")
     );
     assert!(
+        all.body
+            .contains("<p class=\"muted\" id=\"running-more\" hidden></p>"),
+        "nothing is cut off, so no \"more\" line"
+    );
+    assert!(
         henk_domain::text::is_in_style(&all.body),
         "page text is in style"
     );
@@ -484,6 +489,66 @@ async fn paging_keeps_the_filters() {
 }
 
 #[tokio::test]
+async fn running_now_counts_every_running_run_beyond_one_page() {
+    let f = fixture("https://127.0.0.1:9");
+    let running = u64::from(Page::MAX) + 2;
+    for n in 0..running {
+        f.dashboard
+            .app
+            .store
+            .create_run(&NewRun {
+                id: RunId::parse(format!("r-{n:03}")).unwrap(),
+                kind: RunKind::Plan,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: n,
+                commit: None,
+                requester: None,
+                trigger: "asked".into(),
+                link: String::new(),
+            })
+            .await
+            .unwrap();
+    }
+    let me = signed_in(&f, ALLOWED);
+
+    let overview = get(&f, "/dashboard", Some(&me)).await;
+    assert!(
+        overview.body.contains(&format!(
+            "Running now (<span id=\"running-count\">{running}</span>)"
+        )),
+        "the badge is the real count, not the page size"
+    );
+    assert!(
+        overview
+            .body
+            .contains("<p class=\"muted\" id=\"running-more\">And 2 more not shown.</p>"),
+        "{}",
+        overview.body
+    );
+    let shown = overview
+        .body
+        .split("<h2>Runs</h2>")
+        .next()
+        .unwrap()
+        .matches("<tr><td><a href=\"/dashboard/runs/")
+        .count();
+    assert_eq!(shown, usize::try_from(Page::MAX).unwrap());
+
+    let json = get(&f, "/dashboard/running.json", Some(&me)).await;
+    let json: Value = serde_json::from_str(&json.body).unwrap();
+    assert_eq!(json["total"], running);
+    assert_eq!(
+        json["runs"].as_array().unwrap().len(),
+        usize::try_from(Page::MAX).unwrap()
+    );
+
+    let script = get(&f, "/dashboard/app.js", Some(&me)).await;
+    assert!(script.body.contains("running.total"));
+    assert!(script.body.contains("more not shown."));
+}
+
+#[tokio::test]
 async fn run_detail_events_health_and_the_poller_answer() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
@@ -529,7 +594,9 @@ async fn run_detail_events_health_and_the_poller_answer() {
     assert!(health.body.contains("review, plan"));
 
     let running = get(&f, "/dashboard/running.json", Some(&me)).await;
-    let rows: Value = serde_json::from_str(&running.body).unwrap();
+    let running: Value = serde_json::from_str(&running.body).unwrap();
+    assert_eq!(running["total"], 1);
+    let rows = &running["runs"];
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["id"], "r-review");
     assert_eq!(
