@@ -110,7 +110,7 @@ pub async fn run_address(
         })
         .await?;
     info!(run = %run, "address run started");
-    let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
+    let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
     let model = app.model(&config.model)?;
     let model_id = model_id(model.as_ref());
 
@@ -689,6 +689,7 @@ check_commands = [["true"]]
             github: None,
             gitlab: None,
             shutdown: CancellationToken::new(),
+            live_runs: crate::liveness::LiveRuns::default(),
             test_writer: None,
             test_session: None,
             test_address_writer: Some(hub as Arc<dyn AddressWriter>),
