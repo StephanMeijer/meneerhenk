@@ -553,3 +553,36 @@ async fn no_turn_warning_when_the_limit_is_that_small() {
             .all(|m| m.text() != "3 turns left: wrap up.")
     );
 }
+
+#[tokio::test]
+async fn a_refusal_ends_the_run_as_a_refusal_and_is_never_nudged() {
+    let refused = Ok(Completion {
+        message: ChatMessage::assistant(""),
+        stop: StopReason::Refused("content_filter".to_owned()),
+        usage: henk_llm::Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new("m", [refused, text("second try")]));
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    let agent = Agent::new(model.clone(), ToolSet::new(), "s", config()).with_continuation(
+        Box::new(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some("Please try again.".to_owned())
+        }),
+    );
+    let outcome = agent
+        .run(
+            vec![ChatMessage::user("review this")],
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(&outcome.stop, StopCause::Refused(why) if why == "content_filter"));
+    assert!(!outcome.stop.is_clean(), "a refusal is not a clean end");
+    assert_eq!(outcome.turns, 1);
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no nudge after a refusal"
+    );
+    assert_eq!(model.requests().len(), 1, "no second model call");
+}

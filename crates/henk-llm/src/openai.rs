@@ -234,6 +234,7 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
         Some("stop") if had_calls => StopReason::ToolUse,
         Some("stop") | None => StopReason::EndTurn,
         Some("length") => StopReason::MaxTokens,
+        Some("content_filter") => StopReason::Refused("content_filter".to_owned()),
         Some(other) => StopReason::Other(other.to_owned()),
     };
     let usage = response.get("usage").map_or_else(

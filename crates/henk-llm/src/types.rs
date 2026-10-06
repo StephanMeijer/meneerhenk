@@ -236,6 +236,9 @@ pub enum StopReason {
     ToolUse,
     /// The output token cap was hit.
     MaxTokens,
+    /// The provider's safety layer declined: Anthropic `refusal`, OpenAI
+    /// `content_filter`. The raw reason is kept.
+    Refused(String),
     /// Something provider-specific.
     Other(String),
 }

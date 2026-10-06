@@ -188,6 +188,7 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
         Some("end_turn") | None => StopReason::EndTurn,
         Some("tool_use") => StopReason::ToolUse,
         Some("max_tokens") => StopReason::MaxTokens,
+        Some("refusal") => StopReason::Refused("refusal".to_owned()),
         Some(other) => StopReason::Other(other.to_owned()),
     };
     let usage = response

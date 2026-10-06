@@ -603,7 +603,9 @@ async fn spawn_lanes(
                     .await;
             }
             // The lane row (henk-session) says finished for a time limit;
-            // the summary distinguishes it as stopped, from `stop`.
+            // the summary distinguishes it as stopped, from `stop`. A model
+            // that declined (`StopCause::Refused`) is a dropped lane: the
+            // summary names it instead of reading as a clean review (#40).
             let lane_outcome = match outcome.stop {
                 StopCause::Timeout => LaneOutcome::Stopped,
                 _ if outcome.finished() => LaneOutcome::Finished,
@@ -1000,6 +1002,35 @@ lanes = [{ name = "lane-a", model = "m" }]
         let lanes = f.app.store.lanes(&run).await.unwrap();
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].status, LaneStatus::Finished);
+    }
+
+    #[tokio::test]
+    async fn a_lane_whose_model_declined_is_not_a_clean_review() {
+        let refused = Ok(Completion {
+            message: henk_llm::ChatMessage::assistant(""),
+            stop: StopReason::Refused("content_filter".to_owned()),
+            usage: Usage::default(),
+        });
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [refused])).await;
+        let run = RunId::parse("r-refused").unwrap();
+        let _ = run_review(&f.app, request(&run), CancellationToken::new()).await;
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1, "the check is closed");
+            let summary = finished[0].summary();
+            assert_ne!(
+                summary, "No issues found.",
+                "a refusal never reads as a clean review"
+            );
+            assert!(summary.contains("Lane lane-a did not finish."), "{summary}");
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
+        }
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        assert_eq!(lanes[0].status, LaneStatus::Dropped);
+        assert_eq!(
+            lanes[0].error.as_deref(),
+            Some("the model declined (content_filter)")
+        );
     }
 
     #[tokio::test]
