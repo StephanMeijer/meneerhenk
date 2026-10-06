@@ -41,6 +41,9 @@ pub struct App {
     /// Tests: what `address_writer` returns for every platform.
     #[cfg(test)]
     pub test_address_writer: Option<Arc<dyn AddressWriter>>,
+    /// Tests: the tracker `issue_writer` returns for every platform.
+    #[cfg(test)]
+    pub test_issue_writer: Option<Arc<dyn IssueWriter>>,
 }
 
 impl std::fmt::Debug for App {
@@ -153,6 +156,8 @@ impl App {
             test_session: None,
             #[cfg(test)]
             test_address_writer: None,
+            #[cfg(test)]
+            test_issue_writer: None,
         })
     }
 
@@ -272,6 +277,10 @@ impl App {
         &self,
         platform: henk_domain::allowlist::Platform,
     ) -> anyhow::Result<Arc<dyn IssueWriter>> {
+        #[cfg(test)]
+        if let Some(writer) = &self.test_issue_writer {
+            return Ok(Arc::clone(writer));
+        }
         match platform {
             henk_domain::allowlist::Platform::GitHub => self
                 .github

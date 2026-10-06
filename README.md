@@ -35,7 +35,13 @@ A review lane works from the diff Henk fetched once: `list_changed_files`,
 numbered line range at the reviewed commit), `list_existing_findings`,
 `post_finding` (refused for a line that is not in the diff) and
 `improve_finding`. The planner has `write_plan`, the tracker tools and
-`web_fetch`. Lanes are kept honest and cheap by three things in
+`web_fetch`. On GitLab it plans work items: it can set the type (issue or
+task), fill empty fields (weight, start and due date, health) with
+`set_fields`, link parent, child, blocking and related items, and create
+tasks under an issue. The `gitlab-write` server needs the work item tools
+in `GITLAB_TOOLS`: `get_work_item`, `update_work_item`, `create_work_item`,
+`convert_work_item_type` and `create_work_item_note` (see
+`henk.example.toml`). Lanes are kept honest and cheap by three things in
 `henk-agent`: old tool results are replaced by one-line stubs once the
 conversation passes a size budget (`review.max_conversation_chars` and
 `review.keep_recent_turns`), a lane that ends without opening every
@@ -296,6 +302,6 @@ line in `docs/SPEC.md` once the team confirms it.
   limit. A plan that reaches its time limit still fails (§4).
 - §3.3 Findings in resolved threads do not count towards N.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
-- §4 On GitLab, triage sets labels, type and links; parent and child
-  relations and project fields are not set in this version.
+- §4 On GitHub, triage sets labels, type and links; priority, effort and
+  target date are not set in this version.
 - Everywhere: the only rate limit is `review.max_concurrent`.

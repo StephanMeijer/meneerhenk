@@ -248,7 +248,7 @@ flowchart TD
     N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>claim the line, first claim wins<br/>fact-check, when configured<br/>Marker attached<br/>PlatformWriter::post_finding"]
     N -- "improve_finding" --> F3["refuse when a person answered<br/>fact-check, when configured<br/>PlatformWriter::update_finding"]
     N -- "withdraw_finding" --> F7["refuse when a person answered<br/>fact-check, when configured<br/>update_finding + resolve_finding"]
-    N -- "write_plan, set_title, add_labels, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
+    N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     F0 --> M
     F6 --> M

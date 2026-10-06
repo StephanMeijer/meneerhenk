@@ -17,6 +17,9 @@ pub enum PlatformError {
     /// A 2xx body did not have the expected shape.
     #[error("unexpected response: {0}")]
     Decode(String),
+    /// The tracker cannot do this, or not for this kind of issue.
+    #[error("not supported: {0}")]
+    Unsupported(String),
     /// Credentials could not be produced.
     #[error("authentication: {0}")]
     Auth(String),

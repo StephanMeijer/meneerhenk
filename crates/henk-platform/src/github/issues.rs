@@ -3,6 +3,8 @@
 use henk_domain::allowlist::{Platform, RepoRef};
 use serde_json::{Value, json};
 
+use henk_domain::triage::TriageFields;
+
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
 use crate::issue::{IssueInfo, IssueRelation, IssueTarget, IssueUpdate, IssueWriter};
@@ -43,6 +45,12 @@ fn info(value: &Value) -> Result<IssueInfo, PlatformError> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned(),
+        kind: value
+            .get("type")
+            .and_then(|t| t.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        fields: TriageFields::default(),
     })
 }
 
@@ -81,6 +89,12 @@ impl IssueWriter for GitHubWriter {
         target: &IssueTarget,
         update: IssueUpdate,
     ) -> Result<(), PlatformError> {
+        if update.fields.is_some() {
+            return Err(PlatformError::Unsupported(
+                "GitHub triage fields (priority, effort, target date) are not set by Henk yet"
+                    .to_owned(),
+            ));
+        }
         let mut body = serde_json::Map::new();
         if let Some(title) = update.title {
             body.insert("title".into(), json!(title));
@@ -182,7 +196,7 @@ impl IssueWriter for GitHubWriter {
                     .await?;
             }
             IssueRelation::RelatesTo => {
-                return Err(PlatformError::Decode(
+                return Err(PlatformError::Unsupported(
                     "GitHub has no 'relates to' relationship; mention the issue in the plan instead".to_owned(),
                 ));
             }

@@ -22,6 +22,7 @@ pub mod review;
 pub mod run;
 pub mod scope;
 pub mod text;
+pub mod triage;
 
 /// Henk's full name as it appears in platform accounts and summaries.
 pub const DISPLAY_NAME: &str = "Meneer Henk";

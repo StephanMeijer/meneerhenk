@@ -128,6 +128,9 @@ const GITLAB_READ: &[(&str, &[Rule])] = &[
     ("list_issues", &[Rule::ProjectId]),
     ("list_issue_links", &[Rule::ProjectId]),
     ("list_issue_discussions", &[Rule::ProjectId]),
+    // Work items: GitLab issues and tasks with hierarchy, weight, dates and health.
+    ("get_work_item", &[Rule::ProjectId]),
+    ("list_work_items", &[Rule::ProjectId]),
     ("list_labels", &[Rule::ProjectId]),
     ("get_project", &[Rule::ProjectId]),
 ];
@@ -576,6 +579,40 @@ mod tests {
             ),
             Verdict::Deny(_)
         ));
+    }
+
+    #[test]
+    fn a_gitlab_planner_reads_work_items_of_its_own_project_only() {
+        let scope = Scope::Plan {
+            repo: RepoRef::parse(Platform::GitLab, "9xxlab/tools/cli").unwrap(),
+            issue: 9,
+        };
+        for tool in ["get_work_item", "list_work_items"] {
+            assert_eq!(
+                guard(
+                    Platform::GitLab,
+                    tool,
+                    &json!({"project_id": "1", "iid": 3}),
+                    &scope
+                ),
+                Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "iid": 3})),
+                "{tool}"
+            );
+            assert!(
+                matches!(
+                    guard(
+                        Platform::GitLab,
+                        tool,
+                        &json!({"project_id": "other/project"}),
+                        &scope
+                    ),
+                    Verdict::Deny(_)
+                ),
+                "{tool}"
+            );
+        }
+        assert!(!is_exposed(Platform::GitLab, "update_work_item"));
+        assert!(!is_exposed(Platform::GitLab, "create_work_item"));
     }
 
     #[test]

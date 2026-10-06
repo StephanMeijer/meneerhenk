@@ -688,6 +688,7 @@ check_commands = [["true"]]
             test_writer: None,
             test_session: None,
             test_address_writer: Some(hub as Arc<dyn AddressWriter>),
+            test_issue_writer: None,
         }
     }
 

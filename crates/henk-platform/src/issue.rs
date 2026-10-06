@@ -1,6 +1,7 @@
 //! What a planner writes to an issue, behind one trait per platform (§4).
 
 use henk_domain::allowlist::{Platform, RepoRef};
+use henk_domain::triage::TriageFields;
 
 use crate::error::PlatformError;
 use crate::writer::PostedComment;
@@ -26,6 +27,11 @@ pub struct IssueInfo {
     pub labels: Vec<String>,
     /// Link.
     pub url: String,
+    /// The tracker's kind of issue, when it has kinds: GitLab's work item
+    /// type (`Issue`, `Task`, `Epic`), GitHub's issue type.
+    pub kind: Option<String>,
+    /// Triage fields as they are now. Always empty on GitHub.
+    pub fields: TriageFields,
 }
 
 /// How two issues relate.
@@ -67,8 +73,20 @@ pub struct IssueUpdate {
     pub body: Option<String>,
     /// New full label set.
     pub labels: Option<Vec<String>>,
-    /// New issue type (GitHub issue types; GitLab `issue_type`).
+    /// New issue type (GitHub issue types; GitLab work item type).
     pub issue_type: Option<String>,
+    /// Triage fields to fill.
+    pub fields: Option<TriageFields>,
+}
+
+/// A sub-issue that exists. `unlinked` says why it is not linked to its
+/// parent, when the link failed after the issue was made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedSubIssue {
+    /// The new issue.
+    pub issue: IssueInfo,
+    /// The link error, if the issue is not linked.
+    pub unlinked: Option<String>,
 }
 
 /// Everything a planner writes to an issue tracker.
@@ -97,6 +115,24 @@ pub trait IssueWriter: Send + Sync {
         title: &str,
         body: &str,
     ) -> Result<IssueInfo, PlatformError>;
+
+    /// Creates an issue below `target` in the hierarchy. By default an issue
+    /// created and then linked as a sub-issue; a tracker that can do both in
+    /// one step overrides it, so a failed link cannot leave an orphan.
+    async fn create_sub_issue(
+        &self,
+        target: &IssueTarget,
+        title: &str,
+        body: &str,
+    ) -> Result<CreatedSubIssue, PlatformError> {
+        let issue = self.create_issue(&target.repo, title, body).await?;
+        let unlinked = self
+            .link_issues(target, IssueRelation::SubIssue, issue.number)
+            .await
+            .err()
+            .map(|error| error.to_string());
+        Ok(CreatedSubIssue { issue, unlinked })
+    }
 
     /// Registers a relationship between `target` and `other` in the same repository.
     async fn link_issues(

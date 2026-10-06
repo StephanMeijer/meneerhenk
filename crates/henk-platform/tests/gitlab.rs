@@ -293,3 +293,229 @@ async fn resolve_finding_resolves_the_discussion_its_note_starts() {
         "a reply starts no discussion"
     );
 }
+
+/// A work-item tracker: one item #9 of `kind` with labels and a weight,
+/// answering the way `@zereight/mcp-gitlab` does (GraphQL iids are strings).
+fn work_items(kind: &'static str) -> FakeServer {
+    let tools = [
+        "get_work_item",
+        "update_work_item",
+        "create_work_item",
+        "convert_work_item_type",
+        "create_work_item_note",
+    ]
+    .iter()
+    .map(|name| FakeServer::tool(name, "", &[]))
+    .collect();
+    FakeServer::new(tools, move |name, args| match name {
+        "get_work_item" => text(json!({
+            "id": "gid://gitlab/WorkItem/4242", "iid": "9", "title": "Export runs", "state": "OPEN",
+            "type": kind, "webUrl": "https://gitlab.example/g/p/-/work_items/9",
+            "description": "Body.", "labels": ["backend", "old"], "weight": 5,
+            "dueDate": "2026-12-01", "healthStatus": "needsAttention"
+        })),
+        "create_work_item" => text(json!({
+            "id": "gid://gitlab/WorkItem/4300", "iid": "12", "title": args["title"],
+            "type": if args["type"] == json!("task") { "Task" } else { "Issue" },
+            "webUrl": "https://gitlab.example/g/p/-/work_items/12"
+        })),
+        "create_work_item_note" => {
+            text(json!({"id": "gid://gitlab/Note/77", "body": args["body"]}))
+        }
+        "update_work_item" | "convert_work_item_type" => text(json!({"iid": "9"})),
+        other => CallToolResult::error(vec![ContentBlock::text(format!("unexpected {other}"))]),
+    })
+}
+
+fn issue_target() -> henk_platform::IssueTarget {
+    henk_platform::IssueTarget {
+        repo: RepoRef::parse(Platform::GitLab, "g/p").unwrap(),
+        number: 9,
+    }
+}
+
+fn last_call(fake: &FakeServer, tool: &str) -> Value {
+    fake.calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.name == tool)
+        .unwrap_or_else(|| panic!("no {tool} call"))
+        .arguments
+}
+
+#[tokio::test]
+async fn a_work_item_reads_as_an_issue_with_its_fields() {
+    use henk_domain::triage::{Health, date_text};
+    use henk_platform::IssueWriter as _;
+
+    let fake = work_items("Issue");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let issue = writer.issue(&issue_target()).await.unwrap();
+    assert_eq!(issue.number, 9, "a string iid is read");
+    assert_eq!(issue.id, Some(4242));
+    assert!(issue.open);
+    assert_eq!(issue.kind.as_deref(), Some("Issue"));
+    assert_eq!(issue.labels, ["backend", "old"]);
+    assert_eq!(issue.body, "Body.");
+    assert_eq!(issue.fields.weight, Some(5));
+    assert_eq!(
+        issue.fields.due.map(date_text).as_deref(),
+        Some("2026-12-01")
+    );
+    assert_eq!(issue.fields.health, Some(Health::NeedsAttention));
+    assert_eq!(issue.fields.start, None);
+    assert_eq!(
+        last_call(&fake, "get_work_item"),
+        json!({"project_id": "g/p", "iid": 9})
+    );
+}
+
+#[tokio::test]
+async fn an_update_sends_label_changes_type_and_fields_as_work_item_calls() {
+    use henk_domain::triage::TriageFields;
+    use henk_platform::{IssueUpdate, IssueWriter as _};
+
+    let fake = work_items("Issue");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    writer
+        .update_issue(
+            &issue_target(),
+            IssueUpdate {
+                title: Some("Export runs as CSV".to_owned()),
+                labels: Some(vec!["backend".to_owned(), "priority::high".to_owned()]),
+                issue_type: Some("Task".to_owned()),
+                fields: Some(
+                    TriageFields::parse(Some(3), Some("2026-11-02"), None, Some("on_track"))
+                        .unwrap(),
+                ),
+                ..IssueUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        last_call(&fake, "convert_work_item_type"),
+        json!({"project_id": "g/p", "iid": 9, "new_type": "task"})
+    );
+    assert_eq!(
+        last_call(&fake, "update_work_item"),
+        json!({
+            "project_id": "g/p", "iid": 9, "title": "Export runs as CSV",
+            "add_labels": ["priority::high"], "remove_labels": ["old"],
+            "weight": 3, "start_date": "2026-11-02", "health_status": "onTrack"
+        })
+    );
+
+    let before = fake.calls().len();
+    writer
+        .update_issue(&issue_target(), IssueUpdate::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.calls().len(),
+        before,
+        "nothing to change sends nothing"
+    );
+
+    let refused = writer
+        .update_issue(
+            &issue_target(),
+            IssueUpdate {
+                issue_type: Some("incident".to_owned()),
+                ..IssueUpdate::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(henk_platform::PlatformError::Unsupported(_))
+    ));
+}
+
+#[tokio::test]
+async fn every_relation_is_one_work_item_update() {
+    use henk_platform::{IssueRelation, IssueWriter as _};
+
+    let fake = work_items("Issue");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    for (relation, expected) in [
+        (IssueRelation::Parent, json!({"parent_iid": 4})),
+        (
+            IssueRelation::SubIssue,
+            json!({"children_to_add": [{"iid": 4}]}),
+        ),
+        (
+            IssueRelation::Blocks,
+            json!({"linked_items_to_add": [{"iid": 4, "link_type": "BLOCKS"}]}),
+        ),
+        (
+            IssueRelation::BlockedBy,
+            json!({"linked_items_to_add": [{"iid": 4, "link_type": "BLOCKED_BY"}]}),
+        ),
+        (
+            IssueRelation::RelatesTo,
+            json!({"linked_items_to_add": [{"iid": 4, "link_type": "RELATED"}]}),
+        ),
+    ] {
+        writer
+            .link_issues(&issue_target(), relation, 4)
+            .await
+            .unwrap();
+        let mut want = json!({"project_id": "g/p", "iid": 9});
+        want.as_object_mut()
+            .unwrap()
+            .extend(expected.as_object().unwrap().clone());
+        assert_eq!(last_call(&fake, "update_work_item"), want, "{relation:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_sub_issue_is_a_task_made_under_its_parent_in_one_call() {
+    use henk_platform::IssueWriter as _;
+
+    let fake = work_items("Issue");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let created = writer
+        .create_sub_issue(&issue_target(), "Export CSV", "The CSV half.")
+        .await
+        .unwrap();
+    assert_eq!(created.issue.number, 12);
+    assert_eq!(created.issue.kind.as_deref(), Some("Task"));
+    assert_eq!(created.unlinked, None);
+    assert_eq!(
+        last_call(&fake, "create_work_item"),
+        json!({"project_id": "g/p", "title": "Export CSV", "description": "The CSV half.", "type": "task", "parent_iid": 9})
+    );
+    assert!(
+        !fake.calls().iter().any(|c| c.name == "update_work_item"),
+        "no separate link call"
+    );
+
+    let fake = work_items("Task");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let refused = writer
+        .create_sub_issue(&issue_target(), "Export CSV", "The CSV half.")
+        .await;
+    assert!(matches!(
+        refused,
+        Err(henk_platform::PlatformError::Unsupported(_))
+    ));
+    assert!(!fake.calls().iter().any(|c| c.name == "create_work_item"));
+}
+
+#[tokio::test]
+async fn a_comment_is_a_work_item_note() {
+    use henk_platform::IssueWriter as _;
+
+    let fake = work_items("Task");
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let posted = writer
+        .comment(&issue_target(), "Two questions.")
+        .await
+        .unwrap();
+    assert_eq!(posted.id, "gid://gitlab/Note/77");
+    assert_eq!(
+        last_call(&fake, "create_work_item_note"),
+        json!({"project_id": "g/p", "iid": 9, "body": "Two questions."})
+    );
+}
