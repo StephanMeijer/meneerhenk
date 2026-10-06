@@ -1,5 +1,7 @@
 //! Scope guards (§8.5): a lane may read only its own repository, and a
-//! review lane only its own pull request at its own commit.
+//! review lane only its own pull request. In review scope, file and tree
+//! reads are pinned to the reviewed commit on both platforms; commit
+//! history (`get_commit`, `list_commits`) is not.
 //!
 //! The guard runs in Henk's process on every MCP tool call a model makes,
 //! before the call leaves for the server. It knows the tools by name and,
@@ -77,6 +79,12 @@ enum Rule {
     ProjectId,
     /// `merge_request_iid` is the reviewed merge request (GitLab, review scope only).
     MergeRequestIid,
+    /// Reads happen at the reviewed commit: `ref` is set to the commit,
+    /// replacing any `ref` the model gave (GitLab `get_file_contents` and
+    /// `get_repository_tree`, review scope). Plan scope has no commit, so
+    /// `ref` is kept there. `list_commits` and `get_commit` are not pinned;
+    /// they read history of the same project.
+    PinRef,
 }
 
 const GITHUB_READ: &[(&str, &[Rule])] = &[
@@ -122,11 +130,10 @@ const GITLAB_READ: &[(&str, &[Rule])] = &[
     ),
     ("mr_discussions", &[Rule::ProjectId, Rule::MergeRequestIid]),
     ("list_merge_requests", &[Rule::ProjectId]),
-    ("get_file_contents", &[Rule::ProjectId]),
-    ("get_repository_tree", &[Rule::ProjectId]),
+    ("get_file_contents", &[Rule::ProjectId, Rule::PinRef]),
+    ("get_repository_tree", &[Rule::ProjectId, Rule::PinRef]),
     ("list_commits", &[Rule::ProjectId]),
     ("get_commit", &[Rule::ProjectId]),
-    ("search_repositories", &[]),
     ("get_issue", &[Rule::ProjectId]),
     ("list_issues", &[Rule::ProjectId]),
     ("list_issue_links", &[Rule::ProjectId]),
@@ -244,6 +251,11 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
                     if args.get("sha").is_none() {
                         args.insert("sha".into(), json!(commit.as_str()));
                     }
+                }
+            }
+            Rule::PinRef => {
+                if let Scope::Review { commit, .. } = scope {
+                    args.insert("ref".into(), json!(commit.as_str()));
                 }
             }
             Rule::DenyWholeDiffMethods => {
@@ -725,6 +737,51 @@ mod tests {
             ),
             Verdict::Deny(_)
         ));
+        assert!(matches!(
+            guard(
+                Platform::GitLab,
+                "search_repositories",
+                &json!({"search": "secret"}),
+                &scope
+            ),
+            Verdict::Deny(_)
+        ));
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_file_contents",
+                &json!({"file_path": "a.rs", "ref": "other-branch"}),
+                &scope
+            ),
+            Verdict::Allow(
+                json!({"project_id": "9xxlab/tools/cli", "file_path": "a.rs", "ref": SHA})
+            )
+        );
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_repository_tree",
+                &json!({"path": "src"}),
+                &scope
+            ),
+            Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "path": "src", "ref": SHA}))
+        );
+        let plan = Scope::Plan {
+            repo: RepoRef::parse(Platform::GitLab, "9xxlab/tools/cli").unwrap(),
+            issue: 3,
+        };
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_file_contents",
+                &json!({"file_path": "a.rs", "ref": "main"}),
+                &plan
+            ),
+            Verdict::Allow(
+                json!({"project_id": "9xxlab/tools/cli", "file_path": "a.rs", "ref": "main"})
+            ),
+            "a plan has no commit to pin to"
+        );
     }
 
     #[test]
@@ -775,5 +832,9 @@ mod tests {
         }
         assert!(is_exposed(Platform::GitHub, "pull_request_read"));
         assert!(!is_exposed(Platform::GitHub, "issue_write"));
+        assert!(
+            !is_exposed(Platform::GitLab, "search_repositories"),
+            "a lane does not list other projects"
+        );
     }
 }
