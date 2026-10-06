@@ -367,7 +367,16 @@ impl Tool for Bash {
             return ToolOutput::error(result.output);
         }
         let mut out = if result.timed_out {
-            format!("stopped: ran past {} s", timeout.as_secs())
+            // The backend gives a command at most what is left of the run's
+            // time for commands, which may be less than it asked for.
+            if result.duration + Duration::from_secs(1) < timeout {
+                format!(
+                    "stopped after {} s: the time left for this run's commands ran out, not the command's own limit",
+                    result.duration.as_secs()
+                )
+            } else {
+                format!("stopped: ran past {} s", timeout.as_secs())
+            }
         } else {
             match result.code {
                 Some(code) => format!("exit {code} in {:.1} s", result.duration.as_secs_f64()),
@@ -697,5 +706,50 @@ mod tests {
         let cut = bash.call(json!({"command": "make"})).await.content;
         assert!(cut.contains("mktemp"), "{cut}");
         assert!(!cut.contains("read_file"), "{cut}");
+    }
+
+    /// A command the run's remaining time stopped short says so, not that
+    /// it ran past the limit it asked for.
+    #[tokio::test]
+    async fn bash_says_when_the_runs_time_stopped_a_command() {
+        let dir = ScratchDir::new("henk-code-bash-budget").unwrap();
+        let mut provider = FakeProvider::default();
+        provider.script.insert(
+            "bash -c cargo test".to_owned(),
+            crate::workspace::fake::Scripted {
+                delay: Duration::from_secs(30),
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let workspace = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
+        let limits = henk_domain::workspace::Limits {
+            command_secs: 20,
+            run_secs: 1,
+            ..henk_domain::workspace::Limits::default()
+        };
+        let bash = Bash {
+            workspace: crate::workspace::metered(workspace, limits),
+            limit: Duration::from_secs(20),
+            sharing: Sharing::Shared,
+        };
+        let cut = bash.call(json!({"command": "cargo test"})).await;
+        assert!(!cut.is_error, "{}", cut.content);
+        assert!(
+            cut.content.starts_with(
+                "stopped after 1 s: the time left for this run's commands ran out, not the command's own limit\n"
+            ),
+            "{}",
+            cut.content
+        );
+        assert!(!cut.content.contains("ran past 20 s"), "{}", cut.content);
+        let gone = bash.call(json!({"command": "cargo test"})).await;
+        assert!(
+            gone.is_error && gone.content.starts_with("not started:"),
+            "{}",
+            gone.content
+        );
     }
 }

@@ -112,8 +112,9 @@ pub struct SessionFactCheck {
     /// has them (#170). With it, the code tools read there instead of the
     /// platform (#90). Checks only read, so they share it.
     pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
-    /// How long one `bash` command may run in that workspace (#85).
-    pub command_limit: std::time::Duration,
+    /// The time each check's commands get in that workspace, its own
+    /// and not shared with the other checks (#85).
+    pub check_limits: henk_domain::workspace::Limits,
     /// The rendered system prompt, without skills.
     pub system: String,
     /// The skills the checker may load.
@@ -154,11 +155,13 @@ impl SessionFactCheck {
         tools.add(GetFileDiff(files));
         match (&self.workspace, &self.file_reader) {
             (Some(workspace), _) => {
-                crate::code_tools::add(&mut tools, workspace);
+                let workspace =
+                    crate::workspace::metered(Arc::clone(workspace), self.check_limits.clone());
+                crate::code_tools::add(&mut tools, &workspace);
                 crate::code_tools::add_bash(
                     &mut tools,
-                    workspace,
-                    self.command_limit,
+                    &workspace,
+                    std::time::Duration::from_secs(self.check_limits.command_secs),
                     crate::code_tools::Sharing::Shared,
                 );
             }
@@ -436,7 +439,10 @@ diff --git a/src/a.rs b/src/a.rs
             diff: Arc::new(ReviewDiff::from_unified(DIFF)),
             file_reader: None,
             workspace: None,
-            command_limit: Duration::from_secs(10),
+            check_limits: henk_domain::workspace::Limits {
+                command_secs: 10,
+                ..henk_domain::workspace::Limits::default()
+            },
             system: "check".into(),
             skills: crate::skill_tools::AgentSkills::new(),
             limits: AgentConfig {
@@ -458,6 +464,78 @@ diff --git a/src/a.rs b/src/a.rs
             line: 2,
             side: DiffSide::Right,
             text: "x is never set.".into(),
+        }
+    }
+
+    /// Every check gets the run's time for commands of its own: one that
+    /// used all of its time leaves the next one its full share (#85).
+    #[tokio::test]
+    async fn a_later_check_still_gets_time_for_its_commands() {
+        use crate::workspace::WorkspaceProvider as _;
+        let dir = crate::git::ScratchDir::new("henk-check-budget").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut provider = crate::workspace::fake::FakeProvider::default();
+        provider.script.insert(
+            "bash -c cargo test".to_owned(),
+            crate::workspace::fake::Scripted {
+                delay: Duration::from_secs(30),
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let workspace = provider
+            .open(dir.path(), &henk_domain::workspace::Profile::default())
+            .await
+            .unwrap();
+        let bash = || {
+            Ok(Completion {
+                message: ChatMessage {
+                    role: henk_llm::Role::Assistant,
+                    blocks: vec![henk_llm::Block::ToolCall(ToolCall {
+                        id: "b1".into(),
+                        name: "bash".into(),
+                        arguments: ToolArguments::Parsed(json!({"command": "cargo test"})),
+                    })],
+                },
+                stop: StopReason::ToolUse,
+                usage: Usage::default(),
+            })
+        };
+        let model = Arc::new(ScriptedClient::new(
+            "opus",
+            [
+                bash(),
+                verdict_call("rejected", "the test passes."),
+                done(),
+                bash(),
+                verdict_call("rejected", "the test passes."),
+                done(),
+            ],
+        ));
+        let mut check = checker(vec![model.clone()]).await;
+        check.workspace = Some(workspace);
+        check.check_limits.run_secs = 1;
+        let mut seen = 0;
+        for _ in 0..2 {
+            check.check(&request("lane-model")).await;
+            let requests = model.requests();
+            let results: Vec<String> = requests[seen..]
+                .iter()
+                .flat_map(|r| r.messages.iter())
+                .flat_map(|m| m.blocks.iter())
+                .filter_map(|b| match b {
+                    henk_llm::Block::ToolResult(r) => Some(r.content.clone()),
+                    _ => None,
+                })
+                .collect();
+            seen = requests.len();
+            assert!(
+                results.iter().any(|r| r.starts_with("stopped after 1 s")),
+                "each check's command gets its own second: {results:?}"
+            );
+            assert!(
+                !results.iter().any(|r| r.contains("not started")),
+                "{results:?}"
+            );
         }
     }
 

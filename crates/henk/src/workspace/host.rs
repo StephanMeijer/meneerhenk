@@ -312,7 +312,8 @@ impl Workspace for HostWorkspace {
         let Some((program, rest)) = argv.split_first() else {
             return Err(WorkspaceError::Refused("an empty command".to_owned()));
         };
-        let limit = self.budget.next(timeout)?;
+        let held = self.budget.reserve(timeout)?;
+        let limit = held.granted();
         if limit.is_zero() {
             return Ok(self.budget.used_up());
         }
@@ -365,7 +366,7 @@ impl Workspace for HostWorkspace {
                 duration: started.elapsed(),
             },
         };
-        self.budget.spend(result.duration);
+        held.settle(result.duration);
         Ok(result)
     }
 

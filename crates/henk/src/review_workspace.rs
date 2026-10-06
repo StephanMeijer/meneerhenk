@@ -12,12 +12,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context as _;
 use henk_domain::review::{CommitSha, LaneName};
 use henk_domain::run::RunId;
-use henk_domain::workspace::{EnvLane, Profile};
+use henk_domain::workspace::{EnvLane, Limits, Profile};
 use henk_platform::ReviewTarget;
 use henk_store::RunStore;
 use tokio::task::JoinSet;
@@ -37,8 +36,8 @@ const FACT_CHECK: &str = "fact-check";
 pub struct ReviewWorkspaces {
     lanes: BTreeMap<String, Arc<dyn Workspace>>,
     fact_check: Option<Arc<dyn Workspace>>,
-    /// The profile's limit per command, for `bash` (#85).
-    command_limit: Duration,
+    /// The profile's limits, for `bash` (#85).
+    limits: Limits,
 }
 
 impl ReviewWorkspaces {
@@ -85,17 +84,24 @@ impl ReviewWorkspaces {
         };
         let mut opening = JoinSet::new();
         for name in &names {
+            // The fact-checker's checks share one copy but each get the
+            // profile's run time of their own (`workspace::metered`), so its
+            // copy does not hold them to one run's time together.
+            let mut profile = profile.clone();
+            if name == FACT_CHECK {
+                profile.limits.run_secs = u64::MAX;
+            }
             opening.spawn(open_one(
                 Arc::clone(&app.workspace_provider),
                 Arc::clone(&app.store),
                 checkout.path().to_path_buf(),
-                profile.clone(),
+                profile,
                 run.clone(),
                 name.clone(),
             ));
         }
         let mut workspaces = Self {
-            command_limit: Duration::from_secs(profile.limits.command_secs),
+            limits: profile.limits.clone(),
             ..Self::default()
         };
         let mut failed = Vec::new();
@@ -159,9 +165,9 @@ impl ReviewWorkspaces {
         self.fact_check.clone()
     }
 
-    /// How long one command in these workspaces may run.
-    pub const fn command_limit(&self) -> Duration {
-        self.command_limit
+    /// The profile's limits on commands in these workspaces.
+    pub fn limits(&self) -> Limits {
+        self.limits.clone()
     }
 
     /// Closes every workspace still held. Closing one twice does nothing,

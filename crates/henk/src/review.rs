@@ -78,8 +78,8 @@ struct LaneInputs {
     title: String,
     base_ref: String,
     cancel: CancellationToken,
-    /// How long one `bash` command may run in the review's workspaces.
-    command_limit: Duration,
+    /// The profile's limits on commands in the review's workspaces.
+    limits: henk_domain::workspace::Limits,
 }
 
 /// Appended to the fact-checker's prompt when it has a workspace: its copy
@@ -597,14 +597,14 @@ async fn run_lanes(
         title: title.to_owned(),
         base_ref: base_ref.to_owned(),
         cancel: cancel.clone(),
-        command_limit: Duration::ZERO,
+        limits: henk_domain::workspace::Limits::default(),
     };
     // Each lane's own workspace, when the profile reviews in one (#170),
     // and the fact-checker's. Lanes close theirs when they end; the rest
     // closes once all have. On an early error they are dropped, which
     // destroys them too.
     let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
-    lanes.command_limit = workspaces.command_limit();
+    lanes.limits = workspaces.limits();
     lanes.fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
     let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
@@ -874,7 +874,7 @@ async fn build_lane(
             crate::code_tools::add_bash(
                 &mut set,
                 workspace,
-                lanes.command_limit,
+                Duration::from_secs(lanes.limits.command_secs),
                 crate::code_tools::Sharing::Own,
             );
         }
@@ -1013,7 +1013,7 @@ async fn build_fact_check(
         diff: Arc::clone(diff),
         file_reader,
         workspace,
-        command_limit: lanes.command_limit,
+        check_limits: lanes.limits.clone(),
         system,
         skills: app.settings.skills.select(&config.skills),
         limits: AgentConfig {

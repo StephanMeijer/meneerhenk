@@ -516,6 +516,83 @@ impl Workspace for NoExport {
     }
 }
 
+/// `workspace` with a time budget of its own against `limits`: each
+/// command gets at most `command_secs` and all of them together at most
+/// `run_secs`, as well as whatever the workspace under it allows. The
+/// fact-checker's checks share one copy but each get their own time, so
+/// one check's commands cannot leave a later check none (#85). Closing
+/// it leaves the workspace under it open: that has its own owner.
+pub fn metered(workspace: Arc<dyn Workspace>, limits: Limits) -> Arc<dyn Workspace> {
+    Arc::new(Metered {
+        inner: workspace,
+        budget: Budget::new(limits),
+    })
+}
+
+/// See [`metered`].
+struct Metered {
+    inner: Arc<dyn Workspace>,
+    budget: Budget,
+}
+
+#[async_trait::async_trait]
+impl Workspace for Metered {
+    async fn exec(
+        &self,
+        argv: &[String],
+        cwd: &WorkspacePath,
+        timeout: Duration,
+    ) -> Result<ExecResult, WorkspaceError> {
+        let held = self.budget.reserve(timeout)?;
+        if held.granted().is_zero() {
+            return Ok(self.budget.used_up());
+        }
+        let result = self.inner.exec(argv, cwd, held.granted()).await?;
+        held.settle(result.duration);
+        Ok(result)
+    }
+
+    async fn read(&self, path: &WorkspacePath, max_bytes: u64) -> Result<Vec<u8>, WorkspaceError> {
+        self.inner.read(path, max_bytes).await
+    }
+
+    async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
+        self.inner.write(path, content).await
+    }
+
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.inner.list(dir, only, cap).await
+    }
+
+    async fn search(
+        &self,
+        dir: &WorkspacePath,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
+        max_file_bytes: u64,
+        cap: usize,
+    ) -> Result<Vec<Hit>, WorkspaceError> {
+        self.inner
+            .search(dir, pattern, only, max_file_bytes, cap)
+            .await
+    }
+
+    async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
+        self.inner.export().await
+    }
+
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.inner.baseline().await
+    }
+
+    async fn close(&self) {}
+}
+
 /// The sandbox host's provider from the settings, when `[workspace.ssh]` is
 /// there: its key read from the file the configured variable names.
 ///
@@ -552,8 +629,42 @@ pub fn ssh_provider(
 #[derive(Debug)]
 pub(crate) struct Budget {
     limits: Limits,
-    /// Time commands have used so far, against `limits.run_secs`.
+    /// Time commands have used or hold so far, against `limits.run_secs`.
     used: std::sync::Mutex<Duration>,
+}
+
+/// The time one command was given, held against its budget while it runs
+/// so that commands started at the same time cannot each take what is left.
+/// Settled with the time it took; dropped unsettled, it spends the time
+/// that has passed, at most what it was given.
+#[must_use]
+pub(crate) struct Reservation<'a> {
+    budget: &'a Budget,
+    granted: Duration,
+    started: std::time::Instant,
+    settled: bool,
+}
+
+impl Reservation<'_> {
+    /// How long the command may run; zero when the run's time is used up.
+    pub(crate) const fn granted(&self) -> Duration {
+        self.granted
+    }
+
+    /// Spends what the command took and frees the rest.
+    pub(crate) fn settle(mut self, spent: Duration) {
+        self.settled = true;
+        self.budget.settle(self.granted, spent);
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.budget
+                .settle(self.granted, self.started.elapsed().min(self.granted));
+        }
+    }
 }
 
 impl Budget {
@@ -564,21 +675,28 @@ impl Budget {
         }
     }
 
-    /// How long the next command may run when it asks for `asked`.
-    pub(crate) fn next(&self, asked: Duration) -> Result<Duration, WorkspaceError> {
-        let used = *self
+    /// Holds the time the next command may run when it asks for `asked`.
+    pub(crate) fn reserve(&self, asked: Duration) -> Result<Reservation<'_>, WorkspaceError> {
+        let mut used = self
             .used
             .lock()
             .map_err(|_| WorkspaceError::Backend("the workspace is unavailable".to_owned()))?;
-        let left = Duration::from_secs(self.limits.run_secs).saturating_sub(used);
-        Ok(asked
+        let left = Duration::from_secs(self.limits.run_secs).saturating_sub(*used);
+        let granted = asked
             .min(Duration::from_secs(self.limits.command_secs))
-            .min(left))
+            .min(left);
+        *used += granted;
+        Ok(Reservation {
+            budget: self,
+            granted,
+            started: std::time::Instant::now(),
+            settled: false,
+        })
     }
 
-    pub(crate) fn spend(&self, spent: Duration) {
+    fn settle(&self, granted: Duration, spent: Duration) {
         if let Ok(mut used) = self.used.lock() {
-            *used += spent;
+            *used = used.saturating_sub(granted) + spent;
         }
     }
 
@@ -660,6 +778,79 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    fn limits(command_secs: u64, run_secs: u64) -> Limits {
+        Limits {
+            command_secs,
+            run_secs,
+            ..Limits::default()
+        }
+    }
+
+    #[test]
+    fn a_running_command_holds_its_time_until_it_is_settled() {
+        let budget = Budget::new(limits(10, 15));
+        let first = budget.reserve(Duration::from_mins(1)).unwrap();
+        assert_eq!(first.granted(), Duration::from_secs(10));
+        let second = budget.reserve(Duration::from_mins(1)).unwrap();
+        assert_eq!(
+            second.granted(),
+            Duration::from_secs(5),
+            "a command started alongside gets only what the first left"
+        );
+        first.settle(Duration::from_secs(2));
+        drop(second);
+        let third = budget.reserve(Duration::from_mins(1)).unwrap();
+        assert_eq!(
+            third.granted(),
+            Duration::from_secs(10),
+            "what a command did not use is free again"
+        );
+    }
+
+    #[tokio::test]
+    async fn metered_copies_of_one_workspace_each_have_their_own_time() {
+        use crate::workspace::fake::{FakeProvider, Scripted};
+        let dir = crate::git::ScratchDir::new("henk-metered").unwrap();
+        let mut provider = FakeProvider::default();
+        provider.script.insert(
+            "slow".to_owned(),
+            Scripted {
+                delay: Duration::from_secs(30),
+                ..Scripted::default()
+            },
+        );
+        let shared = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
+        let one = metered(Arc::clone(&shared), limits(10, 1));
+        let two = metered(Arc::clone(&shared), limits(10, 1));
+        let slow = vec!["slow".to_owned()];
+        let root = WorkspacePath::root();
+        let first = one
+            .exec(&slow, &root, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(first.timed_out && first.duration == Duration::from_secs(1));
+        let again = one
+            .exec(&slow, &root, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(again.output.starts_with("not started:"), "{}", again.output);
+        let other = two
+            .exec(&slow, &root, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(other.duration, Duration::from_secs(1), "{}", other.output);
+        two.close().await;
+        assert_eq!(
+            provider.live(),
+            1,
+            "closing a metered copy leaves the workspace open"
+        );
+        shared.close().await;
+    }
 
     fn exported(path: &str, mode: FileMode, deleted: bool) -> Exported {
         Exported {
