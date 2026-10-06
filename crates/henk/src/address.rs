@@ -18,7 +18,7 @@ use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, OpenThread};
+use henk_platform::address::{AddressWriter, GitCredential, OpenThread};
 use henk_session::{SessionSpec, model_id, run_session};
 use henk_store::{NewRun, RunStatus};
 use tokio_util::sync::CancellationToken;
@@ -224,12 +224,12 @@ impl Session<'_> {
             return Ok(report);
         }
 
-        let token = self
+        let credential = self
             .writer
-            .git_token()
+            .git_credential()
             .await
-            .context("getting a token for git")?;
-        let workspace = self.import(facts, token.clone()).await?;
+            .context("getting a credential for git")?;
+        let workspace = self.import(facts, credential.clone()).await?;
         // Closed on every path; a run future that is dropped instead drops
         // the workspace, and every backend destroys itself then too.
         let worked = self.in_workspace(&workspace, &threads, cancel).await;
@@ -244,10 +244,15 @@ impl Session<'_> {
             // reaches it, and it is what Henk commits and pushes.
             let dir = ScratchDir::new(&format!("henk-address-{}-push", self.run))
                 .context("making the checkout directory")?;
-            let checkout =
-                Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
-                    .await
-                    .context("checking out the pull request to push")?;
+            let checkout = Checkout::clone_at(
+                dir,
+                &facts.remote,
+                &facts.push.head_ref,
+                &facts.head,
+                credential,
+            )
+            .await
+            .context("checking out the pull request to push")?;
             Some(
                 self.commit_and_push(&checkout, facts, &threads, &settled, &changes)
                     .await?,
@@ -265,14 +270,19 @@ impl Session<'_> {
     async fn import(
         &self,
         facts: &henk_platform::address::PullFacts,
-        token: Option<secrecy::SecretString>,
+        credential: Option<GitCredential>,
     ) -> anyhow::Result<Arc<dyn Workspace>> {
         let dir = ScratchDir::new(&format!("henk-address-{}", self.run))
             .context("making the checkout directory")?;
-        let checkout =
-            Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
-                .await
-                .context("checking out the pull request")?;
+        let checkout = Checkout::clone_at(
+            dir,
+            &facts.remote,
+            &facts.push.head_ref,
+            &facts.head,
+            credential,
+        )
+        .await
+        .context("checking out the pull request")?;
         let repo = self.request.target.repo.path();
         let profile = self.app.settings.workspace.profile_for(&repo);
         let opened = self
@@ -611,9 +621,8 @@ mod tests {
         Block, ChatMessage, Completion, ModelClient, Role, StopReason, ToolArguments, ToolCall,
         Usage,
     };
-    use henk_platform::address::{CommitIdentity, PullFacts, ThreadNote};
+    use henk_platform::address::{CommitIdentity, GitCredential, PullFacts, ThreadNote};
     use henk_platform::{PlatformError, PostedComment};
-    use secrecy::SecretString;
     use serde_json::{Value, json};
 
     use super::*;
@@ -668,7 +677,7 @@ check_commands = [["true"]]
         async fn open_threads(&self, _: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
             Ok(self.threads.clone())
         }
-        async fn git_token(&self) -> Result<Option<SecretString>, PlatformError> {
+        async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
             Ok(None)
         }
         async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {

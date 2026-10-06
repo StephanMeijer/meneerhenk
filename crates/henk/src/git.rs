@@ -1,6 +1,6 @@
 //! A throwaway checkout of one pull request's branch, for an address run
 //! (§3.5): clone, see what changed, commit, push. Git runs as a child
-//! process with an empty environment. The token reaches git through its
+//! process with an empty environment. The credential reaches git through its
 //! environment, never its arguments, so it is not in a process listing, a
 //! log line or anything a model sees.
 
@@ -12,8 +12,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use henk_domain::review::CommitSha;
 use henk_domain::workspace::{Change, ChangeKind};
-use henk_platform::address::CommitIdentity;
-use secrecy::{ExposeSecret as _, SecretString};
+use henk_platform::address::{CommitIdentity, GitCredential};
+use secrecy::ExposeSecret as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
@@ -94,18 +94,27 @@ impl Drop for ScratchDir {
 #[derive(Debug)]
 pub struct Checkout {
     dir: ScratchDir,
-    token: Option<SecretString>,
+    credential: Option<GitCredential>,
 }
 
-/// The header git sends to authenticate as the App.
-fn auth_header(token: &SecretString) -> String {
-    let basic = STANDARD.encode(format!("x-access-token:{}", token.expose_secret()));
+/// The header git sends to authenticate: Basic with the platform's user name
+/// for tokens (`x-access-token` on GitHub, `oauth2` on GitLab).
+fn auth_header(credential: &GitCredential) -> String {
+    let basic = STANDARD.encode(format!(
+        "{}:{}",
+        credential.username,
+        credential.token.expose_secret()
+    ));
     format!("Authorization: Basic {basic}")
 }
 
 /// A git command with nothing inherited: no user or system config, no
-/// prompt, and the token only when `token` is given.
-pub(crate) fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString>) -> Command {
+/// prompt, and the credential only when one is given.
+pub(crate) fn git_command(
+    dir: &Path,
+    args: &[&str],
+    credential: Option<&GitCredential>,
+) -> Command {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -121,11 +130,11 @@ pub(crate) fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(token) = token {
+    if let Some(credential) = credential {
         command
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-            .env("GIT_CONFIG_VALUE_0", auth_header(token));
+            .env("GIT_CONFIG_VALUE_0", auth_header(credential));
     }
     command
 }
@@ -134,11 +143,11 @@ pub(crate) fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString
 async fn run(
     dir: &Path,
     args: &[&str],
-    token: Option<&SecretString>,
+    credential: Option<&GitCredential>,
     input: Option<&str>,
 ) -> Result<String, GitError> {
     let name = args.first().copied().unwrap_or("").to_owned();
-    let mut child = git_command(dir, args, token).spawn()?;
+    let mut child = git_command(dir, args, credential).spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         if let Some(input) = input {
             stdin.write_all(input.as_bytes()).await?;
@@ -177,9 +186,9 @@ impl Checkout {
         remote: &str,
         branch: &str,
         expected: &CommitSha,
-        token: Option<SecretString>,
+        credential: Option<GitCredential>,
     ) -> Result<Self, GitError> {
-        let checkout = Self { dir, token };
+        let checkout = Self { dir, credential };
         run(
             checkout.path(),
             &[
@@ -193,7 +202,7 @@ impl Checkout {
                 remote,
                 ".",
             ],
-            checkout.token.as_ref(),
+            checkout.credential.as_ref(),
             None,
         )
         .await?;
@@ -358,7 +367,7 @@ impl Checkout {
         run(
             self.path(),
             &["push", "--quiet", "--no-verify", "origin", &refspec],
-            self.token.as_ref(),
+            self.credential.as_ref(),
             None,
         )
         .await?;
@@ -369,6 +378,8 @@ impl Checkout {
 #[cfg(test)]
 pub(crate) mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
+    use secrecy::SecretString;
 
     use super::*;
 
@@ -402,7 +413,7 @@ pub(crate) mod tests {
         };
         let seeded = Checkout {
             dir: seed,
-            token: None,
+            credential: None,
         };
         let head = seeded.commit(&identity, "Seed\n").await.unwrap();
         let url = remote.path().to_string_lossy().into_owned();
@@ -639,26 +650,41 @@ pub(crate) mod tests {
 
     #[test]
     fn the_token_is_in_the_environment_and_never_in_the_arguments() {
-        let token = SecretString::from("ghs_secret123".to_owned());
-        let command = git_command(
-            Path::new("/tmp"),
-            &["push", "origin", "HEAD:refs/heads/x"],
-            Some(&token),
-        );
-        let std = command.as_std();
-        for arg in std.get_args() {
-            assert!(!arg.to_string_lossy().contains("ghs_secret123"));
-            assert!(!arg.to_string_lossy().contains("Authorization"));
+        for (credential, username) in [
+            (
+                GitCredential::github(SecretString::from("ghs_secret123".to_owned())),
+                "x-access-token",
+            ),
+            (
+                GitCredential::gitlab(SecretString::from("glpat-secret123".to_owned())),
+                "oauth2",
+            ),
+        ] {
+            let secret = credential.token.expose_secret().to_owned();
+            let command = git_command(
+                Path::new("/tmp"),
+                &["push", "origin", "HEAD:refs/heads/x"],
+                Some(&credential),
+            );
+            let std = command.as_std();
+            for arg in std.get_args() {
+                assert!(!arg.to_string_lossy().contains(&secret));
+                assert!(!arg.to_string_lossy().contains("Authorization"));
+            }
+            let header = std
+                .get_envs()
+                .find(|(k, _)| *k == "GIT_CONFIG_VALUE_0")
+                .and_then(|(_, v)| v)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let encoded = STANDARD.encode(format!("{username}:{secret}"));
+            assert_eq!(header, format!("Authorization: Basic {encoded}"));
+            assert!(
+                !format!("{credential:?}").contains(&secret),
+                "a logged credential is redacted"
+            );
         }
-        let header = std
-            .get_envs()
-            .find(|(k, _)| *k == "GIT_CONFIG_VALUE_0")
-            .and_then(|(_, v)| v)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let encoded = STANDARD.encode("x-access-token:ghs_secret123");
-        assert_eq!(header, format!("Authorization: Basic {encoded}"));
         let plain = git_command(Path::new("/tmp"), &["status"], None);
         assert!(
             plain

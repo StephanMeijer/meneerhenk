@@ -74,6 +74,36 @@ pub struct CommitIdentity {
     pub email: String,
 }
 
+/// What git authenticates with: HTTP Basic with a user name and a token.
+/// The token's `Debug` is redacted, so the credential can be logged as is.
+#[derive(Clone, Debug)]
+pub struct GitCredential {
+    /// The user name the platform expects next to the token.
+    pub username: &'static str,
+    /// The token.
+    pub token: SecretString,
+}
+
+impl GitCredential {
+    /// A GitHub App installation token.
+    #[must_use]
+    pub fn github(token: SecretString) -> Self {
+        Self {
+            username: "x-access-token",
+            token,
+        }
+    }
+
+    /// A GitLab personal access token.
+    #[must_use]
+    pub fn gitlab(token: SecretString) -> Self {
+        Self {
+            username: "oauth2",
+            token,
+        }
+    }
+}
+
 /// What an address run reads and writes on a platform, besides git.
 #[async_trait::async_trait]
 pub trait AddressWriter: Send + Sync {
@@ -83,9 +113,9 @@ pub trait AddressWriter: Send + Sync {
     /// The unresolved review threads, from anyone.
     async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError>;
 
-    /// The token git clones and pushes with; `None` for a remote that needs
-    /// none.
-    async fn git_token(&self) -> Result<Option<SecretString>, PlatformError>;
+    /// The credential git clones and pushes with; `None` for a remote that
+    /// needs none.
+    async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError>;
 
     /// Who Henk's commits are by.
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError>;
