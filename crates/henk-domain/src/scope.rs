@@ -61,7 +61,10 @@ enum Rule {
     /// `pullNumber` is the reviewed pull request (GitHub, review scope only).
     PullNumber,
     /// `query` gets `repo:owner/name`; a qualifier naming anything else is
-    /// refused (GitHub search).
+    /// refused (GitHub search). The pin is joined to the query by an
+    /// implicit AND, which boolean syntax can escape, so parentheses, `OR`,
+    /// `NOT` and unclosed or escaped quotes are refused outright rather than
+    /// judged by context. Text inside a quoted phrase is literal.
     SearchQueryRepo,
     /// Reads happen at the reviewed commit: `ref` is dropped and `sha`
     /// defaults to the commit (GitHub, review scope). An explicit `sha` is
@@ -231,12 +234,8 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
                 }
             }
             Rule::SearchQueryRepo => {
-                let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-                match pin_search_query(query, repo) {
-                    Ok(pinned) => {
-                        args.insert("query".into(), json!(pinned));
-                    }
-                    Err(qualifier) => return outside(repo, "search qualifier", &qualifier),
+                if let Err(refused) = pin_search(&mut args, repo) {
+                    return refused;
                 }
             }
             Rule::PinToCommit => {
@@ -299,31 +298,115 @@ fn outside(repo: &RepoRef, what: &str, given: &str) -> Verdict {
     ))
 }
 
-/// Replaces `repo:`, `org:` and `user:` qualifiers naming this repository
-/// or its owner with `repo:owner/name`. Returns the first qualifier naming
-/// anything else as the error.
-fn pin_search_query(query: &str, repo: &RepoRef) -> Result<String, String> {
+/// Pins `query` to the repository, or the refusal to send back.
+fn pin_search(args: &mut serde_json::Map<String, Value>, repo: &RepoRef) -> Result<(), Verdict> {
+    let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+    match pin_search_query(query, repo) {
+        Ok(pinned) => {
+            args.insert("query".into(), json!(pinned));
+            Ok(())
+        }
+        Err(SearchRefusal::Qualifier(qualifier)) => {
+            Err(outside(repo, "search qualifier", &qualifier))
+        }
+        Err(SearchRefusal::Syntax(reason)) => Err(Verdict::Deny(reason.to_owned())),
+    }
+}
+
+/// Why a search query is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SearchRefusal {
+    /// A `repo:`, `org:`, `user:` or `owner:` qualifier naming something else.
+    Qualifier(String),
+    /// Syntax that could escape the appended pin.
+    Syntax(&'static str),
+}
+
+const UNCLOSED_QUOTE: &str =
+    "the search query has an unclosed or escaped quote; close every phrase in plain double quotes";
+const PARENTHESES: &str = "parentheses are not used in search queries here; put code with parentheses in double quotes, for example \"parse(\"";
+const OPERATORS: &str =
+    "OR and NOT are not used in search queries here; search for one thing at a time";
+
+/// One whitespace-separated word of a query. `plain` is the part outside
+/// double quotes; a word with no plain part is a quoted phrase.
+struct SearchWord {
+    text: String,
+    plain: String,
+}
+
+fn search_words(query: &str) -> Result<Vec<SearchWord>, SearchRefusal> {
+    if query.contains("\\\"") {
+        return Err(SearchRefusal::Syntax(UNCLOSED_QUOTE));
+    }
+    let mut words = Vec::new();
+    let mut text = String::new();
+    let mut plain = String::new();
+    let mut quoted = false;
+    for c in query.chars() {
+        if c == '"' {
+            quoted = !quoted;
+            text.push(c);
+        } else if quoted {
+            text.push(c);
+        } else if c.is_whitespace() {
+            if !text.is_empty() {
+                words.push(SearchWord {
+                    text: std::mem::take(&mut text),
+                    plain: std::mem::take(&mut plain),
+                });
+            }
+        } else {
+            text.push(c);
+            plain.push(c);
+        }
+    }
+    if quoted {
+        return Err(SearchRefusal::Syntax(UNCLOSED_QUOTE));
+    }
+    if !text.is_empty() {
+        words.push(SearchWord { text, plain });
+    }
+    Ok(words)
+}
+
+/// Replaces `repo:`, `org:`, `user:` and `owner:` qualifiers naming this
+/// repository or its owner with one `repo:owner/name`, appended. Refuses a
+/// qualifier naming anything else, and any syntax that could escape the
+/// pin (see [`Rule::SearchQueryRepo`]). Quoted phrases are kept as they are.
+fn pin_search_query(query: &str, repo: &RepoRef) -> Result<String, SearchRefusal> {
     let path = repo.path();
-    let mut kept: Vec<&str> = Vec::new();
-    for word in query.split_whitespace() {
-        let Some((key, value)) = word.split_once(':') else {
-            kept.push(word);
+    let mut kept: Vec<String> = Vec::new();
+    for word in search_words(query)? {
+        if word.plain.is_empty() {
+            kept.push(word.text);
+            continue;
+        }
+        if word.plain.contains(['(', ')']) {
+            return Err(SearchRefusal::Syntax(PARENTHESES));
+        }
+        if matches!(word.text.as_str(), "OR" | "NOT") {
+            return Err(SearchRefusal::Syntax(OPERATORS));
+        }
+        let body = word.text.strip_prefix('-').unwrap_or(&word.text);
+        let Some((key, value)) = body.split_once(':') else {
+            kept.push(word.text);
             continue;
         };
+        let value = value.trim_matches('"');
         let ours = match key.to_ascii_lowercase().as_str() {
             "repo" => value.eq_ignore_ascii_case(&path),
-            "org" | "user" => value.eq_ignore_ascii_case(repo.owner()),
+            "org" | "user" | "owner" => value.eq_ignore_ascii_case(repo.owner()),
             _ => {
-                kept.push(word);
+                kept.push(word.text);
                 continue;
             }
         };
         if !ours {
-            return Err(word.to_owned());
+            return Err(SearchRefusal::Qualifier(word.text));
         }
     }
-    let pin = format!("repo:{path}");
-    kept.push(&pin);
+    kept.push(format!("repo:{path}"));
     Ok(kept.join(" "))
 }
 
@@ -521,6 +604,69 @@ mod tests {
                     ),
                     Verdict::Deny(_)
                 ),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_syntax_that_could_escape_the_pin_is_refused() {
+        let search = |tool: &str, query: &str| {
+            guard(
+                Platform::GitHub,
+                tool,
+                &json!({"query": query}),
+                &review_scope(),
+            )
+        };
+        for query in [
+            "x (repo:evil/secret)",
+            "x OR (org:evil)",
+            "x OR (repo:evil/x)",
+            "x OR y",
+            "NOT x",
+            "owner:evil x",
+            "-repo:evil/x",
+            "Repo:\"evil/x\"",
+            "\"x",
+            "\"a\\\" b\"",
+            "parse(",
+        ] {
+            for tool in ["search_code", "search_issues", "search_pull_requests"] {
+                assert!(
+                    matches!(search(tool, query), Verdict::Deny(_)),
+                    "{tool}: {query}"
+                );
+            }
+        }
+        let Verdict::Deny(reason) = search("search_code", "parse(") else {
+            panic!("parentheses are refused");
+        };
+        assert!(reason.contains("double quotes"), "{reason}");
+        assert_eq!(
+            search("search_issues", "x OR (repo:evil/x)"),
+            Verdict::Deny(OPERATORS.to_owned())
+        );
+        for (query, pinned) in [
+            (
+                "\"parse(\" language:rust",
+                "\"parse(\" language:rust repo:docspec/app",
+            ),
+            (
+                "\"repo:evil/x\" readme",
+                "\"repo:evil/x\" readme repo:docspec/app",
+            ),
+            (
+                "label:\"good first issue\" is:open",
+                "label:\"good first issue\" is:open repo:docspec/app",
+            ),
+            ("a AND b", "a AND b repo:docspec/app"),
+            ("owner:DocSpec -repo:docspec/app x", "x repo:docspec/app"),
+            ("", "repo:docspec/app"),
+        ] {
+            assert_eq!(
+                search("search_code", query),
+                Verdict::Allow(json!({"query": pinned})),
                 "{query}"
             );
         }
