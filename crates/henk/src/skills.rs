@@ -128,13 +128,17 @@ fn load(dir: &Path) -> Result<SkillCatalog, ConfigError> {
 }
 
 /// Every path in a skill folder other than its `SKILL.md`, relative to it.
+/// A symbolic link is listed as itself and never followed, so a link cannot
+/// reach outside the folder or loop back into it.
 fn other_files(folder: &Path) -> std::io::Result<Vec<String>> {
     let mut found = Vec::new();
     let mut pending = vec![folder.to_owned()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
+            let entry = entry?;
+            let path = entry.path();
+            // `DirEntry::file_type` does not follow links, unlike `Path::is_dir`.
+            if entry.file_type()?.is_dir() {
                 pending.push(path);
             } else if path != folder.join(SKILL_FILE) {
                 let relative = path.strip_prefix(folder).unwrap_or(&path);
@@ -222,6 +226,27 @@ mod tests {
     fn a_malformed_skill_name_is_refused() {
         let lane = r#"{ name = "lane-a", model = "proxy-fast", skills = ["Bad Name"] }"#;
         assert!(matches!(example(lane), Err(ConfigError::Syntax(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_a_skill_folder_are_listed_not_followed() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("henk-skill-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let outside = root.join("outside");
+        let skill = root.join("skills").join("linked");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(skill.join("sub")).unwrap();
+        std::fs::write(outside.join("secret.txt"), "x").unwrap();
+        std::fs::write(skill.join(SKILL_FILE), "not parsed here").unwrap();
+        symlink(outside.join("secret.txt"), skill.join("file-link")).unwrap();
+        symlink(&outside, skill.join("dir-link")).unwrap();
+        symlink(&skill, skill.join("sub").join("loop")).unwrap();
+
+        let ignored = other_files(&skill).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(ignored, ["dir-link", "file-link", "sub/loop"]);
     }
 
     #[test]
