@@ -66,6 +66,7 @@ fn fixture(github: &str) -> Fixture {
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
         live_runs: crate::liveness::LiveRuns::default(),
+        workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: None,
         test_session: None,
         test_address_writer: None,
