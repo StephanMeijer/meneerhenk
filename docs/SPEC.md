@@ -537,7 +537,6 @@ Each item breaks a promise above.
 | §8.3 Words are information | Only an instruction protects this. Planner and chat can read private code and fetch any public URL, so injected text could send data out |
 | §8.5 An email reply can go only to that mail's correspondents | The sender controls who the correspondents are (Reply-To, any number of Cc), so the promise bounds nothing |
 | §6 A failed mail stays unread and is picked up again | A mail whose workflow failed to start is never retried |
-| §3.3 The count | Comments beyond the first 100 are not counted |
 | §3.2 Lanes do not repeat each other | Retried steps can post duplicate comments |
 | §4 Every plan ends | Plans have no time or turn limit, so a hung plan never fails and never says so |
 

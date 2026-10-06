@@ -1009,3 +1009,57 @@ async fn a_forged_marker_note_is_not_henks() {
         "nothing was written"
     );
 }
+
+/// `mr_discussions` with 100 discussions by people on every page up to
+/// `last`, and Henk's finding alone on page `last`; past it, nothing.
+fn paged_discussions(last: u64) -> FakeServer {
+    let tools = vec![FakeServer::tool("mr_discussions", "", &[])];
+    FakeServer::new(tools, move |_, args| {
+        let page = args["page"].as_u64().unwrap_or(0);
+        if page == last {
+            return text(json!([{"id": "d-late", "notes": [
+                {"id": 99_999, "body": format!("Off by one.\n\n{}", marker(MarkerKind::Finding)),
+                 "author": {"username": "meneerhenk"},
+                 "position": {"new_path": "src/a.rs", "new_line": 10}, "resolved": false}
+            ]}]));
+        }
+        if page > last {
+            return text(json!([]));
+        }
+        text(Value::Array(
+            (0..100)
+                .map(|i| {
+                    json!({"id": format!("d-{page}-{i}"), "notes": [
+                        {"id": page * 1000 + i, "body": "looks fine", "author": {"username": "alice"},
+                         "position": {"new_path": "src/a.rs", "new_line": 1}}
+                    ]})
+                })
+                .collect(),
+        ))
+    })
+}
+
+#[tokio::test]
+async fn discussions_on_the_eleventh_page_are_read() {
+    let fake = paged_discussions(11);
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let findings = writer.existing_findings(&target()).await.unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(ids, ["99999"]);
+    assert_eq!(fake.calls().len(), 11);
+}
+
+#[tokio::test]
+async fn a_discussion_list_past_the_cap_is_an_error() {
+    let fake = paged_discussions(u64::MAX);
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let result = writer.existing_findings(&target()).await;
+    assert!(
+        matches!(
+            result,
+            Err(henk_platform::PlatformError::TooMany { limit: 10_000, .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fake.calls().len(), 100, "stops at the cap");
+}
