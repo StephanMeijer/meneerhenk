@@ -16,7 +16,9 @@ use std::time::Duration;
 use henk_domain::address::WorkspacePath;
 use henk_domain::workspace::{FileMode, Limits, Profile};
 
-use super::{Workspace, WorkspaceError, WorkspaceProvider};
+use henk_domain::ignore::PathFilter;
+
+use super::{Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider};
 use crate::git::ScratchDir;
 
 /// A checkout to import: two files, one of them executable, and a `.git`
@@ -66,6 +68,9 @@ async fn open(
 /// of different backends apart.
 pub async fn every_backend_does_this(provider: Arc<dyn WorkspaceProvider>, name: &str) {
     files_are_read_written_listed_and_searched(&provider, name).await;
+    patterns_mean_the_same_beyond_ascii(&provider, name).await;
+    crlf_lines_read_alike(&provider, name).await;
+    a_glob_keeps_files_out_of_the_search(&provider, name).await;
     links_out_of_the_tree_and_into_git_are_refused(&provider, name).await;
     commands_run_with_an_empty_environment_and_limits(&provider, name).await;
     the_changes_are_exported_with_their_modes(&provider, name).await;
@@ -109,34 +114,246 @@ async fn files_are_read_written_listed_and_searched(
         Err(WorkspaceError::Refused(_))
     ));
 
-    let files = ws.list(&WorkspacePath::root(), 100).await.unwrap();
+    let root = WorkspacePath::root();
+    let files = ws.list(&root, None, 100).await.unwrap();
     assert_eq!(
         files,
         ["run.sh", "src/a.rs", "src/deep/new.rs"],
         ".git is never listed"
     );
-    assert_eq!(ws.list(&WorkspacePath::root(), 1).await.unwrap().len(), 1);
+    assert_eq!(ws.list(&root, None, 1).await.unwrap().len(), 1);
+    let rust = PathFilter::new(["*.rs"]);
+    assert_eq!(
+        ws.list(&root, Some(&rust), 100).await.unwrap(),
+        ["src/a.rs", "src/deep/new.rs"],
+        "a name glob matches at any depth"
+    );
+    let top = PathFilter::new(["src/*.rs"]);
+    assert_eq!(
+        ws.list(&root, Some(&top), 1).await.unwrap(),
+        ["src/a.rs"],
+        "the glob is applied before the cap"
+    );
 
+    let find = |source: &str| Pattern::parse(source).unwrap();
     let hits = ws
-        .search(&WorkspacePath::root(), "let x", 1024, 10)
+        .search(&root, &find("let x"), None, 1024, 10)
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!((hits[0].path.as_str(), hits[0].line), ("src/a.rs", 2));
     assert_eq!(hits[0].text, "let x = 1;");
+    let shown = |hits: Vec<Hit>| -> Vec<(String, usize)> {
+        hits.into_iter().map(|h| (h.path, h.line)).collect()
+    };
+    assert_eq!(
+        shown(
+            ws.search(&root, &find(r"\blet\s+x\s*=\s*\d+;$"), None, 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [("src/a.rs".to_owned(), 2)],
+        "classes, word boundaries and anchors"
+    );
+    assert_eq!(
+        shown(
+            ws.search(&root, &find("(?i)FN MAIN|^// NEW"), None, 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [
+            ("src/a.rs".to_owned(), 1),
+            ("src/deep/new.rs".to_owned(), 1)
+        ],
+        "any case and alternation, sorted by path"
+    );
+    let deep = PathFilter::new(["src/deep/**"]);
+    assert_eq!(
+        shown(
+            ws.search(&root, &find("."), Some(&deep), 1024, 10)
+                .await
+                .unwrap()
+        ),
+        [("src/deep/new.rs".to_owned(), 1)],
+        "only the files the glob matches"
+    );
+    assert_eq!(
+        ws.search(&root, &find("."), None, 1024, 2)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "capped"
+    );
     assert!(
-        ws.search(&WorkspacePath::root(), "core", 1024, 10)
+        ws.search(&root, &find("core"), None, 1024, 10)
             .await
             .unwrap()
             .is_empty(),
         "nothing in .git is searched"
     );
     assert!(
-        ws.search(&WorkspacePath::root(), "let x", 5, 10)
+        ws.search(&root, &find("let x"), None, 5, 10)
             .await
             .unwrap()
             .is_empty(),
         "a file over the size is skipped"
+    );
+    ws.close().await;
+}
+
+/// `\w`, `\s` and `\b` know letters and spaces beyond ASCII and `\d` is the
+/// ASCII digits only, on every backend and whatever grep's version; a file
+/// the run's user cannot read is skipped, not an error.
+async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-unicode"), Limits::default()).await;
+    ws.write(
+        &path("u.txt"),
+        "caf\u{e9} = 7\nx = \u{663}\nfoo\u{a0}bar\n".as_bytes(),
+    )
+    .await
+    .unwrap();
+    ws.write(&path("locked.txt"), b"locked 7\n").await.unwrap();
+    let locked = ws
+        .exec(
+            &sh("chmod 000 locked.txt"),
+            &WorkspacePath::root(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(locked.code, Some(0), "{}", locked.output);
+    let only = PathFilter::new(["u.txt"]);
+    let lines = async |source: &str| -> Vec<usize> {
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse(source).unwrap(),
+            Some(&only),
+            1024,
+            10,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.line)
+        .collect()
+    };
+    assert_eq!(
+        lines(r"\bcaf\w\b").await,
+        [1],
+        "a letter beyond ASCII is a word character"
+    );
+    assert!(
+        lines(r"caf\b").await.is_empty(),
+        "no boundary inside a word"
+    );
+    assert_eq!(lines(r"foo\sbar").await, [3], "a no-break space is a space");
+    assert_eq!(
+        lines("(?i)^CAF\u{c9}\\b").await,
+        [1],
+        "any case beyond ASCII"
+    );
+    assert_eq!(lines(r"\d").await, [1], "an Arabic-Indic digit is not \\d");
+    assert_eq!(lines(r"[\d]").await, [1], "nor inside a class");
+    assert_eq!(lines(r"^\D+$").await, [2, 3], "but it is \\D");
+    assert_eq!(
+        lines(r"\p{Nd}").await,
+        [1, 2],
+        "Unicode digits are asked for by name"
+    );
+    assert!(
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse("7").unwrap(),
+            None,
+            1024,
+            10
+        )
+        .await
+        .is_ok(),
+        "an unreadable file does not fail the search"
+    );
+    ws.close().await;
+}
+
+/// A CRLF line reads alike everywhere: `$` is before its `\r`, and the
+/// `\r` is there for what asks for it.
+async fn crlf_lines_read_alike(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-crlf"), Limits::default()).await;
+    ws.write(&path("dos.txt"), b"let a = 1;\r\nlet b = 2;\nend\r\n")
+        .await
+        .unwrap();
+    let only = PathFilter::new(["dos.txt"]);
+    let lines = async |source: &str| -> Vec<usize> {
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse(source).unwrap(),
+            Some(&only),
+            1024,
+            10,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.line)
+        .collect()
+    };
+    assert_eq!(lines(";$").await, [1, 2], "a CRLF line ends before its \\r");
+    assert_eq!(lines("^end$").await, [3]);
+    assert_eq!(lines(r"\r").await, [1, 3], "the \\r is there");
+    assert_eq!(
+        lines(r"\s$").await,
+        [1, 3],
+        "and is a space, on every backend"
+    );
+    let hits = ws
+        .search(
+            &WorkspacePath::root(),
+            &Pattern::parse("^end").unwrap(),
+            Some(&only),
+            1024,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits[0].text, "end", "a hit's text is trimmed");
+    ws.close().await;
+}
+
+/// A glob keeps a file out of the search altogether: here one grep -P
+/// would give up on is never read.
+async fn a_glob_keeps_files_out_of_the_search(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-narrowed"), Limits::default()).await;
+    let long = format!("{}b\n", "a".repeat(5000));
+    ws.write(&path("bundle.min.js"), long.as_bytes())
+        .await
+        .unwrap();
+    ws.write(&path("src/b.rs"), b"aaa\n").await.unwrap();
+    let rust = PathFilter::new(["*.rs"]);
+    let hits = ws
+        .search(
+            &WorkspacePath::root(),
+            &Pattern::parse("(a+)+$").unwrap(),
+            Some(&rust),
+            1 << 20,
+            10,
+        )
+        .await
+        .unwrap();
+    let found: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(found, ["src/b.rs"]);
+    assert!(
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse("x").unwrap(),
+            Some(&PathFilter::new(["*.none"])),
+            1024,
+            10
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "a glob that matches nothing finds nothing"
     );
     ws.close().await;
 }

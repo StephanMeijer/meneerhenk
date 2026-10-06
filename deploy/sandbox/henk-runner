@@ -41,7 +41,7 @@
 set -eu
 umask 022
 
-VERSION=2
+VERSION=3
 RUN_PATH=${HENK_RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin}
 RECORDS=/var/lib/henk-runner
 
@@ -280,6 +280,17 @@ probe)
             echo "$tool missing"
         fi
     done
+    # The code tools' search hands grep -P a pattern that starts with
+    # (*UCP), under LANG=C.UTF-8 as `as` runs it, so \w, \s and \b know
+    # letters and spaces beyond ASCII whatever GNU grep's version. This
+    # checks that very form: busybox's grep has no -P, and a PCRE built
+    # without Unicode refuses (*UCP) or reads the bytes one by one.
+    if printf 'caf\303\251\302\240x\n' |
+        PATH=$RUN_PATH LANG=C.UTF-8 grep -qP '(*UCP)^caf\w\b\sx$' 2>/dev/null; then
+        echo "grep-pcre yes"
+    else
+        echo "grep-pcre missing"
+    fi
     # What the runner itself needs as root, on its own PATH.
     if [ -z "$BASE" ]; then
         for tool in runuser useradd userdel pkill; do

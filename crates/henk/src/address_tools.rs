@@ -1,5 +1,5 @@
-//! The tools an address run's model works with (§3.5): read, search and
-//! edit files in the workspace, run the project's checks, and settle each
+//! The tools an address run's model works with (§3.5): the shared code
+//! tools to read and search (`code_tools`), edit files in the workspace, run the project's checks, and settle each
 //! review thread. The tools talk only to a [`Workspace`]; nothing here
 //! reaches the network, git or a credential. Committing, pushing and
 //! replying are Henk's code, after the session.
@@ -17,14 +17,8 @@ use henk_platform::address::OpenThread;
 use serde_json::{Value, json};
 
 use crate::checks::{describe, run_checks};
+use crate::code_tools::{self, MAX_FILE_BYTES};
 use crate::workspace::Workspace;
-
-/// Lines `read_file` returns at most per call.
-const READ_LINES: usize = 400;
-/// Files larger than this are not read, searched or written.
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
-/// Entries `list_files` and hits `search` return at most.
-const LIST_CAP: usize = 500;
 
 /// What all address tools share.
 pub struct AddressContext {
@@ -143,140 +137,11 @@ macro_rules! address_tool {
     };
 }
 
-address_tool!(ListFiles);
-address_tool!(ReadFile);
-address_tool!(SearchFiles);
 address_tool!(EditFile);
 address_tool!(WriteFile);
 address_tool!(RunChecks);
 address_tool!(ListThreads);
 address_tool!(SettleThread);
-
-#[async_trait::async_trait]
-impl Tool for ListFiles {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: name("list_files"),
-            description: "Lists the files under a directory of the repository (default: all)."
-                .to_owned(),
-            input_schema: schema(&json!({"dir": {"type": "string"}}), &[]),
-        }
-    }
-
-    async fn call(&self, args: Value) -> ToolOutput {
-        let ctx = &self.0;
-        let dir = match WorkspacePath::parse_dir(arg_str(&args, "dir").unwrap_or("")) {
-            Ok(dir) => dir,
-            Err(error) => return ToolOutput::error(error.to_string()),
-        };
-        let files = match ctx.workspace.list(&dir, LIST_CAP).await {
-            Ok(files) => files,
-            Err(error) => return ToolOutput::error(error.to_string()),
-        };
-        let mut text = String::new();
-        for file in &files {
-            let _ = writeln!(text, "{file}");
-        }
-        if files.len() >= LIST_CAP {
-            text.push_str("[more files; list a subdirectory]\n");
-        }
-        ToolOutput::ok(if text.is_empty() {
-            "No files.".to_owned()
-        } else {
-            text
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ReadFile {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: name("read_file"),
-            description: format!(
-                "Reads a file with line numbers, from line `from` (default 1), at most {READ_LINES} lines."
-            ),
-            input_schema: schema(
-                &json!({"path": {"type": "string"}, "from": {"type": "integer", "minimum": 1}}),
-                &["path"],
-            ),
-        }
-    }
-
-    async fn call(&self, args: Value) -> ToolOutput {
-        let ctx = &self.0;
-        let path = match WorkspacePath::parse(arg_str(&args, "path").unwrap_or("")) {
-            Ok(path) => path,
-            Err(error) => return ToolOutput::error(error.to_string()),
-        };
-        let text = match ctx.workspace.read(&path, MAX_FILE_BYTES).await {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(error) => return ToolOutput::error(format!("cannot read {path}: {error}")),
-        };
-        let from = args
-            .get("from")
-            .and_then(Value::as_u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .unwrap_or(1)
-            .max(1);
-        let total = text.lines().count();
-        let mut out = String::new();
-        for (index, line) in text.lines().enumerate().skip(from - 1).take(READ_LINES) {
-            let _ = writeln!(out, "{:>5} {line}", index + 1);
-        }
-        if from - 1 + READ_LINES < total {
-            let _ = writeln!(
-                out,
-                "[{total} lines; continue with from = {}]",
-                from + READ_LINES
-            );
-        }
-        ToolOutput::ok(if out.is_empty() {
-            format!("{path} is empty or shorter than line {from}.")
-        } else {
-            out
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for SearchFiles {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: name("search"),
-            description: "Finds lines containing the exact text in every file of the repository."
-                .to_owned(),
-            input_schema: schema(&json!({"text": {"type": "string"}}), &["text"]),
-        }
-    }
-
-    async fn call(&self, args: Value) -> ToolOutput {
-        let ctx = &self.0;
-        let Some(needle) = arg_str(&args, "text").filter(|t| !t.is_empty()) else {
-            return ToolOutput::error("text is required");
-        };
-        let hits = match ctx
-            .workspace
-            .search(&WorkspacePath::root(), needle, MAX_FILE_BYTES, LIST_CAP)
-            .await
-        {
-            Ok(hits) => hits,
-            Err(error) => return ToolOutput::error(error.to_string()),
-        };
-        let mut out = String::new();
-        for hit in &hits {
-            let _ = writeln!(out, "{}:{}: {}", hit.path, hit.line, hit.text);
-        }
-        if hits.len() >= LIST_CAP {
-            out.push_str("[more matches; search for something narrower]\n");
-        }
-        ToolOutput::ok(if out.is_empty() {
-            "No matches.".to_owned()
-        } else {
-            out
-        })
-    }
-}
 
 #[async_trait::async_trait]
 impl Tool for EditFile {
@@ -466,10 +331,8 @@ impl Tool for SettleThread {
 #[must_use]
 pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
     let mut set = ToolSet::new();
-    set.add(ListFiles(Arc::clone(ctx)))
-        .add(ReadFile(Arc::clone(ctx)))
-        .add(SearchFiles(Arc::clone(ctx)))
-        .add(EditFile(Arc::clone(ctx)))
+    code_tools::add(&mut set, &ctx.workspace);
+    set.add(EditFile(Arc::clone(ctx)))
         .add(WriteFile(Arc::clone(ctx)))
         .add(RunChecks(Arc::clone(ctx)))
         .add(ListThreads(Arc::clone(ctx)))
@@ -560,7 +423,9 @@ mod tests {
             json!({"path": "/etc/passwd"}),
             json!({"path": ".git/config"}),
         ] {
-            let out = ReadFile(Arc::clone(&ctx)).call(args.clone()).await;
+            let out = code_tools::ReadFile(Arc::clone(&ctx.workspace))
+                .call(args.clone())
+                .await;
             assert!(out.is_error, "read {args}");
         }
         for args in [
@@ -571,7 +436,9 @@ mod tests {
             assert!(out.is_error, "write {args}");
         }
         assert!(ctx.workspace.export().await.unwrap().is_empty());
-        let listed = ListFiles(Arc::clone(&ctx)).call(json!({})).await;
+        let listed = code_tools::ListFiles(Arc::clone(&ctx.workspace))
+            .call(json!({}))
+            .await;
         assert_eq!(listed.content, "src/a.rs\n");
         let big = "x".repeat(1024 * 1024 + 1);
         let out = WriteFile(Arc::clone(&ctx))
@@ -596,12 +463,12 @@ mod tests {
             content(&ctx, "src/a.rs").await,
             "fn main() {\n    let x = 1;\n}\n"
         );
-        let read = ReadFile(Arc::clone(&ctx))
-            .call(json!({"path": "src/a.rs", "from": 2}))
+        let read = code_tools::ReadFile(Arc::clone(&ctx.workspace))
+            .call(json!({"path": "src/a.rs", "start_line": 2}))
             .await;
-        assert_eq!(read.content, "    2     let x = 1;\n    3 }\n");
-        let found = SearchFiles(Arc::clone(&ctx))
-            .call(json!({"text": "let x"}))
+        assert_eq!(read.content, "    2|     let x = 1;\n    3| }\n");
+        let found = code_tools::Search(Arc::clone(&ctx.workspace))
+            .call(json!({"pattern": "let x"}))
             .await;
         assert_eq!(found.content, "src/a.rs:2: let x = 1;\n");
     }

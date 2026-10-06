@@ -22,13 +22,14 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use henk_domain::address::WorkspacePath;
+use henk_domain::ignore::PathFilter;
 use henk_domain::workspace::Profile;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, client};
 use tracing::warn;
 
 use super::{
-    Budget, ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider,
+    Budget, ExecResult, Exported, Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider,
     parse_raw_diff, tail,
 };
 
@@ -537,13 +538,29 @@ const WRITE: &str = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
 /// `.git` directory left out.
 const LIST: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -print0 \)"#;
 
-/// Lines with `$3` in the text files under `$1` of fewer than `$2` bytes, as
-/// `path NUL line:text`. No match is not a failure: grep says 1, and xargs
-/// 123 for a grep that said 1 or could not read a file.
-const SEARCH: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \) |
-xargs -0 -r grep -HIFn --null -e "$3" --
-s=$?
-[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || [ "$s" -eq 123 ]"#;
+/// The regular files under `$1` of fewer than `$2` bytes, NUL-separated,
+/// links not followed and any `.git` directory left out: what `search`
+/// would read, for Henk to narrow by a glob first.
+const SEARCHED: &str =
+    r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \)"#;
+
+/// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), as
+/// `path NUL line:text`, in the text files under `$1` of fewer than `$2`
+/// bytes, or with `$1` `-` in the NUL-separated files on stdin, so a glob
+/// keeps the others from grep altogether. Files the run's user cannot read
+/// are left out first, so a grep that says 2 failed on the pattern itself:
+/// no `-P`, a pattern PCRE refuses or its backtracking limit. Each grep's
+/// 1, no match, becomes 0 and its 2 becomes 255, on which xargs stops and
+/// says 124, so that is an error and never "no matches".
+const SEARCH: &str = r#"if [ "$1" = - ]; then cat; else
+find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \); fi |
+xargs -0 -r sh -c 'p=$1
+shift
+for f; do
+    shift
+    if [ -r "$f" ]; then set -- "$@" "$f"; fi
+done
+[ "$#" -eq 0 ] || grep -HIPn --null -e "$p" -- "$@" || [ "$?" -eq 1 ] || exit 255' sh "$3""#;
 
 /// `limit` in seconds for the runner's `timeout`, to the millisecond as the
 /// host backend's limit is, rounded up: `timeout` reads 0 as no limit at all,
@@ -778,7 +795,12 @@ impl Workspace for SshWorkspace {
             .map(|_| ())
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let (_, real) = self.existing(dir).await?;
         let reply = self
             .script(LIST, &[&real], &[])
@@ -789,6 +811,7 @@ impl Workspace for SshWorkspace {
             .split(|b| *b == 0)
             .filter_map(|f| std::str::from_utf8(f).ok())
             .filter_map(|f| self.relative(f))
+            .filter(|f| only.is_none_or(|o| o.matches(f)))
             .collect();
         files.sort();
         files.truncate(cap);
@@ -798,14 +821,38 @@ impl Workspace for SshWorkspace {
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let (_, real) = self.existing(dir).await?;
         let under = max_file_bytes.saturating_add(1).to_string();
+        // With a glob, the files are narrowed here and sent on stdin, so
+        // grep never reads one the glob leaves out.
+        let mut files = Vec::new();
+        if let Some(only) = only {
+            let found = self
+                .script(SEARCHED, &[&real, &under], &[])
+                .await?
+                .ok("listing files")?;
+            for file in found.stdout.split(|b| *b == 0) {
+                let kept = std::str::from_utf8(file)
+                    .ok()
+                    .and_then(|f| self.relative(f))
+                    .is_some_and(|f| only.matches(&f));
+                if kept {
+                    files.extend_from_slice(file);
+                    files.push(0);
+                }
+            }
+            if files.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        let from = if only.is_some() { "-" } else { real.as_str() };
         let reply = self
-            .script(SEARCH, &[&real, &under, needle], &[])
+            .script(SEARCH, &[from, &under, pattern.pcre()], &files)
             .await?
             .ok("searching")?;
         let mut hits = Vec::new();
@@ -829,6 +876,9 @@ impl Workspace for SshWorkspace {
                 continue;
             };
             let Ok(number) = number.parse() else { continue };
+            if only.is_some_and(|o| !o.matches(&path)) {
+                continue;
+            }
             hits.push(Hit {
                 path,
                 line: number,
@@ -1057,6 +1107,31 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_grep_cannot_finish_is_an_error_not_no_matches() {
+        let runner = LocalRunner::new("henk-ssh-backtrack");
+        let provider = SshProvider::with_runner(Arc::clone(&runner) as Arc<dyn Runner>);
+        let source = crate::workspace::contract::source("henk-ssh-backtrack-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let line = format!("{}b\n", "a".repeat(5000));
+        ws.write(&WorkspacePath::parse("long.txt").unwrap(), line.as_bytes())
+            .await
+            .unwrap();
+        // Linear in Rust's regex, past PCRE's backtracking limit in grep -P.
+        let pattern = Pattern::parse("(a+)+$").unwrap();
+        let searched = ws
+            .search(&WorkspacePath::root(), &pattern, None, 1 << 20, 10)
+            .await;
+        assert!(
+            matches!(&searched, Err(WorkspaceError::Backend(m)) if m.contains("searching failed")),
+            "{searched:?}"
+        );
+        ws.close().await;
+    }
+
+    #[tokio::test]
     async fn the_run_gets_its_own_checkout_with_git_and_a_dropped_one_is_removed() {
         let runner = LocalRunner::new("henk-ssh-own-checkout");
         let provider = SshProvider::with_runner(Arc::clone(&runner) as Arc<dyn Runner>);
@@ -1157,7 +1232,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner 2\n"), "{probe}");
+        assert!(probe.starts_with("henk-runner 3\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 

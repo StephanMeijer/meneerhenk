@@ -147,6 +147,12 @@ impl ReviewWorkspaces {
         self.lanes.remove(lane.as_str())
     }
 
+    /// The fact-checker's workspace, if it has one. It stays held, so
+    /// [`Self::close_all`] closes it.
+    pub fn fact_check(&self) -> Option<Arc<dyn Workspace>> {
+        self.fact_check.clone()
+    }
+
     /// Closes every workspace still held. Closing one twice does nothing,
     /// so a lane may close its own first.
     pub async fn close_all(self) {

@@ -59,31 +59,57 @@ fn matches(pattern: &str, path: &str) -> bool {
 
 /// Whole-path matching, segment by segment; `**` takes zero or more.
 fn segments_match(pattern: &[&str], path: &[&str]) -> bool {
-    match pattern.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => {
-            (0..=path.len()).any(|skip| path.get(skip..).is_some_and(|p| segments_match(rest, p)))
-        }
-        Some((first, rest)) => path.split_first().is_some_and(|(segment, others)| {
-            segment_matches(first.as_bytes(), segment.as_bytes()) && segments_match(rest, others)
-        }),
-    }
+    wildcard(
+        pattern,
+        path,
+        |p| *p == "**",
+        |p, segment| segment_matches(p.as_bytes(), segment.as_bytes()),
+    )
 }
 
 /// One segment: `*` any run of bytes, `?` one byte, anything else itself.
 fn segment_matches(pattern: &[u8], name: &[u8]) -> bool {
-    match pattern.split_first() {
-        None => name.is_empty(),
-        Some((b'*', rest)) => {
-            (0..=name.len()).any(|skip| name.get(skip..).is_some_and(|n| segment_matches(rest, n)))
+    wildcard(pattern, name, |p| *p == b'*', |p, n| *p == b'?' || p == n)
+}
+
+/// Whether `pattern` matches all of `text`, where a `star` item takes any
+/// run of items and every other item takes one that `one` accepts. Greedy
+/// with one point to go back to, the last star: a later star can always
+/// take what an earlier one would have, so going back further never finds
+/// a match this misses. At most `pattern.len() * text.len()` steps, however
+/// many stars, where trying every split was exponential in them.
+fn wildcard<P, T>(
+    pattern: &[P],
+    text: &[T],
+    star: impl Fn(&P) -> bool,
+    one: impl Fn(&P, &T) -> bool,
+) -> bool {
+    let (mut p, mut t) = (0, 0);
+    // The last star's position and the text position it was taken at.
+    let mut back: Option<(usize, usize)> = None;
+    while let Some(item) = text.get(t) {
+        match pattern.get(p) {
+            Some(next) if star(next) => {
+                back = Some((p, t));
+                p += 1;
+                continue;
+            }
+            Some(next) if one(next, item) => {
+                p += 1;
+                t += 1;
+                continue;
+            }
+            _ => {}
         }
-        Some((b'?', rest)) => name
-            .split_first()
-            .is_some_and(|(_, others)| segment_matches(rest, others)),
-        Some((c, rest)) => name
-            .split_first()
-            .is_some_and(|(n, others)| n == c && segment_matches(rest, others)),
+        let Some((at, taken)) = back else {
+            return false;
+        };
+        // The star takes one more item and the rest is tried again.
+        back = Some((at, taken + 1));
+        p = at + 1;
+        t = taken + 1;
     }
+    pattern.get(p..).is_some_and(|rest| rest.iter().all(&star))
 }
 
 #[cfg(test)]
@@ -128,6 +154,36 @@ mod tests {
         assert!(!f.matches("x/vendor/foo/LICENSE"));
         assert!(f.matches("gen/v1.rs"));
         assert!(!f.matches("gen/v10.rs"));
+    }
+
+    #[test]
+    fn stars_and_question_marks_within_a_segment() {
+        let f = filter(&["*a*b?", "x*", "*", "a*?*c"]);
+        assert!(f.matches("src/aXbY"));
+        assert!(f.matches("ab1"));
+        assert!(f.matches("xenon"));
+        assert!(f.matches("abc"));
+        let g = filter(&["*a*b?"]);
+        assert!(!g.matches("ab"));
+        assert!(!g.matches("aXb"));
+        assert!(!filter(&["a*?*c"]).matches("ac"));
+        assert!(filter(&["src/**/**/x.rs"]).matches("src/x.rs"));
+        assert!(!filter(&["src/**/y/**/x.rs"]).matches("src/a/x.rs"));
+    }
+
+    #[test]
+    fn a_glob_full_of_stars_is_cheap() {
+        let name = "a".repeat(64);
+        let start = std::time::Instant::now();
+        assert!(!filter(&["*a*a*a*a*a*a*a*b"]).matches(&name));
+        let deep = vec!["a"; 64].join("/");
+        assert!(!filter(&["**/a/**/a/**/a/**/a/**/a/**/a/**/a/**/b"]).matches(&deep));
+        assert!(filter(&["**/a/**/a/**/a/**/a/**/a/**/a/**/a/**/a"]).matches(&deep));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

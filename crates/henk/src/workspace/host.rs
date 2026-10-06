@@ -16,11 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use henk_domain::address::WorkspacePath;
+use henk_domain::ignore::PathFilter;
 use henk_domain::workspace::Profile;
 use tokio::process::Command;
 
 use super::{
-    Budget, ExecResult, Exported, Hit, Workspace, WorkspaceError, WorkspaceProvider,
+    Budget, ExecResult, Exported, Hit, Pattern, Workspace, WorkspaceError, WorkspaceProvider,
     parse_raw_diff, tail,
 };
 use crate::git::{ScratchDir, git_command};
@@ -103,7 +104,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Every file under `dir`, relative to `root`, `.git` left out, at most
 /// `cap`. Links are not followed.
-fn walk(root: &Path, dir: &Path, cap: usize, out: &mut Vec<String>) {
+fn walk(root: &Path, dir: &Path, only: Option<&PathFilter>, cap: usize, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -118,10 +119,13 @@ fn walk(root: &Path, dir: &Path, cap: usize, out: &mut Vec<String>) {
             continue;
         }
         match entry.file_type() {
-            Ok(kind) if kind.is_dir() => walk(root, &path, cap, out),
+            Ok(kind) if kind.is_dir() => walk(root, &path, only, cap, out),
             Ok(kind) if kind.is_file() => {
                 if let Ok(relative) = path.strip_prefix(root) {
-                    out.push(relative.to_string_lossy().into_owned());
+                    let relative = relative.to_string_lossy().into_owned();
+                    if only.is_none_or(|o| o.matches(&relative)) {
+                        out.push(relative);
+                    }
                 }
             }
             _ => {}
@@ -384,25 +388,31 @@ impl Workspace for HostWorkspace {
         std::fs::write(&target, content).map_err(io(path))
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
         let root = self.root()?;
         let start = self.existing(dir)?;
         let mut files = Vec::new();
-        walk(&root, &start, cap, &mut files);
+        walk(&root, &start, only, cap, &mut files);
         Ok(files)
     }
 
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let root = self.root()?;
         let start = self.existing(dir)?;
         let mut files = Vec::new();
-        walk(&root, &start, usize::MAX, &mut files);
+        walk(&root, &start, only, usize::MAX, &mut files);
         let mut hits = Vec::new();
         for file in files {
             let full = root.join(&file);
@@ -412,8 +422,8 @@ impl Workspace for HostWorkspace {
             let Ok(text) = std::fs::read_to_string(&full) else {
                 continue;
             };
-            for (index, line) in text.lines().enumerate() {
-                if line.contains(needle) {
+            for (index, line) in super::lines(&text).enumerate() {
+                if pattern.is_match(line) {
                     hits.push(Hit {
                         path: file.clone(),
                         line: index + 1,
@@ -524,7 +534,7 @@ mod tests {
     async fn the_import_leaves_git_behind() {
         let (_src, ws) = open("henk-ws-import", Limits::default()).await;
         assert!(!ws.tree().join(".git").exists());
-        let files = ws.list(&WorkspacePath::root(), 100).await.unwrap();
+        let files = ws.list(&WorkspacePath::root(), None, 100).await.unwrap();
         assert_eq!(files, ["old.md", "run.sh", "src/a.rs"]);
         assert!(ws.export().await.unwrap().is_empty(), "nothing changed yet");
     }
@@ -544,7 +554,7 @@ mod tests {
         }
         assert!(!Path::new("/etc/x").exists());
         assert!(
-            ws.list(&p("etc"), 10).await.is_err(),
+            ws.list(&p("etc"), None, 10).await.is_err(),
             "a link out is not listed"
         );
         assert!(
@@ -582,6 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_finds_lines_and_skips_large_files() {
+        let find = |source: &str| crate::workspace::Pattern::parse(source).unwrap();
         let src = source("henk-ws-search");
         let ws = HostProvider
             .open(src.path(), &Profile::default())
@@ -591,7 +602,7 @@ mod tests {
             .await
             .unwrap();
         let hits = ws
-            .search(&WorkspacePath::root(), "let x", 50, 10)
+            .search(&WorkspacePath::root(), &find("let x"), None, 50, 10)
             .await
             .unwrap();
         assert_eq!(
@@ -602,9 +613,16 @@ mod tests {
                 text: "let x = 1;".to_owned()
             }]
         );
-        let capped = ws.search(&p("src"), "let x", 1 << 20, 3).await.unwrap();
+        let capped = ws
+            .search(&p("src"), &find("let x"), None, 1 << 20, 3)
+            .await
+            .unwrap();
         assert_eq!(capped.len(), 3);
-        assert!(ws.search(&p("nope"), "x", 10, 10).await.is_err());
+        assert!(
+            ws.search(&p("nope"), &find("x"), None, 10, 10)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

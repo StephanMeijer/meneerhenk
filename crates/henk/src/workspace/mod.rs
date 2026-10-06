@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::address::{PathError, WorkspacePath};
+use henk_domain::ignore::PathFilter;
 use henk_domain::workspace::{
     BackendKind, Change, ChangeKind, EnvLane, FileMode, Limits, Profile, RawChange,
     changeset_refusal,
@@ -65,6 +66,166 @@ pub struct ExecResult {
     pub output: String,
     /// How long it ran.
     pub duration: Duration,
+}
+
+/// What `search` looks for: a regular expression, checked here before any
+/// backend sees it. The syntax is what Rust's `regex` and PCRE (`grep -P`,
+/// which the `ssh` backend runs) read alike: classes, `\b`, `\d`, `\s`,
+/// `\w`, `(?i)`, alternation, repetition. What the two read differently is
+/// refused with a reason: class set operations and nested classes (POSIX
+/// classes among them), `\<`, `\>`, `\b{...}`, `\D` inside a class and the
+/// flags `x`, `R` and `u`. What is left is made to mean the same in both:
+/// `\d` is the ASCII digits in both, `$` also matches before the `\r` of a
+/// CRLF line, which both see, and PCRE gets `(*UCP)` so `\w`, `\s` and
+/// `\b` know letters and spaces beyond ASCII as Rust's do, whatever grep's
+/// version.
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pcre: String,
+    regex: regex::Regex,
+}
+
+/// Bytes a compiled search pattern may take.
+const PATTERN_SIZE: usize = 1 << 20;
+/// Characters a search pattern may have.
+const PATTERN_LENGTH: usize = 500;
+
+impl Pattern {
+    /// Checks and compiles `source`.
+    ///
+    /// # Errors
+    ///
+    /// Says, in words for the model, why the pattern is refused.
+    pub fn parse(source: &str) -> Result<Self, String> {
+        if source.is_empty() {
+            return Err("the pattern is empty".to_owned());
+        }
+        if source.chars().count() > PATTERN_LENGTH {
+            return Err(format!(
+                "the pattern is longer than {PATTERN_LENGTH} characters"
+            ));
+        }
+        if source.contains('\n') {
+            return Err("the pattern spans lines; search matches one line at a time".to_owned());
+        }
+        let build = |source: &str| {
+            regex::RegexBuilder::new(source)
+                .size_limit(PATTERN_SIZE)
+                .build()
+                .map_err(|e| format!("not a regular expression: {e}"))
+        };
+        // Checked as given first, so an error quotes the model's own pattern.
+        build(source)?;
+        let common = translate(source)?;
+        let regex = build(&common)?;
+        Ok(Self {
+            pcre: format!("(*UCP){common}"),
+            regex,
+        })
+    }
+
+    /// The pattern as `grep -P` gets it, to match what [`Pattern::is_match`]
+    /// does.
+    #[must_use]
+    pub fn pcre(&self) -> &str {
+        &self.pcre
+    }
+
+    /// Whether `line` has a match.
+    #[must_use]
+    pub fn is_match(&self, line: &str) -> bool {
+        self.regex.is_match(line)
+    }
+}
+
+/// `source` in the part of the syntax Rust's `regex` and PCRE read alike,
+/// with `\d` and `\D` spelled as ASCII classes, or why it cannot be. Every
+/// backslash escapes the one character after it, and a class cannot nest,
+/// so one flag says whether the scan is inside `[...]`.
+fn translate(source: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_class = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('d') if in_class => out.push_str("0-9"),
+                Some('d') => out.push_str("[0-9]"),
+                Some('D') if in_class => {
+                    return Err(
+                        r"\D inside [...] is not supported; use [^0-9] or list the characters"
+                            .to_owned(),
+                    );
+                }
+                Some('D') => out.push_str("[^0-9]"),
+                Some('<' | '>') => {
+                    return Err(
+                        r"\< and \> are word boundaries in Rust and plain characters in grep -P; use \b"
+                            .to_owned(),
+                    );
+                }
+                Some('b' | 'B') if !in_class && chars.peek() == Some(&'{') => {
+                    return Err(
+                        r"\b{...} is not supported; use \b, or \b with a \w beside it".to_owned(),
+                    );
+                }
+                Some(next) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+                None => out.push('\\'),
+            },
+            '[' if in_class => {
+                return Err(
+                    r"a [ inside [...] (a nested class or a POSIX class such as [:alpha:]) is not supported; escape it as \[ or use ranges such as a-z"
+                        .to_owned(),
+                );
+            }
+            '[' => {
+                in_class = true;
+                out.push('[');
+                if chars.next_if_eq(&'^').is_some() {
+                    out.push('^');
+                }
+                // A `]` first in a class is the character itself.
+                if chars.next_if_eq(&']').is_some() {
+                    out.push(']');
+                }
+            }
+            ']' if in_class => {
+                in_class = false;
+                out.push(']');
+            }
+            // A CRLF line ends in `\r` on every backend; `$` is before it.
+            '$' if !in_class => out.push_str(r"\r?$"),
+            '&' | '-' | '~' if in_class && chars.peek() == Some(&c) => {
+                return Err(
+                    "class set operations (&&, --, ~~ inside [...]) are not supported; escape the characters or use a simpler class".to_owned(),
+                );
+            }
+            '(' if !in_class && chars.peek() == Some(&'?') => {
+                let flags: String = chars
+                    .clone()
+                    .skip(1)
+                    .take_while(|f| "imsUuxR-".contains(*f))
+                    .collect();
+                if flags.contains(['x', 'R', 'u']) {
+                    return Err("of the flags only i, m, s and U are supported".to_owned());
+                }
+                out.push('(');
+            }
+            _ => out.push(c),
+        }
+    }
+    Ok(out)
+}
+
+/// The lines of `text` as grep reads them: split at `\n` only, so a CRLF
+/// line keeps its `\r` on every backend and [`Pattern`] reads `$` as
+/// `\r?$` for both engines alike.
+pub(crate) fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
 }
 
 /// One search hit.
@@ -157,16 +318,23 @@ pub trait Workspace: Send + Sync {
     /// Returns [`WorkspaceError`] when the path is refused or the write fails.
     async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError>;
 
-    /// The files under `dir`, sorted, at most `cap`. `.git` is left out and
+    /// The files under `dir`, sorted, at most `cap`; with `only`, just
+    /// the paths it matches, counted before the cap. `.git` is left out and
     /// symbolic links are not followed.
     ///
     /// # Errors
     ///
     /// Returns [`WorkspaceError`] when `dir` is refused or missing.
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError>;
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError>;
 
-    /// Lines containing `needle` in the files under `dir`, at most `cap`.
-    /// Files larger than `max_file_bytes` or not text are skipped.
+    /// Lines matching `pattern` in the files under `dir` (with `only`, just
+    /// the files it matches), sorted by path and line, at most `cap`. Files
+    /// larger than `max_file_bytes` or not text are skipped.
     ///
     /// # Errors
     ///
@@ -174,7 +342,8 @@ pub trait Workspace: Send + Sync {
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError>;
@@ -310,18 +479,26 @@ impl Workspace for NoExport {
         self.inner.write(path, content).await
     }
 
-    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
-        self.inner.list(dir, cap).await
+    async fn list(
+        &self,
+        dir: &WorkspacePath,
+        only: Option<&PathFilter>,
+        cap: usize,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.inner.list(dir, only, cap).await
     }
 
     async fn search(
         &self,
         dir: &WorkspacePath,
-        needle: &str,
+        pattern: &Pattern,
+        only: Option<&PathFilter>,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
-        self.inner.search(dir, needle, max_file_bytes, cap).await
+        self.inner
+            .search(dir, pattern, only, max_file_bytes, cap)
+            .await
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
@@ -493,6 +670,66 @@ mod tests {
             },
             content: if deleted { Vec::new() } else { b"x\n".to_vec() },
         }
+    }
+
+    #[test]
+    fn only_set_operators_inside_a_class_are_refused() {
+        for allowed in [
+            r"[A-Za-z_]\w*\s*&&",
+            r"\[x\] -- y",
+            r"[]]&&",
+            r"[\]]--",
+            r"[a] ~~",
+            r"a && b",
+        ] {
+            assert!(Pattern::parse(allowed).is_ok(), "{allowed}");
+        }
+        let condition = Pattern::parse(r"[A-Za-z_]\w*\s*&&").unwrap();
+        assert!(condition.is_match("if ready && done"));
+        for refused in [r"[a&&b]", r"[\w--\d]", r"[^]&&]", r"x [a-c--b]"] {
+            let error = Pattern::parse(refused).unwrap_err();
+            assert!(error.contains("class set operations"), "{refused}: {error}");
+        }
+    }
+
+    #[test]
+    fn what_the_engines_read_differently_is_refused() {
+        for (refused, says) in [
+            (r"\<word\>", r"\<"),
+            (r"\b{start}x", r"\b{"),
+            (r"[a[b]]", "nested"),
+            (r"[[:alpha:]]", "POSIX"),
+            (r"[^\D]", r"\D inside"),
+            (r"(?x) a b", "flags"),
+            (r"(?R)a$", "flags"),
+            (r"(?-u:\w)", "flags"),
+        ] {
+            let error = Pattern::parse(refused).unwrap_err();
+            assert!(error.contains(says), "{refused}: {error}");
+        }
+        for allowed in [
+            r"(?i)x", r"(?ms)x", r"(?U)a+", r"(?:a|b)", r"(?i:a)b", r"\b\w+\b", r"[<>]",
+        ] {
+            assert!(Pattern::parse(allowed).is_ok(), "{allowed}");
+        }
+    }
+
+    #[test]
+    fn digits_are_ascii_and_an_escaped_backslash_stays_one() {
+        let digit = Pattern::parse(r"^\d$").unwrap();
+        assert!(digit.is_match("7"));
+        assert!(!digit.is_match("\u{663}"));
+        assert!(Pattern::parse(r"^[\d_]+$").unwrap().is_match("7_"));
+        assert_eq!(
+            Pattern::parse(r"[\d_]\D").unwrap().pcre(),
+            "(*UCP)[0-9_][^0-9]"
+        );
+        let literal = Pattern::parse(r"^\\d$").unwrap();
+        assert!(literal.is_match(r"\d"));
+        assert!(!literal.is_match("7"));
+        assert_eq!(Pattern::parse(r"\\d").unwrap().pcre(), r"(*UCP)\\d");
+        let refused = Pattern::parse(r"(\d").unwrap_err();
+        assert!(refused.contains(r"(\d"), "{refused}");
     }
 
     #[tokio::test]
