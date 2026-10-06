@@ -559,3 +559,51 @@ async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
     assert_eq!(posted.id, "99");
     writer.resolve_thread(&target(), "PRRT_1").await.unwrap();
 }
+
+#[tokio::test]
+async fn a_github_issue_has_a_kind_and_no_fields_to_set() {
+    use henk_platform::{IssueTarget, IssueUpdate, IssueWriter as _};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/issues/9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 900, "number": 9, "title": "Export runs", "body": "Body.", "state": "open",
+            "labels": [{"name": "backend"}], "html_url": "https://github.com/docspec/app/issues/9",
+            "type": {"id": 1, "name": "Feature"}
+        })))
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    let writer = GitHubWriter::new(api, "x");
+    let target = IssueTarget {
+        repo: RepoRef::parse(Platform::GitHub, "docspec/app").unwrap(),
+        number: 9,
+    };
+    let issue = writer.issue(&target).await.unwrap();
+    assert_eq!(issue.kind.as_deref(), Some("Feature"));
+    assert!(issue.fields.is_empty());
+
+    let fields = henk_domain::triage::TriageFields::parse(Some(3), None, None, None).unwrap();
+    let refused = writer
+        .update_issue(
+            &target,
+            IssueUpdate {
+                fields: Some(fields),
+                ..IssueUpdate::default()
+            },
+        )
+        .await;
+    assert!(matches!(
+        refused,
+        Err(henk_platform::PlatformError::Unsupported(_))
+    ));
+    let sent = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() != "GET")
+        .count();
+    assert_eq!(sent, 0, "nothing was sent");
+}

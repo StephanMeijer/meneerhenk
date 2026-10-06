@@ -22,7 +22,7 @@ use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
 use crate::plan_tools::{
     AddLabels, AskQuestions, CreateSubIssue, LinkIssue, PlanContext, PlanState, SetDescription,
-    SetIssueType, SetTitle, WritePlan,
+    SetFields, SetIssueType, SetTitle, WritePlan,
 };
 use crate::review::Interrupted;
 use crate::web_fetch::WebFetch;
@@ -280,6 +280,7 @@ async fn planner_tools(
     set.add(SetDescription(Arc::clone(&context)));
     set.add(AddLabels(Arc::clone(&context)));
     set.add(SetIssueType(Arc::clone(&context)));
+    set.add(SetFields(Arc::clone(&context)));
     set.add(LinkIssue(Arc::clone(&context)));
     set.add(CreateSubIssue(Arc::clone(&context)));
     set.add(AskQuestions(Arc::clone(&context)));
@@ -303,8 +304,7 @@ async fn plan_body(
         .as_ref()
         .ok_or_else(|| anyhow!("planning is not configured"))?;
     let platform = request.target.repo.platform();
-    let alias = app.read_mcp_alias(platform)?;
-    let session: Arc<dyn McpSession> = Arc::new(app.connect_mcp(alias).await?);
+    let session = app.read_session(platform).await?;
     let scope = Scope::Plan {
         repo: request.target.repo.clone(),
         issue: request.target.number,
@@ -378,9 +378,261 @@ fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use std::collections::BTreeMap;
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::plan::PlanSection;
+    use henk_llm::testing::ScriptedClient;
+    use henk_llm::{
+        Block, ChatMessage, Completion, ModelClient, Role, StopReason, ToolArguments, ToolCall,
+        Usage,
+    };
+    use henk_mcp::testing::{FakeServer, echo_behaviour};
+    use henk_platform::IssueWriter;
+    use serde_json::json;
 
     use super::*;
+    use crate::config::Config;
+    use crate::plan_tools::tests::FakeIssueWriter;
+
+    const CONFIG: &str = r#"
+[discord]
+channel_id = 1
+henk_user_id = 2
+team_lead_ids = [3]
+[mail]
+address = "henk@example.com"
+[allowlist]
+github_owners = ["o"]
+[github]
+app_id = 1
+installation_id = 2
+bot_login = "h[bot]"
+[mcp.github]
+command = "unused"
+[models.m]
+provider = "open_ai"
+base_url = "https://x.test/v1"
+api_key_env = "UNUSED"
+model = "scripted"
+[planning]
+model = "m"
+requester_id = 3
+"#;
+
+    fn done() -> Completion {
+        Completion {
+            message: ChatMessage::assistant("Plan written."),
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        }
+    }
+
+    fn write_plan(markdown: &str) -> Completion {
+        Completion {
+            message: ChatMessage {
+                role: Role::Assistant,
+                blocks: vec![Block::ToolCall(ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "write_plan".to_owned(),
+                    arguments: ToolArguments::Parsed(json!({"markdown": markdown})),
+                })],
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        }
+    }
+
+    struct Fixture {
+        app: App,
+        tracker: Arc<FakeIssueWriter>,
+        model: Arc<ScriptedClient>,
+    }
+
+    async fn fixture(tracker: FakeIssueWriter, script: Vec<Completion>) -> Fixture {
+        let settings = Config::parse(CONFIG)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let server = FakeServer::new(
+            vec![FakeServer::tool("issue_read", "", &["owner", "repo"])],
+            echo_behaviour(),
+        );
+        let session: Arc<dyn McpSession> = Arc::new(server.connect("github").await);
+        let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
+        let mut models: BTreeMap<String, Arc<dyn henk_llm::ModelClient>> = BTreeMap::new();
+        models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
+        let tracker = Arc::new(tracker);
+        Fixture {
+            app: App {
+                settings,
+                store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+                models,
+                github: None,
+                gitlab: None,
+                shutdown: CancellationToken::new(),
+                test_writer: None,
+                test_session: Some(session),
+                test_address_writer: None,
+                test_issue_writer: Some(Arc::clone(&tracker) as Arc<dyn IssueWriter>),
+            },
+            tracker,
+            model,
+        }
+    }
+
+    fn request(run: &str) -> PlanRequest {
+        PlanRequest {
+            target: IssueTarget {
+                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+                number: 9,
+            },
+            note: None,
+            trigger: "test".to_owned(),
+            run: Some(RunId::parse(run).unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_first_plan_is_written_with_its_session_log() {
+        let f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs as CSV."),
+            vec![write_plan("## Goal\n\nExport runs."), done()],
+        )
+        .await;
+        let report = run_plan(&f.app, request("r-plan-1"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.planned);
+
+        let body = f.tracker.issue.lock().unwrap().body.clone();
+        assert!(body.starts_with("Export runs as CSV."), "{body}");
+        let section = extract_plan(&body).unwrap();
+        assert_eq!(section.plan, "## Goal\n\nExport runs.");
+        assert_eq!(section.sessions.len(), 1, "{body}");
+        assert!(
+            section.sessions[0].contains("/runs/r-plan-1"),
+            "{}",
+            section.sessions[0]
+        );
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        let record = f
+            .app
+            .store
+            .run(&RunId::parse("r-plan-1").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+
+        let system = f.model.requests()[0].system.clone().unwrap();
+        assert!(system.contains("There is no previous plan."), "{system}");
+    }
+
+    #[tokio::test]
+    async fn a_new_plan_replaces_the_old_one_which_it_starts_from() {
+        let old = PlanSection {
+            plan: "## Goal\n\nThe old plan.".to_owned(),
+            sessions: vec!["- earlier session".to_owned()],
+        };
+        let body = with_plan_section("Export runs as CSV.", &old);
+        let f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, &body),
+            vec![
+                write_plan(
+                    "## Done since the previous plan\n\nNothing.\n\n## Goal\n\nThe new plan.",
+                ),
+                done(),
+            ],
+        )
+        .await;
+        run_plan(&f.app, request("r-plan-2"), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let body = f.tracker.issue.lock().unwrap().body.clone();
+        let section = extract_plan(&body).unwrap();
+        assert!(section.plan.ends_with("The new plan."), "{body}");
+        assert!(
+            !body.contains("The old plan."),
+            "replaced, not appended: {body}"
+        );
+        assert_eq!(section.sessions.len(), 2, "the log keeps earlier sessions");
+        let system = f.model.requests()[0].system.clone().unwrap();
+        assert!(system.contains("Done since the previous plan"), "{system}");
+        assert!(system.contains("The old plan."), "{system}");
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_never_gets_written_fails_on_the_issue_with_its_run_link() {
+        let f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs."),
+            vec![done()],
+        )
+        .await;
+        let error = run_plan(&f.app, request("r-plan-3"), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("without writing a plan"),
+            "{error}"
+        );
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1);
+        assert!(
+            comments[0].starts_with("Planning failed."),
+            "{}",
+            comments[0]
+        );
+        assert!(comments[0].contains("/runs/r-plan-3"), "{}", comments[0]);
+        let record = f
+            .app
+            .store
+            .run(&RunId::parse("r-plan-3").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn closed_issues_and_pull_requests_are_not_planned() {
+        let closed = FakeIssueWriter::new(Platform::GitHub, None, "Done.");
+        closed.issue.lock().unwrap().open = false;
+        let f = fixture(closed, vec![]).await;
+        let error = run_plan(&f.app, request("r-plan-4"), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is closed"), "{error}");
+
+        let pull = FakeIssueWriter::new(Platform::GitHub, None, "Code.");
+        pull.issue.lock().unwrap().is_pull_request = true;
+        let f = fixture(pull, vec![]).await;
+        let error = run_plan(&f.app, request("r-plan-5"), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("is a pull request"), "{error}");
+        assert!(
+            f.tracker.comments.lock().unwrap().is_empty(),
+            "a refusal posts nothing"
+        );
+        assert!(f.model.requests().is_empty(), "and asks no model");
+        assert!(
+            f.app
+                .store
+                .run(&RunId::parse("r-plan-5").unwrap())
+                .await
+                .unwrap()
+                .is_none(),
+            "and records no run"
+        );
+    }
 
     #[test]
     fn a_refused_plan_fails_and_says_why() {

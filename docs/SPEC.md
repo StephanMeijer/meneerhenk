@@ -214,7 +214,11 @@ Henk then:
      related);
    - adds fitting existing labels;
    - sets the issue type and empty fields such as priority, effort and
-     target date;
+     target date. On GitLab the issue is a work item: the type is issue or
+     task (an issue's sub-issues are tasks, and a task has none), effort is
+     the weight, the target date is the due date, and a start date and
+     health status may be set too; priority is a label. A field that
+     already has a value is left alone;
    - may split separable work into sub-issues (at most 5);
    - may sharpen the title or description.
 3. **Asks** questions in a comment when their answers would change the plan.
@@ -484,8 +488,8 @@ then a line in the section named.
 5. **§3.3 Resolved threads.** Does a finding in a resolved thread still count
    in *N*?
 6. **§4 Time limit.** How long may a plan run before it has failed?
-7. **§4 Triage on GitLab.** Issue type, priority, effort and target date are
-   GitHub Projects fields. What does triage set on GitLab?
+7. **§4 Triage on GitLab.** Decided 2026-10-06; §4 says what triage sets on
+   GitLab.
 8. **§5.2 Quick successive messages.** How long is the window that merges
    messages from one person into one turn?
 9. **§5.1 Joining in.** Is there a cap on how often Henk joins in uninvited?
@@ -596,3 +600,7 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.5 (new), §1, §8.2, §8.5, §9: Henk may address review feedback when a
   colleague asks, pushing one fast-forward commit to that pull request's
   branch (#35). Approving, blocking and merging stay out.
+- §4: what triage sets on GitLab, answering open question 7, which stays
+  in §10 marked decided so the numbers of the others do not change. Fields
+  are only filled when empty, on both platforms, as §4 already said for
+  priority, effort and target date.

@@ -11,6 +11,7 @@ use henk_domain::plan::{
 };
 use henk_domain::run::RunId;
 use henk_domain::text::style_violations;
+use henk_domain::triage::TriageFields;
 use henk_llm::{ToolDef, ToolName};
 use henk_platform::{IssueRelation, IssueTarget, IssueUpdate, IssueWriter};
 use serde_json::{Value, json};
@@ -114,6 +115,7 @@ planner_tool!(SetTitle);
 planner_tool!(SetDescription);
 planner_tool!(AddLabels);
 planner_tool!(SetIssueType);
+planner_tool!(SetFields);
 planner_tool!(LinkIssue);
 planner_tool!(CreateSubIssue);
 planner_tool!(AskQuestions);
@@ -294,7 +296,7 @@ impl Tool for SetIssueType {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("set_issue_type"),
-            description: "Sets the issue type where the tracker supports it (GitHub issue types such as Bug, Feature, Task; GitLab issue, incident, task). Costs 1 change.".to_owned(),
+            description: "Sets the issue type where the tracker supports it (GitHub issue types such as Bug, Feature, Task; on GitLab issue or task). Costs 1 change.".to_owned(),
             input_schema: object_schema(
                 &json!({"type": {"type": "string"}, "reason": {"type": "string"}}), &["type", "reason"]),
         }
@@ -321,6 +323,74 @@ impl Tool for SetIssueType {
         {
             Ok(()) => ToolOutput::ok("Type set."),
             Err(error) => ToolOutput::error(format!("Could not set the type: {error}")),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SetFields {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("set_fields"),
+            description: "Fills empty triage fields on a GitLab issue or task: weight (the effort, a small integer), start_date and due_date (YYYY-MM-DD; the due date is the target date) and health (on_track, needs_attention, at_risk). A field that already has a value is left alone. Not available on GitHub. Costs 1 change.".to_owned(),
+            input_schema: object_schema(
+                &json!({
+                    "weight": {"type": "integer", "minimum": 0},
+                    "start_date": {"type": "string"},
+                    "due_date": {"type": "string"},
+                    "health": {"type": "string", "enum": ["on_track", "needs_attention", "at_risk"]},
+                    "reason": {"type": "string"}
+                }),
+                &["reason"],
+            ),
+        }
+    }
+
+    async fn call(&self, args: Value) -> ToolOutput {
+        let ctx = &self.0;
+        let Some(reason) = arg_str(&args, "reason") else {
+            return ToolOutput::error("reason is required");
+        };
+        if ctx.writer.platform() == henk_domain::allowlist::Platform::GitHub {
+            return ToolOutput::error(
+                "Triage fields are not set on GitHub yet; skip them and mention estimates in the plan.",
+            );
+        }
+        if args.get("weight").is_some_and(|w| w.as_u64().is_none()) {
+            return ToolOutput::error("weight must be a whole number of zero or more");
+        }
+        let wanted = match TriageFields::parse(
+            args.get("weight").and_then(Value::as_u64),
+            arg_str(&args, "start_date"),
+            arg_str(&args, "due_date"),
+            arg_str(&args, "health"),
+        ) {
+            Ok(wanted) => wanted,
+            Err(error) => return ToolOutput::error(format!("Not set: {error}.")),
+        };
+        let current = match ctx.writer.issue(&ctx.target).await {
+            Ok(issue) => issue.fields,
+            Err(error) => return ToolOutput::error(format!("Could not read the issue: {error}")),
+        };
+        if let Err(error) = wanted.may_fill(&current) {
+            return ToolOutput::error(format!("Not set: {error}. Only empty fields are filled."));
+        }
+        if let Err(refusal) = ctx.spend(1, &format!("set {wanted} ({reason})")) {
+            return refusal;
+        }
+        match ctx
+            .writer
+            .update_issue(
+                &ctx.target,
+                IssueUpdate {
+                    fields: Some(wanted),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(()) => ToolOutput::ok(format!("Set {wanted}.")),
+            Err(error) => ToolOutput::error(format!("Could not set the fields: {error}")),
         }
     }
 }
@@ -411,6 +481,15 @@ impl Tool for CreateSubIssue {
                 ));
             }
         }
+        // A parent that cannot have children is refused before the budget
+        // is spent, as nothing would be created.
+        let parent = match ctx.writer.issue(&ctx.target).await {
+            Ok(parent) => parent,
+            Err(error) => return ToolOutput::error(format!("Could not read the issue: {error}")),
+        };
+        if let Err(error) = ctx.writer.may_have_children(&parent) {
+            return ToolOutput::error(format!("Could not create the sub-issue: {error}"));
+        }
         if let Err(refusal) = ctx.spend(2, &format!("created sub-issue {title:?} ({reason})")) {
             return refusal;
         }
@@ -420,7 +499,7 @@ impl Tool for CreateSubIssue {
         ));
         let created = match ctx
             .writer
-            .create_issue(&ctx.target.repo, title, &full_body)
+            .create_sub_issue(&ctx.target, title, &full_body)
             .await
         {
             Ok(created) => created,
@@ -428,23 +507,20 @@ impl Tool for CreateSubIssue {
                 return ToolOutput::error(format!("Could not create the sub-issue: {error}"));
             }
         };
+        let issue = created.issue;
         if let Ok(mut state) = ctx.state.lock() {
-            state.sub_issues.push(created.number);
+            state.sub_issues.push(issue.number);
         }
-        match ctx
-            .writer
-            .link_issues(&ctx.target, IssueRelation::SubIssue, created.number)
-            .await
-        {
-            Ok(()) => ToolOutput::ok(format!(
+        match created.unlinked {
+            None => ToolOutput::ok(format!(
                 "Created and linked sub-issue #{} ({}).",
-                created.number, created.url
+                issue.number, issue.url
             )),
-            Err(error) => {
+            Some(error) => {
                 warn!(%error, "sub-issue created but not linked");
                 ToolOutput::ok(format!(
                     "Created sub-issue #{} but could not link it: {error}",
-                    created.number
+                    issue.number
                 ))
             }
         }
@@ -547,5 +623,375 @@ impl Tool for WritePlan {
             }
             Err(error) => ToolOutput::error(format!("Could not write the plan: {error}")),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::triage::Health;
+    use henk_platform::{CreatedSubIssue, IssueInfo, PlatformError, PostedComment};
+
+    use super::*;
+
+    /// An issue tracker in memory: one issue, the repository's labels, and
+    /// every write it was asked for. Behaves like the platform it names.
+    pub(crate) struct FakeIssueWriter {
+        pub(crate) platform: Platform,
+        pub(crate) issue: Mutex<IssueInfo>,
+        pub(crate) repo_labels: Vec<String>,
+        pub(crate) comments: Mutex<Vec<String>>,
+        pub(crate) links: Mutex<Vec<(IssueRelation, u64)>>,
+        pub(crate) created: Mutex<Vec<String>>,
+        pub(crate) updates: Mutex<Vec<IssueUpdate>>,
+        pub(crate) fail_writes: bool,
+    }
+
+    impl FakeIssueWriter {
+        pub(crate) fn new(platform: Platform, kind: Option<&str>, body: &str) -> Self {
+            Self {
+                platform,
+                issue: Mutex::new(IssueInfo {
+                    id: Some(1),
+                    number: 9,
+                    title: "Export runs".to_owned(),
+                    body: body.to_owned(),
+                    open: true,
+                    is_pull_request: false,
+                    labels: Vec::new(),
+                    url: "https://tracker.example/o/r/issues/9".to_owned(),
+                    kind: kind.map(str::to_owned),
+                    fields: TriageFields::default(),
+                }),
+                repo_labels: vec!["backend".to_owned(), "priority::high".to_owned()],
+                comments: Mutex::default(),
+                links: Mutex::default(),
+                created: Mutex::default(),
+                updates: Mutex::default(),
+                fail_writes: false,
+            }
+        }
+
+        fn write(&self) -> Result<(), PlatformError> {
+            if self.fail_writes {
+                return Err(PlatformError::Status {
+                    status: 500,
+                    body: "tracker down".to_owned(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IssueWriter for FakeIssueWriter {
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+
+        async fn issue(&self, _: &IssueTarget) -> Result<IssueInfo, PlatformError> {
+            Ok(self.issue.lock().unwrap().clone())
+        }
+
+        async fn update_issue(
+            &self,
+            _: &IssueTarget,
+            update: IssueUpdate,
+        ) -> Result<(), PlatformError> {
+            self.write()?;
+            if update.fields.is_some() && self.platform == Platform::GitHub {
+                return Err(PlatformError::Unsupported("no fields on GitHub".to_owned()));
+            }
+            let mut issue = self.issue.lock().unwrap();
+            if let Some(title) = &update.title {
+                issue.title.clone_from(title);
+            }
+            if let Some(body) = &update.body {
+                issue.body.clone_from(body);
+            }
+            if let Some(labels) = &update.labels {
+                issue.labels.clone_from(labels);
+            }
+            if let Some(kind) = &update.issue_type {
+                issue.kind = Some(kind.clone());
+            }
+            if let Some(fields) = update.fields {
+                let current = &mut issue.fields;
+                current.weight = current.weight.or(fields.weight);
+                current.start = current.start.or(fields.start);
+                current.due = current.due.or(fields.due);
+                current.health = current.health.or(fields.health);
+            }
+            self.updates.lock().unwrap().push(update);
+            Ok(())
+        }
+
+        async fn repo_labels(&self, _: &RepoRef) -> Result<Vec<String>, PlatformError> {
+            Ok(self.repo_labels.clone())
+        }
+
+        async fn create_issue(
+            &self,
+            _: &RepoRef,
+            title: &str,
+            body: &str,
+        ) -> Result<IssueInfo, PlatformError> {
+            self.write()?;
+            let mut created = self.created.lock().unwrap();
+            created.push(title.to_owned());
+            let number = 100 + u64::try_from(created.len()).unwrap();
+            Ok(IssueInfo {
+                id: Some(number),
+                number,
+                title: title.to_owned(),
+                body: body.to_owned(),
+                open: true,
+                is_pull_request: false,
+                labels: Vec::new(),
+                url: format!("https://tracker.example/o/r/issues/{number}"),
+                kind: None,
+                fields: TriageFields::default(),
+            })
+        }
+
+        fn may_have_children(&self, parent: &IssueInfo) -> Result<(), PlatformError> {
+            if self.platform == Platform::GitLab && parent.kind.as_deref() == Some("Task") {
+                return Err(PlatformError::Unsupported(
+                    "a GitLab task cannot have children".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
+        async fn create_sub_issue(
+            &self,
+            target: &IssueTarget,
+            title: &str,
+            body: &str,
+        ) -> Result<CreatedSubIssue, PlatformError> {
+            let parent = self.issue.lock().unwrap().clone();
+            self.may_have_children(&parent)?;
+            let issue = self.create_issue(&target.repo, title, body).await?;
+            self.links
+                .lock()
+                .unwrap()
+                .push((IssueRelation::SubIssue, issue.number));
+            Ok(CreatedSubIssue {
+                issue,
+                unlinked: None,
+            })
+        }
+
+        async fn link_issues(
+            &self,
+            _: &IssueTarget,
+            relation: IssueRelation,
+            other: u64,
+        ) -> Result<(), PlatformError> {
+            self.write()?;
+            self.links.lock().unwrap().push((relation, other));
+            Ok(())
+        }
+
+        async fn comment(
+            &self,
+            _: &IssueTarget,
+            body: &str,
+        ) -> Result<PostedComment, PlatformError> {
+            self.write()?;
+            let mut comments = self.comments.lock().unwrap();
+            comments.push(body.to_owned());
+            Ok(PostedComment {
+                id: format!("n{}", comments.len()),
+                node_id: None,
+                url: String::new(),
+            })
+        }
+    }
+
+    pub(crate) fn context(writer: Arc<FakeIssueWriter>, budget: u32) -> Arc<PlanContext> {
+        let platform = writer.platform;
+        let repo = match platform {
+            Platform::GitHub => "o/r",
+            Platform::GitLab => "group/project",
+        };
+        Arc::new(PlanContext {
+            run: RunId::parse("r-plan").unwrap(),
+            model: ModelId::parse("planner-model").unwrap(),
+            requester: Some(3),
+            target: IssueTarget {
+                repo: RepoRef::parse(platform, repo).unwrap(),
+                number: 9,
+            },
+            writer,
+            state: Mutex::new(PlanState {
+                budget: ChangeBudget::new(budget),
+                changes: Vec::new(),
+                sub_issues: Vec::new(),
+                plan: None,
+                asked: false,
+            }),
+            sub_issue_cap: 2,
+        })
+    }
+
+    fn gitlab(kind: &str) -> (Arc<FakeIssueWriter>, Arc<PlanContext>) {
+        let writer = Arc::new(FakeIssueWriter::new(Platform::GitLab, Some(kind), "Body."));
+        let ctx = context(Arc::clone(&writer), 20);
+        (writer, ctx)
+    }
+
+    fn changes(ctx: &PlanContext) -> Vec<String> {
+        ctx.state.lock().unwrap().changes.clone()
+    }
+
+    #[tokio::test]
+    async fn set_fields_fills_empty_gitlab_fields_and_logs_the_change() {
+        let (writer, ctx) = gitlab("Issue");
+        let out = SetFields(Arc::clone(&ctx))
+            .call(json!({"weight": 3, "due_date": "2026-11-30", "health": "on_track", "reason": "small change, due with the release"}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        let fields = writer.issue.lock().unwrap().fields;
+        assert_eq!(fields.weight, Some(3));
+        assert_eq!(
+            fields.due.map(henk_domain::triage::date_text).as_deref(),
+            Some("2026-11-30")
+        );
+        assert_eq!(fields.health, Some(Health::OnTrack));
+        assert_eq!(
+            changes(&ctx),
+            ["set weight 3, due 2026-11-30, health on track (small change, due with the release)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_fields_leaves_a_persons_value_alone_and_spends_nothing() {
+        let (writer, ctx) = gitlab("Issue");
+        writer.issue.lock().unwrap().fields.weight = Some(8);
+        let out = SetFields(Arc::clone(&ctx))
+            .call(json!({"weight": 3, "health": "at_risk", "reason": "r"}))
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("already set, left alone: weight"),
+            "{}",
+            out.content
+        );
+        assert!(writer.updates.lock().unwrap().is_empty());
+        assert!(changes(&ctx).is_empty(), "a refusal costs nothing");
+        assert_eq!(writer.issue.lock().unwrap().fields.weight, Some(8));
+    }
+
+    #[tokio::test]
+    async fn set_fields_refuses_bad_values_and_github() {
+        let (writer, ctx) = gitlab("Issue");
+        for args in [
+            json!({"due_date": "30-11-2026", "reason": "r"}),
+            json!({"start_date": "2026-12-02", "due_date": "2026-12-01", "reason": "r"}),
+            json!({"weight": -1, "reason": "r"}),
+            json!({"health": "great", "reason": "r"}),
+            json!({"reason": "r"}),
+        ] {
+            let out = SetFields(Arc::clone(&ctx)).call(args.clone()).await;
+            assert!(out.is_error, "{args}");
+        }
+        assert!(writer.updates.lock().unwrap().is_empty());
+
+        let github = Arc::new(FakeIssueWriter::new(Platform::GitHub, None, "Body."));
+        let out = SetFields(context(Arc::clone(&github), 20))
+            .call(json!({"weight": 3, "reason": "r"}))
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("not set on GitHub"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_task_gets_no_sub_issues_but_an_issue_does() {
+        let (writer, ctx) = gitlab("Task");
+        let args = json!({"title": "Export CSV", "body": "The CSV half.", "reason": "separable"});
+        let out = CreateSubIssue(Arc::clone(&ctx)).call(args.clone()).await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("cannot have children"),
+            "{}",
+            out.content
+        );
+        assert!(writer.created.lock().unwrap().is_empty());
+        assert!(ctx.state.lock().unwrap().sub_issues.is_empty());
+        assert!(changes(&ctx).is_empty(), "a refusal is not a change");
+        assert_eq!(
+            ctx.state.lock().unwrap().budget.remaining(),
+            20,
+            "and costs nothing"
+        );
+
+        let (writer, ctx) = gitlab("Issue");
+        let out = CreateSubIssue(Arc::clone(&ctx)).call(args).await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(
+            *writer.links.lock().unwrap(),
+            [(IssueRelation::SubIssue, 101)]
+        );
+        assert_eq!(ctx.state.lock().unwrap().sub_issues, [101]);
+    }
+
+    #[tokio::test]
+    async fn the_budget_runs_out_and_the_next_change_is_refused() {
+        let writer = Arc::new(FakeIssueWriter::new(
+            Platform::GitLab,
+            Some("Issue"),
+            "Body.",
+        ));
+        let ctx = context(Arc::clone(&writer), 1);
+        let first = SetTitle(Arc::clone(&ctx))
+            .call(json!({"title": "Export runs as CSV", "reason": "sharper"}))
+            .await;
+        assert!(!first.is_error, "{first:?}");
+        let second = SetFields(Arc::clone(&ctx))
+            .call(json!({"weight": 2, "reason": "r"}))
+            .await;
+        assert!(second.is_error);
+        assert_eq!(
+            writer.updates.lock().unwrap().len(),
+            1,
+            "only the title went out"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_that_breaks_the_style_rules_never_reaches_the_tracker() {
+        let (writer, ctx) = gitlab("Issue");
+        let out = CreateSubIssue(Arc::clone(&ctx))
+            .call(json!({"title": "Export \u{2014} CSV", "body": "Body.", "reason": "r"}))
+            .await;
+        assert!(out.is_error);
+        let out = WritePlan(Arc::clone(&ctx))
+            .call(json!({"markdown": "## Goal\n\nShip it \u{1f680}"}))
+            .await;
+        assert!(out.is_error);
+        assert!(writer.created.lock().unwrap().is_empty());
+        assert!(writer.updates.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_relation_goes_to_the_tracker_as_asked() {
+        let (writer, ctx) = gitlab("Issue");
+        let out = LinkIssue(Arc::clone(&ctx))
+            .call(json!({"relation": "parent", "number": 4, "reason": "part of the epic"}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        let refused = LinkIssue(Arc::clone(&ctx))
+            .call(json!({"relation": "blocks", "number": 9, "reason": "r"}))
+            .await;
+        assert!(refused.is_error, "an issue cannot relate to itself");
+        assert_eq!(*writer.links.lock().unwrap(), [(IssueRelation::Parent, 4)]);
     }
 }

@@ -14,7 +14,7 @@ pub mod webhook;
 pub mod writer;
 
 pub use error::PlatformError;
-pub use issue::{IssueInfo, IssueRelation, IssueTarget, IssueUpdate, IssueWriter};
+pub use issue::{CreatedSubIssue, IssueInfo, IssueRelation, IssueTarget, IssueUpdate, IssueWriter};
 pub use writer::{
     DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
     PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,

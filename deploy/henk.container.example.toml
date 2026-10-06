@@ -89,5 +89,5 @@ pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
 [mcp.gitlab-write]
 command = "node"
 args = ["/opt/mcp-gitlab/lib/node_modules/@zereight/mcp-gitlab/build/index.js"]
-env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels" }
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels,get_work_item,update_work_item,create_work_item,convert_work_item_type,create_work_item_note" }
 pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]

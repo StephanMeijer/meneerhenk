@@ -359,6 +359,7 @@ async fn one_address_run_per_pull_request_at_a_time() {
         test_writer: None,
         test_session: None,
         test_address_writer: None,
+        test_issue_writer: None,
     });
     let coordinator = Coordinator::new(app);
     let target = ReviewTarget {
