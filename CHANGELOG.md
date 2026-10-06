@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.3...v0.1.4) - 2026-10-06
+
+### Added
+
+- *(dashboard)* sign-in for run and event pages, and pruning of old events
+- *(address)* run henk address on GitLab merge requests
+- *(address)* git credentials with a per-platform username
+- *(platform)* GitLab address writer for merge requests
+
+### Fixed
+
+- *(scope)* drop GitLab search_repositories and pin file reads to the reviewed commit
+- *(scope)* refuse search queries that can escape the repository pin
+- *(review)* recognise Henk's comments by author, not by marker
+
+### Other
+
+- Merge pull request #145 from StephanMeijer/fix/web-fetch-ssrf
+- *(address)* run the address cases on GitLab, and document it
+- update Cargo.toml dependencies
+
 ## [0.1.3](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.2...v0.1.3) - 2026-10-06
 
 ### Added
