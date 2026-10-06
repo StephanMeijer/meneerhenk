@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.5...v0.1.6) - 2026-10-06
+
+### Added
+
+- *(address)* sign off and credit the requester on the address-run commit
+- *(domain)* commit identities and the trailer block of Henk's commit
+- *(address)* credit a GitLab requester by their gitlab_id
+
+### Fixed
+
+- *(domain)* build GitLab noreply addresses with the instance's host
+
+### Other
+
+- Merge pull request #110 from StephanMeijer/feat/commit-trailers
+- Merge pull request #157 from StephanMeijer/fix/flaky-trace-test
+
 ## [0.1.5](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.4...v0.1.5) - 2026-10-06
 
 ### Fixed
