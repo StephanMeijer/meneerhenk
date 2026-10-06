@@ -875,24 +875,43 @@ pub(crate) mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+    use std::path::PathBuf;
+
     use crate::git::ScratchDir;
 
     /// The runner script of this repository, run here as the current user
     /// in its test mode: a workspace is a directory and nothing changes
     /// user. It checks the script and the backend together without SSH.
     pub(crate) struct LocalRunner {
-        base: ScratchDir,
+        _scratch: ScratchDir,
+        base: PathBuf,
     }
 
     impl LocalRunner {
         pub(crate) fn new(name: &str) -> Arc<Self> {
+            let scratch = ScratchDir::new(name).unwrap();
+            let base = scratch.path().to_owned();
             Arc::new(Self {
-                base: ScratchDir::new(name).unwrap(),
+                _scratch: scratch,
+                base,
+            })
+        }
+
+        /// A runner whose workspaces sit behind a symbolic link, as on a
+        /// host where /home links to /var/home.
+        fn behind_a_link(name: &str) -> Arc<Self> {
+            let scratch = ScratchDir::new(name).unwrap();
+            std::fs::create_dir(scratch.path().join("real")).unwrap();
+            std::os::unix::fs::symlink("real", scratch.path().join("home")).unwrap();
+            let base = scratch.path().join("home");
+            Arc::new(Self {
+                _scratch: scratch,
+                base,
             })
         }
 
         pub(crate) fn base(&self) -> &Path {
-            self.base.path()
+            &self.base
         }
     }
 
@@ -915,7 +934,7 @@ pub(crate) mod tests {
                 .env_clear()
                 .env("SSH_ORIGINAL_COMMAND", tokens.join(" "))
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env("HENK_RUNNER_BASE", self.base.path())
+                .env("HENK_RUNNER_BASE", &self.base)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -997,6 +1016,63 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("a dropped workspace is removed");
+    }
+
+    #[tokio::test]
+    async fn a_tree_behind_a_linked_home_is_inside_the_repository() {
+        let runner = LocalRunner::behind_a_link("henk-ssh-linked-home");
+        let provider = SshProvider::with_runner(Arc::clone(&runner) as Arc<dyn Runner>);
+        let source = crate::workspace::contract::source("henk-ssh-linked-home-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let read = ws
+            .read(&WorkspacePath::parse("src/a.rs").unwrap(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(read, b"fn main() {\n    let x = 1;\n}\n");
+        let ran = ws
+            .exec(
+                &["ls".to_owned()],
+                &WorkspacePath::parse_dir("src").unwrap(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ran.code, Some(0), "{}", ran.output);
+        assert_eq!(ran.output, "a.rs\n");
+        ws.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_tree_swapped_for_a_link_is_not_exported() {
+        let runner = LocalRunner::new("henk-ssh-swapped-tree");
+        let provider = SshProvider::with_runner(Arc::clone(&runner) as Arc<dyn Runner>);
+        let source = crate::workspace::contract::source("henk-ssh-swapped-tree-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let ran = ws
+            .exec(
+                &[
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "cd .. && mkdir elsewhere && echo secret > elsewhere/secret && mv work kept && ln -s elsewhere work".to_owned(),
+                ],
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ran.code, Some(0), "{}", ran.output);
+        let refused = ws.export().await.unwrap_err();
+        assert!(
+            refused.to_string().contains("not a directory any more"),
+            "{refused}"
+        );
+        ws.close().await;
     }
 
     #[tokio::test]
@@ -1085,6 +1161,62 @@ pub(crate) mod tests {
                 .contains("not the pinned workspace.ssh.host_key"),
             "{refused}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    async fn live_export_stops_the_run_and_refuses_a_tree_swapped_for_a_link() {
+        let provider = SshProvider::new(live_target());
+        let source = crate::workspace::contract::source("henk-ssh-live-swap-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let sh = |script: &str| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+        let left = ws
+            .exec(
+                &sh("(sleep 300 >/dev/null 2>&1 &); ln -s /root rootlink"),
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(left.code, Some(0), "{}", left.output);
+        let changes = ws.export().await.unwrap();
+        assert_eq!(changes.len(), 1, "only the link itself is a change");
+        assert_eq!(
+            changes[0].raw.mode,
+            henk_domain::workspace::FileMode::Symlink
+        );
+        let after = ws
+            .exec(
+                &sh("pgrep -x sleep"),
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.code,
+            Some(1),
+            "export stopped what the run left behind: {}",
+            after.output
+        );
+        let swapped = ws
+            .exec(
+                &sh("cd .. && mv work kept && ln -s /etc work"),
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(swapped.code, Some(0), "{}", swapped.output);
+        let refused = ws.export().await.unwrap_err();
+        assert!(
+            refused.to_string().contains("not a directory any more"),
+            "{refused}"
+        );
+        ws.close().await;
     }
 
     fn key_line(seed: u8) -> String {

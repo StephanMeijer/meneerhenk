@@ -353,8 +353,10 @@ machine of their own. Henk copies the pull request's checkout there, `.git`
 and all, as a new Unix user `henk-w…` with its own home; every command and
 file operation of the run is done as that user, with an empty environment
 and the profile's time and output limits; the changeset comes from a record
-only root can write, never from the tree's `.git`; afterwards the user, its
-processes and its files are removed. Henk's key and the platform token never
+only root can write, never from the tree's `.git`, fed from a tar the user
+makes of its tree once its processes are stopped, so root never reads a path
+the user controls; afterwards the user, its processes and its files are
+removed. Henk's key and the platform token never
 reach the host (§8.4), and `henk serve` removes what a crashed process left
 when it starts. Runs share the host's kernel, `/tmp` and network, and
 memory, cpu, pids and disk are not limited: use a host that holds nothing
