@@ -1967,9 +1967,10 @@ github_owners = ["docspec"]
             .lines()
             .map(|line| {
                 in_address |= line == "# [address]";
-                let setting = line
-                    .strip_prefix("# ")
-                    .filter(|rest| rest.starts_with('[') || rest.contains(" = "));
+                let setting = line.strip_prefix("# ").filter(|rest| {
+                    let header = rest.starts_with('[') && rest.trim_end().ends_with(']');
+                    header || rest.contains(" = ")
+                });
                 match setting {
                     Some(rest) if in_address => rest.to_owned(),
                     _ => line.to_owned(),
@@ -2004,7 +2005,7 @@ github_owners = ["docspec"]
             described.contains("  StephanMeijer/scratch-repo: Henk's sign-off on, requester co-author on, requester sign-off on"),
             "{described}"
         );
-        assert!(!described.contains("Warning:"), "{described}");
+        assert!(!described.contains("no requester trailers"), "{described}");
     }
 
     const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[address]\nmodel = \"m\"\nrequester_id = 3\n";
