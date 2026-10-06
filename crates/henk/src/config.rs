@@ -1000,13 +1000,35 @@ fn validate_dashboard(dashboard: &DashboardConfig) -> Result<(), ConfigError> {
         Some("a dashboard secret has no variable name")
     } else if ![&dashboard.github_web_base, &dashboard.github_api_base]
         .iter()
-        .all(|url| url.starts_with("https://") || url.starts_with("http://127.0.0.1"))
+        .all(|url| is_github_base(url))
     {
-        Some("dashboard GitHub addresses must be https")
+        Some("dashboard GitHub addresses must be https, or http to a loopback address")
     } else {
         None
     };
     problem.map_or(Ok(()), |p| Err(ConfigError::Dashboard(p.to_owned())))
+}
+
+/// Whether `raw` may be a GitHub address the dashboard signs in through:
+/// https to any host, or plain http only to a loopback IP literal (a local
+/// test server). The URL is parsed so that hosts like
+/// `127.0.0.1.evil.com` or `127.0.0.1@evil.com` are judged by their real host.
+fn is_github_base(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        _ => false,
+    }
 }
 
 fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), ConfigError> {
@@ -1800,6 +1822,48 @@ github_owners = ["docspec"]
         ] {
             assert!(database(bad).is_err(), "{why}");
         }
+    }
+
+    #[test]
+    fn dashboard_github_addresses_are_judged_by_their_parsed_host() {
+        for good in [
+            "https://github.com",
+            "https://api.github.com/",
+            "https://ghe.example.test/api/v3",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.2:9000",
+            "http://[::1]:8080",
+        ] {
+            assert!(is_github_base(good), "{good}");
+        }
+        for bad in [
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1.evil.com:8080/",
+            "http://127.0.0.1@evil.com",
+            "http://127.0.0.1:80@evil.com",
+            "http://localhost:8080",
+            "http://github.com",
+            "http://10.0.0.1",
+            "ftp://127.0.0.1",
+            "https://",
+            "127.0.0.1:8080",
+            "",
+        ] {
+            assert!(!is_github_base(bad), "{bad}");
+        }
+        assert!(
+            database(
+                "[dashboard]\nallowed_github_ids = [1]\ngithub_api_base = \"http://127.0.0.1.evil.com\"\n"
+            )
+            .is_err()
+        );
+        assert!(
+            database(
+                "[dashboard]\nallowed_github_ids = [1]\ngithub_api_base = \"http://127.0.0.1:9000\"\n"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
