@@ -1327,7 +1327,7 @@ check_commands = [["true"]]
     #[tokio::test]
     async fn a_run_cancelled_from_the_dashboard_pushes_nothing_and_says_by_whom() {
         let (remote, head) = bare_remote("henk-address-dashboard-cancel").await;
-        let hub = hub(remote.path(), &head, None);
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
         let asked = Arc::new(tokio::sync::Notify::new());
         let provider = fake();
         let app = app_with_model(
@@ -1343,7 +1343,10 @@ check_commands = [["true"]]
             asked.notified().await;
             assert!(app.cancels.cancel(&run, "github:1234".to_owned()));
         };
-        let (result, ()) = tokio::join!(run_address(&app, request("r-addr-9"), cancel), stop);
+        let (result, ()) = tokio::join!(
+            run_address(&app, request(Platform::GitHub, "r-addr-9"), cancel),
+            stop
+        );
 
         assert!(result.is_err());
         assert!(provider.closed(), "the workspace is destroyed");
