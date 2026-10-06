@@ -363,8 +363,9 @@ memory, cpu, pids and disk are not limited: use a host that holds nothing
 else, and one Henk per host.
 
 To set one up, as root on the host (Debian or alike; it needs `git`, `sudo`,
-`useradd`/`userdel`, `runuser`, `pkill` and GNU `grep`, whose `-P` the
-`search` tool uses):
+`useradd`/`userdel`, `runuser`, `pkill` and GNU `grep` with `-P` on a
+PCRE2 with Unicode support, which the `search` tool uses; any version
+does, 3.8 and later are checked):
 1. Copy `deploy/sandbox/henk-runner` to `/usr/local/sbin/henk-runner`,
    mode 755, owned by root. It is the only program Henk's key may run.
 2. `useradd --create-home henk`, and put Henk's public key in
@@ -429,8 +430,8 @@ regular expression (`search`) and read any file by line range
 (`read_file`), the same code tools an address run has; `bash` follows in
 #85. Without a workspace a lane reads through the platform as before.
 After updating Henk, copy `deploy/sandbox/henk-runner` to the host again:
-`henk doctor --probe` names the runner's version and says when `grep -P` is
-missing there.
+`henk doctor --probe` names the runner's version and says when `grep -P`
+there is missing or does not read Unicode as the `search` tool needs.
 
 A review runs the setup stage on code that anyone who can open a pull
 request chose, from a fork too, so `review = true` needs a backend apart
