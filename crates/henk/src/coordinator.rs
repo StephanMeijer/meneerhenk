@@ -17,7 +17,7 @@ use crate::address::{AddressRequest, run_address};
 use crate::app::App;
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
-use crate::review::{ReviewRequest, run_review};
+use crate::review::{ReviewRequest, report_cancelled_while_queued, run_review};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
@@ -150,11 +150,28 @@ impl Coordinator {
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
         tokio::spawn(async move {
             let _cancellable = cancellable;
-            let Ok(_permit) = slots.acquire_owned().await else {
-                return;
+            // A review waiting for a slot still hears its token: a cancel
+            // ends it now, not once a slot frees.
+            let _permit = tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                permit = slots.acquire_owned() => match permit {
+                    Ok(permit) => Some(permit),
+                    Err(_) => return,
+                },
             };
             if cancel.is_cancelled() {
-                info!("review superseded before it started");
+                let by = request
+                    .run
+                    .as_ref()
+                    .and_then(|run| app.cancels.cancelled_by(run));
+                if let Some(by) = by {
+                    if let Err(error) = report_cancelled_while_queued(&app, &request, &by).await {
+                        warn!(%error, "could not record the cancelled review");
+                    }
+                } else {
+                    info!("review superseded before it started");
+                }
             } else if let Err(error) = run_review(&app, request, cancel).await {
                 warn!(%error, "review ended with an error");
             }

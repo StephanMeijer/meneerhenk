@@ -325,6 +325,66 @@ async fn report_cancelled(
     Ok(())
 }
 
+/// A person cancelled a review from the dashboard while it waited for a
+/// slot (#69). It never started, so there is no check to close; its run is
+/// still recorded and ends `cancelled`, so the run page the dashboard
+/// links to exists and says who, and one comment says so.
+///
+/// # Errors
+///
+/// Returns an error when the run could not be recorded.
+pub async fn report_cancelled_while_queued(
+    app: &App,
+    request: &ReviewRequest,
+    by: &str,
+) -> anyhow::Result<()> {
+    let run = request.run.clone().unwrap_or_else(new_run_id);
+    let link = app.settings.run_link(&run);
+    let platform = request.target.platform();
+    app.store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform,
+            repo: request.target.repo.path(),
+            target: request.target.number,
+            commit: request.commit.as_ref().map(|c| c.as_str().to_owned()),
+            requester: request.requester.clone(),
+            trigger: request.trigger.clone(),
+            link: link.clone(),
+        })
+        .await?;
+    info!(run = %run, by, "review cancelled from the dashboard before it started");
+    match app.writer(platform) {
+        Ok(writer) => {
+            let body = Marker {
+                run: run.clone(),
+                model: ModelId::parse("none").unwrap_or_else(|_| unreachable!("constant")),
+                requested_by: None,
+                kind: Some(MarkerKind::Reply),
+                checked_by: None,
+                withdrawn: None,
+            }
+            .attach(&crate::cancel::cancelled_notice(by, &link, false));
+            if let Err(post_error) = writer.post_comment(&request.target, &body).await {
+                error!(%post_error, "could not post that the review was cancelled");
+            }
+        }
+        Err(writer_error) => {
+            error!(%writer_error, "could not post that the review was cancelled");
+        }
+    }
+    app.store
+        .finish_run(
+            &run,
+            RunStatus::Cancelled,
+            None,
+            Some(&CancelledBy(by.to_owned()).to_string()),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Henk was told to stop: the check completes as interrupted, the run
 /// ends `failed`, and nothing is posted; the next review posts (§3.3).
 async fn report_interrupted(
@@ -1435,6 +1495,82 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert!(
             !coordinator.cancel(&run, "github:1234".to_owned()),
             "an ended run is not cancellable"
+        );
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_review_cancelled_while_it_waits_for_a_slot_ends_cancelled_at_once() {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let mut f = fixture(DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let writer = Arc::clone(&f.writer);
+        let app = Arc::new(f.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let commit = CommitSha::parse(SHA).unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, first) = coordinator.submit_review(request(&placeholder), commit.clone());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&first).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(
+            status,
+            Some(RunStatus::Running),
+            "the first review holds the slot"
+        );
+
+        let mut other = request(&placeholder);
+        other.target.number = 8;
+        let (_, queued) = coordinator.submit_review(other, commit);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            app.store.run(&queued).await.unwrap().is_none(),
+            "the second review waits for the slot"
+        );
+
+        assert!(coordinator.cancel(&queued, "github:1234".to_owned()));
+        let mut record = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            record = app.store.run(&queued).await.unwrap();
+            if record
+                .as_ref()
+                .is_some_and(|r| r.status != RunStatus::Running)
+            {
+                break;
+            }
+        }
+        let record = record.expect("the cancelled review has a run the dashboard can show");
+        assert_eq!(record.status, RunStatus::Cancelled);
+        assert_eq!(record.target, 8);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("cancelled from the dashboard by github:1234")
+        );
+        let notices: Vec<String> = writer
+            .replies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| Marker::parse(&r.body).is_some_and(|m| m.run == queued))
+            .map(|r| r.body.clone())
+            .collect();
+        assert_eq!(notices.len(), 1, "one comment: {notices:?}");
+        assert!(
+            notices[0].contains("Cancelled from the dashboard by GitHub account 1234."),
+            "{}",
+            notices[0]
+        );
+        assert_eq!(
+            app.store.run(&first).await.unwrap().map(|r| r.status),
+            Some(RunStatus::Running),
+            "the first review still holds the slot: the cancel did not wait for it"
         );
         app.shutdown.cancel();
     }
