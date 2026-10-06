@@ -15,6 +15,7 @@ use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, Peop
 use henk_domain::mail::EmailAddress;
 use henk_domain::marker::ModelId;
 use henk_domain::review::{LaneName, LaneSpec};
+use henk_domain::workspace::{BackendKind, Limits, Profile, WorkspacePolicy};
 use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
 
@@ -55,6 +56,9 @@ pub struct Config {
     /// Addressing review feedback (§3.5).
     #[serde(default)]
     pub address: Option<AddressConfig>,
+    /// Where an address run's tools and checks run (§3.5).
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
     /// External MCP servers by alias.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServerConfig>,
@@ -454,12 +458,13 @@ pub struct AddressConfig {
     #[serde(default = "default_max_changed_files")]
     pub max_changed_files: usize,
     /// The project's checks, each an argument list such as
-    /// `["cargo", "test"]`, run in the checkout with an empty environment.
+    /// `["cargo", "test"]`, run in the workspace with an empty environment.
     #[serde(default)]
     pub check_commands: Vec<Vec<String>>,
-    /// Time limit per check in seconds.
-    #[serde(default = "default_check_timeout_secs")]
-    pub check_timeout_secs: u64,
+    /// Deprecated: the time limit per check in seconds. Use
+    /// `[workspace] command_secs`, which this overrides when set.
+    #[serde(default)]
+    pub check_timeout_secs: Option<u64>,
     /// The Team Lead on whose behalf CLI and API runs push.
     pub requester_id: DiscordUserId,
 }
@@ -470,8 +475,131 @@ fn default_address_timeout_secs() -> u64 {
 fn default_max_changed_files() -> usize {
     20
 }
-fn default_check_timeout_secs() -> u64 {
-    10 * 60
+
+/// Where an address run's tools and checks run (§3.5): the default
+/// profile's backend and limits, named profiles, and which repository uses
+/// which profile.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    /// Where workspaces run.
+    pub backend: BackendKind,
+    /// The image a backend starts from; not on the host.
+    pub image: Option<String>,
+    /// Seconds one command may run.
+    pub command_secs: u64,
+    /// Seconds all commands of one run may take together.
+    pub run_secs: u64,
+    /// Bytes of output kept per command.
+    pub output_bytes: u64,
+    /// Memory in MiB.
+    pub memory_mib: Option<u64>,
+    /// CPUs.
+    pub cpus: Option<u64>,
+    /// Processes.
+    pub pids: Option<u64>,
+    /// Disk in MiB.
+    pub disk_mib: Option<u64>,
+    /// Named profiles; what they leave out comes from the default.
+    pub profiles: BTreeMap<String, ProfileConfig>,
+    /// Repository, as `owner/name`, to profile name.
+    pub repositories: BTreeMap<String, String>,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        let profile = Profile::default();
+        Self {
+            backend: profile.backend,
+            image: profile.image,
+            command_secs: profile.limits.command_secs,
+            run_secs: profile.limits.run_secs,
+            output_bytes: profile.limits.output_bytes,
+            memory_mib: profile.limits.memory_mib,
+            cpus: profile.limits.cpus,
+            pids: profile.limits.pids,
+            disk_mib: profile.limits.disk_mib,
+            profiles: BTreeMap::new(),
+            repositories: BTreeMap::new(),
+        }
+    }
+}
+
+/// A named workspace profile. Every field is optional and defaults to the
+/// `[workspace]` value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProfileConfig {
+    /// Where workspaces run.
+    pub backend: Option<BackendKind>,
+    /// The image a backend starts from.
+    pub image: Option<String>,
+    /// Seconds one command may run.
+    pub command_secs: Option<u64>,
+    /// Seconds all commands of one run may take together.
+    pub run_secs: Option<u64>,
+    /// Bytes of output kept per command.
+    pub output_bytes: Option<u64>,
+    /// Memory in MiB.
+    pub memory_mib: Option<u64>,
+    /// CPUs.
+    pub cpus: Option<u64>,
+    /// Processes.
+    pub pids: Option<u64>,
+    /// Disk in MiB.
+    pub disk_mib: Option<u64>,
+}
+
+impl WorkspaceConfig {
+    /// The policy, with `check_timeout_secs` from `[address]` as the default
+    /// profile's command limit when it is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Workspace`] when the policy is unusable.
+    fn into_policy(self, check_timeout_secs: Option<u64>) -> Result<WorkspacePolicy, ConfigError> {
+        let default = Profile {
+            backend: self.backend,
+            image: self.image,
+            limits: Limits {
+                command_secs: check_timeout_secs.unwrap_or(self.command_secs),
+                run_secs: self.run_secs,
+                output_bytes: self.output_bytes,
+                memory_mib: self.memory_mib,
+                cpus: self.cpus,
+                pids: self.pids,
+                disk_mib: self.disk_mib,
+            },
+        };
+        let profiles = self
+            .profiles
+            .into_iter()
+            .map(|(name, p)| {
+                let base = &default;
+                let profile = Profile {
+                    backend: p.backend.unwrap_or(base.backend),
+                    image: p.image.or_else(|| base.image.clone()),
+                    limits: Limits {
+                        command_secs: p.command_secs.unwrap_or(base.limits.command_secs),
+                        run_secs: p.run_secs.unwrap_or(base.limits.run_secs),
+                        output_bytes: p.output_bytes.unwrap_or(base.limits.output_bytes),
+                        memory_mib: p.memory_mib.or(base.limits.memory_mib),
+                        cpus: p.cpus.or(base.limits.cpus),
+                        pids: p.pids.or(base.limits.pids),
+                        disk_mib: p.disk_mib.or(base.limits.disk_mib),
+                    },
+                };
+                (name, profile)
+            })
+            .collect();
+        let policy = WorkspacePolicy {
+            default,
+            profiles,
+            repositories: self.repositories,
+        };
+        policy.validate().map_err(ConfigError::Workspace)?;
+        Ok(policy)
+    }
 }
 
 fn default_plan_timeout_secs() -> u64 {
@@ -548,6 +676,9 @@ pub enum ConfigError {
     /// The database setting is unusable.
     #[error("{0}")]
     Database(String),
+    /// The workspace setting is unusable.
+    #[error("{0}")]
+    Workspace(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -581,6 +712,11 @@ pub struct Settings {
     pub planning: Option<PlanningConfig>,
     /// Addressing review feedback.
     pub address: Option<AddressConfig>,
+    /// Where an address run's tools and checks run, per repository.
+    pub workspace: WorkspacePolicy,
+    /// True when the command limit came from the deprecated
+    /// `address.check_timeout_secs`.
+    pub legacy_check_timeout: bool,
     /// MCP servers by alias.
     pub mcp: BTreeMap<String, McpServerConfig>,
 }
@@ -650,6 +786,8 @@ impl Config {
             validate_address(address, &self.models, &self.discord.team_lead_ids)?;
         }
         let legacy_database_path = self.server.database_path.is_some();
+        let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
+        let workspace = self.workspace.into_policy(check_timeout_secs)?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
 
         let people = People::new(
@@ -685,6 +823,8 @@ impl Config {
             review: self.review,
             planning: self.planning,
             address: self.address,
+            workspace,
+            legacy_check_timeout: check_timeout_secs.is_some(),
             mcp: self.mcp,
         })
     }
@@ -736,7 +876,11 @@ fn validate_address(
             address.requester_id
         )));
     }
-    if address.max_changed_files == 0 || address.timeout_secs == 0 || address.max_turns == 0 {
+    if address.max_changed_files == 0
+        || address.timeout_secs == 0
+        || address.max_turns == 0
+        || address.check_timeout_secs == Some(0)
+    {
         return Err(ConfigError::Address(
             "address limits must be above zero".to_owned(),
         ));
@@ -901,6 +1045,15 @@ impl ModelFileConfig {
     }
 }
 
+/// `a, b and c`.
+fn and_list(items: &[&str]) -> String {
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_owned(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 impl Settings {
     /// Public link of a run.
     #[must_use]
@@ -931,6 +1084,60 @@ impl Settings {
             ""
         };
         let _ = writeln!(out, "Database:        {}{legacy}", self.database.describe());
+    }
+
+    /// The workspace profiles, for [`Self::describe`], with a warning for
+    /// every backend that is not isolated.
+    fn describe_workspace(&self, out: &mut String) {
+        let _ = writeln!(out, "Workspace:");
+        let mut weak = Vec::new();
+        for (name, profile) in self.workspace.named() {
+            let limits = &profile.limits;
+            let _ = write!(
+                out,
+                "  {name}: {}, {}s per command, {}s per run, {} bytes of output",
+                profile.backend, limits.command_secs, limits.run_secs, limits.output_bytes
+            );
+            if let Some(image) = &profile.image {
+                let _ = write!(out, ", image {image}");
+            }
+            for (what, value, unit) in [
+                ("memory", limits.memory_mib, " MiB"),
+                ("cpu", limits.cpus, ""),
+                ("pids", limits.pids, ""),
+                ("disk", limits.disk_mib, " MiB"),
+            ] {
+                if let Some(value) = value {
+                    let _ = write!(out, ", {what} {value}{unit}");
+                }
+            }
+            if name == "default" && self.legacy_check_timeout {
+                out.push_str(
+                    " (address.check_timeout_secs is deprecated; use [workspace] command_secs)",
+                );
+            }
+            let users: Vec<&str> = self
+                .workspace
+                .repositories
+                .iter()
+                .filter(|(_, p)| *p == name)
+                .map(|(r, _)| r.as_str())
+                .collect();
+            if !users.is_empty() {
+                let _ = write!(out, "; for {}", users.join(", "));
+            }
+            out.push('\n');
+            if !profile.backend.is_isolated() && !weak.contains(&profile.backend) {
+                weak.push(profile.backend);
+            }
+        }
+        for backend in weak {
+            let _ = writeln!(
+                out,
+                "Warning: the {backend} backend is not isolated; checks run as Henk's user, and {} limits are not enforced.",
+                and_list(&Limits::unenforced_on(backend))
+            );
+        }
     }
 
     /// A plain-text description of what Henk would work with.
@@ -1012,6 +1219,7 @@ impl Settings {
                 address.check_commands.len()
             );
         }
+        self.describe_workspace(&mut out);
         let _ = writeln!(out, "MCP servers:");
         for (alias, server) in &self.mcp {
             let how = server.command.as_deref().map_or_else(
@@ -1222,6 +1430,99 @@ github_owners = ["docspec"]
         ] {
             assert!(parse(bad).is_err(), "{why}");
         }
+    }
+
+    #[test]
+    fn workspace_is_configured_and_checked() {
+        let defaults = database("").unwrap();
+        assert_eq!(defaults.workspace, WorkspacePolicy::default());
+        assert!(!defaults.legacy_check_timeout);
+
+        let settings = database(
+            "[workspace]\ncommand_secs = 300\noutput_bytes = 4096\n[workspace.profiles.slow]\ncommand_secs = 3600\n[workspace.repositories]\n\"docspec/big\" = \"slow\"\n",
+        )
+        .unwrap();
+        let slow = settings.workspace.profile_for("docspec/big");
+        assert_eq!(slow.limits.command_secs, 3600);
+        assert_eq!(slow.limits.output_bytes, 4096, "inherited from [workspace]");
+        let other = settings.workspace.profile_for("docspec/app");
+        assert_eq!(other.limits.command_secs, 300);
+
+        for (bad, why) in [
+            (
+                "[workspace.repositories]\n\"docspec/big\" = \"nope\"\n",
+                "unknown profile",
+            ),
+            ("[workspace]\ncommand_secs = 0\n", "zero limit"),
+            (
+                "[workspace.profiles.p]\npids = 0\n",
+                "zero limit in a profile",
+            ),
+            ("[workspace]\nimage = \"rust:1\"\n", "an image on host"),
+        ] {
+            assert!(
+                matches!(database(bad), Err(ConfigError::Workspace(_))),
+                "{why}"
+            );
+        }
+        for (bad, why) in [
+            ("[workspace]\nsandbox = true\n", "unknown field"),
+            (
+                "[workspace]\nbackend = \"fake\"\n",
+                "fake is for tests only",
+            ),
+            (
+                "[workspace.profiles.p]\nnetwork = true\n",
+                "unknown profile field",
+            ),
+        ] {
+            assert!(
+                matches!(database(bad), Err(ConfigError::Syntax(_))),
+                "{why}"
+            );
+        }
+
+        let with_model = format!(
+            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
+        );
+        let legacy = Config::parse(&format!(
+            "{with_model}[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_timeout_secs = 42\n"
+        ))
+        .and_then(Config::into_settings)
+        .unwrap();
+        assert!(legacy.legacy_check_timeout);
+        assert_eq!(legacy.workspace.default.limits.command_secs, 42);
+        assert!(
+            legacy
+                .describe()
+                .contains("address.check_timeout_secs is deprecated"),
+            "{}",
+            legacy.describe()
+        );
+    }
+
+    #[test]
+    fn describe_shows_the_workspace_and_warns_that_host_is_not_isolated() {
+        let settings = database(
+            "[workspace]\nmemory_mib = 512\n[workspace.profiles.slow]\ncommand_secs = 3600\n[workspace.repositories]\n\"docspec/big\" = \"slow\"\n",
+        )
+        .unwrap();
+        let text = settings.describe();
+        assert!(
+            text.contains(
+                "Workspace:\n  default: host, 600s per command, 1800s per run, 20480 bytes of output, memory 512 MiB\n  slow: host, 3600s per command"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("; for docspec/big"), "{text}");
+        assert!(
+            text.contains(
+                "Warning: the host backend is not isolated; checks run as Henk's user, and memory, cpu, pids and disk limits are not enforced."
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches("Warning:").count(), 1, "{text}");
+        assert!(henk_domain::text::is_in_style(&text), "{text}");
     }
 
     #[test]

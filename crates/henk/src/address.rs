@@ -240,7 +240,7 @@ impl Session<'_> {
             root: checkout.path().to_path_buf(),
             threads: threads.clone(),
             check_commands: config.check_commands.clone(),
-            check_timeout: Duration::from_secs(config.check_timeout_secs),
+            check_timeout: self.command_limit(),
             max_changed_files: config.max_changed_files,
             state: Mutex::new(AddressState::default()),
         });
@@ -292,7 +292,7 @@ impl Session<'_> {
         let results = run_checks(
             checkout.path(),
             &config.check_commands,
-            Duration::from_secs(config.check_timeout_secs),
+            self.command_limit(),
         )
         .await;
         let checks_text = if results.is_empty() {
@@ -343,6 +343,20 @@ impl Session<'_> {
             .context("pushing")?;
         info!(commit = %sha, files, "pushed");
         Ok((Some(sha), checks_text))
+    }
+
+    /// How long one check may run: the workspace profile's command limit
+    /// for this repository.
+    fn command_limit(&self) -> Duration {
+        let repo = self.request.target.repo.path();
+        Duration::from_secs(
+            self.app
+                .settings
+                .workspace
+                .profile_for(&repo)
+                .limits
+                .command_secs,
+        )
     }
 
     async fn session(
