@@ -123,7 +123,7 @@ flowchart TB
 
 | Crate | Modules | Depends on |
 |---|---|---|
-| `henk-domain` | `identity`, `allowlist`, `review`, `finding`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `discord`, `mail` | serde, thiserror, serde_json |
+| `henk-domain` | `identity`, `allowlist`, `review`, `finding`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
@@ -131,7 +131,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `web_fetch`, `coordinator`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -250,6 +250,7 @@ flowchart TD
     N -- "withdraw_finding" --> F7["refuse when a person answered<br/>fact-check, when configured<br/>update_finding + resolve_finding"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
+    N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]
     F0 --> M
     F6 --> M
     F1 --> M
@@ -258,6 +259,7 @@ flowchart TD
     F7 --> M
     F4 --> M
     F5 --> M
+    F8 --> M
     E1 --> M
     E2 --> M
 ```

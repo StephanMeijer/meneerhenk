@@ -170,6 +170,9 @@ pub struct LaneSpec {
     pub name: LaneName,
     /// The configured model id this lane runs on.
     pub model: ModelId,
+    /// The skills this lane may load.
+    #[serde(default)]
+    pub skills: Vec<crate::skill::SkillName>,
 }
 
 /// How one lane ended (§3.3).

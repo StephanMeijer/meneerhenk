@@ -15,6 +15,10 @@ pub const PLANNER: &str = include_str!("../prompts/planner.md");
 /// Instructions for an address run (§3.5).
 pub const ADDRESS: &str = include_str!("../prompts/address.md");
 
+/// The skills block appended to an agent's system prompt when it has
+/// skills. `{{catalogue}}` lists them.
+pub const SKILLS: &str = include_str!("../prompts/skills.md");
+
 /// Fixed greetings for mentions (§3.4), one per line. No model is involved,
 /// so a mention cannot inject anything.
 pub const GREETINGS: &str = include_str!("../prompts/greetings.txt");
@@ -58,6 +62,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(FACT_CHECK));
         assert!(henk_domain::text::is_in_style(PLANNER));
         assert!(henk_domain::text::is_in_style(ADDRESS));
+        assert!(henk_domain::text::is_in_style(SKILLS));
         assert!(henk_domain::text::is_in_style(GREETINGS));
         assert!(greeting(7).contains("review"));
         assert_eq!(greeting(1), greeting(1 + 4));
@@ -77,6 +82,12 @@ mod tests {
         ] {
             assert!(REVIEW_LANE.contains(&format!("`{tool}`")), "{tool}");
         }
+    }
+
+    #[test]
+    fn skills_block_names_its_tool_and_placeholder() {
+        assert!(SKILLS.contains("`load_skill`"));
+        assert!(SKILLS.contains("{{catalogue}}"));
     }
 
     #[test]

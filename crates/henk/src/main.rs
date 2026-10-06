@@ -27,6 +27,8 @@ mod review_many;
 mod review_tools;
 mod runs;
 mod server;
+mod skill_tools;
+mod skills;
 mod urls;
 mod web_fetch;
 mod workspace;
@@ -200,7 +202,10 @@ fn load_settings(path: &Path) -> anyhow::Result<Settings> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let config = Config::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
-    config.into_settings().context("validating configuration")
+    let mut settings = config.into_settings().context("validating configuration")?;
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    skills::attach(&mut settings, config_dir)?;
+    Ok(settings)
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
