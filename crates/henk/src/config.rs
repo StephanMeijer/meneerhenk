@@ -17,7 +17,7 @@ use henk_domain::mail::EmailAddress;
 use henk_domain::marker::ModelId;
 use henk_domain::review::{LaneName, LaneSpec};
 use henk_domain::skill::SkillName;
-use henk_domain::workspace::{BackendKind, Limits, Profile, WorkspacePolicy};
+use henk_domain::workspace::{BackendKind, Limits, Profile, Toolchain, WorkspacePolicy};
 use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
 
@@ -691,6 +691,10 @@ pub struct WorkspaceConfig {
     pub pids: Option<u64>,
     /// Disk in MiB.
     pub disk_mib: Option<u64>,
+    /// Setup commands run before the model starts (#93), in order.
+    pub setup: Vec<Vec<String>>,
+    /// The tool manager for the repository's toolchain: `"mise"`.
+    pub toolchain: Option<Toolchain>,
     /// Named profiles; what they leave out comes from the default.
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
@@ -782,6 +786,8 @@ impl Default for WorkspaceConfig {
             cpus: profile.limits.cpus,
             pids: profile.limits.pids,
             disk_mib: profile.limits.disk_mib,
+            setup: profile.setup,
+            toolchain: profile.toolchain,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
@@ -812,6 +818,10 @@ pub struct ProfileConfig {
     pub pids: Option<u64>,
     /// Disk in MiB.
     pub disk_mib: Option<u64>,
+    /// Setup commands; replaces the default's when given.
+    pub setup: Option<Vec<Vec<String>>>,
+    /// The tool manager; replaces the default's when given.
+    pub toolchain: Option<Toolchain>,
 }
 
 impl WorkspaceConfig {
@@ -846,6 +856,8 @@ impl WorkspaceConfig {
                 pids: self.pids,
                 disk_mib: self.disk_mib,
             },
+            setup: self.setup,
+            toolchain: self.toolchain,
         };
         let profiles = self
             .profiles
@@ -864,6 +876,8 @@ impl WorkspaceConfig {
                         pids: p.pids.or(base.limits.pids),
                         disk_mib: p.disk_mib.or(base.limits.disk_mib),
                     },
+                    setup: p.setup.unwrap_or_else(|| base.setup.clone()),
+                    toolchain: p.toolchain.or(base.toolchain),
                 };
                 (name, profile)
             })
@@ -1622,6 +1636,16 @@ impl Settings {
             if let Some(image) = &profile.image {
                 let _ = write!(out, ", image {image}");
             }
+            if let Some(toolchain) = profile.toolchain {
+                let _ = write!(out, ", toolchain {toolchain}");
+            }
+            match profile.setup.len() {
+                0 => {}
+                1 => out.push_str(", 1 setup step"),
+                n => {
+                    let _ = write!(out, ", {n} setup steps");
+                }
+            }
             for (what, value, unit) in [
                 ("memory", limits.memory_mib, " MiB"),
                 ("cpu", limits.cpus, ""),
@@ -2363,6 +2387,40 @@ github_owners = ["docspec"]
             "{}",
             legacy.describe()
         );
+    }
+
+    #[test]
+    fn setup_steps_and_the_toolchain_are_configured_per_profile() {
+        let settings = database(
+            "[workspace]\ntoolchain = \"mise\"\nsetup = [[\"make\", \"deps\"], [\"npm\", \"ci\"]]\n[workspace.profiles.bare]\nsetup = []\n[workspace.profiles.same]\ncommand_secs = 60\n",
+        )
+        .unwrap();
+        let policy = &settings.workspace;
+        assert_eq!(policy.default.toolchain, Some(Toolchain::Mise));
+        assert_eq!(policy.default.setup, [["make", "deps"], ["npm", "ci"]]);
+        let (bare, same) = (
+            policy.profiles.get("bare").unwrap(),
+            policy.profiles.get("same").unwrap(),
+        );
+        assert!(bare.setup.is_empty(), "a profile can drop the steps");
+        assert_eq!(
+            bare.toolchain,
+            Some(Toolchain::Mise),
+            "and keeps what it leaves out"
+        );
+        assert_eq!(same.setup, policy.default.setup);
+        let text = settings.describe();
+        assert!(
+            text.contains("  default: host, 600s per command, 1800s per run, 20480 bytes of output, toolchain mise, 2 setup steps"),
+            "{text}"
+        );
+        for bad in [
+            "[workspace]\nsetup = [[]]\n",
+            "[workspace]\nsetup = [[\" \"]]\n",
+            "[workspace]\ntoolchain = \"asdf\"\n",
+        ] {
+            assert!(database(bad).is_err(), "{bad}");
+        }
     }
 
     fn host_key_line() -> String {

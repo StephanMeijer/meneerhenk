@@ -94,6 +94,10 @@ impl Workspace for Traced {
         self.inner.export().await
     }
 
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.inner.baseline().await
+    }
+
     async fn close(&self) {
         self.inner.close().await;
     }

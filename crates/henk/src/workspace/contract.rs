@@ -69,6 +69,7 @@ pub async fn every_backend_does_this(provider: Arc<dyn WorkspaceProvider>, name:
     links_out_of_the_tree_and_into_git_are_refused(&provider, name).await;
     commands_run_with_an_empty_environment_and_limits(&provider, name).await;
     the_changes_are_exported_with_their_modes(&provider, name).await;
+    changes_count_from_the_baseline(&provider, name).await;
     a_closed_workspace_is_gone(&provider, name).await;
 }
 
@@ -323,6 +324,27 @@ async fn the_changes_are_exported_with_their_modes(
         4,
         "exporting twice is fine"
     );
+    ws.close().await;
+}
+
+async fn changes_count_from_the_baseline(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-baseline"), Limits::default()).await;
+    ws.write(&path("src/a.rs"), b"fn main() {}\n")
+        .await
+        .unwrap();
+    ws.write(&path("generated.txt"), b"setup\n").await.unwrap();
+    ws.baseline().await.unwrap();
+    assert!(
+        ws.export().await.unwrap().is_empty(),
+        "what was there at the baseline is not a change"
+    );
+    ws.write(&path("src/a.rs"), b"fn main() { run(); }\n")
+        .await
+        .unwrap();
+    let changes = ws.export().await.unwrap();
+    let seen: Vec<&str> = changes.iter().map(|c| c.raw.path.as_str()).collect();
+    assert_eq!(seen, ["src/a.rs"], "only what changed after it");
+    assert_eq!(changes[0].content, b"fn main() { run(); }\n");
     ws.close().await;
 }
 

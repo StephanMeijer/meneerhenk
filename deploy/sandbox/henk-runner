@@ -29,6 +29,8 @@
 #   record ID diff            stop the user's processes, then the changes since
 #                             import, as `git diff --raw -z`
 #   record ID blob SHA        the content of one changed file
+#   record ID baseline        stop the user's processes, then record the tree
+#                             as it is now: later diffs start from here
 #   destroy ID                kill the user's processes, remove it and its files
 #   sweep                     destroy every workspace on this host
 #   probe                     print the version and which tools are present
@@ -39,7 +41,7 @@
 set -eu
 umask 022
 
-VERSION=1
+VERSION=2
 RUN_PATH=${HENK_RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin}
 RECORDS=/var/lib/henk-runner
 
@@ -224,7 +226,7 @@ exec env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 "$@"'
         /bin/sh -c "$enter" sh "$work/$cwd" "$cwd" timeout --kill-after=5 "$secs" "$@"
     ;;
 record)
-    [ $# -ge 2 ] || die "usage: record ID diff | record ID blob SHA"
+    [ $# -ge 2 ] || die "usage: record ID diff | record ID baseline | record ID blob SHA"
     workspace "$1"
     case $2 in
     diff)
@@ -232,6 +234,13 @@ record)
         snapshot
         record_git add --all
         record_git diff --cached --raw -z --no-renames --no-ext-diff --no-textconv --no-abbrev HEAD
+        ;;
+    baseline)
+        [ $# -eq 2 ] || die "usage: record ID baseline"
+        stop || die "the processes of $user do not stop"
+        snapshot
+        record_git add --all
+        record_git commit --quiet --allow-empty --message setup
         ;;
     blob)
         [ $# -eq 3 ] || die "usage: record ID blob SHA"

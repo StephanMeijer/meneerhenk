@@ -62,7 +62,7 @@ impl WorkspaceProvider for FakeProvider {
             .map_err(|e| WorkspaceError::Backend(format!("cannot import: {e}")))?;
         self.closed.store(false, Ordering::SeqCst);
         Ok(Arc::new(FakeWorkspace {
-            base: files.clone(),
+            base: Mutex::new(files.clone()),
             files: Mutex::new(files),
             provider: self.clone(),
         }))
@@ -95,7 +95,8 @@ fn import(root: &Path, dir: &Path, files: &mut Files) -> std::io::Result<()> {
 /// A workspace in memory.
 #[derive(Debug)]
 pub struct FakeWorkspace {
-    base: Files,
+    /// What `export` compares with: the import, or the last baseline.
+    base: Mutex<Files>,
     files: Mutex<Files>,
     provider: FakeProvider,
 }
@@ -108,6 +109,12 @@ impl FakeWorkspace {
             ));
         }
         self.files
+            .lock()
+            .map_err(|_| WorkspaceError::Backend("poisoned".to_owned()))
+    }
+
+    fn base(&self) -> Result<std::sync::MutexGuard<'_, Files>, WorkspaceError> {
+        self.base
             .lock()
             .map_err(|_| WorkspaceError::Backend("poisoned".to_owned()))
     }
@@ -217,9 +224,10 @@ impl Workspace for FakeWorkspace {
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
         let files = self.files()?;
+        let base = self.base()?;
         let mut changes = Vec::new();
         for (path, (content, executable)) in files.iter() {
-            if self.base.get(path) == Some(&(content.clone(), *executable)) {
+            if base.get(path) == Some(&(content.clone(), *executable)) {
                 continue;
             }
             changes.push(Exported {
@@ -235,7 +243,7 @@ impl Workspace for FakeWorkspace {
                 content: content.clone(),
             });
         }
-        for (path, (_, executable)) in &self.base {
+        for (path, (_, executable)) in base.iter() {
             if !files.contains_key(path) {
                 changes.push(Exported {
                     raw: RawChange {
@@ -253,6 +261,12 @@ impl Workspace for FakeWorkspace {
         }
         changes.extend(self.provider.inject.iter().cloned());
         Ok(changes)
+    }
+
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        let files = self.files()?;
+        *self.base()? = files.clone();
+        Ok(())
     }
 
     async fn close(&self) {

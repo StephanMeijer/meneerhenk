@@ -867,6 +867,20 @@ impl Workspace for SshWorkspace {
         Ok(changes)
     }
 
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.alive()?;
+        self.runner
+            .call(
+                &["record".to_owned(), self.id.clone(), "baseline".to_owned()],
+                &[],
+                None,
+                REQUEST_WAIT,
+            )
+            .await?
+            .ok("recording the tree after setup")?;
+        Ok(())
+    }
+
     async fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -1143,7 +1157,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner 1\n"), "{probe}");
+        assert!(probe.starts_with("henk-runner 2\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 
@@ -1300,6 +1314,51 @@ pub(crate) mod tests {
             "henk-ssh-live",
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host with henk-runner and mise (HENK_TEST_SSH_*)"]
+    async fn live_mise_gives_the_run_the_repositorys_own_toolchain() {
+        let provider = SshProvider::new(live_target());
+        let source = ScratchDir::new("henk-ssh-live-mise").unwrap();
+        std::fs::write(
+            source.path().join("mise.toml"),
+            "[tools]\nshellcheck = \"0.10.0\"\n",
+        )
+        .unwrap();
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        for step in [
+            crate::workspace::toolchain::Mise::safe_mode(),
+            crate::workspace::toolchain::Mise::install(),
+        ] {
+            let ran = ws
+                .exec(&step, &WorkspacePath::root(), Duration::from_mins(5))
+                .await
+                .unwrap();
+            assert_eq!(ran.code, Some(0), "{step:?}: {}", ran.output);
+        }
+        let mised = crate::workspace::toolchain::Mise::wrap(Arc::clone(&ws));
+        let version = mised
+            .exec(
+                &["shellcheck".to_owned(), "--version".to_owned()],
+                &WorkspacePath::root(),
+                Duration::from_mins(1),
+            )
+            .await
+            .unwrap();
+        assert!(
+            version.output.contains("version: 0.10.0"),
+            "{}",
+            version.output
+        );
+        assert!(
+            ws.export().await.unwrap().is_empty(),
+            "what mise fetched is outside the tree"
+        );
+        ws.close().await;
     }
 
     #[tokio::test]

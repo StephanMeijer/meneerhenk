@@ -6,6 +6,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use henk_domain::workspace::{BackendKind, Toolchain, WorkspacePolicy};
 use henk_mcp::{McpSession as _, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth};
 
@@ -100,31 +101,11 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
         Err(error) => return vec![Check::fail(key, format!("{error:#}"))],
     };
     match provider.probe().await {
-        Ok(report) => {
-            let mut lines = report.lines();
-            let version = lines
-                .next()
-                .unwrap_or("henk-runner (no version)")
-                .to_owned();
-            let missing: Vec<&str> = lines
-                .filter_map(|l| l.strip_suffix(" missing"))
-                // mise is optional until a profile uses it (#93).
-                .filter(|tool| *tool != "mise")
-                .collect();
-            let runner = if missing.is_empty() {
-                Check::ok("sandbox runner", version)
-            } else {
-                Check::fail(
-                    "sandbox runner",
-                    format!("{version}; missing on the host: {}", missing.join(", ")),
-                )
-            };
-            vec![
-                Check::ok("sandbox connection", format!("{target}, signed in")),
-                Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
-                runner,
-            ]
-        }
+        Ok(report) => vec![
+            Check::ok("sandbox connection", format!("{target}, signed in")),
+            Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
+            runner_check(&report, &settings.workspace),
+        ],
         Err(error) => {
             let text = error.to_string();
             let refused_key = text.contains("pinned workspace.ssh.host_key");
@@ -137,6 +118,29 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
                 },
             ]
         }
+    }
+}
+
+/// The runner's probe report as a check: a tool it says is missing fails
+/// it, mise only when a profile on the sandbox host names it as its
+/// toolchain; a host-backed profile runs mise on Henk's own machine.
+fn runner_check(report: &str, workspace: &WorkspacePolicy) -> Check {
+    let mut lines = report.lines();
+    let version = lines.next().unwrap_or("henk-runner (no version)");
+    let wants_mise = workspace
+        .named()
+        .any(|(_, p)| p.backend == BackendKind::Ssh && p.toolchain == Some(Toolchain::Mise));
+    let missing: Vec<&str> = lines
+        .filter_map(|l| l.strip_suffix(" missing"))
+        .filter(|tool| *tool != "mise" || wants_mise)
+        .collect();
+    if missing.is_empty() {
+        Check::ok("sandbox runner", version)
+    } else {
+        Check::fail(
+            "sandbox runner",
+            format!("{version}; missing on the host: {}", missing.join(", ")),
+        )
     }
 }
 
@@ -507,6 +511,39 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn mise_is_wanted_on_the_sandbox_host_only_by_a_profile_there() {
+        use henk_domain::workspace::Profile;
+        let report = "henk-runner 2\ngit /usr/bin/git\nmise missing\n";
+        let profile = |backend, toolchain| Profile {
+            backend,
+            toolchain,
+            ..Profile::default()
+        };
+        let mut workspace = WorkspacePolicy::default();
+        workspace.profiles.insert(
+            "local".to_owned(),
+            profile(BackendKind::Host, Some(Toolchain::Mise)),
+        );
+        workspace
+            .profiles
+            .insert("sandbox".to_owned(), profile(BackendKind::Ssh, None));
+        assert_eq!(
+            runner_check(report, &workspace).verdict,
+            Verdict::Ok("henk-runner 2".to_owned()),
+            "only a host-backed profile wants mise"
+        );
+        workspace.profiles.insert(
+            "sandbox".to_owned(),
+            profile(BackendKind::Ssh, Some(Toolchain::Mise)),
+        );
+        assert_eq!(
+            runner_check(report, &workspace).verdict,
+            Verdict::Fail("henk-runner 2; missing on the host: mise".to_owned()),
+            "a sandbox profile wants it"
+        );
+    }
 
     #[test]
     fn render_counts_failures() {
