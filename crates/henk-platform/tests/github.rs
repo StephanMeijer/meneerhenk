@@ -506,6 +506,11 @@ async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
         )
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/user/77"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 77, "login": "alice"})))
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/repos/docspec/app/pulls/7/comments/11/replies"))
         .and(body_partial_json(json!({"body": "Fixed in abc: done."})))
@@ -533,6 +538,8 @@ async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
         identity.email,
         "4242+meneer-henk[bot]@users.noreply.github.com"
     );
+    assert_eq!(writer.user_login(77).await.unwrap(), "alice");
+    assert!(writer.user_login(78).await.is_err(), "an unknown id");
     assert_eq!(
         writer.commit_url(&target(), "abc"),
         format!("{}/docspec/app/commit/abc", server.uri())

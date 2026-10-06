@@ -285,8 +285,7 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 colleague, Henk reads every unresolved review thread of a GitHub pull
 request or GitLab merge request, fixes what the feedback is right about
 in a workspace, runs the configured `[address].check_commands` there, and
-pushes one commit to the pull request's branch with `Henk-Run` and
-`Requested-by` trailers. Only a changeset leaves the workspace: Henk
+pushes one commit to the pull request's branch. Only a changeset leaves the workspace: Henk
 refuses it whole when a path leads into `.git` or out of the repository,
 becomes a symbolic link or a submodule, or the run changed more files than
 allowed, and otherwise applies it to a fresh checkout nothing ran in and
@@ -308,6 +307,31 @@ in the `PRIVATE-TOKEN` header, because the MCP server's merge request
 leaves the project ids out. Without it GitLab reviews still run and
 address runs are refused. The token's account needs Developer access to
 push.
+
+The commit ends in a trailer block, in this order: `Henk-Run` (the run),
+`Requested-by` (the requester's Discord id), the requester's
+`Co-authored-by` and `Signed-off-by`, and Henk's `Signed-off-by` last, as
+the committer's. By default Henk signs off, so DCO checks pass, and the
+requester is credited as co-author; the requester does not sign off.
+`[address.trailers]` changes the defaults and
+`[address.repositories."owner/name"]` changes them for one repository on
+the allowlist. Turning on `requester_signoff` for a repository means the
+requester certifies the Developer Certificate of Origin for a change they
+asked for but did not type: enabling it is the operator's statement that
+requesters in that repository agree to that.
+
+Henk commits as the App, `meneer-henk[bot]` with its GitHub noreply
+address, unless `[address.identity]` sets a `name` and `email`; that
+identity is author, committer and Henk's sign-off alike. The requester is
+credited by the `github_id` in their `[[people]]` entry: Henk reads that
+account's current login by id and uses
+`<id>+<login>@users.noreply.github.com`, GitLab's
+`<id>-<username>@users.noreply.gitlab.com` once GitLab runs exist.
+`commit_name` and `commit_email` in the same entry override both. A
+requester with neither gets no trailers of their own, the run notes why,
+and `henk config check` warns about it. Trailer values come only from ids
+and configuration, never from a display name or a comment (spec §2, §8.3);
+`config check` refuses a malformed name or email.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in

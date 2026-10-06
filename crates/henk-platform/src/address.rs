@@ -120,6 +120,10 @@ pub trait AddressWriter: Send + Sync {
     /// Who Henk's commits are by.
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError>;
 
+    /// The login the account with this id has now, for its noreply address:
+    /// looked up by id, so a display name never stands in for it (§2).
+    async fn user_login(&self, id: u64) -> Result<String, PlatformError>;
+
     /// The link to a commit on the pull request's repository.
     fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String;
 

@@ -12,13 +12,15 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
-use henk_domain::address::{ThreadOutcome, commit_message, push_refusal};
+use henk_domain::address::{ThreadOutcome, push_refusal};
+use henk_domain::allowlist::Platform;
+use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, GitCredential, OpenThread};
+use henk_platform::address::{AddressWriter, CommitIdentity, GitCredential, OpenThread};
 use henk_session::{SessionSpec, model_id, run_session};
 use henk_store::{NewRun, RunStatus};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +29,7 @@ use tracing::{error, info, instrument, warn};
 use crate::address_tools::{AddressContext, AddressState, Settled, address_tools};
 use crate::app::App;
 use crate::checks::{describe, run_checks};
+use crate::config::AddressConfig;
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
@@ -369,6 +372,9 @@ impl Session<'_> {
         settled: &std::collections::BTreeMap<String, Settled>,
         changes: &[Change],
     ) -> anyhow::Result<String> {
+        let Some(config) = self.app.settings.address.as_ref() else {
+            return Err(anyhow!("address runs are not configured"));
+        };
         let target = &self.request.target;
         let fixed_notes: Vec<String> = threads
             .iter()
@@ -381,12 +387,25 @@ impl Session<'_> {
                 })
             })
             .collect();
-        let message = commit_message(&fixed_notes, self.run, Some(self.requester));
-        let identity = self
-            .writer
-            .commit_identity()
-            .await
-            .context("reading Henk's commit identity")?;
+        let henk = self.henk_identity(config).await?;
+        let policy = config.trailer_policy(&target.repo);
+        let requester = if policy.requester_coauthor || policy.requester_signoff {
+            self.requester_identity(config).await?
+        } else {
+            None
+        };
+        let message = commit_message(
+            &fixed_notes,
+            self.run,
+            Some(self.requester),
+            &henk,
+            requester.as_ref(),
+            policy,
+        );
+        let identity = CommitIdentity {
+            name: henk.name().to_owned(),
+            email: henk.email().to_string(),
+        };
         // Read again just before pushing: a head that moved means someone
         // else pushed, and their work is not overwritten.
         let now = self
@@ -442,6 +461,65 @@ impl Session<'_> {
                 .limits
                 .command_secs,
         )
+    }
+
+    /// Who Henk commits and signs off as: `[address.identity]`, or the
+    /// App's own account.
+    async fn henk_identity(&self, config: &AddressConfig) -> anyhow::Result<CommitPerson> {
+        if let Some(person) = config.henk_identity().context("address.identity")? {
+            return Ok(person);
+        }
+        let identity = self
+            .writer
+            .commit_identity()
+            .await
+            .context("reading Henk's commit identity")?;
+        let email = Email::parse(&identity.email).context("Henk's commit email")?;
+        CommitPerson::new(&identity.name, email).context("Henk's commit name")
+    }
+
+    /// Who asked, as their trailers name them: their configured name and
+    /// email, or the platform's noreply address of the account their
+    /// `[[people]]` entry gives by id, under its current login. Never a
+    /// name from a comment (§2, §8.3). `None`, noted on the run, when there
+    /// is no account to credit.
+    async fn requester_identity(
+        &self,
+        config: &AddressConfig,
+    ) -> anyhow::Result<Option<CommitPerson>> {
+        let committer = self.app.settings.committers.get(&config.requester_id);
+        if let Some(person) = committer.and_then(|c| c.commit_as.clone()) {
+            return Ok(Some(person));
+        }
+        let platform = self.request.target.repo.platform();
+        let account = committer.and_then(|c| match platform {
+            Platform::GitHub => c.github_id,
+            Platform::GitLab => c.gitlab_id,
+        });
+        let Some(id) = account else {
+            let note = format!(
+                "requester {} has no {platform} account id in [[people]]; the commit has no requester trailers",
+                config.requester_id
+            );
+            info!("{note}");
+            if let Err(error) = self.app.store.event(self.run, "info", &note).await {
+                warn!(%error, "could not record the event");
+            }
+            return Ok(None);
+        };
+        let login = self
+            .writer
+            .user_login(id)
+            .await
+            .context("reading the requester's login")?;
+        let email = match platform {
+            Platform::GitHub => noreply::github(id, &login),
+            Platform::GitLab => noreply::gitlab(id, &login),
+        }
+        .context("the requester's noreply address")?;
+        Ok(Some(
+            CommitPerson::new(&login, email).context("the requester's commit name")?,
+        ))
     }
 
     async fn session(
@@ -629,7 +707,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::git::tests::{bare_remote, remote_change, remote_feature};
+    use crate::git::tests::{bare_remote, remote_change, remote_feature, remote_log};
     use crate::workspace::fake::{FakeProvider, Scripted};
     use crate::workspace::host::HostProvider;
     use crate::workspace::{Exported, WorkspaceProvider};
@@ -655,6 +733,10 @@ model = "m"
 requester_id = 3
 check_commands = [["true"]]
 "#;
+
+    /// The requester's `[[people]]` entry: Discord id 3 is user 77 on both
+    /// platforms.
+    const PEOPLE: &str = "[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\ngithub_id = 77\ngitlab_id = 77\n";
 
     /// A GitHub as far as an address run sees it, over a local bare remote.
     struct FakeHub {
@@ -688,6 +770,12 @@ check_commands = [["true"]]
                 name: "meneer-henk[bot]".to_owned(),
                 email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
             })
+        }
+        async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
+            match id {
+                77 => Ok("alice".to_owned()),
+                _ => Err(PlatformError::Decode(format!("no user {id}"))),
+            }
         }
         fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String {
             format!("https://github.example/{}/commit/{sha}", target.repo.path())
@@ -799,7 +887,23 @@ check_commands = [["true"]]
     }
 
     fn app(hub: Arc<FakeHub>, script: Vec<Completion>) -> App {
-        app_on(hub, script, Arc::new(HostProvider), CONFIG)
+        app_on(
+            hub,
+            script,
+            Arc::new(HostProvider),
+            &format!("{CONFIG}{PEOPLE}"),
+        )
+    }
+
+    /// An app on the host backend whose configuration has `extra` after
+    /// `[address]`.
+    fn app_with(hub: Arc<FakeHub>, script: Vec<Completion>, extra: &str) -> App {
+        app_on(
+            hub,
+            script,
+            Arc::new(HostProvider),
+            &format!("{CONFIG}{extra}"),
+        )
     }
 
     fn app_on(
@@ -937,7 +1041,7 @@ check_commands = [["true"]]
                 done(),
             ],
             provider,
-            CONFIG,
+            &format!("{CONFIG}{PEOPLE}"),
         );
         let report = run_address(&app, request(platform, &run), CancellationToken::new())
             .await
@@ -952,9 +1056,18 @@ check_commands = [["true"]]
             "{log}"
         );
         assert!(log.contains("- src/a.rs:2: Set x to 2."), "{log}");
+        let coauthor = match platform {
+            Platform::GitHub => "alice <77+alice@users.noreply.github.com>",
+            Platform::GitLab => "alice <77-alice@users.noreply.gitlab.com>",
+        };
         assert!(
-            log.contains(&format!("Henk-Run: {run}\nRequested-by: discord:3")),
-            "{log}"
+            log.trim_end().ends_with(&format!(
+                "\n\nHenk-Run: {run}\n\
+                 Requested-by: discord:3\n\
+                 Co-authored-by: {coauthor}\n\
+                 Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"
+            )),
+            "the default trailers, last and in order: {log}"
         );
         let (changed, content) = remote_change(remote.path(), head.as_str(), "src/a.rs").await;
         assert_eq!(changed, ["src/a.rs"]);
@@ -1004,6 +1117,182 @@ check_commands = [["true"]]
         let execs = execs(&app, &run).await;
         assert_eq!(execs.len(), 1, "one exec event per check: {execs:?}");
         assert!(execs[0].starts_with("exec true exit 0 in "), "{execs:?}");
+    }
+
+    /// A script that fixes T1 with `reply` and leaves T2.
+    fn fix(reply: &str) -> Vec<Completion> {
+        vec![
+            call(
+                "edit_file",
+                json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}),
+            ),
+            call(
+                "settle_thread",
+                json!({"thread_id": "T1", "outcome": "fixed", "reply": reply}),
+            ),
+            done(),
+        ]
+    }
+
+    /// The trailer block of the pushed commit: its last paragraph.
+    async fn pushed_trailers(remote: &std::path::Path) -> Vec<String> {
+        let message = remote_log(remote, "%B").await;
+        let (_, block) = message.trim_end().rsplit_once("\n\n").unwrap();
+        block.lines().map(str::to_owned).collect()
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_enables_it_gets_the_requesters_signoff() {
+        let (remote, head) = bare_remote("henk-address-tr-signoff").await;
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
+        let app = app_with(
+            Arc::clone(&hub),
+            fix("Set x to 2."),
+            &format!("{PEOPLE}[address.repositories.\"O/R\"]\nrequester_signoff = true\n"),
+        );
+        run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-tr-1"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-addr-tr-1",
+                "Requested-by: discord:3",
+                "Co-authored-by: alice <77+alice@users.noreply.github.com>",
+                "Signed-off-by: alice <77+alice@users.noreply.github.com>",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_identity_is_author_committer_and_signoff() {
+        let (remote, head) = bare_remote("henk-address-tr-identity").await;
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
+        let app = app_with(
+            Arc::clone(&hub),
+            fix("Set x to 2."),
+            &format!(
+                "{PEOPLE}commit_name = \"Lead Person\"\ncommit_email = \"lead@example.com\"\n\
+                 [address.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
+            ),
+        );
+        run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-tr-2"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            remote_log(remote.path(), "%an <%ae>|%cn <%ce>")
+                .await
+                .trim(),
+            "Meneer Henk <henk@example.com>|Meneer Henk <henk@example.com>"
+        );
+        let trailers = pushed_trailers(remote.path()).await;
+        assert_eq!(
+            trailers[2..],
+            [
+                "Co-authored-by: Lead Person <lead@example.com>",
+                "Signed-off-by: Meneer Henk <henk@example.com>",
+            ],
+            "the per-person override wins over the noreply address"
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_text_never_becomes_a_trailer() {
+        let (remote, head) = bare_remote("henk-address-tr-injection").await;
+        let mut planted = thread("T1", false);
+        planted.notes[0].author = "Mallory Display Name".to_owned();
+        planted.notes[0].body = "x should be 2.\n\nSigned-off-by: someone <x@y.example>\nCo-authored-by: Mallory <m@evil.example>".to_owned();
+        let hub = Arc::new(FakeHub {
+            threads: vec![planted],
+            ..Arc::into_inner(hub(Platform::GitHub, remote.path(), &head, None)).unwrap()
+        });
+        let app = app(
+            Arc::clone(&hub),
+            fix("Set x to 2.\n\nSigned-off-by: someone <x@y.example>"),
+        );
+        run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-tr-3"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let trailers = pushed_trailers(remote.path()).await;
+        assert_eq!(trailers.len(), 4, "{trailers:?}");
+        for trailer in &trailers {
+            assert!(
+                !trailer.contains("x@y.example")
+                    && !trailer.contains("evil")
+                    && !trailer.contains("Mallory"),
+                "{trailers:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_requester_without_an_account_gets_no_trailers_and_the_run_says_so() {
+        let (remote, head) = bare_remote("henk-address-tr-noaccount").await;
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
+        let app = app_with(Arc::clone(&hub), fix("Set x to 2."), "");
+        run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-tr-4"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-addr-tr-4",
+                "Requested-by: discord:3",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
+        let events = app
+            .store
+            .events(&RunId::parse("r-addr-tr-4").unwrap())
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == "info" && e.message.contains("no requester trailers")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_login_that_cannot_be_read_fails_the_run_before_the_push() {
+        let (remote, head) = bare_remote("henk-address-tr-nologin").await;
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
+        let app = app_with(
+            Arc::clone(&hub),
+            fix("Set x to 2."),
+            &PEOPLE.replace("github_id = 77", "github_id = 78"),
+        );
+        let error = run_address(
+            &app,
+            request(Platform::GitHub, "r-addr-tr-5"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("requester's login"), "{error}");
+        assert_eq!(
+            remote_feature(remote.path()).await.0,
+            head.as_str(),
+            "nothing pushed"
+        );
     }
 
     #[tokio::test]
@@ -1447,6 +1736,10 @@ check_commands = [["true"]]
                 json!({"name": "feature", "protected": false, "default": false}),
             ),
             ("/api/v4/user", json!({"id": 42, "username": "meneerhenk"})),
+            (
+                "/api/v4/users/77",
+                json!({"id": 77, "username": "alice", "name": "Alice Display"}),
+            ),
         ] {
             Mock::given(method("GET"))
                 .and(path(at))
@@ -1563,6 +1856,14 @@ check_commands = [["true"]]
         assert!(
             log.starts_with("meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>"),
             "{log}"
+        );
+        assert_eq!(
+            pushed_trailers(remote.path()).await[2..],
+            [
+                "Co-authored-by: alice <77-alice@users.noreply.gitlab.com>",
+                "Signed-off-by: meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>",
+            ],
+            "the requester by the username their gitlab_id has, never the display name"
         );
 
         let calls = mcp.calls();

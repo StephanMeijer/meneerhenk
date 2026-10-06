@@ -208,6 +208,15 @@ impl AddressWriter for GitLabWriter {
         })
     }
 
+    async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
+        let user = self.rest()?.get(&format!("/users/{id}")).await?;
+        user.get("username")
+            .and_then(Value::as_str)
+            .filter(|username| !username.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| PlatformError::Decode(format!("user {id} without username")))
+    }
+
     fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String {
         match self.rest() {
             Ok(rest) => format!("{}/{}/-/commit/{sha}", rest.web_url(), target.repo.path()),

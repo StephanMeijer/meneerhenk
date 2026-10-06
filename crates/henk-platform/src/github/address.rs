@@ -124,6 +124,15 @@ impl AddressWriter for GitHubWriter {
         })
     }
 
+    async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
+        let user = self.api().get(&format!("/user/{id}")).await?;
+        user.get("login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| PlatformError::Decode(format!("user {id} without login")))
+    }
+
     async fn resolve_thread(
         &self,
         _target: &ReviewTarget,

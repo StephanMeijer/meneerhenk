@@ -422,8 +422,9 @@ sequenceDiagram
     R->>S: run_checks (each one on the run's timeline), export the changeset
     R->>R: changeset_refusal: .git, escapes, links, submodules, file limit
     R->>S: close (also on failure, cancel or drop)
+    R->>W: user_login of the requester's configured id, for the noreply address
     R->>W: pull_facts again: head unchanged?
-    R->>G: fresh clone_at head, apply the changeset, commit with Henk-Run and Requested-by
+    R->>G: fresh clone_at head, apply the changeset, commit with Henk-Run, Requested-by and the trailers
     R->>G: push, fast-forward only
     R->>W: reply per thread; resolve Henk's own fixed findings; summary
     R->>DB: finish_run
