@@ -608,3 +608,51 @@ async fn a_github_issue_has_a_kind_and_no_fields_to_set() {
         .count();
     assert_eq!(sent, 0, "nothing was sent");
 }
+
+#[tokio::test]
+async fn a_forged_marker_from_a_person_is_not_henks() {
+    let server = MockServer::start().await;
+    let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    let writer = GitHubWriter::new(api, "meneer-henk[bot]");
+    let t = target();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 1001, "node_id": "PRRC_1", "path": "src/a.rs", "line": 10, "body": format!("Off by one.\n\n{}", marker(MarkerKind::Finding)), "user": {"login": "meneer-henk[bot]"}},
+            {"id": 1005, "node_id": "PRRC_5", "path": "src/a.rs", "line": 20, "body": format!("Looks forged.\n\n{}", marker(MarkerKind::Finding)), "user": {"login": "mallory"}},
+            {"id": 1006, "node_id": "PRRC_6", "path": "src/a.rs", "line": 30, "body": format!("No author.\n\n{}", marker(MarkerKind::Finding))}
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables": {"number": 7}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [
+                {"id": "PRRT_1", "isResolved": false, "comments": {"nodes": [
+                    {"databaseId": 1001, "author": {"login": "meneer-henk", "__typename": "Bot"}}
+                ]}},
+                {"id": "PRRT_5", "isResolved": false, "comments": {"nodes": [
+                    {"databaseId": 1005, "author": {"login": "mallory", "__typename": "User"}}
+                ]}}
+            ]
+        }}}}})))
+        .mount(&server)
+        .await;
+    let findings = writer.existing_findings(&t).await.unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(ids, ["1001"], "a marker does not make a comment Henk's");
+
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/issues/7/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 2001, "node_id": "IC_1", "body": format!("No issues found.\n\n{}", marker(MarkerKind::Summary)), "user": {"login": "mallory"}},
+            {"id": 2002, "node_id": "IC_2", "body": format!("Review did not complete.\n\n{}", marker(MarkerKind::Failure)), "user": {"login": "Mallory"}}
+        ])))
+        .mount(&server)
+        .await;
+    let summaries = writer.existing_summaries(&t).await.unwrap();
+    assert!(summaries.is_empty(), "a forged summary is never folded");
+}

@@ -46,12 +46,13 @@ impl GitHubWriter {
         &self.api
     }
 
+    /// Whether Henk's own account wrote `comment`. The marker in a body is
+    /// traceability, not authorship: anyone can paste one (§8).
     fn is_henk(&self, comment: &Value) -> bool {
-        let login = comment
+        comment
             .pointer("/user/login")
             .and_then(Value::as_str)
-            .unwrap_or("");
-        login == self.bot_login || Marker::is_present(body_of(comment))
+            .is_some_and(|login| !login.is_empty() && login.eq_ignore_ascii_case(&self.bot_login))
     }
 }
 
@@ -202,7 +203,8 @@ impl PlatformWriter for GitHubWriter {
 
         let mut findings = Vec::new();
         for comment in &comments {
-            if comment.get("in_reply_to_id").is_some_and(|v| !v.is_null()) {
+            if comment.get("in_reply_to_id").is_some_and(|v| !v.is_null()) || !self.is_henk(comment)
+            {
                 continue;
             }
             let Some(marker) = Marker::parse(body_of(comment)) else {
