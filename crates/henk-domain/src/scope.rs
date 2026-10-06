@@ -1,5 +1,7 @@
 //! Scope guards (§8.5): a lane may read only its own repository, and a
-//! review lane only its own pull request at its own commit.
+//! review lane only its own pull request. In review scope, file and tree
+//! reads are pinned to the reviewed commit on both platforms; commit
+//! history (`get_commit`, `list_commits`) is not.
 //!
 //! The guard runs in Henk's process on every MCP tool call a model makes,
 //! before the call leaves for the server. It knows the tools by name and,
@@ -61,7 +63,10 @@ enum Rule {
     /// `pullNumber` is the reviewed pull request (GitHub, review scope only).
     PullNumber,
     /// `query` gets `repo:owner/name`; a qualifier naming anything else is
-    /// refused (GitHub search).
+    /// refused (GitHub search). The pin is joined to the query by an
+    /// implicit AND, which boolean syntax can escape, so parentheses, `OR`,
+    /// `NOT` and unclosed or escaped quotes are refused outright rather than
+    /// judged by context. Text inside a quoted phrase is literal.
     SearchQueryRepo,
     /// Reads happen at the reviewed commit: `ref` is dropped and `sha`
     /// defaults to the commit (GitHub, review scope). An explicit `sha` is
@@ -74,6 +79,12 @@ enum Rule {
     ProjectId,
     /// `merge_request_iid` is the reviewed merge request (GitLab, review scope only).
     MergeRequestIid,
+    /// Reads happen at the reviewed commit: `ref` is set to the commit,
+    /// replacing any `ref` the model gave (GitLab `get_file_contents` and
+    /// `get_repository_tree`, review scope). Plan scope has no commit, so
+    /// `ref` is kept there. `list_commits` and `get_commit` are not pinned;
+    /// they read history of the same project.
+    PinRef,
 }
 
 const GITHUB_READ: &[(&str, &[Rule])] = &[
@@ -119,11 +130,10 @@ const GITLAB_READ: &[(&str, &[Rule])] = &[
     ),
     ("mr_discussions", &[Rule::ProjectId, Rule::MergeRequestIid]),
     ("list_merge_requests", &[Rule::ProjectId]),
-    ("get_file_contents", &[Rule::ProjectId]),
-    ("get_repository_tree", &[Rule::ProjectId]),
+    ("get_file_contents", &[Rule::ProjectId, Rule::PinRef]),
+    ("get_repository_tree", &[Rule::ProjectId, Rule::PinRef]),
     ("list_commits", &[Rule::ProjectId]),
     ("get_commit", &[Rule::ProjectId]),
-    ("search_repositories", &[]),
     ("get_issue", &[Rule::ProjectId]),
     ("list_issues", &[Rule::ProjectId]),
     ("list_issue_links", &[Rule::ProjectId]),
@@ -231,12 +241,8 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
                 }
             }
             Rule::SearchQueryRepo => {
-                let query = args.get("query").and_then(Value::as_str).unwrap_or("");
-                match pin_search_query(query, repo) {
-                    Ok(pinned) => {
-                        args.insert("query".into(), json!(pinned));
-                    }
-                    Err(qualifier) => return outside(repo, "search qualifier", &qualifier),
+                if let Err(refused) = pin_search(&mut args, repo) {
+                    return refused;
                 }
             }
             Rule::PinToCommit => {
@@ -245,6 +251,11 @@ pub fn guard(platform: Platform, tool: &str, arguments: &Value, scope: &Scope) -
                     if args.get("sha").is_none() {
                         args.insert("sha".into(), json!(commit.as_str()));
                     }
+                }
+            }
+            Rule::PinRef => {
+                if let Scope::Review { commit, .. } = scope {
+                    args.insert("ref".into(), json!(commit.as_str()));
                 }
             }
             Rule::DenyWholeDiffMethods => {
@@ -299,31 +310,115 @@ fn outside(repo: &RepoRef, what: &str, given: &str) -> Verdict {
     ))
 }
 
-/// Replaces `repo:`, `org:` and `user:` qualifiers naming this repository
-/// or its owner with `repo:owner/name`. Returns the first qualifier naming
-/// anything else as the error.
-fn pin_search_query(query: &str, repo: &RepoRef) -> Result<String, String> {
+/// Pins `query` to the repository, or the refusal to send back.
+fn pin_search(args: &mut serde_json::Map<String, Value>, repo: &RepoRef) -> Result<(), Verdict> {
+    let query = args.get("query").and_then(Value::as_str).unwrap_or("");
+    match pin_search_query(query, repo) {
+        Ok(pinned) => {
+            args.insert("query".into(), json!(pinned));
+            Ok(())
+        }
+        Err(SearchRefusal::Qualifier(qualifier)) => {
+            Err(outside(repo, "search qualifier", &qualifier))
+        }
+        Err(SearchRefusal::Syntax(reason)) => Err(Verdict::Deny(reason.to_owned())),
+    }
+}
+
+/// Why a search query is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SearchRefusal {
+    /// A `repo:`, `org:`, `user:` or `owner:` qualifier naming something else.
+    Qualifier(String),
+    /// Syntax that could escape the appended pin.
+    Syntax(&'static str),
+}
+
+const UNCLOSED_QUOTE: &str =
+    "the search query has an unclosed or escaped quote; close every phrase in plain double quotes";
+const PARENTHESES: &str = "parentheses are not used in search queries here; put code with parentheses in double quotes, for example \"parse(\"";
+const OPERATORS: &str =
+    "OR and NOT are not used in search queries here; search for one thing at a time";
+
+/// One whitespace-separated word of a query. `plain` is the part outside
+/// double quotes; a word with no plain part is a quoted phrase.
+struct SearchWord {
+    text: String,
+    plain: String,
+}
+
+fn search_words(query: &str) -> Result<Vec<SearchWord>, SearchRefusal> {
+    if query.contains("\\\"") {
+        return Err(SearchRefusal::Syntax(UNCLOSED_QUOTE));
+    }
+    let mut words = Vec::new();
+    let mut text = String::new();
+    let mut plain = String::new();
+    let mut quoted = false;
+    for c in query.chars() {
+        if c == '"' {
+            quoted = !quoted;
+            text.push(c);
+        } else if quoted {
+            text.push(c);
+        } else if c.is_whitespace() {
+            if !text.is_empty() {
+                words.push(SearchWord {
+                    text: std::mem::take(&mut text),
+                    plain: std::mem::take(&mut plain),
+                });
+            }
+        } else {
+            text.push(c);
+            plain.push(c);
+        }
+    }
+    if quoted {
+        return Err(SearchRefusal::Syntax(UNCLOSED_QUOTE));
+    }
+    if !text.is_empty() {
+        words.push(SearchWord { text, plain });
+    }
+    Ok(words)
+}
+
+/// Replaces `repo:`, `org:`, `user:` and `owner:` qualifiers naming this
+/// repository or its owner with one `repo:owner/name`, appended. Refuses a
+/// qualifier naming anything else, and any syntax that could escape the
+/// pin (see [`Rule::SearchQueryRepo`]). Quoted phrases are kept as they are.
+fn pin_search_query(query: &str, repo: &RepoRef) -> Result<String, SearchRefusal> {
     let path = repo.path();
-    let mut kept: Vec<&str> = Vec::new();
-    for word in query.split_whitespace() {
-        let Some((key, value)) = word.split_once(':') else {
-            kept.push(word);
+    let mut kept: Vec<String> = Vec::new();
+    for word in search_words(query)? {
+        if word.plain.is_empty() {
+            kept.push(word.text);
+            continue;
+        }
+        if word.plain.contains(['(', ')']) {
+            return Err(SearchRefusal::Syntax(PARENTHESES));
+        }
+        if matches!(word.text.as_str(), "OR" | "NOT") {
+            return Err(SearchRefusal::Syntax(OPERATORS));
+        }
+        let body = word.text.strip_prefix('-').unwrap_or(&word.text);
+        let Some((key, value)) = body.split_once(':') else {
+            kept.push(word.text);
             continue;
         };
+        let value = value.trim_matches('"');
         let ours = match key.to_ascii_lowercase().as_str() {
             "repo" => value.eq_ignore_ascii_case(&path),
-            "org" | "user" => value.eq_ignore_ascii_case(repo.owner()),
+            "org" | "user" | "owner" => value.eq_ignore_ascii_case(repo.owner()),
             _ => {
-                kept.push(word);
+                kept.push(word.text);
                 continue;
             }
         };
         if !ours {
-            return Err(word.to_owned());
+            return Err(SearchRefusal::Qualifier(word.text));
         }
     }
-    let pin = format!("repo:{path}");
-    kept.push(&pin);
+    kept.push(format!("repo:{path}"));
     Ok(kept.join(" "))
 }
 
@@ -527,6 +622,69 @@ mod tests {
     }
 
     #[test]
+    fn search_syntax_that_could_escape_the_pin_is_refused() {
+        let search = |tool: &str, query: &str| {
+            guard(
+                Platform::GitHub,
+                tool,
+                &json!({"query": query}),
+                &review_scope(),
+            )
+        };
+        for query in [
+            "x (repo:evil/secret)",
+            "x OR (org:evil)",
+            "x OR (repo:evil/x)",
+            "x OR y",
+            "NOT x",
+            "owner:evil x",
+            "-repo:evil/x",
+            "Repo:\"evil/x\"",
+            "\"x",
+            "\"a\\\" b\"",
+            "parse(",
+        ] {
+            for tool in ["search_code", "search_issues", "search_pull_requests"] {
+                assert!(
+                    matches!(search(tool, query), Verdict::Deny(_)),
+                    "{tool}: {query}"
+                );
+            }
+        }
+        let Verdict::Deny(reason) = search("search_code", "parse(") else {
+            panic!("parentheses are refused");
+        };
+        assert!(reason.contains("double quotes"), "{reason}");
+        assert_eq!(
+            search("search_issues", "x OR (repo:evil/x)"),
+            Verdict::Deny(OPERATORS.to_owned())
+        );
+        for (query, pinned) in [
+            (
+                "\"parse(\" language:rust",
+                "\"parse(\" language:rust repo:docspec/app",
+            ),
+            (
+                "\"repo:evil/x\" readme",
+                "\"repo:evil/x\" readme repo:docspec/app",
+            ),
+            (
+                "label:\"good first issue\" is:open",
+                "label:\"good first issue\" is:open repo:docspec/app",
+            ),
+            ("a AND b", "a AND b repo:docspec/app"),
+            ("owner:DocSpec -repo:docspec/app x", "x repo:docspec/app"),
+            ("", "repo:docspec/app"),
+        ] {
+            assert_eq!(
+                search("search_code", query),
+                Verdict::Allow(json!({"query": pinned})),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn plan_scope_allows_any_pull_request_in_the_repository_but_requires_one() {
         let scope = Scope::Plan {
             repo: RepoRef::parse(Platform::GitHub, "docspec/app").unwrap(),
@@ -579,6 +737,51 @@ mod tests {
             ),
             Verdict::Deny(_)
         ));
+        assert!(matches!(
+            guard(
+                Platform::GitLab,
+                "search_repositories",
+                &json!({"search": "secret"}),
+                &scope
+            ),
+            Verdict::Deny(_)
+        ));
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_file_contents",
+                &json!({"file_path": "a.rs", "ref": "other-branch"}),
+                &scope
+            ),
+            Verdict::Allow(
+                json!({"project_id": "9xxlab/tools/cli", "file_path": "a.rs", "ref": SHA})
+            )
+        );
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_repository_tree",
+                &json!({"path": "src"}),
+                &scope
+            ),
+            Verdict::Allow(json!({"project_id": "9xxlab/tools/cli", "path": "src", "ref": SHA}))
+        );
+        let plan = Scope::Plan {
+            repo: RepoRef::parse(Platform::GitLab, "9xxlab/tools/cli").unwrap(),
+            issue: 3,
+        };
+        assert_eq!(
+            guard(
+                Platform::GitLab,
+                "get_file_contents",
+                &json!({"file_path": "a.rs", "ref": "main"}),
+                &plan
+            ),
+            Verdict::Allow(
+                json!({"project_id": "9xxlab/tools/cli", "file_path": "a.rs", "ref": "main"})
+            ),
+            "a plan has no commit to pin to"
+        );
     }
 
     #[test]
@@ -629,5 +832,9 @@ mod tests {
         }
         assert!(is_exposed(Platform::GitHub, "pull_request_read"));
         assert!(!is_exposed(Platform::GitHub, "issue_write"));
+        assert!(
+            !is_exposed(Platform::GitLab, "search_repositories"),
+            "a lane does not list other projects"
+        );
     }
 }
