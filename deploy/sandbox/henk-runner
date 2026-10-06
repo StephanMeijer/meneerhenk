@@ -1,0 +1,239 @@
+#!/bin/sh
+# henk-runner: the one program Henk's SSH key may run on a sandbox host (#84).
+#
+# Henk connects as the user `henk`, whose authorized_keys line forces this
+# program:
+#
+#   restrict,command="/usr/local/sbin/henk-runner" ssh-ed25519 AAAA... henk
+#
+# and a sudoers rule lets that user run it as root:
+#
+#   henk ALL=(root) NOPASSWD: /usr/local/sbin/henk-runner
+#
+# Each workspace is a throwaway user `henk-<id>` with its own home, holding
+# the run's checkout in ~/work, and a record of the checkout that only root
+# can write, outside the home. Everything a run does in its tree is done as
+# that user. The request arrives in SSH_ORIGINAL_COMMAND: a subcommand, then
+# tokens that are a workspace id, a number, a hex sha, or `b` and base64 (the
+# `b` keeps an empty value a token), so splitting on spaces is the whole parse
+# and no part of a request is shell-evaluated.
+#
+#   create ID                 make the user, ~/work and the record; print ~/work
+#   import ID                 unpack a tar from stdin into ~/work, record it
+#   as ID SECS CWD ARGV...    run ARGV (b+base64) in ~/work/CWD (b+base64) as the
+#                             user, empty environment, at most SECS seconds
+#                             (a decimal number)
+#   record ID diff            the changes since import, as `git diff --raw -z`
+#   record ID blob SHA        the content of one changed file
+#   destroy ID                kill the user's processes, remove it and its files
+#   sweep                     destroy every workspace on this host
+#   probe                     print the version and which tools are present
+#
+# For tests only: run as a normal user with HENK_RUNNER_BASE set, a workspace
+# is a directory under it and nothing changes user. As root that variable is
+# ignored.
+set -eu
+umask 022
+
+VERSION=1
+RUN_PATH=${HENK_RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin}
+RECORDS=/var/lib/henk-runner
+
+die() {
+    echo "henk-runner: $*" >&2
+    exit 64
+}
+
+if [ $# -eq 0 ] && [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+    case $SSH_ORIGINAL_COMMAND in
+    *[!A-Za-z0-9+/=_.\ -]*) die "refused: unexpected characters in the request" ;;
+    esac
+    set -f
+    # shellcheck disable=SC2086 # splitting is the parse; see the header
+    set -- $SSH_ORIGINAL_COMMAND
+    set +f
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+    BASE=
+elif [ -n "${HENK_RUNNER_BASE:-}" ]; then
+    BASE=$HENK_RUNNER_BASE
+else
+    exec sudo -n "$0" "$@"
+fi
+
+[ $# -ge 1 ] || die "no request"
+command=$1
+shift
+
+# Whether $1 is a workspace id: `w` and twelve hex digits.
+is_id() {
+    case $1 in
+    w[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# The paths of workspace $1, checked to be one of ours.
+workspace() {
+    is_id "$1" || die "not a workspace id: $1"
+    id=$1
+    user=henk-$id
+    if [ -n "$BASE" ]; then
+        home=$BASE/$id/home
+        record=$BASE/$id/record
+    else
+        home=/home/$user
+        record=$RECORDS/$id
+    fi
+    work=$home/work
+}
+
+# Runs "$@" as the workspace's user.
+as_user() {
+    if [ -n "$BASE" ]; then
+        "$@"
+    else
+        runuser -u "$user" -- "$@"
+    fi
+}
+
+# git on the record, never on the tree's own .git, with no hooks, no
+# fsmonitor and no system or global configuration.
+record_git() {
+    env -i PATH="$RUN_PATH" HOME="$record" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgSign=false \
+        -c user.name=Henk -c user.email=henk@workspace.invalid -c 'safe.directory=*' \
+        --git-dir="$record/git" --work-tree="$work" "$@"
+}
+
+# The value of one `b` and base64 token, trailing newlines kept.
+decode() {
+    case $1 in b*) ;; *) die "not a value token: $1" ;; esac
+    value=$(printf %s "${1#b}" | base64 -d && printf x) || die "not base64: $1"
+    value=${value%x}
+}
+
+destroy() {
+    if [ -n "$BASE" ]; then
+        rm -rf "${BASE:?}/$id"
+        return 0
+    fi
+    if id -u "$user" >/dev/null 2>&1; then
+        uid=$(id -u "$user")
+        pkill -KILL -u "$uid" 2>/dev/null || true
+        loginctl terminate-user "$user" 2>/dev/null || true
+        for dir in /tmp /var/tmp /dev/shm; do
+            find "$dir" -xdev -uid "$uid" -delete 2>/dev/null || true
+        done
+        userdel --remove "$user" 2>/dev/null ||
+            { sleep 1 && pkill -KILL -u "$uid" 2>/dev/null; userdel --remove "$user"; } ||
+            true
+    fi
+    rm -rf "${RECORDS:?}/$id"
+}
+
+case $command in
+create)
+    [ $# -eq 1 ] || die "usage: create ID"
+    workspace "$1"
+    if [ -n "$BASE" ]; then
+        mkdir -p "$home"
+    else
+        useradd --create-home --home-dir "$home" --shell /bin/sh --user-group "$user"
+    fi
+    chmod 700 "$home"
+    mkdir -p "$record"
+    chmod 700 "$record"
+    as_user mkdir "$work"
+    echo "$work"
+    ;;
+import)
+    [ $# -eq 1 ] || die "usage: import ID"
+    workspace "$1"
+    as_user tar -x -f - -C "$work" --no-same-owner
+    record_git init --quiet
+    record_git add --all --force
+    record_git commit --quiet --allow-empty --message import
+    ;;
+as)
+    [ $# -ge 4 ] || die "usage: as ID SECS CWD ARGV..."
+    workspace "$1"
+    secs=$2
+    case $secs in '' | *[!0-9.]* | *.*.*) die "not a number of seconds: $secs" ;; esac
+    decode "$3"
+    cwd=$value
+    shift 3
+    count=$#
+    while [ "$count" -gt 0 ]; do
+        decode "$1"
+        shift
+        set -- "$@" "$value"
+        count=$((count - 1))
+    done
+    cd "$work/$cwd" || die "no such directory: $cwd"
+    if [ -n "$BASE" ]; then
+        exec env -i PATH="$RUN_PATH" HOME="$home" LANG=C.UTF-8 timeout --kill-after=5 "$secs" "$@"
+    fi
+    exec runuser -u "$user" -- env -i PATH="$RUN_PATH" HOME="$home" LANG=C.UTF-8 \
+        timeout --kill-after=5 "$secs" "$@"
+    ;;
+record)
+    [ $# -ge 2 ] || die "usage: record ID diff | record ID blob SHA"
+    workspace "$1"
+    case $2 in
+    diff)
+        record_git add --all
+        record_git diff --cached --raw -z --no-renames --no-ext-diff --no-textconv --no-abbrev HEAD
+        ;;
+    blob)
+        [ $# -eq 3 ] || die "usage: record ID blob SHA"
+        case $3 in '' | *[!0-9a-f]*) die "not a sha: $3" ;; esac
+        record_git cat-file blob "$3"
+        ;;
+    *) die "unknown record request: $2" ;;
+    esac
+    ;;
+destroy)
+    [ $# -eq 1 ] || die "usage: destroy ID"
+    workspace "$1"
+    destroy
+    ;;
+sweep)
+    [ $# -eq 0 ] || die "usage: sweep"
+    if [ -n "$BASE" ]; then
+        found=$(ls "$BASE" 2>/dev/null || true)
+    else
+        found=$(getent passwd | cut -d: -f1 | sed -n 's/^henk-\(w[0-9a-f]\{12\}\)$/\1/p')
+        found="$found $(ls "$RECORDS" 2>/dev/null || true)"
+    fi
+    for one in $found; do
+        if is_id "$one"; then
+            workspace "$one"
+            destroy
+        fi
+    done
+    ;;
+probe)
+    echo "henk-runner $VERSION"
+    # What runs: on the PATH the run's commands get.
+    for tool in git tar timeout realpath find grep stat mise; do
+        if found=$(PATH=$RUN_PATH command -v "$tool"); then
+            echo "$tool $found"
+        else
+            echo "$tool missing"
+        fi
+    done
+    # What the runner itself needs as root, on its own PATH.
+    if [ -z "$BASE" ]; then
+        for tool in runuser useradd userdel pkill; do
+            if found=$(command -v "$tool"); then
+                echo "$tool $found"
+            else
+                echo "$tool missing"
+            fi
+        done
+    fi
+    ;;
+*) die "unknown request: $command" ;;
+esac

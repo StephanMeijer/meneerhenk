@@ -12,11 +12,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::address::{PathError, WorkspacePath};
-use henk_domain::workspace::{Change, ChangeKind, FileMode, Profile, RawChange, changeset_refusal};
+use henk_domain::workspace::{
+    BackendKind, Change, ChangeKind, FileMode, Limits, Profile, RawChange, changeset_refusal,
+};
 
+#[cfg(test)]
+pub mod contract;
 #[cfg(test)]
 pub mod fake;
 pub mod host;
+pub mod ssh;
 pub mod traced;
 
 /// Why a workspace operation failed. The text goes back to the model, so it
@@ -110,7 +115,9 @@ pub fn checked_changeset(exported: Vec<Exported>, max_files: usize) -> Result<Ve
 
 /// A workspace: a copy of one pull request's files where a model's tools
 /// read, write and run commands. Paths are relative to its root; `.git` is
-/// never part of it.
+/// never part of what they see. A backend may leave the checkout's own
+/// `.git` in the tree for the run's commands (the `ssh` backend does); the
+/// tools never read it and the changeset never carries it.
 ///
 /// Every backend destroys the workspace on [`Workspace::close`] and also
 /// when it is dropped, so a run that fails, is cancelled or is aborted
@@ -184,9 +191,10 @@ pub trait Workspace: Send + Sync {
 /// Opens workspaces of one backend.
 #[async_trait::async_trait]
 pub trait WorkspaceProvider: Send + Sync {
-    /// Imports the files of the checkout at `source`, without its `.git`,
-    /// into a new workspace run as `profile` says. The caller may remove
-    /// `source` once this returns.
+    /// Imports the files of the checkout at `source` into a new workspace run
+    /// as `profile` says; whether its `.git` comes along is the backend's
+    /// choice, since no tool reaches it. The caller may remove `source` once
+    /// this returns.
     ///
     /// # Errors
     ///
@@ -196,6 +204,170 @@ pub trait WorkspaceProvider: Send + Sync {
         source: &Path,
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError>;
+}
+
+/// Opens each workspace on the backend its profile names: the host always,
+/// the sandbox host when `[workspace.ssh]` is configured.
+#[derive(Debug)]
+pub struct Backends {
+    host: host::HostProvider,
+    ssh: Option<ssh::SshProvider>,
+}
+
+impl Backends {
+    /// The backends there are.
+    #[must_use]
+    pub fn new(ssh: Option<ssh::SshProvider>) -> Self {
+        Self {
+            host: host::HostProvider,
+            ssh,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for Backends {
+    async fn open(
+        &self,
+        source: &Path,
+        profile: &Profile,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        match profile.backend {
+            BackendKind::Host => self.host.open(source, profile).await,
+            BackendKind::Ssh => match &self.ssh {
+                Some(ssh) => ssh.open(source, profile).await,
+                None => Err(WorkspaceError::Backend(
+                    "the ssh backend is not configured: [workspace.ssh] is missing".to_owned(),
+                )),
+            },
+        }
+    }
+}
+
+/// The sandbox host's provider from the settings, when `[workspace.ssh]` is
+/// there: its key read from the file the configured variable names.
+///
+/// # Errors
+///
+/// Returns an error when the variable is unset or the key or host key does
+/// not parse.
+pub fn ssh_provider(
+    settings: &crate::config::Settings,
+) -> anyhow::Result<Option<ssh::SshProvider>> {
+    use anyhow::Context as _;
+    let Some(config) = &settings.workspace_ssh else {
+        return Ok(None);
+    };
+    let path = crate::app::env_var(&config.key_path_env).ok_or_else(|| {
+        anyhow::anyhow!("environment variable {} is not set", config.key_path_env)
+    })?;
+    let key = russh::keys::load_secret_key(&path, None)
+        .with_context(|| format!("reading the sandbox host key {path}"))?;
+    let host_key = russh::keys::PublicKey::from_openssh(config.host_key.trim())
+        .context("workspace.ssh.host_key")?;
+    Ok(Some(ssh::SshProvider::new(ssh::SshTarget {
+        host: config.host.clone(),
+        port: config.port,
+        user: config.user.clone(),
+        key: Arc::new(key),
+        host_key,
+    })))
+}
+
+/// What one workspace's commands may still take: each command's own
+/// limit, the profile's command limit and what is left of the run's. Shared
+/// by every backend, so a used-up run and a stopped command read the same.
+#[derive(Debug)]
+pub(crate) struct Budget {
+    limits: Limits,
+    /// Time commands have used so far, against `limits.run_secs`.
+    used: std::sync::Mutex<Duration>,
+}
+
+impl Budget {
+    pub(crate) fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            used: std::sync::Mutex::new(Duration::ZERO),
+        }
+    }
+
+    /// How long the next command may run when it asks for `asked`.
+    pub(crate) fn next(&self, asked: Duration) -> Result<Duration, WorkspaceError> {
+        let used = *self
+            .used
+            .lock()
+            .map_err(|_| WorkspaceError::Backend("the workspace is unavailable".to_owned()))?;
+        let left = Duration::from_secs(self.limits.run_secs).saturating_sub(used);
+        Ok(asked
+            .min(Duration::from_secs(self.limits.command_secs))
+            .min(left))
+    }
+
+    pub(crate) fn spend(&self, spent: Duration) {
+        if let Ok(mut used) = self.used.lock() {
+            *used += spent;
+        }
+    }
+
+    /// The bytes of output a command keeps.
+    pub(crate) fn output_cap(&self) -> usize {
+        usize::try_from(self.limits.output_bytes).unwrap_or(usize::MAX)
+    }
+
+    /// The result of a command that was not started: the run's time is gone.
+    pub(crate) fn used_up(&self) -> ExecResult {
+        ExecResult {
+            code: None,
+            timed_out: true,
+            output: format!(
+                "not started: the run's {}s for commands are used up",
+                self.limits.run_secs
+            ),
+            duration: Duration::ZERO,
+        }
+    }
+}
+
+/// One change from `git diff --cached --raw -z --no-abbrev`, and the blob
+/// that holds its content when there is one to read: not for a deletion,
+/// a link or a submodule.
+pub(crate) fn parse_raw_diff(
+    raw: &[u8],
+) -> Result<Vec<(RawChange, Option<String>)>, WorkspaceError> {
+    // `:old new old-sha new-sha status NUL path NUL`, one per change.
+    let mut fields = raw
+        .split(|b| *b == 0)
+        .map(|f| String::from_utf8_lossy(f).into_owned());
+    let mut changes = Vec::new();
+    while let Some(meta) = fields.next() {
+        if meta.is_empty() {
+            continue;
+        }
+        let path = fields
+            .next()
+            .ok_or_else(|| WorkspaceError::Backend("git diff ended early".to_owned()))?;
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let (Some(old_mode), Some(new_mode), Some(new_sha), Some(status)) =
+            (parts.first(), parts.get(1), parts.get(3), parts.get(4))
+        else {
+            return Err(WorkspaceError::Backend(format!("git diff said {meta:?}")));
+        };
+        let deleted = status.starts_with('D');
+        let mode = FileMode::from_git(if deleted { old_mode } else { new_mode })
+            .ok_or_else(|| WorkspaceError::Backend(format!("unknown mode in {meta:?}")))?;
+        let blob = (!deleted && matches!(mode, FileMode::Regular | FileMode::Executable))
+            .then(|| (*new_sha).to_owned());
+        changes.push((
+            RawChange {
+                path,
+                mode,
+                deleted,
+            },
+            blob,
+        ));
+    }
+    Ok(changes)
 }
 
 /// The last `cap` bytes of `text`, on a character boundary, marked as cut.

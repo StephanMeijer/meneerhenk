@@ -69,7 +69,75 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks.extend(check_github(settings).await);
     checks.extend(check_mcp(settings).await);
     checks.push(check_database(settings).await);
+    checks.extend(check_sandbox(settings, probe_models).await);
     checks
+}
+
+/// The `ssh` backend's sandbox host (#84): without `--probe`, only whether
+/// its key is set; with it, the connection, the host key and the runner,
+/// each on a line of its own.
+async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
+    let Some(ssh) = &settings.workspace_ssh else {
+        return Vec::new();
+    };
+    let target = format!("{}@{}:{}", ssh.user, ssh.host, ssh.port);
+    let key = format!("secret ${}", ssh.key_path_env);
+    if env_var(&ssh.key_path_env).is_none() {
+        return vec![Check::fail(
+            key,
+            "not set; the ssh workspace backend cannot sign in",
+        )];
+    }
+    if !probe {
+        return vec![
+            Check::ok(key, "set; Henk's key for the sandbox host"),
+            Check::ok("sandbox host", format!("{target}; --probe connects")),
+        ];
+    }
+    let provider = match crate::workspace::ssh_provider(settings) {
+        Ok(Some(provider)) => provider,
+        Ok(None) => return Vec::new(),
+        Err(error) => return vec![Check::fail(key, format!("{error:#}"))],
+    };
+    match provider.probe().await {
+        Ok(report) => {
+            let mut lines = report.lines();
+            let version = lines
+                .next()
+                .unwrap_or("henk-runner (no version)")
+                .to_owned();
+            let missing: Vec<&str> = lines
+                .filter_map(|l| l.strip_suffix(" missing"))
+                // mise is optional until a profile uses it (#93).
+                .filter(|tool| *tool != "mise")
+                .collect();
+            let runner = if missing.is_empty() {
+                Check::ok("sandbox runner", version)
+            } else {
+                Check::fail(
+                    "sandbox runner",
+                    format!("{version}; missing on the host: {}", missing.join(", ")),
+                )
+            };
+            vec![
+                Check::ok("sandbox connection", format!("{target}, signed in")),
+                Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
+                runner,
+            ]
+        }
+        Err(error) => {
+            let text = error.to_string();
+            let refused_key = text.contains("pinned workspace.ssh.host_key");
+            vec![
+                Check::fail("sandbox connection", format!("{target}: {text}")),
+                if refused_key {
+                    Check::fail("sandbox host key", "not the pinned workspace.ssh.host_key")
+                } else {
+                    Check::warn("sandbox host key", "not checked: no connection")
+                },
+            ]
+        }
+    }
 }
 
 pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {

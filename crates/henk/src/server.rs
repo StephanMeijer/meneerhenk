@@ -191,6 +191,15 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     // Reaps at once, then every minute: a crash followed by a restart
     // within the staleness window is closed too (#47).
     let reaper = crate::liveness::spawn_reaper(Arc::clone(&app), cancel.clone());
+    // Workspaces a process that died left on the sandbox host go now (#84).
+    if let Ok(Some(sandbox)) = crate::workspace::ssh_provider(&app.settings) {
+        tokio::spawn(async move {
+            match sandbox.sweep().await {
+                Ok(()) => info!("sandbox host swept"),
+                Err(error) => warn!(%error, "could not sweep the sandbox host"),
+            }
+        });
+    }
     // Events older than server.keep_events_days go; runs stay (#69).
     let pruner = crate::prune::spawn_pruner(Arc::clone(&app), cancel.clone());
     let mut hook_tasks = tokio::task::JoinSet::new();

@@ -298,11 +298,12 @@ Then he replies in each thread (fixed with the commit link, declined with
 why, or a question), resolves only the threads of his own findings that he
 fixed, and sums up with the run link. The model never holds the token or a
 git command; Henk's code commits and pushes. `[workspace]` picks the
-backend and its limits. The only backend today is `host`: the checks run
-the pull request's code as Henk's user with an empty environment, so they
-see none of Henk's secrets, but nothing else isolates them, and
-`henk config check` warns about that. Every command is on the run's
-timeline (`henk runs show`). A container comes later. On GitHub the App
+backend and its limits, per repository through profiles. `host` runs the
+checks as Henk's user with an empty environment, so they see none of
+Henk's secrets, but nothing else isolates them. `ssh` runs each run as a
+throwaway user on a sandbox host (see "Sandbox host" below). `henk config
+check` warns about what each one does not isolate. Every command is on the
+run's timeline (`henk runs show`). On GitHub the App
 needs `Contents: write`. On GitLab Henk reads `[gitlab].token_env`
 himself: git pushes with it as `oauth2`, and the merge request's projects,
 the branch's protection and his account id come from the REST API with it
@@ -344,6 +345,51 @@ and their outcomes older than `server.keep_events_days` (30 by default) once
 an hour. Runs are kept, since their links are posted on the platforms. An
 event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
 run and the events that led to it at `/dashboard/runs/{id}`.
+
+### Sandbox host
+
+The `ssh` workspace backend (#84) runs an address run's commands on a
+machine of their own. Henk copies the pull request's checkout there, `.git`
+and all, as a new Unix user `henk-w…` with its own home; every command and
+file operation of the run is done as that user, with an empty environment
+and the profile's time and output limits; the changeset comes from a record
+only root can write, never from the tree's `.git`; afterwards the user, its
+processes and its files are removed. Henk's key and the platform token never
+reach the host (§8.4), and `henk serve` removes what a crashed process left
+when it starts. Runs share the host's kernel, `/tmp` and network, and
+memory, cpu, pids and disk are not limited: use a host that holds nothing
+else, and one Henk per host.
+
+To set one up, as root on the host (Debian or alike; it needs `git`, `sudo`,
+`useradd`/`userdel`, `runuser` and `pkill`):
+1. Copy `deploy/sandbox/henk-runner` to `/usr/local/sbin/henk-runner`,
+   mode 755, owned by root. It is the only program Henk's key may run.
+2. `useradd --create-home henk`, and put Henk's public key in
+   `~henk/.ssh/authorized_keys` as
+   `restrict,command="/usr/local/sbin/henk-runner" ssh-ed25519 AAAA… henk`.
+3. Let that user run the runner as root, and nothing else:
+   `echo 'henk ALL=(root) NOPASSWD: /usr/local/sbin/henk-runner' > /etc/sudoers.d/henk`.
+
+Then, in `henk.toml`, with the private key's path in the variable
+`key_path_env` names and the host key pinned (`ssh-keyscan -t ed25519 host`
+prints it; there is no trust on first use):
+
+```toml
+[workspace.profiles.sandbox]
+backend = "ssh"
+[workspace.repositories]
+"docspec/app" = "sandbox"
+[workspace.ssh]
+host = "sandbox.example.com"
+host_key = "ssh-ed25519 AAAA…"
+# port = 22, user = "henk", key_path_env = "HENK_SANDBOX_KEY_PATH"
+```
+
+`henk doctor --probe` connects and reports the connection, the host key and
+the runner's tools on lines of their own. The live tests run against such a
+host: `deploy/sandbox/test-host.Containerfile` builds one, and
+`HENK_TEST_SSH_HOST`, `_PORT`, `_USER`, `_KEY_PATH` and `_HOST_KEY` point
+`cargo test -p henk -- --ignored live_` at it.
 
 ### Dashboard
 
