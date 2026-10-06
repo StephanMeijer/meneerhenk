@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -16,7 +17,7 @@ use henk_events::{EventBus, Hook};
 use secrecy::SecretString;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnRequest, OnRequest, TraceLayer};
 use tracing::{info, warn};
 
 use crate::app::{App, env_var};
@@ -92,8 +93,11 @@ pub fn compose(app: &Arc<App>) -> Composed {
             });
         match built {
             Ok(dashboard) => {
-                composed.router =
-                    with_dashboard(composed.router, dashboard::routes(Arc::new(dashboard)));
+                composed.router = with_dashboard(
+                    composed.router,
+                    dashboard::routes(Arc::new(dashboard)),
+                    DefaultOnRequest::default(),
+                );
                 composed.shared.dashboard.store(true, Ordering::Release);
                 info!("dashboard at /dashboard");
             }
@@ -106,8 +110,13 @@ pub fn compose(app: &Arc<App>) -> Composed {
 /// Adds the dashboard's routes to a composed router. The composed routes
 /// are already traced, so only the dashboard's own routes get a trace
 /// layer here; layering the merged router would trace the rest twice.
-fn with_dashboard(router: Router, dashboard: Router) -> Router {
-    router.merge(dashboard.layer(TraceLayer::new_for_http()))
+/// `on_request` is the trace layer's request hook: [`compose`] passes the
+/// default one, a test passes one that counts (#148).
+fn with_dashboard<O>(router: Router, dashboard: Router, on_request: O) -> Router
+where
+    O: OnRequest<Body> + Clone + Send + Sync + 'static,
+{
+    router.merge(dashboard.layer(TraceLayer::new_for_http().on_request(on_request)))
 }
 
 /// Builds the server with explicit secrets, for tests and for [`compose`].
@@ -382,46 +391,39 @@ github_owners = ["docspec"]
         assert!(body.contains("\"review\""));
     }
 
-    /// A writer that keeps what the trace layer logs, for counting.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
+    /// The dashboard's trace layer sees its own routes once and the
+    /// composed routes not at all: layering the merged router would trace
+    /// every other route twice. Counted through the layer's request hook,
+    /// not from log lines, since whether `tracing` logs a call site is
+    /// cached for the whole process and other tests running alongside
+    /// could hide a line (#148).
     #[tokio::test]
     async fn the_dashboard_does_not_trace_the_other_routes_twice() {
+        use std::sync::atomic::AtomicUsize;
+
         let app = test_app().await;
         let dashboard = Router::new().route("/dashboard/x", get(|| async { "ok" }));
-        let router = with_dashboard(composed(&app).router, dashboard);
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        for path in ["/healthz", "/dashboard/x"] {
-            captured.0.lock().unwrap().clear();
+        let traced = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&traced);
+        let router = with_dashboard(
+            composed(&app).router,
+            dashboard,
+            move |_: &Request<Body>, _: &tracing::Span| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        for (path, layered) in [("/healthz", 0), ("/dashboard/x", 1)] {
+            let before = traced.load(Ordering::SeqCst);
             let (status, _) = call(
                 router.clone(),
                 Request::get(path).body(Body::empty()).unwrap(),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{path}");
-            let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
             assert_eq!(
-                log.matches("started processing request").count(),
-                1,
-                "{path} traced once: {log}"
+                traced.load(Ordering::SeqCst) - before,
+                layered,
+                "{path} passes the dashboard's trace layer {layered} time(s)"
             );
         }
     }
