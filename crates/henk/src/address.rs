@@ -676,6 +676,9 @@ fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
         StopCause::Cancelled => Err(anyhow!("cancelled")),
         StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
         StopCause::Refused(why) => Err(anyhow!("the model declined to address ({why})")),
+        StopCause::Stuck { tool, .. } => Err(anyhow!(
+            "the model kept repeating {tool} with the same arguments"
+        )),
     }
 }
 
@@ -1923,5 +1926,17 @@ check_commands = [["true"]]
         let error = session_result(StopCause::Refused("refusal".to_owned()), 60).unwrap_err();
         assert_eq!(error.to_string(), "the model declined to address (refusal)");
         assert!(session_result(StopCause::EndTurn, 60).is_ok());
+    }
+
+    #[test]
+    fn a_stuck_address_session_fails_and_names_the_tool() {
+        let stuck = StopCause::Stuck {
+            tool: "read_file".to_owned(),
+            repeats: 5,
+        };
+        assert_eq!(
+            session_result(stuck, 60).unwrap_err().to_string(),
+            "the model kept repeating read_file with the same arguments"
+        );
     }
 }

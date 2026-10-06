@@ -604,8 +604,9 @@ async fn spawn_lanes(
             }
             // The lane row (henk-session) says finished for a time limit;
             // the summary distinguishes it as stopped, from `stop`. A model
-            // that declined (`StopCause::Refused`) is a dropped lane: the
-            // summary names it instead of reading as a clean review (#40).
+            // that declined (`StopCause::Refused`) or kept repeating one
+            // tool call (`StopCause::Stuck`) is a dropped lane: the summary
+            // names it instead of reading as a clean review (#40).
             let lane_outcome = match outcome.stop {
                 StopCause::Timeout => LaneOutcome::Stopped,
                 _ if outcome.finished() => LaneOutcome::Finished,

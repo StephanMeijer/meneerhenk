@@ -12,7 +12,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use henk_agent::{Agent, AgentConfig, StopCause, Tool, ToolOutput, ToolSet, Verdict, mcp_tools};
+use henk_agent::{
+    Agent, AgentConfig, AgentEvent, RepeatFiring, StopCause, Tool, ToolOutput, ToolSet, Verdict,
+    mcp_tools,
+};
 use henk_llm::testing::ScriptedClient;
 use henk_llm::{
     Block, ChatMessage, Completion, Role, StopReason, ToolArguments, ToolCall, ToolDef, ToolName,
@@ -61,6 +64,7 @@ fn config() -> AgentConfig {
         max_tool_output_chars: 100,
         max_conversation_chars: 100_000,
         keep_recent_turns: 2,
+        max_repeated_calls: 3,
     }
 }
 
@@ -499,8 +503,9 @@ fn busy_tools() -> ToolSet {
 #[tokio::test]
 async fn the_turn_warning_comes_once_before_the_third_to_last_turn() {
     // A model that never stops calling a tool: it runs into max_turns = 5.
+    // Each call differs, so the repeat guard stays out of it.
     let script: Vec<_> = (0..5)
-        .map(|i| call(&format!("c{i}"), "sleep", json!({})))
+        .map(|i| call(&format!("c{i}"), "sleep", json!({"n": i})))
         .collect();
     let model = Arc::new(ScriptedClient::new("m", script));
     let agent = Agent::new(model.clone(), busy_tools(), "s", config()).with_turn_warning(warning());
@@ -587,4 +592,246 @@ async fn a_refusal_ends_the_run_as_a_refusal_and_is_never_nudged() {
         "no nudge after a refusal"
     );
     assert_eq!(model.requests().len(), 1, "no second model call");
+}
+
+/// Counts its calls by tool name; every call succeeds.
+struct Counter {
+    name: &'static str,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Tool for Counter {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: ToolName::parse(self.name).unwrap(),
+            description: String::new(),
+            input_schema: json!({}),
+        }
+    }
+
+    async fn call(&self, _: Value) -> ToolOutput {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ToolOutput::ok("same as before")
+    }
+}
+
+/// A tool set of `read` and `list`, with their call counts.
+fn counted_tools() -> (
+    ToolSet,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lists = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut set = ToolSet::new();
+    set.add(Counter {
+        name: "read",
+        calls: Arc::clone(&reads),
+    });
+    set.add(Counter {
+        name: "list",
+        calls: Arc::clone(&lists),
+    });
+    (set, reads, lists)
+}
+
+fn count(calls: &std::sync::atomic::AtomicUsize) -> usize {
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The tool results of one message, as (`call_id`, content, `is_error`).
+fn results_of(message: &ChatMessage) -> Vec<(String, String, bool)> {
+    message
+        .blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::ToolResult(r) => Some((r.call_id.clone(), r.content.clone(), r.is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn roomy() -> AgentConfig {
+    AgentConfig {
+        max_turns: 12,
+        ..config()
+    }
+}
+
+#[tokio::test]
+async fn a_call_repeated_past_the_limit_is_refused_and_not_run() {
+    let (set, reads, _) = counted_tools();
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "read", json!({"path": "a.rs", "line": 1})),
+            call("c2", "read", json!({"line": 1, "path": "a.rs"})),
+            call("c3", "read", json!({"path": "a.rs", "line": 1})),
+            call("c4", "read", json!({"line": 1, "path": "a.rs"})),
+            text("Done."),
+        ],
+    ));
+    let agent = Agent::new(model.clone(), set, "s", roomy());
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    assert_eq!(count(&reads), 3, "the fourth identical call is not run");
+    assert_eq!(
+        outcome.repeats,
+        vec![RepeatFiring {
+            tool: "read".to_owned(),
+            repeats: 4,
+            ended: false,
+        }]
+    );
+    let refused = results_of(&model.requests()[4].messages[8]);
+    assert_eq!(refused.len(), 1);
+    let (id, content, is_error) = &refused[0];
+    assert_eq!(id, "c4");
+    assert!(is_error);
+    assert!(content.starts_with("Refused:"), "{content}");
+    assert!(henk_domain::text::is_in_style(content));
+}
+
+#[tokio::test]
+async fn repeating_after_the_refusal_ends_the_run_as_stuck() {
+    let (set, reads, lists) = counted_tools();
+    let same = || call("c", "read", json!({"path": "a.rs"}));
+    let last = Ok(Completion {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::ToolCall(ToolCall {
+                    id: "c5".into(),
+                    name: "read".into(),
+                    arguments: ToolArguments::Parsed(json!({"path": "a.rs"})),
+                }),
+                Block::ToolCall(ToolCall {
+                    id: "c6".into(),
+                    name: "list".into(),
+                    arguments: ToolArguments::Parsed(json!({})),
+                }),
+            ],
+        },
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [same(), same(), same(), same(), last, text("never asked")],
+    ));
+    let agent = Agent::new(model.clone(), set, "s", roomy());
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+
+    assert!(
+        matches!(&outcome.stop, StopCause::Stuck { tool, repeats: 5 } if tool == "read"),
+        "{:?}",
+        outcome.stop
+    );
+    assert!(!outcome.stop.is_clean(), "stuck is not a clean end");
+    assert_eq!(outcome.turns, 5, "no model call after the stuck one");
+    assert_eq!(count(&reads), 3);
+    assert_eq!(count(&lists), 0, "calls after the stuck one are not run");
+    assert_eq!(
+        outcome
+            .repeats
+            .iter()
+            .map(|f| (f.repeats, f.ended))
+            .collect::<Vec<_>>(),
+        vec![(4, false), (5, true)]
+    );
+    // Every call of the last turn has a result, so the conversation is
+    // well formed for a transcript.
+    let last_results = results_of(outcome.messages.last().unwrap());
+    let ids: Vec<_> = last_results.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(ids, vec!["c5", "c6"]);
+    assert!(last_results.iter().all(|(_, _, is_error)| *is_error));
+}
+
+#[tokio::test]
+async fn other_arguments_or_a_call_in_between_do_not_trigger_the_guard() {
+    let (set, reads, lists) = counted_tools();
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "read", json!({"path": "a.rs"})),
+            call("c2", "read", json!({"path": "b.rs"})),
+            call("c3", "read", json!({"path": "c.rs"})),
+            call("c4", "read", json!({"path": "d.rs"})),
+            call("c5", "read", json!({"path": "a.rs"})),
+            call("c6", "read", json!({"path": "a.rs"})),
+            call("c7", "read", json!({"path": "a.rs"})),
+            call("c8", "list", json!({})),
+            call("c9", "read", json!({"path": "a.rs"})),
+            call("c10", "read", json!({"path": "a.rs"})),
+            text("Done."),
+        ],
+    ));
+    let agent = Agent::new(model.clone(), set, "s", roomy());
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    assert_eq!(count(&reads), 9, "every call ran");
+    assert_eq!(count(&lists), 1);
+    assert!(outcome.repeats.is_empty());
+}
+
+#[tokio::test]
+async fn a_limit_of_zero_turns_the_guard_off() {
+    let (set, reads, _) = counted_tools();
+    let mut script: Vec<_> = (0..8)
+        .map(|i| call(&format!("c{i}"), "read", json!({"path": "a.rs"})))
+        .collect();
+    script.push(text("Done."));
+    let model = Arc::new(ScriptedClient::new("m", script));
+    let limits = AgentConfig {
+        max_repeated_calls: 0,
+        ..roomy()
+    };
+    let agent = Agent::new(model.clone(), set, "s", limits);
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+
+    assert!(matches!(outcome.stop, StopCause::EndTurn));
+    assert_eq!(count(&reads), 8);
+    assert!(outcome.repeats.is_empty());
+}
+
+#[tokio::test]
+async fn the_guard_fires_as_an_event() {
+    let (set, _, _) = counted_tools();
+    let same = || call("c", "read", json!({"path": "a.rs"}));
+    let model = Arc::new(ScriptedClient::new("m", [same(), same(), text("Done.")]));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let limits = AgentConfig {
+        max_repeated_calls: 1,
+        ..roomy()
+    };
+    let agent = Agent::new(model, set, "s", limits).with_events(tx);
+    agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    drop(agent);
+    let mut fired = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::RepeatRefused { .. } = event {
+            fired.push(event);
+        }
+    }
+    assert_eq!(
+        fired,
+        vec![AgentEvent::RepeatRefused {
+            tool: "read".to_owned(),
+            repeats: 2,
+            ended: false,
+        }]
+    );
 }

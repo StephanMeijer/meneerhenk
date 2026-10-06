@@ -379,6 +379,9 @@ fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
         StopCause::Cancelled => Err(anyhow!("cancelled")),
         StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
         StopCause::Refused(why) => Err(anyhow!("the model declined to plan ({why})")),
+        StopCause::Stuck { tool, .. } => Err(anyhow!(
+            "the model kept repeating {tool} with the same arguments"
+        )),
     }
 }
 
@@ -652,6 +655,18 @@ requester_id = 3
                 .unwrap_err()
                 .to_string()
                 .contains("60s")
+        );
+    }
+
+    #[test]
+    fn a_stuck_plan_fails_and_names_the_tool() {
+        let stuck = StopCause::Stuck {
+            tool: "github__get_issue".to_owned(),
+            repeats: 5,
+        };
+        assert_eq!(
+            session_result(stuck, 60).unwrap_err().to_string(),
+            "the model kept repeating github__get_issue with the same arguments"
         );
     }
 }

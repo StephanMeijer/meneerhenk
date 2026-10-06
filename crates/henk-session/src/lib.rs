@@ -138,6 +138,9 @@ pub async fn run_session(
             LaneStatus::Dropped,
             Some(format!("the model declined ({why})")),
         ),
+        StopCause::Stuck { tool, .. } => {
+            (LaneStatus::Dropped, Some(format!("stuck repeating {tool}")))
+        }
     };
     if let Err(store_error) = store
         .finish_lane(
@@ -305,6 +308,7 @@ mod tests {
                 max_tool_output_chars: 100,
                 max_conversation_chars: 100_000,
                 keep_recent_turns: 2,
+                max_repeated_calls: 3,
             },
             continuation: None,
             turn_warning: None,
