@@ -144,9 +144,11 @@ pub async fn run_address(
             info!(run = %run, commit = ?report.commit, "address run ended");
             Ok(report)
         }
-        Err(failure) if app.cancels.cancelled_by(&run).is_some() => {
-            // A person cancelled it from the dashboard (#69). Everything that
-            // can fail does so before the push, so nothing was pushed.
+        Err(failure) if is_cancelled(&failure) && app.cancels.cancelled_by(&run).is_some() => {
+            // A person cancelled it from the dashboard (#69), and the run
+            // stopped because of it: the token is checked again right
+            // before the push, so nothing was pushed. Any other failure is
+            // reported as one, even when a cancel was asked for meanwhile.
             let by = app.cancels.cancelled_by(&run).unwrap_or_default();
             info!(run = %run, by, %failure, "address run cancelled from the dashboard");
             let body = marker(&run, &model_id, MarkerKind::Reply)
@@ -174,6 +176,27 @@ pub async fn run_address(
                 .await?;
             Err(anyhow!("address run failed: {reason}"))
         }
+    }
+}
+
+/// The error of a run that stopped because its cancellation token fired.
+/// Only this error ends a run as cancelled from the dashboard.
+#[derive(Debug, thiserror::Error)]
+#[error("cancelled")]
+struct Cancelled;
+
+/// Whether `failure` is the run stopping for its cancellation token.
+fn is_cancelled(failure: &anyhow::Error) -> bool {
+    failure.downcast_ref::<Cancelled>().is_some()
+}
+
+/// Stops the run when its token fired. Checked where the run would
+/// otherwise go on to push, since nothing else looks at the token then.
+fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancelled> {
+    if cancel.is_cancelled() {
+        Err(Cancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -256,7 +279,9 @@ impl Session<'_> {
         let workspace = self.import(facts, credential.clone()).await?;
         // Closed on every path; a run future that is dropped instead drops
         // the workspace, and every backend destroys itself then too.
-        let worked = self.in_workspace(&workspace, &threads, cancel).await;
+        let worked = self
+            .in_workspace(&workspace, &threads, cancel.clone())
+            .await;
         workspace.close().await;
         drop(workspace);
         let (settled, changes, checks_text) = worked?;
@@ -264,6 +289,8 @@ impl Session<'_> {
         let commit = if changes.is_empty() {
             None
         } else {
+            // A cancel that came after the session ended stops the run here.
+            stop_if_cancelled(&cancel)?;
             // A fresh checkout nothing ran in: only the checked changeset
             // reaches it, and it is what Henk commits and pushes.
             let dir = ScratchDir::new(&format!("henk-address-{}-push", self.run))
@@ -278,7 +305,7 @@ impl Session<'_> {
             .await
             .context("checking out the pull request to push")?;
             Some(
-                self.commit_and_push(&checkout, facts, &threads, &settled, &changes)
+                self.commit_and_push(&checkout, facts, &threads, &settled, &changes, &cancel)
                     .await?,
             )
         };
@@ -392,6 +419,7 @@ impl Session<'_> {
         threads: &[OpenThread],
         settled: &std::collections::BTreeMap<String, Settled>,
         changes: &[Change],
+        cancel: &CancellationToken,
     ) -> anyhow::Result<String> {
         let target = &self.request.target;
         let fixed_notes: Vec<String> = threads
@@ -446,6 +474,8 @@ impl Session<'_> {
             .commit(&identity, &message)
             .await
             .context("committing")?;
+        // The last moment a cancel can still stop the push.
+        stop_if_cancelled(cancel)?;
         checkout
             .push(&facts.push.head_ref)
             .await
@@ -619,7 +649,7 @@ fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
     match stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
         StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
-        StopCause::Cancelled => Err(anyhow!("cancelled")),
+        StopCause::Cancelled => Err(Cancelled.into()),
         StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
         StopCause::Refused(why) => Err(anyhow!("the model declined to address ({why})")),
     }
@@ -690,12 +720,20 @@ check_commands = [["true"]]
         replies: Mutex<Vec<(String, String)>>,
         resolved: Mutex<Vec<String>>,
         comments: Mutex<Vec<String>>,
+        /// A person who cancels the run on the second read of the pull
+        /// request, just before the push.
+        cancel_on_reread: Mutex<Option<(crate::cancel::Cancels, RunId)>>,
     }
 
     #[async_trait::async_trait]
     impl AddressWriter for FakeHub {
         async fn pull_facts(&self, _: &ReviewTarget) -> Result<PullFacts, PlatformError> {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            if read >= 1
+                && let Some((cancels, run)) = self.cancel_on_reread.lock().unwrap().take()
+            {
+                assert!(cancels.cancel(&run, "github:1234".to_owned()));
+            }
             Ok(match (&self.later, read) {
                 (Some(later), 1..) => later.clone(),
                 _ => self.facts.clone(),
@@ -900,6 +938,7 @@ check_commands = [["true"]]
             replies: Mutex::default(),
             resolved: Mutex::default(),
             comments: Mutex::default(),
+            cancel_on_reread: Mutex::default(),
         })
     }
 
@@ -1364,6 +1403,123 @@ check_commands = [["true"]]
         assert_eq!(remote_head, head.as_str(), "nothing was pushed");
         let record = app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Cancelled);
+    }
+
+    /// A model that follows its script and, on its last answer, has a
+    /// person cancel the run: the session ends normally, the cancel comes
+    /// after it.
+    struct CancelOnLastAnswer {
+        script: ScriptedClient,
+        left: AtomicUsize,
+        cancels: crate::cancel::Cancels,
+        run: RunId,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for CancelOnLastAnswer {
+        fn model(&self) -> &'static str {
+            "scripted"
+        }
+        async fn complete(
+            &self,
+            request: &henk_llm::CompletionRequest,
+        ) -> Result<Completion, henk_llm::LlmError> {
+            if self.left.fetch_sub(1, Ordering::SeqCst) == 1 {
+                assert!(self.cancels.cancel(&self.run, "github:1234".to_owned()));
+            }
+            self.script.complete(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_after_the_session_ended_still_stops_the_push() {
+        let (remote, head) = bare_remote("henk-address-late-cancel").await;
+        let hub = hub(Platform::GitHub, remote.path(), &head, None);
+        let run = RunId::parse("r-addr-10").unwrap();
+        let cancels = crate::cancel::Cancels::default();
+        let script = vec![
+            fix_x(),
+            call(
+                "settle_thread",
+                json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
+            ),
+            done(),
+        ];
+        let model = CancelOnLastAnswer {
+            left: AtomicUsize::new(script.len()),
+            script: ScriptedClient::new("scripted", script.into_iter().map(Ok)),
+            cancels: cancels.clone(),
+            run: run.clone(),
+        };
+        let mut app = app_with_model(Arc::clone(&hub), Arc::new(model), Arc::new(fake()), CONFIG);
+        app.cancels = cancels;
+        let cancel = CancellationToken::new();
+        let _cancellable = app.cancels.register(run.clone(), cancel.clone());
+
+        let result = run_address(&app, request(Platform::GitHub, "r-addr-10"), cancel).await;
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            remote_feature(remote.path()).await.0,
+            head.as_str(),
+            "nothing was pushed"
+        );
+        let comments = hub.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "one comment");
+        assert!(
+            comments[0].contains("Cancelled from the dashboard by GitHub account 1234."),
+            "{}",
+            comments[0]
+        );
+        assert!(hub.replies.lock().unwrap().is_empty(), "no thread replies");
+        let record = app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_real_failure_after_a_cancel_was_asked_for_is_reported_as_one() {
+        let (remote, head) = bare_remote("henk-address-cancel-then-fail").await;
+        let mut later = facts(Platform::GitHub, remote.path(), &head);
+        later.head = CommitSha::parse("1111111111111111111111111111111111111111").unwrap();
+        let hub = hub(Platform::GitHub, remote.path(), &head, Some(later));
+        let run = RunId::parse("r-addr-11").unwrap();
+        let app = app(
+            Arc::clone(&hub),
+            vec![
+                fix_x(),
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
+                ),
+                done(),
+            ],
+        );
+        let cancel = CancellationToken::new();
+        let _cancellable = app.cancels.register(run.clone(), cancel.clone());
+        // The cancel lands while the pull request is read again, and that
+        // read finds the branch moved: the run fails for that, not the cancel.
+        *hub.cancel_on_reread.lock().unwrap() = Some((app.cancels.clone(), run.clone()));
+
+        let error = run_address(&app, request(Platform::GitHub, "r-addr-11"), cancel)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("the branch moved"), "{error}");
+        assert_eq!(
+            remote_feature(remote.path()).await.0,
+            head.as_str(),
+            "nothing pushed"
+        );
+        assert_failed_visibly(&hub, "moved after a cancel");
+        let comments = hub.comments.lock().unwrap().clone();
+        assert!(comments[0].contains("the branch moved"), "{}", comments[0]);
+        assert!(
+            !comments[0].contains("Cancelled from the dashboard"),
+            "{}",
+            comments[0]
+        );
+        let record = app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
     }
 
     #[tokio::test]
