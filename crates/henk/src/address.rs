@@ -223,6 +223,24 @@ async fn setup_step(
     ))
 }
 
+/// Refuses a mise that cannot run in safe mode: without it, mise would run
+/// what the repository's `mise.toml` defines (§8.3).
+async fn mise_is_safe(workspace: &dyn Workspace, limit: Duration) -> anyhow::Result<()> {
+    let step = Mise::safe_mode();
+    let result = workspace
+        .exec(&step, &WorkspacePath::root(), limit)
+        .await
+        .with_context(|| format!("setup step `{}`", step.join(" ")))?;
+    let safe = result.code == Some(0) && result.output.trim_end().ends_with("true");
+    if safe {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "the workspace's mise has no safe mode (MISE_SAFE), so it could run code from the repository's mise.toml; update mise there"
+        ))
+    }
+}
+
 fn marker(run: &RunId, model: &ModelId, kind: MarkerKind) -> Marker {
     Marker {
         run: run.clone(),
@@ -410,23 +428,30 @@ impl Session<'_> {
     /// profile's toolchain is installed and its setup commands run, in the
     /// tree's root, each on the run's timeline. The steps come from
     /// configuration only; the repository's `mise.toml` is data mise reads
-    /// (§8.3). The first step that fails fails the run, before the session
-    /// and before anything could be pushed. Returns the workspace the run
-    /// works in: with mise, one whose every command runs through it.
+    /// in its safe mode, which runs nothing the file defines (§8.3). The
+    /// first step that fails fails the run, before the session and before
+    /// anything could be pushed. What the steps leave in the tree is then
+    /// the baseline, so it is never part of the change. Returns the
+    /// workspace the run works in: with mise, one whose every command runs
+    /// through it.
     async fn set_up(&self, workspace: &Arc<dyn Workspace>) -> anyhow::Result<Arc<dyn Workspace>> {
         let repo = self.request.target.repo.path();
         let profile = self.app.settings.workspace.profile_for(&repo);
         let limit = Duration::from_secs(profile.limits.command_secs);
         let mut ready = Arc::clone(workspace);
         if profile.toolchain == Some(Toolchain::Mise) {
-            for step in [&["mise", "trust", "--all"][..], &["mise", "install"]] {
-                let step: Vec<String> = step.iter().map(|word| (*word).to_owned()).collect();
-                setup_step(ready.as_ref(), &step, limit).await?;
-            }
+            mise_is_safe(ready.as_ref(), limit).await?;
+            setup_step(ready.as_ref(), &Mise::install(), limit).await?;
             ready = Mise::wrap(ready);
         }
         for step in &profile.setup {
             setup_step(ready.as_ref(), step, limit).await?;
+        }
+        if profile.toolchain.is_some() || !profile.setup.is_empty() {
+            ready
+                .baseline()
+                .await
+                .context("recording the tree after setup")?;
         }
         Ok(ready)
     }
@@ -1482,13 +1507,33 @@ check_commands = [["true"]]
     }
 
     /// mise and one setup step, every command on the fake backend passing.
+    /// The step leaves a lockfile and a changed tracked file in the tree, as
+    /// a dependency fetch can.
     fn set_up_backend() -> FakeProvider {
         let mut provider = FakeProvider::default();
+        provider.script.insert(
+            "env MISE_SAFE=1 mise settings get safe".to_owned(),
+            Scripted {
+                output: "true\n".to_owned(),
+                ..Scripted::default()
+            },
+        );
+        provider.script.insert(
+            "env MISE_SAFE=1 mise exec -- make deps".to_owned(),
+            Scripted {
+                writes: vec![
+                    ("deps.lock".to_owned(), b"locked\n".to_vec()),
+                    (
+                        "src/a.rs".to_owned(),
+                        b"fn main() {\n    let x = 1;\n}\n// deps\n".to_vec(),
+                    ),
+                ],
+                ..Scripted::default()
+            },
+        );
         for command in [
-            "mise trust --all",
-            "mise install",
-            "mise exec -- make deps",
-            "mise exec -- true",
+            "env MISE_SAFE=1 mise install",
+            "env MISE_SAFE=1 mise exec -- true",
         ] {
             provider
                 .script
@@ -1533,12 +1578,25 @@ check_commands = [["true"]]
         let ran = provider.ran.lock().unwrap().clone();
         assert_eq!(
             ran.get(..3).unwrap(),
-            ["mise trust --all", "mise install", "mise exec -- make deps"],
-            "mise first, then the operator's steps, before anything else"
+            [
+                "env MISE_SAFE=1 mise settings get safe",
+                "env MISE_SAFE=1 mise install",
+                "env MISE_SAFE=1 mise exec -- make deps"
+            ],
+            "mise first, in safe mode, then the operator's steps, before anything else"
         );
         assert!(
-            ran.iter().skip(3).all(|c| c == "mise exec -- true"),
+            ran.iter()
+                .skip(3)
+                .all(|c| c == "env MISE_SAFE=1 mise exec -- true"),
             "the checks run through mise: {ran:?}"
+        );
+        assert!(!ran.iter().any(|c| c.contains("trust")), "{ran:?}");
+        let (files, content) = remote_change(remote.path(), head.as_str(), "src/a.rs").await;
+        assert_eq!(files, ["src/a.rs"], "nothing setup left is pushed");
+        assert_eq!(
+            content, "fn main() {\n    let x = 2;\n}\n// deps\n",
+            "the fix on top of the tree setup left"
         );
         let timeline = app
             .store
@@ -1546,10 +1604,88 @@ check_commands = [["true"]]
             .await
             .unwrap();
         assert!(
-            timeline
-                .iter()
-                .any(|e| e.message.starts_with("exec mise install exit 0")),
+            timeline.iter().any(|e| e
+                .message
+                .starts_with("exec env MISE_SAFE=1 mise install exit 0")),
             "every setup step is on the run's timeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_setup_leaves_in_the_tree_is_never_pushed() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-setup-leftovers").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let provider = set_up_backend();
+        let app = app_on(
+            Arc::clone(&hub),
+            vec![
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "T1", "outcome": "declined", "reply": "Kept as is."}),
+                ),
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "T2", "outcome": "declined", "reply": "No."}),
+                ),
+                done(),
+            ],
+            Arc::new(provider.clone()),
+            &format!("{CONFIG}{PEOPLE}{SET_UP}"),
+        );
+        let report = run_address(
+            &app,
+            request(platform, "r-addr-setup-3"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.commit, None, "the model changed nothing");
+        assert_eq!(
+            remote_feature(remote.path()).await.0,
+            head.as_str(),
+            "nothing pushed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mise_without_safe_mode_is_refused_before_it_reads_the_repository() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-setup-unsafe").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let mut provider = set_up_backend();
+        // An older mise fails on the setting it does not know.
+        provider.script.insert(
+            "env MISE_SAFE=1 mise settings get safe".to_owned(),
+            Scripted {
+                code: 1,
+                output: "mise ERROR Unknown setting: safe".to_owned(),
+                ..Scripted::default()
+            },
+        );
+        let app = app_on(
+            Arc::clone(&hub),
+            vec![fix_x(), done()],
+            Arc::new(provider.clone()),
+            &format!("{CONFIG}{PEOPLE}{SET_UP}"),
+        );
+        let error = run_address(
+            &app,
+            request(platform, "r-addr-setup-4"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("no safe mode"), "{error:#}");
+        assert_eq!(
+            *provider.ran.lock().unwrap(),
+            ["env MISE_SAFE=1 mise settings get safe"],
+            "mise never installed and the model never ran"
+        );
+        assert_eq!(
+            remote_feature(remote.path()).await.0,
+            head.as_str(),
+            "nothing pushed"
         );
     }
 

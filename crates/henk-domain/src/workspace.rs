@@ -128,7 +128,8 @@ pub struct Profile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Toolchain {
-    /// mise (`mise trust`, `mise install`, then `mise exec --` per command).
+    /// mise, in its safe mode (`mise install`, then `mise exec --` per
+    /// command).
     Mise,
 }
 

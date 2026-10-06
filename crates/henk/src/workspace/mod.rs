@@ -185,6 +185,16 @@ pub trait Workspace: Send + Sync {
     /// Returns [`WorkspaceError`] when the backend cannot say.
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError>;
 
+    /// Makes the tree as it is now the point [`Workspace::export`] counts
+    /// from, so what the setup stage left in it is never part of the
+    /// changeset (#93). Like `export`, it reads the tree from the backend's
+    /// own record and never follows a path in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError`] when the backend cannot record the tree.
+    async fn baseline(&self) -> Result<(), WorkspaceError>;
+
     /// Destroys the workspace. Calling it again does nothing.
     async fn close(&self);
 }

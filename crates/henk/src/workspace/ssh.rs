@@ -867,6 +867,20 @@ impl Workspace for SshWorkspace {
         Ok(changes)
     }
 
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.alive()?;
+        self.runner
+            .call(
+                &["record".to_owned(), self.id.clone(), "baseline".to_owned()],
+                &[],
+                None,
+                REQUEST_WAIT,
+            )
+            .await?
+            .ok("recording the tree after setup")?;
+        Ok(())
+    }
+
     async fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -1143,7 +1157,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner 1\n"), "{probe}");
+        assert!(probe.starts_with("henk-runner 2\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 
@@ -1316,8 +1330,10 @@ pub(crate) mod tests {
             .open(source.path(), &Profile::default())
             .await
             .unwrap();
-        for step in [&["mise", "trust", "--all"][..], &["mise", "install"]] {
-            let step: Vec<String> = step.iter().map(|w| (*w).to_owned()).collect();
+        for step in [
+            crate::workspace::toolchain::Mise::safe_mode(),
+            crate::workspace::toolchain::Mise::install(),
+        ] {
             let ran = ws
                 .exec(&step, &WorkspacePath::root(), Duration::from_mins(5))
                 .await

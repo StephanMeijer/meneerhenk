@@ -454,6 +454,13 @@ impl Workspace for HostWorkspace {
         Ok(changes)
     }
 
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.git(&["add", "--all"]).await?;
+        self.git(&["commit", "--quiet", "--allow-empty", "--message", "setup"])
+            .await?;
+        Ok(())
+    }
+
     async fn close(&self) {
         if let Ok(mut dirs) = self.dirs.lock() {
             drop(dirs.take());

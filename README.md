@@ -388,18 +388,24 @@ host_key = "ssh-ed25519 AAAA…"
 ```
 
 A profile can prepare the workspace before the model starts (#93): with
-`toolchain = "mise"`, Henk runs `mise trust` and `mise install` in the
-checkout, so the tools and versions the repository's own `mise.toml` or
-`.tool-versions` names are there, and every command of the run (setup, the
-checks, the model's) then runs through `mise exec`. `setup` lists commands
-of the operator's to run after that, in order, such as a dependency fetch.
-The steps come from `henk.toml` only; the repository's files are data mise
-reads, never a step (§8.3). Each step is on the run's timeline, and the
-first that fails ends the run before the model starts, with nothing pushed.
-mise installs into the run user's home, outside the tree, so nothing it
-fetches is part of the change. On a sandbox host, install mise where the
-runner's PATH finds it (`/usr/local/bin/mise`); `henk doctor --probe` says
-when a profile needs it and it is missing.
+`toolchain = "mise"`, Henk runs `mise install` in the checkout, so the
+tools and versions the repository's own `mise.toml` or `.tool-versions`
+names are there, and every command of the run (setup, the checks, the
+model's) then runs through `mise exec`. `setup` lists commands of the
+operator's to run after that, in order, such as a dependency fetch. The
+steps come from `henk.toml` only; the repository's files are data mise
+reads, never a step (§8.3). mise always runs in its safe mode
+(`MISE_SAFE=1`): it reads the tool versions but runs nothing the file
+defines (`exec()` templates, `_.source`, hooks, tasks, plugin scripts) and
+ignores its `[env]`. Henk never runs `mise trust`, and refuses a mise too
+old to have safe mode. Each step is on the run's timeline, and the first
+that fails ends the run before the model starts, with nothing pushed. mise
+installs into the run user's home, outside the tree, and the tree as setup
+leaves it is where the change starts, so neither what mise fetches nor what
+a setup step writes (a lockfile, `node_modules`) is part of the change. On
+a sandbox host, install mise where the runner's PATH finds it
+(`/usr/local/bin/mise`); `henk doctor --probe` says when a profile there
+needs it and it is missing.
 
 ```toml
 [workspace.profiles.sandbox]
