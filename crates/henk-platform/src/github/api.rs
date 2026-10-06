@@ -52,6 +52,14 @@ pub struct ThreadComment {
 
 const USER_AGENT: &str = "meneer-henk (https://github.com/StephanMeijer/meneerhenk)";
 
+/// Entries per page of every paged read.
+const PAGE_SIZE: usize = 100;
+
+/// Pages read before a list counts as too long: 10,000 entries. Lists are
+/// read to their end (#113); this cap only stops a runaway, and reaching it
+/// is [`PlatformError::TooMany`], never a quietly partial list.
+const MAX_PAGES: usize = 100;
+
 impl GitHubApi {
     /// Builds a client for `api_base` (normally `https://api.github.com`).
     ///
@@ -197,28 +205,41 @@ impl GitHubApi {
         self.send(builder).await
     }
 
-    /// `GET` every page of a REST list (up to ten pages of 100).
+    /// `GET` every page of a REST list, to its end: a page shorter than
+    /// `PAGE_SIZE` (100) is the last.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError`] on transport, status or decode failure.
+    /// Returns [`PlatformError`] on transport, status or decode failure, and
+    /// [`PlatformError::TooMany`] when the list goes on past `MAX_PAGES`
+    /// (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
-        for page in 1..=10 {
-            let separator = if path.contains('?') { '&' } else { '?' };
+        let separator = if path.contains('?') { '&' } else { '?' };
+        // One page past the cap tells a list of exactly the cap, which ends
+        // there, from one that goes on.
+        for page in 1..=MAX_PAGES + 1 {
             let page_items = self
-                .get(&format!("{path}{separator}per_page=100&page={page}"))
+                .get(&format!(
+                    "{path}{separator}per_page={PAGE_SIZE}&page={page}"
+                ))
                 .await?;
             let Some(array) = page_items.as_array() else {
-                break;
+                return Ok(items);
             };
-            let count = array.len();
-            items.extend(array.iter().cloned());
-            if count < 100 {
+            if page > MAX_PAGES && !array.is_empty() {
                 break;
             }
+            let count = array.len();
+            items.extend(array.iter().cloned());
+            if count < PAGE_SIZE {
+                return Ok(items);
+            }
         }
-        Ok(items)
+        Err(PlatformError::TooMany {
+            what: path.to_owned(),
+            limit: MAX_PAGES * PAGE_SIZE,
+        })
     }
 
     /// `POST` JSON to a REST path.
@@ -328,11 +349,15 @@ impl GitHubApi {
         Ok(())
     }
 
-    /// Review threads of a pull request with resolution state.
+    /// Review threads of a pull request with resolution state, every
+    /// thread and every comment in it, read to the end (#113). Address runs
+    /// give the model a thread's whole conversation, so a long thread's
+    /// newest replies must not be cut off.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError`] on failure.
+    /// Returns [`PlatformError`] on failure, and [`PlatformError::TooMany`]
+    /// past `MAX_PAGES` (100) pages of threads or of one thread's comments.
     pub async fn review_threads(
         &self,
         owner: &str,
@@ -352,6 +377,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
           path
           line
           comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               databaseId
               body
@@ -364,8 +390,10 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   }
 }";
         let mut threads = Vec::new();
+        // Threads with more comments than the first page, and where to go on.
+        let mut unfinished: Vec<(usize, String)> = Vec::new();
         let mut after: Option<String> = None;
-        for _ in 0..10 {
+        for _ in 0..MAX_PAGES {
             let data = self
                 .graphql(
                     QUERY,
@@ -382,21 +410,70 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
                 .into_iter()
                 .flatten()
             {
+                if let Some(cursor) = next_cursor(node.get("comments").unwrap_or(&Value::Null)) {
+                    unfinished.push((threads.len(), cursor));
+                }
                 threads.push(parse_thread(node));
             }
-            let has_next = connection
-                .pointer("/pageInfo/hasNextPage")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !has_next {
-                break;
+            if let Some(cursor) = next_cursor(&connection) {
+                after = Some(cursor);
+                continue;
             }
-            after = connection
-                .pointer("/pageInfo/endCursor")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            for (index, cursor) in unfinished {
+                if let Some(thread) = threads.get_mut(index) {
+                    let rest = self.thread_comments(&thread.id, cursor).await?;
+                    thread.comments.extend(rest);
+                }
+            }
+            return Ok(threads);
         }
-        Ok(threads)
+        Err(PlatformError::TooMany {
+            what: format!("the review threads of {owner}/{repo}#{number}"),
+            limit: MAX_PAGES * PAGE_SIZE,
+        })
+    }
+
+    /// The comments of one review thread after `after`, to the end.
+    async fn thread_comments(
+        &self,
+        thread: &str,
+        after: String,
+    ) -> Result<Vec<ThreadComment>, PlatformError> {
+        const QUERY: &str = r"
+query($id: ID!, $after: String) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          databaseId
+          body
+          author { login __typename ... on User { databaseId } ... on Bot { databaseId } }
+        }
+      }
+    }
+  }
+}";
+        let mut comments = Vec::new();
+        let mut after = Some(after);
+        for _ in 0..MAX_PAGES {
+            let data = self
+                .graphql(QUERY, json!({"id": thread, "after": after}))
+                .await?;
+            let connection = data
+                .pointer("/node/comments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            comments.extend(parse_comments(&connection));
+            match next_cursor(&connection) {
+                Some(cursor) => after = Some(cursor),
+                None => return Ok(comments),
+            }
+        }
+        Err(PlatformError::TooMany {
+            what: format!("the comments of review thread {thread}"),
+            limit: MAX_PAGES * PAGE_SIZE,
+        })
     }
 
     /// Resolves a review thread.
@@ -433,30 +510,23 @@ mutation($id: ID!) {
 }
 
 /// One `reviewThreads` node.
+/// The cursor of the next page of a GraphQL connection, when there is one.
+fn next_cursor(connection: &Value) -> Option<String> {
+    let more = connection
+        .pointer("/pageInfo/hasNextPage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    more.then(|| {
+        connection
+            .pointer("/pageInfo/endCursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .flatten()
+}
+
 fn parse_thread(node: &Value) -> ReviewThread {
-    let comments = node
-        .pointer("/comments/nodes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|c| {
-            Some(ThreadComment {
-                database_id: c.get("databaseId")?.as_u64()?,
-                author: c
-                    .pointer("/author/login")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                is_bot: c.pointer("/author/__typename").and_then(Value::as_str) == Some("Bot"),
-                author_id: c.pointer("/author/databaseId").and_then(Value::as_u64),
-                body: c
-                    .get("body")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-            })
-        })
-        .collect();
+    let comments = parse_comments(node.get("comments").unwrap_or(&Value::Null));
     ReviewThread {
         id: node
             .get("id")
@@ -478,4 +548,31 @@ fn parse_thread(node: &Value) -> ReviewThread {
             .and_then(|l| u32::try_from(l).ok()),
         comments,
     }
+}
+
+/// The comments of one page of a thread's `comments` connection.
+fn parse_comments(connection: &Value) -> Vec<ThreadComment> {
+    connection
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            Some(ThreadComment {
+                database_id: c.get("databaseId")?.as_u64()?,
+                author: c
+                    .pointer("/author/login")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                is_bot: c.pointer("/author/__typename").and_then(Value::as_str) == Some("Bot"),
+                author_id: c.pointer("/author/databaseId").and_then(Value::as_u64),
+                body: c
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            })
+        })
+        .collect()
 }

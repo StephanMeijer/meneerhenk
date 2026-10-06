@@ -34,6 +34,17 @@ pub enum PlatformError {
         /// The server's text.
         message: String,
     },
+    /// A list went on past the safety cap. Reading part of it would give a
+    /// count that silently leaves the rest out (#113), so it is an error.
+    #[error(
+        "{what} has more than {limit} entries; Henk stopped reading rather than count part of it"
+    )]
+    TooMany {
+        /// The list.
+        what: String,
+        /// How many entries were read.
+        limit: usize,
+    },
 }
 
 pub(crate) fn truncate(body: &str) -> String {

@@ -662,3 +662,198 @@ async fn a_forged_marker_from_a_person_is_not_henks() {
     let summaries = writer.existing_summaries(&t).await.unwrap();
     assert!(summaries.is_empty(), "a forged summary is never folded");
 }
+
+/// A page of `/pulls/7/comments` by people: 100 when `full`, else none.
+fn people_comments(page: u64, full: bool) -> Value {
+    let count = if full { 100 } else { 0 };
+    Value::Array(
+        (0..count)
+            .map(|i| {
+                json!({"id": page * 1000 + i, "node_id": format!("PRRC_{page}_{i}"), "path": "src/a.rs",
+                       "line": 1, "body": "looks fine", "user": {"login": "alice"}})
+            })
+            .collect(),
+    )
+}
+
+fn page_of(request: &wiremock::Request) -> u64 {
+    request
+        .url
+        .query_pairs()
+        .find(|(key, _)| key == "page")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
+}
+
+async fn no_threads(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": []
+            }}}}}),
+        ))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn findings_on_the_eleventh_page_are_counted() {
+    let server = MockServer::start().await;
+    let finding = format!("Off by one.\n\n{}", marker(MarkerKind::Finding));
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(move |request: &wiremock::Request| {
+            let page = page_of(request);
+            if page == 11 {
+                ResponseTemplate::new(200).set_body_json(json!([
+                    {"id": 99_999, "node_id": "PRRC_late", "path": "src/a.rs", "line": 10,
+                     "body": finding, "user": {"login": "meneer-henk[bot]"}}
+                ]))
+            } else {
+                ResponseTemplate::new(200).set_body_json(people_comments(page, true))
+            }
+        })
+        .mount(&server)
+        .await;
+    no_threads(&server).await;
+    let findings = address_writer(&server)
+        .existing_findings(&target())
+        .await
+        .unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["99999"],
+        "a finding past ten pages is still Henk's to count"
+    );
+}
+
+#[tokio::test]
+async fn a_list_of_exactly_the_cap_is_read_whole() {
+    let server = MockServer::start().await;
+    let finding = format!("Off by one.\n\n{}", marker(MarkerKind::Finding));
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(move |request: &wiremock::Request| {
+            let page = page_of(request);
+            let mut comments = people_comments(page, page <= 100);
+            if page == 100 {
+                comments[99] = json!({"id": 99_999, "node_id": "PRRC_last", "path": "src/a.rs",
+                    "line": 10, "body": finding, "user": {"login": "meneer-henk[bot]"}});
+            }
+            ResponseTemplate::new(200).set_body_json(comments)
+        })
+        .mount(&server)
+        .await;
+    no_threads(&server).await;
+    let findings = address_writer(&server)
+        .existing_findings(&target())
+        .await
+        .unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["99999"],
+        "10,000 comments is the cap, not past it: the list is whole"
+    );
+}
+
+#[tokio::test]
+async fn a_list_past_the_cap_is_an_error_not_a_partial_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(|request: &wiremock::Request| {
+            ResponseTemplate::new(200).set_body_json(people_comments(page_of(request), true))
+        })
+        .mount(&server)
+        .await;
+    no_threads(&server).await;
+    let result = address_writer(&server).existing_findings(&target()).await;
+    assert!(
+        matches!(
+            result,
+            Err(henk_platform::PlatformError::TooMany { limit: 10_000, .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_threads_and_their_comments_are_read_to_the_end() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = MockServer::start().await;
+    let finding = format!("x is set twice.\n\n{}", marker(MarkerKind::Finding));
+    let henk = json!({"login": "meneer-henk", "__typename": "Bot", "databaseId": 900});
+    let alice = json!({"login": "alice", "__typename": "User", "databaseId": 42});
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables": {"number": 7, "after": null}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": true, "endCursor": "threads-2"},
+            "nodes": [{"id": "PRRT_first", "isResolved": true, "isOutdated": false, "path": "src/b.rs", "line": 1,
+                       "comments": {"pageInfo": {"hasNextPage": false, "endCursor": null},
+                                    "nodes": [{"databaseId": 101, "body": "done", "author": alice}]}}]
+        }}}}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({"variables": {"number": 7, "after": "threads-2"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [{"id": "PRRT_long", "isResolved": false, "isOutdated": false, "path": "src/a.rs", "line": 2,
+                       "comments": {"pageInfo": {"hasNextPage": true, "endCursor": "comments-2"},
+                                    "nodes": [{"databaseId": 201, "body": finding, "author": henk}]}}]
+        }}}}})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(
+            json!({"variables": {"id": "PRRT_long", "after": "comments-2"}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"node": {"comments": {
+                "pageInfo": {"hasNextPage": false, "endCursor": null},
+                "nodes": [{"databaseId": 202, "body": "Fixed in the next push.", "author": alice}]
+            }}}}),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 201, "node_id": "PRRC_long", "path": "src/a.rs", "line": 2,
+             "body": format!("x is set twice.\n\n{}", marker(MarkerKind::Finding)),
+             "user": {"login": "meneer-henk[bot]"}}
+        ])))
+        .mount(&server)
+        .await;
+
+    let writer = address_writer(&server);
+    let threads = writer.open_threads(&target()).await.unwrap();
+    assert_eq!(
+        threads.len(),
+        1,
+        "the resolved thread on the first page is not open"
+    );
+    let notes: Vec<u64> = threads[0]
+        .notes
+        .iter()
+        .map(|n| n.comment_id.parse().unwrap())
+        .collect();
+    assert_eq!(
+        notes,
+        [201, 202],
+        "the reply on the second comment page is there, in order"
+    );
+    let findings = writer.existing_findings(&target()).await.unwrap();
+    assert_eq!(findings.len(), 1);
+    assert!(
+        findings[0].answered_by_person,
+        "a reply past the first page of the thread counts"
+    );
+}
