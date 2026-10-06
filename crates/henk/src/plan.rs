@@ -104,7 +104,7 @@ pub async fn run_plan(
         })
         .await?;
     info!(run = %run, "planning started");
-    let _alive = KeepAlive::start(Arc::clone(&app.store), run.clone());
+    let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
 
     let model = app.model(&planning.model)?;
     let context = Arc::new(PlanContext {

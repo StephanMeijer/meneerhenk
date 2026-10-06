@@ -14,6 +14,7 @@ use henk_store::{PgStore, RunStore, SqliteStore};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{DatabaseConfig, Settings};
+use crate::liveness::LiveRuns;
 
 /// The shared application state.
 pub struct App {
@@ -31,6 +32,8 @@ pub struct App {
     /// and plan runs under a child of it, so a run can tell being stopped
     /// from being superseded.
     pub shutdown: CancellationToken,
+    /// The runs this process is working on, which the reaper leaves alone.
+    pub live_runs: LiveRuns,
     /// Tests: the writer `writer` returns for every platform.
     #[cfg(test)]
     pub test_writer: Option<Arc<dyn PlatformWriter>>,
@@ -143,6 +146,7 @@ impl App {
             github,
             gitlab,
             shutdown: CancellationToken::new(),
+            live_runs: LiveRuns::default(),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]
