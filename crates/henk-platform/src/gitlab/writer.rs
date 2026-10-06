@@ -107,33 +107,50 @@ impl GitLabWriter {
         })
     }
 
-    /// All discussions of a merge request, across pages.
-    async fn discussions(&self, target: &ReviewTarget) -> Result<Vec<Value>, PlatformError> {
+    /// Every item of a paged list tool: `per_page` 100, pages 1 to 10,
+    /// until a page has fewer than 100 items. A page is an array or an
+    /// object holding the array under one of `keys`.
+    pub(crate) async fn call_tool_all(
+        &self,
+        tool: &str,
+        arguments: serde_json::Map<String, Value>,
+        keys: &[&str],
+    ) -> Result<Vec<Value>, PlatformError> {
+        const PAGE_SIZE: usize = 100;
+        const MAX_PAGES: u32 = 10;
         let mut all = Vec::new();
-        for page in 1..=10 {
-            let mut args = Self::base_args(target);
-            args.insert("per_page".into(), json!(100));
+        for page in 1..=MAX_PAGES {
+            let mut args = arguments.clone();
+            args.insert("per_page".into(), json!(PAGE_SIZE));
             args.insert("page".into(), json!(page));
-            let value = self
-                .call_tool("mr_discussions", Value::Object(args))
-                .await?;
-            let items: Vec<Value> = match value {
+            let items = match self.call_tool(tool, Value::Object(args)).await? {
                 Value::Array(items) => items,
-                Value::Object(ref map) => map
-                    .get("items")
-                    .or_else(|| map.get("discussions"))
-                    .and_then(Value::as_array)
-                    .cloned()
+                Value::Object(mut map) => keys
+                    .iter()
+                    .find_map(|key| match map.remove(*key) {
+                        Some(Value::Array(items)) => Some(items),
+                        _ => None,
+                    })
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
             let count = items.len();
             all.extend(items);
-            if count < 100 {
+            if count < PAGE_SIZE {
                 break;
             }
         }
         Ok(all)
+    }
+
+    /// All discussions of a merge request, across pages.
+    async fn discussions(&self, target: &ReviewTarget) -> Result<Vec<Value>, PlatformError> {
+        self.call_tool_all(
+            "mr_discussions",
+            Self::base_args(target),
+            &["items", "discussions"],
+        )
+        .await
     }
 
     fn is_henk_note(&self, note: &Value) -> bool {

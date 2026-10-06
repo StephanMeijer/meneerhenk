@@ -524,3 +524,60 @@ async fn a_comment_is_a_work_item_note() {
         json!({"project_id": "g/p", "iid": 9, "body": "Two questions."})
     );
 }
+
+/// `list_labels` with 100 labels on page 1 and one scoped label on page 2;
+/// a third page is an error.
+fn labels() -> FakeServer {
+    let tools = vec![FakeServer::tool("list_labels", "", &[])];
+    FakeServer::new(tools, |name, args| match (name, args["page"].as_u64()) {
+        ("list_labels", Some(1)) => text(Value::Array(
+            (1..=100)
+                .map(|n| json!({"name": format!("label-{n}")}))
+                .collect(),
+        )),
+        ("list_labels", Some(2)) => text(json!([{"name": "priority::high"}])),
+        (other, page) => CallToolResult::error(vec![ContentBlock::text(format!(
+            "unexpected {other} page {page:?}"
+        ))]),
+    })
+}
+
+#[tokio::test]
+async fn labels_are_read_across_pages() {
+    use henk_platform::IssueWriter as _;
+
+    let fake = labels();
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let repo = RepoRef::parse(Platform::GitLab, "g/p").unwrap();
+    let names = writer.repo_labels(&repo).await.unwrap();
+    assert_eq!(names.len(), 101);
+    assert!(names.iter().any(|n| n == "priority::high"));
+    let calls: Vec<Value> = fake
+        .calls()
+        .into_iter()
+        .filter(|c| c.name == "list_labels")
+        .map(|c| c.arguments)
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            json!({"project_id": "g/p", "per_page": 100, "page": 1}),
+            json!({"project_id": "g/p", "per_page": 100, "page": 2}),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_short_items_page_is_the_last() {
+    use henk_platform::IssueWriter as _;
+
+    let tools = vec![FakeServer::tool("list_labels", "", &[])];
+    let fake = FakeServer::new(tools, |_, _| {
+        text(json!({"items": [{"name": "bug"}, {"name": "team::core"}]}))
+    });
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let repo = RepoRef::parse(Platform::GitLab, "g/p").unwrap();
+    let names = writer.repo_labels(&repo).await.unwrap();
+    assert_eq!(names, ["bug", "team::core"]);
+    assert_eq!(fake.calls().len(), 1);
+}
