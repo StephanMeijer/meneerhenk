@@ -231,6 +231,23 @@ fn refused_in(error: &(dyn std::error::Error + 'static)) -> Option<&'static str>
     None
 }
 
+/// The body, at most [`MAX_BYTES`] of it, read as it streams, and whether
+/// there was more. Reading stops one byte past the cap and the response is
+/// dropped, which closes the connection with the rest unread (#55): no page
+/// makes Henk hold more than the cap and one chunk.
+async fn read_capped(mut response: reqwest::Response) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = MAX_BYTES + 1 - body.len();
+        body.extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or(&chunk));
+        if body.len() > MAX_BYTES {
+            body.truncate(MAX_BYTES);
+            return Ok((body, true));
+        }
+    }
+    Ok((body, false))
+}
+
 /// Strips scripts, styles and tags; collapses whitespace.
 fn to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
@@ -341,32 +358,27 @@ impl Tool for WebFetch {
             }
         };
         let status = response.status();
+        if !status.is_success() {
+            // Before any of the body is read: an error page can be any size.
+            return ToolOutput::error(format!("HTTP {status}"));
+        }
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
+        let (bytes, cut) = match read_capped(response).await {
+            Ok(read) => read,
             Err(error) => return ToolOutput::error(format!("Fetch failed while reading: {error}")),
         };
-        let body =
-            String::from_utf8_lossy(bytes.get(..bytes.len().min(MAX_BYTES)).unwrap_or(&bytes))
-                .into_owned();
-        if !status.is_success() {
-            return ToolOutput::error(format!("HTTP {status}"));
-        }
+        let body = String::from_utf8_lossy(&bytes).into_owned();
         let text = if content_type.contains("html") {
             to_text(&body)
         } else {
             body
         };
-        let truncated = if bytes.len() > MAX_BYTES {
-            "\n\n[truncated]"
-        } else {
-            ""
-        };
+        let truncated = if cut { "\n\n[truncated]" } else { "" };
         ToolOutput::ok(format!("{text}{truncated}"))
     }
 }
@@ -530,9 +542,21 @@ mod tests {
         assert_eq!(refused_in(error.as_ref()), Some(PRIVATE));
     }
 
-    /// An HTTPS server for `docs.test` on loopback. `/` answers with a 302 to
-    /// `location(port)`; any other path answers 200 with a secret body.
-    async fn redirecting_server(location: impl Fn(u16) -> String) -> u16 {
+    /// What the test server sends for one request.
+    enum Reply {
+        /// The whole response, as written.
+        Fixed(String),
+        /// `head`, then `total` bytes of `a` in 64 KiB blocks, until a write
+        /// fails because the client went away.
+        Stream { head: String, total: usize },
+    }
+
+    /// An HTTPS server for `docs.test` on loopback. `answer` gets the port
+    /// and the request and says what to send. Returns the port and how many
+    /// body bytes a `Stream` reply got written before the client stopped.
+    async fn tls_server(
+        answer: impl Fn(u16, &[u8]) -> Reply + Send + Sync + 'static,
+    ) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
         let cert = CertificateDer::from_pem_slice(CERT).unwrap();
         let key = PrivateKeyDer::from_pem_slice(KEY).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -546,11 +570,13 @@ mod tests {
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
         let listener = tokio::net::TcpListener::bind((LOOPBACK, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let location = location(port);
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&written);
+        let answer = Arc::new(answer);
         tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
                 let acceptor = acceptor.clone();
-                let location = location.clone();
+                let (answer, counter) = (Arc::clone(&answer), Arc::clone(&counter));
                 tokio::spawn(async move {
                     let Ok(mut tls) = acceptor.accept(tcp).await else {
                         return;
@@ -563,19 +589,140 @@ mod tests {
                             Ok(n) => request.extend_from_slice(&chunk[..n]),
                         }
                     }
-                    let response = if request.starts_with(b"GET / ") {
-                        format!(
-                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                        )
-                    } else {
-                        "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nTARGET-SECRET".to_owned()
-                    };
-                    let _ = tls.write_all(response.as_bytes()).await;
+                    match answer(port, &request) {
+                        Reply::Fixed(response) => {
+                            let _ = tls.write_all(response.as_bytes()).await;
+                        }
+                        Reply::Stream { head, total } => {
+                            if tls.write_all(head.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            let block = vec![b'a'; 64 * 1024];
+                            let mut sent = 0;
+                            while sent < total {
+                                let n = block.len().min(total - sent);
+                                if tls.write_all(&block[..n]).await.is_err() {
+                                    break;
+                                }
+                                sent += n;
+                                counter.store(sent, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
                     let _ = tls.shutdown().await;
                 });
             }
         });
+        (port, written)
+    }
+
+    /// An HTTPS server for `docs.test` on loopback. `/` answers with a 302 to
+    /// `location(port)`; any other path answers 200 with a secret body.
+    async fn redirecting_server(location: impl Fn(u16) -> String + Send + Sync + 'static) -> u16 {
+        let (port, _) = tls_server(move |port, request| {
+            Reply::Fixed(if request.starts_with(b"GET / ") {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    location(port)
+                )
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nTARGET-SECRET"
+                    .to_owned()
+            })
+        })
+        .await;
         port
+    }
+
+    /// Fifty megabytes: far more than any cap or socket buffer.
+    const HUGE: usize = 50 * 1024 * 1024;
+
+    /// Well under [`HUGE`]. Loopback socket buffers take a few megabytes after
+    /// the client stops reading, so "about 200 KB" is checked as "not the
+    /// whole body".
+    const STOPPED_EARLY: usize = 16 * 1024 * 1024;
+
+    /// The bytes written once the server's writes stop moving.
+    async fn settled(written: &std::sync::atomic::AtomicUsize) -> usize {
+        let mut last = usize::MAX;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = written.load(std::sync::atomic::Ordering::SeqCst);
+            if now == last {
+                return now;
+            }
+            last = now;
+        }
+        last
+    }
+
+    fn streaming(status: &'static str, total: usize) -> impl Fn(u16, &[u8]) -> Reply + Send + Sync {
+        move |_, _| Reply::Stream {
+            head: format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+            ),
+            total,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_large_body_is_cut_while_it_streams() {
+        let (port, written) = tls_server(streaming("200 OK", HUGE)).await;
+        let fetch = fetcher(&[("docs.test", &[LOOPBACK])], Some(LOOPBACK));
+        let output = fetch
+            .call(json!({"url": format!("https://docs.test:{port}/big")}))
+            .await;
+        assert!(
+            !output.is_error,
+            "{}",
+            output.content.get(..200).unwrap_or(&output.content)
+        );
+        let text = output
+            .content
+            .strip_suffix("\n\n[truncated]")
+            .expect("marked as cut");
+        assert_eq!(text.len(), MAX_BYTES);
+        assert!(text.bytes().all(|b| b == b'a'));
+        let sent = settled(&written).await;
+        assert!(
+            sent < STOPPED_EARLY,
+            "{sent} bytes were sent before the client stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_status_is_reported_without_reading_the_body() {
+        let (port, written) = tls_server(streaming("500 Internal Server Error", HUGE)).await;
+        let fetch = fetcher(&[("docs.test", &[LOOPBACK])], Some(LOOPBACK));
+        let output = fetch
+            .call(json!({"url": format!("https://docs.test:{port}/broken")}))
+            .await;
+        assert!(output.is_error);
+        assert_eq!(output.content, "HTTP 500 Internal Server Error");
+        let sent = settled(&written).await;
+        assert!(
+            sent < STOPPED_EARLY,
+            "{sent} bytes were sent before the client stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_at_the_cap_is_not_marked_truncated() {
+        for (total, cut) in [(MAX_BYTES, false), (MAX_BYTES + 1, true)] {
+            let (port, _) = tls_server(streaming("200 OK", total)).await;
+            let fetch = fetcher(&[("docs.test", &[LOOPBACK])], Some(LOOPBACK));
+            let output = fetch
+                .call(json!({"url": format!("https://docs.test:{port}/edge")}))
+                .await;
+            assert!(!output.is_error);
+            assert_eq!(
+                output.content.ends_with("[truncated]"),
+                cut,
+                "{total} bytes"
+            );
+            let text = output.content.trim_end_matches("\n\n[truncated]");
+            assert_eq!(text.len(), MAX_BYTES, "{total} bytes");
+        }
     }
 
     #[tokio::test]
