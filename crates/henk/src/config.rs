@@ -1024,15 +1024,7 @@ impl Config {
         }
         validate_fact_check(self.review.fact_check.as_ref(), &self.models)?;
         if let Some(planning) = &self.planning {
-            if !self.models.contains_key(&planning.model) {
-                return Err(ConfigError::UnknownModel {
-                    what: "planning".to_owned(),
-                    model: planning.model.clone(),
-                });
-            }
-            if !self.discord.team_lead_ids.contains(&planning.requester_id) {
-                return Err(ConfigError::PlanningRequester(planning.requester_id));
-            }
+            validate_planning(planning, &self.models, &self.discord.team_lead_ids)?;
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
         if let Some(address) = &self.address {
@@ -1258,6 +1250,24 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
                 "effort applies to provider \"anthropic\" only".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// The planner's model exists and its requester is a Team Lead.
+fn validate_planning(
+    planning: &PlanningConfig,
+    models: &BTreeMap<String, ModelFileConfig>,
+    team_lead_ids: &[DiscordUserId],
+) -> Result<(), ConfigError> {
+    if !models.contains_key(&planning.model) {
+        return Err(ConfigError::UnknownModel {
+            what: "planning".to_owned(),
+            model: planning.model.clone(),
+        });
+    }
+    if !team_lead_ids.contains(&planning.requester_id) {
+        return Err(ConfigError::PlanningRequester(planning.requester_id));
     }
     Ok(())
 }
