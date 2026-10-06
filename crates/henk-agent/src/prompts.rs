@@ -12,6 +12,9 @@ pub const FACT_CHECK: &str = include_str!("../prompts/fact_check.md");
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
+/// Instructions for an address run (§3.5).
+pub const ADDRESS: &str = include_str!("../prompts/address.md");
+
 /// Fixed greetings for mentions (§3.4), one per line. No model is involved,
 /// so a mention cannot inject anything.
 pub const GREETINGS: &str = include_str!("../prompts/greetings.txt");
@@ -54,6 +57,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(REVIEW_LANE));
         assert!(henk_domain::text::is_in_style(FACT_CHECK));
         assert!(henk_domain::text::is_in_style(PLANNER));
+        assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(GREETINGS));
         assert!(greeting(7).contains("review"));
         assert_eq!(greeting(1), greeting(1 + 4));

@@ -101,7 +101,7 @@ OpenBao.
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
-| `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
+| `HENK_API_TOKEN` | `POST /review`, `POST /plan`, `POST /address` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
 | `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
@@ -243,6 +243,7 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
 henk review URL1 URL2 URL3                        # several: at most 50, max_concurrent at a time
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
+henk address https://github.com/owner/repo/pull/7 --note "only the typo"
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
@@ -254,8 +255,24 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
-`POST /plan {"url", "note"?}` with `Authorization: Bearer $HENK_API_TOKEN`
-publish events too and answer `202 {"event": id}`.
+`POST /plan {"url", "note"?}` and `POST /address {"url", "note"?}` with
+`Authorization: Bearer $HENK_API_TOKEN` publish events too and answer
+`202 {"event": id}`.
+
+`henk address` (spec §3.5) is the one thing that changes code. Asked by a
+colleague, Henk reads every unresolved review thread of a GitHub pull
+request, fixes what the feedback is right about in a throwaway checkout,
+runs the configured `[address].check_commands` there, and pushes one
+commit to the pull request's branch with `Henk-Run` and `Requested-by`
+trailers. The push is a fast-forward only. A fork, the default branch, a
+protected branch or a branch that moved while he worked gets nothing.
+Then he replies in each thread (fixed with the commit link, declined with
+why, or a question), resolves only the threads of his own findings that he
+fixed, and sums up with the run link. The model never holds the token or a
+git command; Henk's code commits and pushes. The checks run the pull
+request's code on the host with an empty environment, so they see none of
+Henk's secrets; a container comes later. The App needs `Contents: write`.
+GitLab follows in #67.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in

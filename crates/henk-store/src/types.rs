@@ -317,6 +317,7 @@ pub(crate) fn kind_str(kind: RunKind) -> &'static str {
         RunKind::Plan => "plan",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
+        RunKind::Address => "address",
     }
 }
 
@@ -326,6 +327,7 @@ pub(crate) fn kind_parse(value: &str) -> Option<RunKind> {
         "plan" => RunKind::Plan,
         "discord_turn" => RunKind::DiscordTurn,
         "mail_reply" => RunKind::MailReply,
+        "address" => RunKind::Address,
         _ => return None,
     })
 }

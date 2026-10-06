@@ -390,6 +390,36 @@ parsed and rendered by `henk_domain::plan`. `set_description` keeps that region
 intact; `write_plan` keeps the session log and replaces the plan; the session
 entry is appended by code after the run, never by the model.
 
+## 7a. Addressing review feedback
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as CLI or POST /address
+    participant R as address.rs
+    participant W as AddressWriter (GitHub)
+    participant G as git.rs (checkout)
+    participant A as Agent
+    participant DB as RunStore
+
+    U->>R: run_address(pull request, note)
+    R->>W: pull_facts; push_refusal: fork, default, protected, closed
+    R->>DB: create_run (kind address)
+    R->>W: open_threads (authors by login, never by marker)
+    R->>G: clone_at head, token via env only
+    R->>A: workspace tools: read, search, edit, write, run_checks, settle_thread
+    A-->>R: edits in the checkout, an outcome per thread
+    R->>G: run_checks, commit with Henk-Run and Requested-by
+    R->>W: pull_facts again: head unchanged?
+    R->>G: push, fast-forward only
+    R->>W: reply per thread; resolve Henk's own fixed findings; summary
+    R->>DB: finish_run
+```
+
+Every error happens before the push: a failed run posts a failure comment
+saying nothing was pushed. After the push, replies and the summary are
+best-effort, so a run that pushed is never reported as failed.
+
 ## 8. Run records
 
 ```mermaid

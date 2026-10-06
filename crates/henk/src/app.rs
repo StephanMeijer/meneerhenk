@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow};
 use henk_llm::{ModelClient, client_for};
 use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
+use henk_platform::address::AddressWriter;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::GitLabWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
@@ -37,6 +38,9 @@ pub struct App {
     /// Tests: the session `read_session` returns instead of starting one.
     #[cfg(test)]
     pub test_session: Option<Arc<dyn McpSession>>,
+    /// Tests: what `address_writer` returns for every platform.
+    #[cfg(test)]
+    pub test_address_writer: Option<Arc<dyn AddressWriter>>,
 }
 
 impl std::fmt::Debug for App {
@@ -147,6 +151,8 @@ impl App {
             test_writer: None,
             #[cfg(test)]
             test_session: None,
+            #[cfg(test)]
+            test_address_writer: None,
         })
     }
 
@@ -229,6 +235,31 @@ impl App {
                 .clone()
                 .map(|w| w as Arc<dyn PlatformWriter>)
                 .ok_or_else(|| anyhow!("GitLab is not configured")),
+        }
+    }
+
+    /// What an address run (§3.5) reads and writes on a platform.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform is not configured or not built yet.
+    pub fn address_writer(
+        &self,
+        platform: henk_domain::allowlist::Platform,
+    ) -> anyhow::Result<Arc<dyn AddressWriter>> {
+        #[cfg(test)]
+        if let Some(writer) = &self.test_address_writer {
+            return Ok(Arc::clone(writer));
+        }
+        match platform {
+            henk_domain::allowlist::Platform::GitHub => self
+                .github
+                .clone()
+                .map(|w| w as Arc<dyn AddressWriter>)
+                .ok_or_else(|| anyhow!("GitHub is not configured")),
+            henk_domain::allowlist::Platform::GitLab => Err(anyhow!(
+                "addressing review feedback on GitLab is not built yet (#67)"
+            )),
         }
     }
 

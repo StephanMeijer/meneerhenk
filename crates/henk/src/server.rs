@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
-use crate::listeners::{MentionListener, PlanListener, ReviewListener, Writers};
+use crate::listeners::{AddressListener, MentionListener, PlanListener, ReviewListener, Writers};
 use crate::recorder::StoreRecorder;
 
 /// What the server's own pages can reach.
@@ -93,6 +93,7 @@ pub fn compose_with_secrets(
             )),
             Arc::new(MentionListener::new(settings, writers)),
             Arc::new(PlanListener::new(Arc::clone(&coordinator))),
+            Arc::new(AddressListener::new(Arc::clone(&coordinator))),
         ],
     ));
     let requester = app
@@ -440,7 +441,7 @@ github_owners = ["docspec"]
         let id = EventId::parse(event).unwrap();
         for _ in 0..100 {
             let n = app.store.outcomes(&id).await.map_or(0, |o| o.len());
-            if n >= 3 {
+            if n >= 4 {
                 return n;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -489,7 +490,7 @@ github_owners = ["docspec"]
             .to_owned();
         assert_eq!(
             wait_for_outcomes(&app, &event).await,
-            3,
+            4,
             "every listener recorded an outcome"
         );
         let recorded = app
@@ -574,7 +575,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 3);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -583,6 +584,33 @@ github_owners = ["docspec"]
             .unwrap();
         assert_eq!(recorded.kind, "plan_requested");
         assert_eq!(recorded.source, "api");
+
+        let address = Request::post("/address")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/pull/7","note":"only the typo"}"#,
+            ))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, address).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
+        let id = EventId::parse(event).unwrap();
+        let recorded = app.store.inbound_event(&id).await.unwrap().unwrap();
+        assert_eq!(recorded.kind, "address_requested");
+        let outcome = app
+            .store
+            .outcomes(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|o| o.listener == "address")
+            .unwrap();
+        assert_eq!(outcome.outcome, "ignored");
+        assert_eq!(outcome.detail, "address runs are not configured");
     }
 
     #[tokio::test]

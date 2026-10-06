@@ -950,6 +950,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 shutdown: CancellationToken::new(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
+                test_address_writer: None,
             },
             writer,
         }

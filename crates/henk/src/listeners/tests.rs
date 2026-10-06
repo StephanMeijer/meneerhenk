@@ -22,7 +22,7 @@ use henk_events::{
 use henk_store::RunStore;
 
 use super::testing::{FakeWriter, FakeWriters};
-use super::{MentionListener, PlanListener, ReviewListener, Writers};
+use super::{AddressListener, MentionListener, PlanListener, ReviewListener, Writers};
 use crate::app::App;
 use crate::config::Config;
 use crate::coordinator::Coordinator;
@@ -72,7 +72,8 @@ impl Harness {
                     Arc::new(app.settings.clone()),
                     writers,
                 )),
-                Arc::new(PlanListener::new(coordinator)),
+                Arc::new(PlanListener::new(Arc::clone(&coordinator))),
+                Arc::new(AddressListener::new(coordinator)),
             ],
         );
         Self {
@@ -217,7 +218,7 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
     let outcomes = h.store.outcomes(&out.id).await.unwrap();
-    assert_eq!(outcomes.len(), 3);
+    assert_eq!(outcomes.len(), 4);
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
     assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
@@ -318,4 +319,66 @@ async fn a_plan_request_starts_a_plan() {
         })
         .await;
     assert!(matches!(outside.of("plan"), Handled::Ignored(r) if r.contains("allowlist")));
+}
+
+#[tokio::test]
+async fn an_address_request_needs_address_runs_configured() {
+    let h = Harness::new().await;
+    let out = h
+        .deliver(EventKind::AddressRequested {
+            target: ReviewTarget {
+                repo: repo("docspec/app"),
+                number: 7,
+            },
+            note: None,
+            requester: Some("523".into()),
+        })
+        .await;
+    assert!(
+        matches!(out.of("address"), Handled::Ignored(r) if r.contains("not configured")),
+        "{:?}",
+        out.by_listener
+    );
+    assert!(matches!(out.of("review"), Handled::Ignored(_)));
+    assert!(matches!(out.of("plan"), Handled::Ignored(_)));
+}
+
+#[tokio::test]
+async fn one_address_run_per_pull_request_at_a_time() {
+    let text = format!(
+        "{CONFIG}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n"
+    );
+    let settings = Config::parse(&text).unwrap().into_settings().unwrap();
+    let app = Arc::new(App {
+        settings,
+        store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+        models: std::collections::BTreeMap::new(),
+        github: None,
+        gitlab: None,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        test_writer: None,
+        test_session: None,
+        test_address_writer: None,
+    });
+    let coordinator = Coordinator::new(app);
+    let target = ReviewTarget {
+        repo: repo("docspec/app"),
+        number: 7,
+    };
+    // Both before the first run gets to start: the second is refused.
+    assert!(
+        coordinator
+            .submit_address(target.clone(), None, "a".into())
+            .is_ok()
+    );
+    let second = coordinator.submit_address(target.clone(), None, "b".into());
+    assert!(matches!(second, Err(r) if r.contains("already going")));
+    let other = ReviewTarget {
+        repo: repo("docspec/app"),
+        number: 8,
+    };
+    assert!(
+        coordinator.submit_address(other, None, "c".into()).is_ok(),
+        "another pull request may"
+    );
 }

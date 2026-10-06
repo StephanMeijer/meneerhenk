@@ -6,11 +6,15 @@
     reason = "the CLI's output is stdout and stderr"
 )]
 
+mod address;
+mod address_tools;
 mod app;
+mod checks;
 mod config;
 mod coordinator;
 mod doctor;
 mod fact_check;
+mod git;
 mod hooks;
 mod ids;
 mod listeners;
@@ -29,7 +33,7 @@ mod web_fetch;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::urls::parse_issue_url;
+use crate::urls::{parse_issue_url, parse_pull_request_url};
 use anyhow::{Context as _, anyhow};
 use clap::{Parser, Subcommand};
 use henk_domain::allowlist::Platform;
@@ -83,6 +87,15 @@ enum Command {
         /// Issue URL, such as <https://github.com/owner/repo/issues/9>
         url: String,
         /// A note for the planner, as a colleague would give in conversation.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Address the review feedback on one pull request: fix what is right,
+    /// push one commit to its branch, reply in every thread (§3.5).
+    Address {
+        /// Pull request URL, such as <https://github.com/owner/repo/pull/7>
+        url: String,
+        /// A note, as a colleague would give in conversation.
         #[arg(long)]
         note: Option<String>,
     },
@@ -219,6 +232,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Review { urls, commit } => cmd_review(&cli.config, &urls, commit).await,
         Command::Plan { url, note } => cmd_plan(&cli.config, &url, note).await,
+        Command::Address { url, note } => cmd_address(&cli.config, &url, note).await,
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
@@ -373,6 +387,35 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
     for change in report.changes {
         println!("- {change}");
     }
+    Ok(())
+}
+
+async fn cmd_address(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let app = App::build(settings, None).await?;
+    liveness::reap_orphans(&app).await;
+    interrupt_on_ctrl_c(app.shutdown.clone());
+    let target = parse_pull_request_url(url)?;
+    let report = address::run_address(
+        &app,
+        address::AddressRequest {
+            target,
+            note,
+            trigger: "cli".to_owned(),
+            run: None,
+        },
+        app.shutdown.child_token(),
+    )
+    .await?;
+    println!("run {}", report.run);
+    match &report.commit {
+        Some(commit) => println!("pushed {commit}"),
+        None => println!("nothing pushed"),
+    }
+    println!(
+        "{} fixed, {} declined, {} questions, {} not settled",
+        report.fixed, report.declined, report.questions, report.unsettled
+    );
     Ok(())
 }
 

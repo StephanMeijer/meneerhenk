@@ -52,6 +52,9 @@ pub struct Config {
     /// Planning settings.
     #[serde(default)]
     pub planning: Option<PlanningConfig>,
+    /// Addressing review feedback (§3.5).
+    #[serde(default)]
+    pub address: Option<AddressConfig>,
     /// External MCP servers by alias.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServerConfig>,
@@ -435,6 +438,42 @@ pub struct PlanningConfig {
     pub requester_id: DiscordUserId,
 }
 
+/// Addressing review feedback (§3.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddressConfig {
+    /// Model id from `[models]`.
+    pub model: String,
+    /// Time limit in seconds.
+    #[serde(default = "default_address_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Model calls.
+    #[serde(default = "default_plan_max_turns")]
+    pub max_turns: u32,
+    /// Files one run may change.
+    #[serde(default = "default_max_changed_files")]
+    pub max_changed_files: usize,
+    /// The project's checks, each an argument list such as
+    /// `["cargo", "test"]`, run in the checkout with an empty environment.
+    #[serde(default)]
+    pub check_commands: Vec<Vec<String>>,
+    /// Time limit per check in seconds.
+    #[serde(default = "default_check_timeout_secs")]
+    pub check_timeout_secs: u64,
+    /// The Team Lead on whose behalf CLI and API runs push.
+    pub requester_id: DiscordUserId,
+}
+
+fn default_address_timeout_secs() -> u64 {
+    30 * 60
+}
+fn default_max_changed_files() -> usize {
+    20
+}
+fn default_check_timeout_secs() -> u64 {
+    10 * 60
+}
+
 fn default_plan_timeout_secs() -> u64 {
     20 * 60
 }
@@ -503,6 +542,9 @@ pub enum ConfigError {
     /// A review setting is unusable.
     #[error("{0}")]
     Review(String),
+    /// The address setting is unusable.
+    #[error("{0}")]
+    Address(String),
     /// The database setting is unusable.
     #[error("{0}")]
     Database(String),
@@ -537,6 +579,8 @@ pub struct Settings {
     pub review: ReviewConfig,
     /// Planning.
     pub planning: Option<PlanningConfig>,
+    /// Addressing review feedback.
+    pub address: Option<AddressConfig>,
     /// MCP servers by alias.
     pub mcp: BTreeMap<String, McpServerConfig>,
 }
@@ -602,28 +646,11 @@ impl Config {
             }
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
-        let legacy_database_path = self.server.database_path.is_some();
-        let database = match (self.database, self.server.database_path.clone()) {
-            (Some(_), Some(_)) => {
-                return Err(ConfigError::Database(
-                    "set either [database] or server.database_path, not both".to_owned(),
-                ));
-            }
-            (Some(database), None) => database,
-            (None, Some(path)) => DatabaseConfig::Sqlite { path },
-            (None, None) => DatabaseConfig::default(),
-        };
-        match &database {
-            DatabaseConfig::Sqlite { path } if path.trim().is_empty() => {
-                return Err(ConfigError::Database("database.path is empty".to_owned()));
-            }
-            DatabaseConfig::Postgres { url_env } if url_env.trim().is_empty() => {
-                return Err(ConfigError::Database(
-                    "database.url_env is empty".to_owned(),
-                ));
-            }
-            _ => {}
+        if let Some(address) = &self.address {
+            validate_address(address, &self.models, &self.discord.team_lead_ids)?;
         }
+        let legacy_database_path = self.server.database_path.is_some();
+        let database = resolve_database(self.database, self.server.database_path.clone())?;
 
         let people = People::new(
             self.discord.team_lead_ids.iter().copied(),
@@ -657,9 +684,73 @@ impl Config {
             lanes,
             review: self.review,
             planning: self.planning,
+            address: self.address,
             mcp: self.mcp,
         })
     }
+}
+
+/// Where records live: `[database]`, or the deprecated `server.database_path`.
+fn resolve_database(
+    database: Option<DatabaseConfig>,
+    legacy_path: Option<String>,
+) -> Result<DatabaseConfig, ConfigError> {
+    let database = match (database, legacy_path) {
+        (Some(_), Some(_)) => {
+            return Err(ConfigError::Database(
+                "set either [database] or server.database_path, not both".to_owned(),
+            ));
+        }
+        (Some(database), None) => database,
+        (None, Some(path)) => DatabaseConfig::Sqlite { path },
+        (None, None) => DatabaseConfig::default(),
+    };
+    match &database {
+        DatabaseConfig::Sqlite { path } if path.trim().is_empty() => {
+            return Err(ConfigError::Database("database.path is empty".to_owned()));
+        }
+        DatabaseConfig::Postgres { url_env } if url_env.trim().is_empty() => {
+            return Err(ConfigError::Database(
+                "database.url_env is empty".to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(database)
+}
+
+fn validate_address(
+    address: &AddressConfig,
+    models: &BTreeMap<String, ModelFileConfig>,
+    team_leads: &[DiscordUserId],
+) -> Result<(), ConfigError> {
+    if !models.contains_key(&address.model) {
+        return Err(ConfigError::UnknownModel {
+            what: "address".to_owned(),
+            model: address.model.clone(),
+        });
+    }
+    if !team_leads.contains(&address.requester_id) {
+        return Err(ConfigError::Address(format!(
+            "address.requester_id {} is not in discord.team_lead_ids",
+            address.requester_id
+        )));
+    }
+    if address.max_changed_files == 0 || address.timeout_secs == 0 || address.max_turns == 0 {
+        return Err(ConfigError::Address(
+            "address limits must be above zero".to_owned(),
+        ));
+    }
+    if address
+        .check_commands
+        .iter()
+        .any(|argv| argv.first().is_none_or(|program| program.trim().is_empty()))
+    {
+        return Err(ConfigError::Address(
+            "address.check_commands has an empty command".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), ConfigError> {
@@ -909,6 +1000,18 @@ impl Settings {
                 planning.sub_issue_cap
             );
         }
+        if let Some(address) = &self.address {
+            let _ = writeln!(
+                out,
+                "Address runs:    model {} for Team Lead {}; {}s, {} turns, {} files, {} checks",
+                address.model,
+                address.requester_id,
+                address.timeout_secs,
+                address.max_turns,
+                address.max_changed_files,
+                address.check_commands.len()
+            );
+        }
         let _ = writeln!(out, "MCP servers:");
         for (alias, server) in &self.mcp {
             let how = server.command.as_deref().map_or_else(
@@ -1075,6 +1178,50 @@ github_owners = ["docspec"]
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!settings.legacy_database_path);
+    }
+
+    #[test]
+    fn address_runs_are_configured_and_checked() {
+        let with_model = format!(
+            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
+        );
+        let parse = |extra: &str| {
+            Config::parse(&format!("{with_model}{extra}")).and_then(Config::into_settings)
+        };
+        let settings = parse(
+            "[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[\"cargo\", \"test\"]]\n",
+        )
+        .unwrap();
+        let address = settings.address.as_ref().unwrap();
+        assert_eq!(address.timeout_secs, 1800);
+        assert_eq!(address.max_changed_files, 20);
+        assert_eq!(address.check_commands, [["cargo", "test"]]);
+        assert!(settings.describe().contains("Address runs:    model m"));
+
+        for (bad, why) in [
+            (
+                "[address]\nmodel = \"nope\"\nrequester_id = 3\n",
+                "unknown model",
+            ),
+            (
+                "[address]\nmodel = \"m\"\nrequester_id = 99\n",
+                "not a Team Lead",
+            ),
+            (
+                "[address]\nmodel = \"m\"\nrequester_id = 3\nmax_changed_files = 0\n",
+                "zero limit",
+            ),
+            (
+                "[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[]]\n",
+                "empty command",
+            ),
+            (
+                "[address]\nmodel = \"m\"\nrequester_id = 3\npush_force = true\n",
+                "unknown field",
+            ),
+        ] {
+            assert!(parse(bad).is_err(), "{why}");
+        }
     }
 
     #[test]
