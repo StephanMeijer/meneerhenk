@@ -539,12 +539,20 @@ const WRITE: &str = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
 const LIST: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -print0 \)"#;
 
 /// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), in the
-/// text files under `$1` of fewer than `$2` bytes, as `path NUL line:text`. No match is not a failure: grep says 1, and xargs
-/// 123 for a grep that said 1 or could not read a file.
+/// text files under `$1` of fewer than `$2` bytes, as `path NUL line:text`.
+/// Files the run's user cannot read are left out first, so a grep that
+/// says 2 failed on the pattern itself: no `-P`, a pattern PCRE refuses or
+/// its backtracking limit. Each grep's 1, no match, becomes 0 and its 2
+/// becomes 255, on which xargs stops and says 124, so that is an error and
+/// never "no matches".
 const SEARCH: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \) |
-xargs -0 -r grep -HIPn --null -e "$3" --
-s=$?
-[ "$s" -eq 0 ] || [ "$s" -eq 1 ] || [ "$s" -eq 123 ]"#;
+xargs -0 -r sh -c 'p=$1
+shift
+for f; do
+    shift
+    if [ -r "$f" ]; then set -- "$@" "$f"; fi
+done
+[ "$#" -eq 0 ] || grep -HIPn --null -e "$p" -- "$@" || [ "$?" -eq 1 ] || exit 255' sh "$3""#;
 
 /// `limit` in seconds for the runner's `timeout`, to the millisecond as the
 /// host backend's limit is, rounded up: `timeout` reads 0 as no limit at all,
@@ -1065,6 +1073,31 @@ pub(crate) mod tests {
         crate::workspace::contract::every_backend_does_this(provider, "henk-ssh").await;
         let left: Vec<_> = std::fs::read_dir(runner.base()).unwrap().collect();
         assert!(left.is_empty(), "every closed workspace is gone: {left:?}");
+    }
+
+    #[tokio::test]
+    async fn a_search_grep_cannot_finish_is_an_error_not_no_matches() {
+        let runner = LocalRunner::new("henk-ssh-backtrack");
+        let provider = SshProvider::with_runner(Arc::clone(&runner) as Arc<dyn Runner>);
+        let source = crate::workspace::contract::source("henk-ssh-backtrack-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let line = format!("{}b\n", "a".repeat(5000));
+        ws.write(&WorkspacePath::parse("long.txt").unwrap(), line.as_bytes())
+            .await
+            .unwrap();
+        // Linear in Rust's regex, past PCRE's backtracking limit in grep -P.
+        let pattern = Pattern::parse("(a+)+$").unwrap();
+        let searched = ws
+            .search(&WorkspacePath::root(), &pattern, None, 1 << 20, 10)
+            .await;
+        assert!(
+            matches!(&searched, Err(WorkspaceError::Backend(m)) if m.contains("searching failed")),
+            "{searched:?}"
+        );
+        ws.close().await;
     }
 
     #[tokio::test]
