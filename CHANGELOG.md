@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.9...v0.1.10) - 2026-10-06
+
+### Added
+
+- *(review)* lanes and the fact-checker run commands in their own copy
+- *(workspace)* no runner on the sandbox host; Henk signs in as root
+- *(review)* lanes and the fact-checker list, search and read their own copy
+- *(review)* every lane and the fact-checker in a workspace at the reviewed commit
+
+### Fixed
+
+- *(review)* each fact-check gets its own time for commands
+- *(review)* the fact-checker's bash says its copy is shared
+- *(workspace)* a glob narrows the files before grep, CRLF lines agree
+- *(workspace)* search patterns mean the same on every grep
+- *(workspace)* a search grep cannot finish is an error, and patterns agree
+- *(review)* refuse review workspaces on the host backend
+- a model's glob is matched in linear time, the probe checks Unicode
+
 ## [0.1.9](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.8...v0.1.9) - 2026-10-06
 
 ### Added
