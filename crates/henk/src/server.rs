@@ -2,6 +2,7 @@
 //! pages that make runs and events traceable (§8.6).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -30,6 +31,9 @@ use crate::recorder::StoreRecorder;
 pub struct Shared {
     coordinator: Arc<Coordinator>,
     bus: Arc<EventBus>,
+    /// Whether the dashboard is up. Run and event pages are served only
+    /// there, behind sign-in (#69); without it they are not served.
+    dashboard: AtomicBool,
 }
 
 /// The composed server: the router and the hooks that may need to run.
@@ -42,6 +46,8 @@ pub struct Composed {
     pub bus: Arc<EventBus>,
     /// The reviews in flight, so a shutdown can wait for them to close.
     pub coordinator: Arc<Coordinator>,
+    /// State of the server's own routes.
+    shared: Arc<Shared>,
 }
 
 /// Builds the server from the application. Secrets come from the
@@ -88,6 +94,7 @@ pub fn compose(app: &Arc<App>) -> Composed {
             Ok(dashboard) => {
                 composed.router =
                     with_dashboard(composed.router, dashboard::routes(Arc::new(dashboard)));
+                composed.shared.dashboard.store(true, Ordering::Release);
                 info!("dashboard at /dashboard");
             }
             Err(error) => warn!(%error, "dashboard disabled"),
@@ -138,12 +145,13 @@ pub fn compose_with_secrets(
     let shared = Arc::new(Shared {
         coordinator: Arc::clone(&coordinator),
         bus: Arc::clone(&bus),
+        dashboard: AtomicBool::new(false),
     });
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/runs/{id}", get(run_page))
         .route("/events/{id}", get(event_page))
-        .with_state(shared)
+        .with_state(Arc::clone(&shared))
         .merge(Arc::clone(&github).routes())
         .merge(Arc::clone(&gitlab).routes())
         .merge(Arc::clone(&api).routes())
@@ -154,6 +162,7 @@ pub fn compose_with_secrets(
         hooks,
         bus,
         coordinator,
+        shared,
     }
 }
 
@@ -173,6 +182,8 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     // Reaps at once, then every minute: a crash followed by a restart
     // within the staleness window is closed too (#47).
     let reaper = crate::liveness::spawn_reaper(Arc::clone(&app), cancel.clone());
+    // Events older than server.keep_events_days go; runs stay (#69).
+    let pruner = crate::prune::spawn_pruner(Arc::clone(&app), cancel.clone());
     let mut hook_tasks = tokio::task::JoinSet::new();
     for hook in composed.hooks {
         info!(hook = hook.name(), "hook ready");
@@ -195,6 +206,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     cancel.cancel();
     while hook_tasks.join_next().await.is_some() {}
     let _ = reaper.await;
+    let _ = pruner.await;
     info!("stopped");
     Ok(())
 }
@@ -232,28 +244,46 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
     .into_response()
 }
 
+/// A run link as posted on a pull request or issue: the run is shown on
+/// the dashboard, behind sign-in (#69). Findings, plans and events of
+/// private repositories are never served to whoever has the link.
 async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
     let Ok(run_id) = RunId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad run id").into_response();
     };
-    pages::run_page(
-        shared.coordinator.app().store.as_ref(),
-        &run_id,
-        pages::Links::PUBLIC,
-    )
-    .await
+    signed_in_page(&shared, &format!("/dashboard/runs/{run_id}"))
 }
 
+/// An event link: shown on the dashboard, behind sign-in (#69).
 async fn event_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> Response {
     let Ok(event_id) = EventId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad event id").into_response();
     };
-    pages::event_page(
-        shared.coordinator.app().store.as_ref(),
-        &event_id,
-        pages::Links::PUBLIC,
-    )
-    .await
+    signed_in_page(&shared, &format!("/dashboard/events/{event_id}"))
+}
+
+/// Sends the browser to the dashboard page, or explains that there is none.
+fn signed_in_page(shared: &Shared, to: &str) -> Response {
+    if !shared.dashboard.load(Ordering::Acquire) {
+        return (
+            StatusCode::NOT_FOUND,
+            pages::page(
+                "Not served here",
+                "",
+                "<h1>Not served here</h1><p>Run and event pages are shown on the dashboard, \
+                 behind sign-in. This Henk has no dashboard: add <code>[dashboard]</code> to \
+                 henk.toml. <code>henk runs show</code> reads a run on the server.</p>",
+            ),
+        )
+            .into_response();
+    }
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    if let Ok(location) = axum::http::HeaderValue::from_str(to) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::LOCATION, location);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -450,8 +480,38 @@ github_owners = ["docspec"]
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(page.contains("unmodelled") && page.contains("keep it simple"));
+        assert_eq!(status, StatusCode::NOT_FOUND, "no dashboard, no event page");
+        assert!(
+            !page.contains("keep it simple"),
+            "a recorded payload is never served without sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_and_event_links_lead_to_the_dashboard() {
+        let app = test_app().await;
+        let with = composed(&app);
+        with.shared.dashboard.store(true, Ordering::Release);
+        for (link, to) in [
+            ("/runs/r-1", "/dashboard/runs/r-1"),
+            ("/events/e-1", "/dashboard/events/e-1"),
+        ] {
+            let response = with
+                .router
+                .clone()
+                .oneshot(Request::get(link).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER, "{link}");
+            assert_eq!(response.headers()[axum::http::header::LOCATION], to);
+        }
+        let (status, page) = call(
+            composed(&app).router,
+            Request::get("/runs/r-1").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(page.contains("[dashboard]"), "{page}");
     }
 
     #[tokio::test]

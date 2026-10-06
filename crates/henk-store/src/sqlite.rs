@@ -14,9 +14,9 @@ use time::format_description::well_known::Rfc3339;
 use crate::store::RunStore;
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, RawRun,
-    RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str, now, platform_str,
-    status_str, to_i64, to_u64,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str,
+    now, platform_str, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -31,6 +31,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/002_inbound_events.sql")),
         M::up(include_str!("../migrations/sqlite/003_run_liveness.sql")),
         M::up(include_str!("../migrations/sqlite/004_dashboard.sql")),
+        M::up(include_str!("../migrations/sqlite/005_prune_events.sql")),
     ])
 }
 
@@ -403,6 +404,30 @@ impl RunStore for SqliteStore {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        })
+    }
+
+    async fn prune_events(&self, older_than: OffsetDateTime) -> Result<PruneCounts, StoreError> {
+        let cutoff = older_than
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        self.with(|c| {
+            // The store's mutex is held, so nothing else can interleave.
+            let transaction = c.unchecked_transaction()?;
+            let outcomes = transaction.execute(
+                "DELETE FROM event_outcomes WHERE event_id IN
+                 (SELECT id FROM inbound_events WHERE received_at < ?1)",
+                params![cutoff],
+            )?;
+            let events = transaction.execute(
+                "DELETE FROM inbound_events WHERE received_at < ?1",
+                params![cutoff],
+            )?;
+            transaction.commit()?;
+            Ok(PruneCounts {
+                events: u64::try_from(events).unwrap_or(u64::MAX),
+                outcomes: u64::try_from(outcomes).unwrap_or(u64::MAX),
+            })
         })
     }
 

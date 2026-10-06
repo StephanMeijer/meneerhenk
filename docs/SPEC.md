@@ -445,7 +445,7 @@ These hold everywhere:
      of the head it read, and reply only in that pull request's threads.
    - An email reply can go only to that mail's correspondents.
 6. **Every visible action is traceable.** Each review, plan and mail links
-   back to its run. Each comment carries hidden markers saying who wrote it,
+   back to its run; the run page is behind the dashboard's sign-in. Each comment carries hidden markers saying who wrote it,
    which model, which model fact-checked it when one did and, when someone
    asked for it, for whom. A finding withdrawn as wrong keeps who wrote it
    and adds who withdrew it, with which model and check.

@@ -283,6 +283,15 @@ pub struct InboundEvent {
     pub payload: Option<String>,
 }
 
+/// What one pruning pass deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PruneCounts {
+    /// Inbound events deleted.
+    pub events: u64,
+    /// Outcomes of those events deleted.
+    pub outcomes: u64,
+}
+
 /// What one listener did with an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutcomeRecord {

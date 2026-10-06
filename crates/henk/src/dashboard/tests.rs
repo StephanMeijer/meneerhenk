@@ -231,19 +231,24 @@ async fn seed(f: &Fixture) {
 #[tokio::test]
 async fn nothing_shows_without_a_session() {
     let f = fixture("https://127.0.0.1:9");
-    for uri in [
-        "/dashboard",
-        "/dashboard/events",
-        "/dashboard/health",
-        "/dashboard/runs/r-1",
+    for (uri, login) in [
+        ("/dashboard", "/dashboard/login"),
+        (
+            "/dashboard/events",
+            "/dashboard/login?next=%2Fdashboard%2Fevents",
+        ),
+        (
+            "/dashboard/health",
+            "/dashboard/login?next=%2Fdashboard%2Fhealth",
+        ),
+        (
+            "/dashboard/runs/r-1",
+            "/dashboard/login?next=%2Fdashboard%2Fruns%2Fr-1",
+        ),
     ] {
         let answer = get(&f, uri, None).await;
         assert_eq!(answer.status, StatusCode::SEE_OTHER, "{uri}");
-        assert_eq!(
-            answer.headers[header::LOCATION],
-            "/dashboard/login",
-            "{uri}"
-        );
+        assert_eq!(answer.headers[header::LOCATION], login, "{uri}");
     }
     assert_eq!(
         get(&f, "/dashboard/running.json", None).await.status,
@@ -609,4 +614,78 @@ async fn run_detail_events_health_and_the_poller_answer() {
     let script = get(&f, "/dashboard/app.js", Some(&me)).await;
     assert!(script.body.contains("textContent"));
     assert!(!script.body.contains("innerHTML"));
+}
+
+/// Signs in through the mocked GitHub, starting at `login`, and returns
+/// where the callback sends the browser.
+async fn sign_in_from(f: &Fixture, login: &str) -> String {
+    let started = get(f, login, None).await;
+    assert_eq!(started.status, StatusCode::SEE_OTHER, "{login}");
+    let to = started.headers[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let state = to
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_owned();
+    let cookie = set_cookies(&started)
+        .into_iter()
+        .find(|c| c.starts_with(STATE_COOKIE))
+        .unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_owned();
+    let back = get(
+        f,
+        &format!("/dashboard/auth/callback?code=good&state={state}"),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(back.status, StatusCode::SEE_OTHER, "{login}");
+    back.headers[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn a_run_link_leads_through_sign_in_back_to_the_run() {
+    let github = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/login/oauth/access_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token": "gho_t"})))
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": ALLOWED, "login": "alice"})),
+        )
+        .mount(&github)
+        .await;
+    let f = fixture(&github.uri().replace("localhost", "127.0.0.1"));
+
+    let unsigned = get(&f, "/dashboard/runs/r-1", None).await;
+    assert_eq!(unsigned.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        unsigned.headers[header::LOCATION],
+        "/dashboard/login?next=%2Fdashboard%2Fruns%2Fr-1"
+    );
+    assert_eq!(
+        sign_in_from(&f, "/dashboard/login?next=%2Fdashboard%2Fruns%2Fr-1").await,
+        "/dashboard/runs/r-1"
+    );
+    for hostile in [
+        "https%3A%2F%2Fevil.example%2F",
+        "%2F%2Fevil.example",
+        "%2Fdashboardevil",
+        "%2Fdashboard%2F%5C%5Cevil.example",
+    ] {
+        assert_eq!(
+            sign_in_from(&f, &format!("/dashboard/login?next={hostile}")).await,
+            "/dashboard",
+            "{hostile}"
+        );
+    }
+    assert_eq!(sign_in_from(&f, "/dashboard/login").await, "/dashboard");
 }

@@ -23,6 +23,7 @@ mod liveness;
 mod pages;
 mod plan;
 mod plan_tools;
+mod prune;
 mod recorder;
 mod review;
 mod review_many;

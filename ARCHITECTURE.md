@@ -562,7 +562,7 @@ flowchart LR
 | 3. Words are information | Prompts say so, but the code does not rely on it: every write goes through tools that validate arguments; `web_fetch` sends nothing but the URL |
 | 4. The model never holds credentials | Secrets are read from the environment by `App::build`, `RmcpSession::connect` (passed to the child only), and `GitHubAuth`; the model sees tool names |
 | 5. Scope is fixed per task | `scope::guard` pins repository, pull request and commit for reviews, repository and issue for plans; `plan_tools` refuse other issues except through `link_issue` |
-| 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run and every inbound event with its outcomes, `/runs/{id}` and `/events/{id}` |
+| 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run and every inbound event with its outcomes (events pruned after `server.keep_events_days`, runs kept), `/runs/{id}` leading to the run on the dashboard |
 | 7. Allowlists bound the world | `Allowlist::allows` in `listeners/filter.rs`, `run_review` and `run_plan` |
 | 8. Failure is visible | `report_failure` posts a failure comment and closes the check; `run_plan` posts "Planning failed"; both record the error on the run |
 
@@ -570,8 +570,9 @@ The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth
 says who someone is; the configured GitHub user ids decide, on every
 request, whether they may look. It only reads the store and the settings:
 no page starts, stops or changes anything, and every value it shows is
-escaped. The run and event pages linked from comments are outside it and
-need no sign-in.
+escaped. The run and event links posted in comments, `/runs/{id}` and
+`/events/{id}`, redirect to the dashboard's pages and so need sign-in too;
+without a dashboard they are not served.
 
 ## 10. GitHub and GitLab differences
 

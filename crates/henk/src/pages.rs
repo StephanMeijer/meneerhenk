@@ -1,5 +1,5 @@
-//! HTML for runs and events, shared by the public per-run pages that
-//! comments link to and by the dashboard (#36). Every value that comes from
+//! HTML for runs and events, shown on the dashboard behind sign-in (#36,
+//! #69); the run links posted in comments lead there. Every value that comes from
 //! the store or a payload is escaped: it is other people's text (§8.3).
 
 use std::fmt::Write as _;
@@ -52,19 +52,13 @@ pub fn page(title: &str, nav: &str, body: &str) -> Response {
 /// Where links between runs and events point.
 #[derive(Debug, Clone, Copy)]
 pub struct Links {
-    /// Prefix of run and event paths: empty for the public pages.
+    /// Prefix of run and event paths, such as `/dashboard`.
     pub prefix: &'static str,
     /// The menu above the page.
     pub nav: &'static str,
 }
 
 impl Links {
-    /// The pages comments link to.
-    pub const PUBLIC: Self = Self {
-        prefix: "",
-        nav: "",
-    };
-
     /// The run page of `run`.
     #[must_use]
     pub fn run(self, run: &str) -> String {
