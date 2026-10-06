@@ -86,16 +86,21 @@ pub fn compose(app: &Arc<App>) -> Composed {
             });
         match built {
             Ok(dashboard) => {
-                composed.router = composed
-                    .router
-                    .merge(dashboard::routes(Arc::new(dashboard)))
-                    .layer(TraceLayer::new_for_http());
+                composed.router =
+                    with_dashboard(composed.router, dashboard::routes(Arc::new(dashboard)));
                 info!("dashboard at /dashboard");
             }
             Err(error) => warn!(%error, "dashboard disabled"),
         }
     }
     composed
+}
+
+/// Adds the dashboard's routes to a composed router. The composed routes
+/// are already traced, so only the dashboard's own routes get a trace
+/// layer here; layering the merged router would trace the rest twice.
+fn with_dashboard(router: Router, dashboard: Router) -> Router {
+    router.merge(dashboard.layer(TraceLayer::new_for_http()))
 }
 
 /// Builds the server with explicit secrets, for tests and for [`compose`].
@@ -345,6 +350,50 @@ github_owners = ["docspec"]
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"active_reviews\":0"));
         assert!(body.contains("\"review\""));
+    }
+
+    /// A writer that keeps what the trace layer logs, for counting.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_does_not_trace_the_other_routes_twice() {
+        let app = test_app().await;
+        let dashboard = Router::new().route("/dashboard/x", get(|| async { "ok" }));
+        let router = with_dashboard(composed(&app).router, dashboard);
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        for path in ["/healthz", "/dashboard/x"] {
+            captured.0.lock().unwrap().clear();
+            let (status, _) = call(
+                router.clone(),
+                Request::get(path).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(
+                log.matches("started processing request").count(),
+                1,
+                "{path} traced once: {log}"
+            );
+        }
     }
 
     #[tokio::test]
