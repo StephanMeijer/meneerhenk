@@ -378,7 +378,10 @@ To set one up (Debian or alike):
    does, 3.8 and later are checked).
 2. Put Henk's public key in `/root/.ssh/authorized_keys`, and allow root
    to sign in with a key (`PermitRootLogin prohibit-password`, Debian's
-   default).
+   default). Henk only runs commands, so start the line with `restrict`
+   (no pty, no port, agent or X11 forwarding) and `from=` with the address
+   Henk connects from; a stolen key is then of no use anywhere else:
+   `restrict,from="203.0.113.7" ssh-ed25519 AAAA… henk`
 
 Then, in `henk.toml`, with the private key's path in the variable
 `key_path_env` names and the host key pinned (`ssh-keyscan -t ed25519 host`
@@ -448,10 +451,10 @@ the tools the script needs on lines of their own.
 
 Coming from `henk-runner` (earlier versions signed in as a `henk` user
 whose key could only run that program): put Henk's key in
-`/root/.ssh/authorized_keys` and drop `user = "henk"` from
-`[workspace.ssh]`. `/usr/local/sbin/henk-runner`, `/etc/sudoers.d/henk`
-and the `henk` user are no longer used and can go; records an older Henk
-left are still swept. The live tests run against such a
+`/root/.ssh/authorized_keys` with the options of step 2 and drop
+`user = "henk"` from `[workspace.ssh]`. `/usr/local/sbin/henk-runner`,
+`/etc/sudoers.d/henk` and the `henk` user are no longer used and can go;
+records an older Henk left are still swept. The live tests run against such a
 host: `deploy/sandbox/test-host.Containerfile` builds one, and
 `HENK_TEST_SSH_HOST`, `_PORT`, `_USER`, `_KEY_PATH` and `_HOST_KEY` point
 `cargo test -p henk -- --ignored live_` at it.
