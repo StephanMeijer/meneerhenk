@@ -1,18 +1,15 @@
-//! The project's own checks, run in an address run's checkout (§3.5).
+//! The project's own checks, run in an address run's workspace (§3.5).
 //!
-//! They run the pull request's code. Until Henk runs them in a container,
-//! the guard is the environment: it is emptied, so no secret Henk holds
-//! (§8.4) reaches them, and each command has a time limit.
+//! They run the pull request's code. The workspace backend decides how far
+//! that is kept from Henk: every backend empties the environment, so no
+//! secret Henk holds (§8.4) reaches them, and bounds time and output.
 
 use std::fmt::Write as _;
-use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
+use henk_domain::address::WorkspacePath;
 
-/// Output kept per command for the model: the end, where errors are.
-pub const OUTPUT_CAP: usize = 20 * 1024;
+use crate::workspace::Workspace;
 
 /// What one check did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +20,7 @@ pub struct CheckResult {
     pub code: Option<i32>,
     /// Whether it ran past its time limit and was stopped.
     pub timed_out: bool,
-    /// Standard output and error, the last [`OUTPUT_CAP`] bytes.
+    /// Standard output and error, the end the workspace kept.
     pub output: String,
 }
 
@@ -35,75 +32,34 @@ impl CheckResult {
     }
 }
 
-/// The last `cap` bytes of `text`, on a character boundary.
-fn tail(text: &str, cap: usize) -> String {
-    if text.len() <= cap {
-        return text.to_owned();
-    }
-    let mut start = text.len() - cap;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("[... cut ...]\n{}", text.get(start..).unwrap_or_default())
-}
-
-/// Runs each command in `dir`, in order, with an empty environment.
-pub async fn run_checks(dir: &Path, commands: &[Vec<String>], limit: Duration) -> Vec<CheckResult> {
+/// Runs each command at the root of `workspace`, in order, each for at
+/// most `limit`.
+pub async fn run_checks(
+    workspace: &dyn Workspace,
+    commands: &[Vec<String>],
+    limit: Duration,
+) -> Vec<CheckResult> {
     let mut results = Vec::with_capacity(commands.len());
     for argv in commands {
-        let shown = argv.join(" ");
-        let Some((program, args)) = argv.split_first() else {
+        let command = argv.join(" ");
+        if argv.is_empty() {
             continue;
-        };
-        let child = Command::new(program)
-            .args(args)
-            .current_dir(dir)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", dir)
-            .env("LANG", "C.UTF-8")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
-        let child = match child {
-            Ok(child) => child,
-            Err(error) => {
-                results.push(CheckResult {
-                    command: shown,
-                    code: None,
-                    timed_out: false,
-                    output: format!("could not start: {error}"),
-                });
-                continue;
-            }
-        };
-        match tokio::time::timeout(limit, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                let _ = write!(text, "{}", String::from_utf8_lossy(&output.stderr));
-                results.push(CheckResult {
-                    command: shown,
-                    code: output.status.code(),
-                    timed_out: false,
-                    output: tail(&text, OUTPUT_CAP),
-                });
-            }
-            Ok(Err(error)) => results.push(CheckResult {
-                command: shown,
+        }
+        let result = match workspace.exec(argv, &WorkspacePath::root(), limit).await {
+            Ok(done) => CheckResult {
+                command,
+                code: done.code,
+                timed_out: done.timed_out,
+                output: done.output,
+            },
+            Err(error) => CheckResult {
+                command,
                 code: None,
                 timed_out: false,
-                output: format!("could not wait for it: {error}"),
-            }),
-            // Dropping the future kills the child (`kill_on_drop`).
-            Err(_) => results.push(CheckResult {
-                command: shown,
-                code: None,
-                timed_out: true,
-                output: format!("stopped after {}s", limit.as_secs()),
-            }),
-        }
+                output: format!("could not run: {error}"),
+            },
+        };
+        results.push(result);
     }
     results
 }
@@ -143,61 +99,76 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use henk_domain::workspace::Profile;
+
     use super::*;
     use crate::git::ScratchDir;
+    use crate::workspace::WorkspaceProvider as _;
+    use crate::workspace::fake::{FakeProvider, Scripted};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
     }
 
     #[tokio::test]
-    async fn passing_failing_and_slow_commands_are_told_apart() {
+    async fn passing_and_failing_checks_are_told_apart() {
         let dir = ScratchDir::new("henk-checks-kinds").unwrap();
+        let mut provider = FakeProvider::default();
+        provider
+            .script
+            .insert("true".to_owned(), Scripted::default());
+        provider.script.insert(
+            "cargo test".to_owned(),
+            Scripted {
+                code: 3,
+                output: "broken\n".to_owned(),
+                writes: Vec::new(),
+            },
+        );
+        let ws = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
         let results = run_checks(
-            dir.path(),
-            &[
-                argv(&["true"]),
-                argv(&["sh", "-c", "echo broken >&2; exit 3"]),
-                argv(&["sleep", "5"]),
-            ],
-            Duration::from_millis(300),
+            ws.as_ref(),
+            &[argv(&["true"]), argv(&["cargo", "test"]), Vec::new()],
+            Duration::from_secs(5),
         )
         .await;
+        assert_eq!(results.len(), 2, "an empty command is skipped");
         assert!(results[0].passed());
         assert_eq!(results[1].code, Some(3));
-        assert_eq!(results[1].output.trim(), "broken");
-        assert!(results[2].timed_out);
+        ws.close().await;
+        let closed = run_checks(ws.as_ref(), &[argv(&["true"])], Duration::from_secs(5)).await;
+        assert!(closed[0].output.starts_with("could not run"), "{closed:?}");
+    }
+
+    #[test]
+    fn the_results_read_as_text() {
+        let results = [
+            CheckResult {
+                command: "true".to_owned(),
+                code: Some(0),
+                timed_out: false,
+                output: String::new(),
+            },
+            CheckResult {
+                command: "sh -c exit 3".to_owned(),
+                code: Some(3),
+                timed_out: false,
+                output: "broken\n".to_owned(),
+            },
+            CheckResult {
+                command: "sleep 5".to_owned(),
+                code: None,
+                timed_out: true,
+                output: "stopped after 1s".to_owned(),
+            },
+        ];
         let text = describe(&results);
         assert!(text.contains("$ true: passed"), "{text}");
         assert!(text.contains("failed with exit code 3\nbroken"), "{text}");
         assert!(text.contains("$ sleep 5: timed out"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn a_check_sees_none_of_henks_environment() {
-        let dir = ScratchDir::new("henk-checks-env").unwrap();
-        let results = run_checks(dir.path(), &[argv(&["env"])], Duration::from_secs(5)).await;
-        let names: Vec<&str> = results[0]
-            .output
-            .lines()
-            .filter_map(|line| line.split('=').next())
-            .collect();
-        let mut sorted = names.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, ["HOME", "LANG", "PATH"], "{}", results[0].output);
-        assert!(
-            results[0]
-                .output
-                .contains(&format!("HOME={}", dir.path().display()))
-        );
-    }
-
-    #[test]
-    fn long_output_keeps_its_end() {
-        let text = format!("{}END", "x".repeat(OUTPUT_CAP * 2));
-        let kept = tail(&text, OUTPUT_CAP);
-        assert!(kept.ends_with("END"));
-        assert!(kept.len() <= OUTPUT_CAP + 20);
-        assert_eq!(tail("short", OUTPUT_CAP), "short");
+        assert_eq!(describe(&[]), "No checks are configured.");
     }
 }

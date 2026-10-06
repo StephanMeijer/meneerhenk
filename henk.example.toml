@@ -146,11 +146,26 @@ requester_id = 523456789012345678
 # timeout_secs = 1800
 # max_turns = 80
 # max_changed_files = 20
-# The project's checks, run in the checkout with an empty environment and
-# check_timeout_secs each. They run the pull request's code on this host.
+# The project's checks, run in the workspace with an empty environment and
+# [workspace] command_secs each. They run the pull request's code.
 # check_commands = [["cargo", "test", "--offline"]]
-# check_timeout_secs = 600
 # requester_id = 523456789012345678
+
+# Where an address run's file tools and checks run. Henk copies the pull
+# request's files into a workspace; only a checked changeset comes back, and
+# he commits it in a fresh checkout nothing ran in. The "host" backend runs
+# the checks as Henk's own user on this machine: not isolated, and only the
+# time and output limits hold. `henk config check` says so.
+# [workspace]
+# backend = "host"
+# command_secs = 600
+# run_secs = 1800
+# output_bytes = 20480
+# A named profile takes what it leaves out from [workspace].
+# [workspace.profiles.slow]
+# command_secs = 1800
+# [workspace.repositories]
+# "docspec/big-repo" = "slow"
 
 # External MCP servers. Henk is the client; nothing here is part of Henk.
 # The read session a lane sees: read-only toolsets, no write tool at all.

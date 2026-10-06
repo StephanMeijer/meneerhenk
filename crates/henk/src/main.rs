@@ -29,6 +29,7 @@ mod runs;
 mod server;
 mod urls;
 mod web_fetch;
+mod workspace;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

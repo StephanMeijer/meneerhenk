@@ -16,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{DatabaseConfig, Settings};
 use crate::liveness::LiveRuns;
+use crate::workspace::WorkspaceProvider;
+use crate::workspace::host::HostProvider;
 
 /// The shared application state.
 pub struct App {
@@ -35,6 +37,9 @@ pub struct App {
     pub shutdown: CancellationToken,
     /// The runs this process is working on, which the reaper leaves alone.
     pub live_runs: LiveRuns,
+    /// Opens the workspaces address runs work in (§3.5). The host backend
+    /// in production; tests swap in another.
+    pub workspace_provider: Arc<dyn WorkspaceProvider>,
     /// Tests: the writer `writer` returns for every platform.
     #[cfg(test)]
     pub test_writer: Option<Arc<dyn PlatformWriter>>,
@@ -154,6 +159,7 @@ impl App {
             gitlab,
             shutdown: CancellationToken::new(),
             live_runs: LiveRuns::default(),
+            workspace_provider: Arc::new(HostProvider),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]

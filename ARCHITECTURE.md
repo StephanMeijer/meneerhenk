@@ -399,6 +399,7 @@ sequenceDiagram
     participant R as address.rs
     participant W as AddressWriter (GitHub)
     participant G as git.rs (checkout)
+    participant S as workspace (host)
     participant A as Agent
     participant DB as RunStore
 
@@ -407,14 +408,26 @@ sequenceDiagram
     R->>DB: create_run (kind address)
     R->>W: open_threads (authors by login, never by marker)
     R->>G: clone_at head, token via env only
-    R->>A: workspace tools: read, search, edit, write, run_checks, settle_thread
-    A-->>R: edits in the checkout, an outcome per thread
-    R->>G: run_checks, commit with Henk-Run and Requested-by
+    R->>S: open: copy the files without .git; the clone is removed
+    R->>A: tools on the workspace: read, search, edit, write, run_checks, settle_thread
+    A-->>R: edits in the workspace, an outcome per thread
+    R->>S: run_checks (each one on the run's timeline), export the changeset
+    R->>R: changeset_refusal: .git, escapes, links, submodules, file limit
+    R->>S: close (also on failure, cancel or drop)
     R->>W: pull_facts again: head unchanged?
+    R->>G: fresh clone_at head, apply the changeset, commit with Henk-Run and Requested-by
     R->>G: push, fast-forward only
     R->>W: reply per thread; resolve Henk's own fixed findings; summary
     R->>DB: finish_run
 ```
+
+The model's tools talk only to a `Workspace` (`crates/henk/src/workspace`);
+the backend is a configuration choice (`[workspace]`) and only `host`
+exists today. Its tree has no `.git`: its record of changes is a git
+directory outside the tree, so nothing a check runs can reach it, and
+`HOME` is a scratch directory outside the tree too. What is pushed is
+never the tree the checks ran in, only the checked changeset applied to a
+fresh checkout.
 
 Every error happens before the push: a failed run posts a failure comment
 saying nothing was pushed. After the push, replies and the summary are

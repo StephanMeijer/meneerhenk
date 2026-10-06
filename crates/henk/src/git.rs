@@ -11,6 +11,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use henk_domain::review::CommitSha;
+use henk_domain::workspace::{Change, ChangeKind};
 use henk_platform::address::CommitIdentity;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::io::AsyncWriteExt as _;
@@ -47,6 +48,14 @@ pub enum GitError {
     /// The push was refused as not a fast-forward.
     #[error("the push was refused: the branch moved since Henk read it")]
     Rejected,
+    /// A change could not be applied to the checkout.
+    #[error("cannot apply {path}: {why}")]
+    Apply {
+        /// The path in the checkout.
+        path: String,
+        /// Why not.
+        why: String,
+    },
 }
 
 /// A directory that is removed when dropped.
@@ -96,7 +105,7 @@ fn auth_header(token: &SecretString) -> String {
 
 /// A git command with nothing inherited: no user or system config, no
 /// prompt, and the token only when `token` is given.
-fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString>) -> Command {
+pub(crate) fn git_command(dir: &Path, args: &[&str], token: Option<&SecretString>) -> Command {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -214,6 +223,64 @@ impl Checkout {
             .await?
             .trim()
             .to_owned())
+    }
+
+    /// Applies a checked changeset (§3.5): writes or removes each file and
+    /// sets its executable bit. A path under or at a symbolic link of the
+    /// checkout is refused, so no change lands outside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError::Apply`] for the first change that cannot be
+    /// applied; the checkout is then thrown away, nothing is pushed.
+    pub fn apply(&self, changes: &[Change]) -> Result<(), GitError> {
+        use std::os::unix::fs::PermissionsExt as _;
+        for change in changes {
+            let shown = change.path.as_str();
+            let fail = |why: String| GitError::Apply {
+                path: shown.to_owned(),
+                why,
+            };
+            let target = self.path().join(shown);
+            let mut walked = self.path().to_path_buf();
+            for part in shown.split('/') {
+                walked.push(part);
+                if walked
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    return Err(fail("a symbolic link is in the way".to_owned()));
+                }
+            }
+            match &change.kind {
+                ChangeKind::Delete => match std::fs::remove_file(&target) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(fail(error.to_string())),
+                },
+                ChangeKind::Write {
+                    content,
+                    executable,
+                } => {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| fail(e.to_string()))?;
+                    }
+                    std::fs::write(&target, content).map_err(|e| fail(e.to_string()))?;
+                    let mut permissions = std::fs::metadata(&target)
+                        .map_err(|e| fail(e.to_string()))?
+                        .permissions();
+                    let mode = permissions.mode();
+                    permissions.set_mode(if *executable {
+                        mode | 0o111
+                    } else {
+                        mode & !0o111
+                    });
+                    std::fs::set_permissions(&target, permissions)
+                        .map_err(|e| fail(e.to_string()))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The paths changed in the working tree, added and deleted ones too.
@@ -369,6 +436,30 @@ pub(crate) mod tests {
         (head, log)
     }
 
+    /// The paths the head of `feature` on a bare remote changed since
+    /// `base`, sorted, and the content of `path` there.
+    pub(crate) async fn remote_change(
+        remote: &Path,
+        base: &str,
+        path: &str,
+    ) -> (Vec<String>, String) {
+        let names = run(
+            remote,
+            &["diff", "--name-only", base, "refs/heads/feature"],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut names: Vec<String> = names.lines().map(str::to_owned).collect();
+        names.sort();
+        let spec = format!("refs/heads/feature:{path}");
+        let content = run(remote, &["show", &spec], None, None)
+            .await
+            .unwrap_or_default();
+        (names, content)
+    }
+
     fn identity() -> CommitIdentity {
         CommitIdentity {
             name: "meneer-henk[bot]".to_owned(),
@@ -487,6 +578,63 @@ pub(crate) mod tests {
             matches!(late, Err(GitError::HeadMoved { .. })),
             "a clone of a moved branch is refused"
         );
+    }
+
+    #[tokio::test]
+    async fn a_changeset_is_applied_and_links_are_not_followed() {
+        use henk_domain::address::WorkspacePath;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (remote, head) = bare_remote("henk-git-apply").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let checkout = Checkout::clone_at(
+            ScratchDir::new("henk-git-apply-work").unwrap(),
+            &url,
+            "feature",
+            &head,
+            None,
+        )
+        .await
+        .unwrap();
+        let change = |path: &str, kind: ChangeKind| Change {
+            path: WorkspacePath::parse(path).unwrap(),
+            kind,
+        };
+        checkout
+            .apply(&[
+                change(
+                    "tools/run.sh",
+                    ChangeKind::Write {
+                        content: b"#!/bin/sh\n".to_vec(),
+                        executable: true,
+                    },
+                ),
+                change("src/a.rs", ChangeKind::Delete),
+            ])
+            .unwrap();
+        let mut changed = checkout.changed_files().await.unwrap();
+        changed.sort();
+        assert_eq!(changed, ["src/a.rs", "tools/run.sh"]);
+        let mode = std::fs::metadata(checkout.path().join("tools/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+
+        let outside = ScratchDir::new("henk-git-apply-outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), checkout.path().join("out")).unwrap();
+        let refused = checkout.apply(&[change(
+            "out/x",
+            ChangeKind::Write {
+                content: b"x".to_vec(),
+                executable: false,
+            },
+        )]);
+        assert!(
+            matches!(refused, Err(GitError::Apply { .. })),
+            "{refused:?}"
+        );
+        assert!(!outside.path().join("x").exists());
     }
 
     #[test]

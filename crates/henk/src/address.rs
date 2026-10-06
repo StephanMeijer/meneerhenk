@@ -1,6 +1,6 @@
 //! The address run (§3.5): read the open review threads of one pull
-//! request, let a model fix what it can in a checkout, push one commit as a
-//! fast-forward, then reply in each thread and sum up.
+//! request, let a model fix what it can in a workspace, push one commit as
+//! a fast-forward, then reply in each thread and sum up.
 //!
 //! Everything that can fail with an error happens before the push. After
 //! it, replies and the summary are best-effort: a run that failed never
@@ -15,6 +15,7 @@ use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::address::{ThreadOutcome, commit_message, push_refusal};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::run::{RunId, RunKind};
+use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
 use henk_platform::address::{AddressWriter, OpenThread};
@@ -29,6 +30,8 @@ use crate::checks::{describe, run_checks};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
+use crate::workspace::traced::Traced;
+use crate::workspace::{Workspace, checked_changeset};
 
 /// A request to address one pull request's review feedback.
 #[derive(Debug, Clone)]
@@ -197,9 +200,6 @@ impl Session<'_> {
         facts: &henk_platform::address::PullFacts,
         cancel: CancellationToken,
     ) -> anyhow::Result<AddressReport> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
-        };
         let target = &self.request.target;
         let threads = self
             .writer
@@ -229,45 +229,29 @@ impl Session<'_> {
             .git_token()
             .await
             .context("getting a token for git")?;
-        let dir = ScratchDir::new(&format!("henk-address-{}", self.run))
-            .context("making the checkout directory")?;
-        let checkout =
-            Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
-                .await
-                .context("checking out the pull request")?;
+        let workspace = self.import(facts, token.clone()).await?;
+        // Closed on every path; a run future that is dropped instead drops
+        // the workspace, and every backend destroys itself then too.
+        let worked = self.in_workspace(&workspace, &threads, cancel).await;
+        workspace.close().await;
+        drop(workspace);
+        let (settled, changes, checks_text) = worked?;
 
-        let context = Arc::new(AddressContext {
-            root: checkout.path().to_path_buf(),
-            threads: threads.clone(),
-            check_commands: config.check_commands.clone(),
-            check_timeout: Duration::from_secs(config.check_timeout_secs),
-            max_changed_files: config.max_changed_files,
-            state: Mutex::new(AddressState::default()),
-        });
-        self.session(&context, cancel).await?;
-
-        let settled = context
-            .state
-            .lock()
-            .map(|s| s.settled.clone())
-            .map_err(|_| anyhow!("address state unavailable"))?;
-        let changed = checkout
-            .changed_files()
-            .await
-            .context("listing the changes")?;
-        if changed.len() > config.max_changed_files {
-            return Err(anyhow!(
-                "{} files changed; a run may change at most {}",
-                changed.len(),
-                config.max_changed_files
-            ));
-        }
-
-        let (commit, checks_text) = if changed.is_empty() {
-            (None, String::new())
+        let commit = if changes.is_empty() {
+            None
         } else {
-            self.commit_and_push(&checkout, facts, &threads, &settled, changed.len())
-                .await?
+            // A fresh checkout nothing ran in: only the checked changeset
+            // reaches it, and it is what Henk commits and pushes.
+            let dir = ScratchDir::new(&format!("henk-address-{}-push", self.run))
+                .context("making the checkout directory")?;
+            let checkout =
+                Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
+                    .await
+                    .context("checking out the pull request to push")?;
+            Some(
+                self.commit_and_push(&checkout, facts, &threads, &settled, &changes)
+                    .await?,
+            )
         };
 
         Ok(self
@@ -275,31 +259,107 @@ impl Session<'_> {
             .await)
     }
 
-    /// Runs the checks once more, commits as Henk, makes sure the branch has
-    /// not moved, and pushes. Returns the commit and the checks' report.
+    /// Clones the pull request at the head Henk read and imports its files
+    /// into a new workspace that records every command on the run. The
+    /// clone is removed once the workspace has its copy.
+    async fn import(
+        &self,
+        facts: &henk_platform::address::PullFacts,
+        token: Option<secrecy::SecretString>,
+    ) -> anyhow::Result<Arc<dyn Workspace>> {
+        let dir = ScratchDir::new(&format!("henk-address-{}", self.run))
+            .context("making the checkout directory")?;
+        let checkout =
+            Checkout::clone_at(dir, &facts.remote, &facts.push.head_ref, &facts.head, token)
+                .await
+                .context("checking out the pull request")?;
+        let repo = self.request.target.repo.path();
+        let profile = self.app.settings.workspace.profile_for(&repo);
+        let opened = self
+            .app
+            .workspace_provider
+            .open(checkout.path(), profile)
+            .await
+            .context("opening the workspace")?;
+        Ok(Arc::new(Traced::new(
+            opened,
+            Arc::clone(&self.app.store),
+            self.run.clone(),
+        )))
+    }
+
+    /// The session in the workspace, then its checked changeset: the
+    /// settled threads, the changes and the checks' report.
+    async fn in_workspace(
+        &self,
+        workspace: &Arc<dyn Workspace>,
+        threads: &[OpenThread],
+        cancel: CancellationToken,
+    ) -> anyhow::Result<(
+        std::collections::BTreeMap<String, Settled>,
+        Vec<Change>,
+        String,
+    )> {
+        let Some(config) = self.app.settings.address.as_ref() else {
+            return Err(anyhow!("address runs are not configured"));
+        };
+        let context = Arc::new(AddressContext {
+            workspace: Arc::clone(workspace),
+            threads: threads.to_vec(),
+            check_commands: config.check_commands.clone(),
+            check_timeout: self.command_limit(),
+            max_changed_files: config.max_changed_files,
+            state: Mutex::new(AddressState::default()),
+        });
+        self.session(&context, cancel).await?;
+        let settled = context
+            .state
+            .lock()
+            .map(|s| s.settled.clone())
+            .map_err(|_| anyhow!("address state unavailable"))?;
+        let (changes, checks_text) = self.changeset(workspace.as_ref()).await?;
+        Ok((settled, changes, checks_text))
+    }
+
+    /// What the run changed, checked against the policy (§3.5), and the
+    /// report of the checks. When anything changed, the checks run once more
+    /// in the workspace first, so what they leave behind is part of the
+    /// changeset and its limits.
+    async fn changeset(&self, workspace: &dyn Workspace) -> anyhow::Result<(Vec<Change>, String)> {
+        let Some(config) = self.app.settings.address.as_ref() else {
+            return Err(anyhow!("address runs are not configured"));
+        };
+        if workspace
+            .export()
+            .await
+            .context("listing the changes")?
+            .is_empty()
+        {
+            return Ok((Vec::new(), String::new()));
+        }
+        let results = run_checks(workspace, &config.check_commands, self.command_limit()).await;
+        let checks_text = if results.is_empty() {
+            String::new()
+        } else {
+            describe(&results)
+        };
+        let exported = workspace.export().await.context("listing the changes")?;
+        let changes =
+            checked_changeset(exported, config.max_changed_files).map_err(|why| anyhow!(why))?;
+        Ok((changes, checks_text))
+    }
+
+    /// Applies the changeset to the checkout, commits as Henk, makes sure
+    /// the branch has not moved, and pushes. Returns the commit.
     async fn commit_and_push(
         &self,
         checkout: &Checkout,
         facts: &henk_platform::address::PullFacts,
         threads: &[OpenThread],
         settled: &std::collections::BTreeMap<String, Settled>,
-        files: usize,
-    ) -> anyhow::Result<(Option<String>, String)> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
-        };
+        changes: &[Change],
+    ) -> anyhow::Result<String> {
         let target = &self.request.target;
-        let results = run_checks(
-            checkout.path(),
-            &config.check_commands,
-            Duration::from_secs(config.check_timeout_secs),
-        )
-        .await;
-        let checks_text = if results.is_empty() {
-            String::new()
-        } else {
-            describe(&results)
-        };
         let fixed_notes: Vec<String> = threads
             .iter()
             .filter_map(|t| {
@@ -333,6 +393,21 @@ impl Session<'_> {
         if let Some(why) = push_refusal(&now.push) {
             return Err(anyhow!("I may no longer push: {why}"));
         }
+        checkout.apply(changes).context("applying the change")?;
+        let mut in_checkout = checkout
+            .changed_files()
+            .await
+            .context("listing the changes")?;
+        in_checkout.sort();
+        let mut expected: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        expected.sort_unstable();
+        if in_checkout != expected {
+            return Err(anyhow!(
+                "the checkout changed {} files where the changeset has {}",
+                in_checkout.len(),
+                expected.len()
+            ));
+        }
         let sha = checkout
             .commit(&identity, &message)
             .await
@@ -341,8 +416,22 @@ impl Session<'_> {
             .push(&facts.push.head_ref)
             .await
             .context("pushing")?;
-        info!(commit = %sha, files, "pushed");
-        Ok((Some(sha), checks_text))
+        info!(commit = %sha, files = changes.len(), "pushed");
+        Ok(sha)
+    }
+
+    /// How long one check may run: the workspace profile's command limit
+    /// for this repository.
+    fn command_limit(&self) -> Duration {
+        let repo = self.request.target.repo.path();
+        Duration::from_secs(
+            self.app
+                .settings
+                .workspace
+                .profile_for(&repo)
+                .limits
+                .command_secs,
+        )
     }
 
     async fn session(
@@ -529,7 +618,11 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::git::tests::{bare_remote, remote_feature};
+    use crate::git::tests::{bare_remote, remote_change, remote_feature};
+    use crate::workspace::fake::{FakeProvider, Scripted};
+    use crate::workspace::host::HostProvider;
+    use crate::workspace::{Exported, WorkspaceProvider};
+    use henk_domain::workspace::{FileMode, RawChange};
 
     const CONFIG: &str = r#"
 [discord]
@@ -676,12 +769,30 @@ check_commands = [["true"]]
     }
 
     fn app(hub: Arc<FakeHub>, script: Vec<Completion>) -> App {
-        let settings = Config::parse(CONFIG)
+        app_on(hub, script, Arc::new(HostProvider), CONFIG)
+    }
+
+    fn app_on(
+        hub: Arc<FakeHub>,
+        script: Vec<Completion>,
+        provider: Arc<dyn WorkspaceProvider>,
+        config: &str,
+    ) -> App {
+        let model = ScriptedClient::new("scripted", script.into_iter().map(Ok));
+        app_with_model(hub, Arc::new(model), provider, config)
+    }
+
+    fn app_with_model(
+        hub: Arc<FakeHub>,
+        model: Arc<dyn ModelClient>,
+        provider: Arc<dyn WorkspaceProvider>,
+        config: &str,
+    ) -> App {
+        let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        let model = ScriptedClient::new("scripted", script.into_iter().map(Ok));
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
-        models.insert("m".to_owned(), Arc::new(model));
+        models.insert("m".to_owned(), model);
         App {
             settings,
             store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
@@ -690,11 +801,21 @@ check_commands = [["true"]]
             gitlab: None,
             shutdown: CancellationToken::new(),
             live_runs: crate::liveness::LiveRuns::default(),
+            workspace_provider: provider,
             test_writer: None,
             test_session: None,
             test_address_writer: Some(hub as Arc<dyn AddressWriter>),
             test_issue_writer: None,
         }
+    }
+
+    /// A fake workspace in which the configured check, `true`, passes.
+    fn fake() -> FakeProvider {
+        let mut provider = FakeProvider::default();
+        provider
+            .script
+            .insert("true".to_owned(), Scripted::default());
+        provider
     }
 
     fn request(run: &str) -> AddressRequest {
@@ -721,17 +842,50 @@ check_commands = [["true"]]
         })
     }
 
-    #[tokio::test]
-    async fn a_fix_is_pushed_as_one_commit_and_every_thread_hears_how_it_ended() {
-        let (remote, head) = bare_remote("henk-address-fix").await;
+    fn fix_x() -> Completion {
+        call(
+            "edit_file",
+            json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}),
+        )
+    }
+
+    /// The commands a run recorded on its timeline.
+    async fn execs(app: &App, run: &str) -> Vec<String> {
+        app.store
+            .events(&RunId::parse(run).unwrap())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .filter(|m| m.starts_with("exec "))
+            .collect()
+    }
+
+    /// The failure comment of a run that pushed nothing.
+    fn assert_failed_visibly(hub: &FakeHub, why: &str) {
+        assert!(hub.replies.lock().unwrap().is_empty(), "{why}: no replies");
+        let comments = hub.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "{why}");
+        assert!(
+            comments[0].contains("Nothing was pushed"),
+            "{why}: {}",
+            comments[0]
+        );
+        assert!(
+            comments[0].contains("kind=failure"),
+            "{why}: {}",
+            comments[0]
+        );
+    }
+
+    async fn fix_is_pushed(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
+        let run = format!("r-addr-1-{backend}");
+        let (remote, head) = bare_remote(&format!("henk-address-fix-{backend}")).await;
         let hub = hub(remote.path(), &head, None);
-        let app = app(
+        let app = app_on(
             Arc::clone(&hub),
             vec![
-                call(
-                    "edit_file",
-                    json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}),
-                ),
+                fix_x(),
                 call(
                     "settle_thread",
                     json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
@@ -742,8 +896,10 @@ check_commands = [["true"]]
                 ),
                 done(),
             ],
+            provider,
+            CONFIG,
         );
-        let report = run_address(&app, request("r-addr-1"), CancellationToken::new())
+        let report = run_address(&app, request(&run), CancellationToken::new())
             .await
             .unwrap();
         let sha = report.commit.clone().unwrap();
@@ -757,9 +913,12 @@ check_commands = [["true"]]
         );
         assert!(log.contains("- src/a.rs:2: Set x to 2."), "{log}");
         assert!(
-            log.contains("Henk-Run: r-addr-1\nRequested-by: discord:3"),
+            log.contains(&format!("Henk-Run: {run}\nRequested-by: discord:3")),
             "{log}"
         );
+        let (changed, content) = remote_change(remote.path(), head.as_str(), "src/a.rs").await;
+        assert_eq!(changed, ["src/a.rs"]);
+        assert_eq!(content, "fn main() {\n    let x = 2;\n}\n");
 
         let replies = hub.replies.lock().unwrap().clone();
         assert_eq!(replies.len(), 2);
@@ -787,22 +946,41 @@ check_commands = [["true"]]
             comments[0]
         );
         assert!(comments[0].contains("$ true: passed"), "{}", comments[0]);
-        assert!(comments[0].contains("/runs/r-addr-1"), "{}", comments[0]);
+        assert!(
+            comments[0].contains(&format!("/runs/{run}")),
+            "{}",
+            comments[0]
+        );
         let record = app
             .store
-            .run(&RunId::parse("r-addr-1").unwrap())
+            .run(&RunId::parse(&run).unwrap())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(record.status, RunStatus::Finished);
         assert_eq!(record.kind, RunKind::Address);
+        let execs = execs(&app, &run).await;
+        assert_eq!(execs.len(), 1, "one exec event per check: {execs:?}");
+        assert!(execs[0].starts_with("exec true exit 0 in "), "{execs:?}");
     }
 
     #[tokio::test]
-    async fn without_a_change_nothing_is_pushed_and_a_claimed_fix_is_not_believed() {
-        let (remote, head) = bare_remote("henk-address-nochange").await;
+    async fn a_fix_is_pushed_as_one_commit_and_every_thread_hears_how_it_ended() {
+        fix_is_pushed(Arc::new(HostProvider), "host").await;
+    }
+
+    #[tokio::test]
+    async fn a_fix_is_pushed_as_one_commit_on_the_fake_backend() {
+        let provider = fake();
+        fix_is_pushed(Arc::new(provider.clone()), "fake").await;
+        assert!(provider.closed(), "the workspace is destroyed on success");
+    }
+
+    async fn no_change_no_push(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
+        let run = format!("r-addr-2-{backend}");
+        let (remote, head) = bare_remote(&format!("henk-address-nochange-{backend}")).await;
         let hub = hub(remote.path(), &head, None);
-        let app = app(
+        let app = app_on(
             Arc::clone(&hub),
             vec![
                 call(
@@ -815,8 +993,10 @@ check_commands = [["true"]]
                 ),
                 done(),
             ],
+            provider,
+            CONFIG,
         );
-        let report = run_address(&app, request("r-addr-2"), CancellationToken::new())
+        let report = run_address(&app, request(&run), CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(report.commit, None);
@@ -839,29 +1019,41 @@ check_commands = [["true"]]
             "{summary}"
         );
         assert!(summary.contains("nothing pushed"), "{summary}");
+        assert!(execs(&app, &run).await.is_empty(), "no change, no checks");
     }
 
     #[tokio::test]
-    async fn a_branch_that_moved_while_henk_worked_gets_nothing_pushed() {
-        let (remote, head) = bare_remote("henk-address-moved").await;
+    async fn without_a_change_nothing_is_pushed_and_a_claimed_fix_is_not_believed() {
+        no_change_no_push(Arc::new(HostProvider), "host").await;
+    }
+
+    #[tokio::test]
+    async fn without_a_change_nothing_is_pushed_on_the_fake_backend() {
+        let provider = fake();
+        no_change_no_push(Arc::new(provider.clone()), "fake").await;
+        assert!(provider.closed());
+    }
+
+    async fn branch_moved(provider: Arc<dyn WorkspaceProvider>, backend: &str) {
+        let run = format!("r-addr-3-{backend}");
+        let (remote, head) = bare_remote(&format!("henk-address-moved-{backend}")).await;
         let mut later = facts(remote.path(), &head);
         later.head = CommitSha::parse("1111111111111111111111111111111111111111").unwrap();
         let hub = hub(remote.path(), &head, Some(later));
-        let app = app(
+        let app = app_on(
             Arc::clone(&hub),
             vec![
-                call(
-                    "edit_file",
-                    json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}),
-                ),
+                fix_x(),
                 call(
                     "settle_thread",
                     json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
                 ),
                 done(),
             ],
+            provider,
+            CONFIG,
         );
-        let error = run_address(&app, request("r-addr-3"), CancellationToken::new())
+        let error = run_address(&app, request(&run), CancellationToken::new())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("the branch moved"), "{error}");
@@ -870,25 +1062,215 @@ check_commands = [["true"]]
             head.as_str(),
             "nothing pushed"
         );
-        assert!(
-            hub.replies.lock().unwrap().is_empty(),
-            "no reply speaks of a fix that is not there"
-        );
-        let comments = hub.comments.lock().unwrap().clone();
-        assert_eq!(comments.len(), 1);
-        assert!(
-            comments[0].contains("Nothing was pushed"),
-            "{}",
-            comments[0]
-        );
-        assert!(comments[0].contains("kind=failure"), "{}", comments[0]);
+        assert_failed_visibly(&hub, "moved");
         let record = app
             .store
-            .run(&RunId::parse("r-addr-3").unwrap())
+            .run(&RunId::parse(&run).unwrap())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(record.status, RunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_while_henk_worked_gets_nothing_pushed() {
+        branch_moved(Arc::new(HostProvider), "host").await;
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_gets_nothing_pushed_on_the_fake_backend() {
+        let provider = fake();
+        branch_moved(Arc::new(provider.clone()), "fake").await;
+        assert!(provider.closed(), "the workspace is destroyed on failure");
+    }
+
+    #[tokio::test]
+    async fn a_changeset_against_the_rules_fails_visibly_before_the_push() {
+        let raw = |path: &str, mode: FileMode| Exported {
+            raw: RawChange {
+                path: path.to_owned(),
+                mode,
+                deleted: false,
+            },
+            content: b"x\n".to_vec(),
+        };
+        let too_many: Vec<Exported> = (0..20)
+            .map(|i| raw(&format!("gen/{i}.txt"), FileMode::Regular))
+            .collect();
+        for (case, inject, why) in [
+            (
+                "link",
+                vec![raw("docs", FileMode::Symlink)],
+                "symbolic link",
+            ),
+            (
+                "module",
+                vec![raw("vendor/lib", FileMode::Gitlink)],
+                "submodule",
+            ),
+            (
+                "git",
+                vec![raw(".git/hooks/pre-push", FileMode::Regular)],
+                ".git",
+            ),
+            (
+                "escape",
+                vec![raw("../outside", FileMode::Regular)],
+                "leaves the repository",
+            ),
+            (
+                "many",
+                too_many,
+                "21 files changed; a run may change at most 20",
+            ),
+        ] {
+            let run = format!("r-addr-5-{case}");
+            let (remote, head) = bare_remote(&format!("henk-address-refused-{case}")).await;
+            let hub = hub(remote.path(), &head, None);
+            let mut provider = fake();
+            provider.inject = inject;
+            let app = app_on(
+                Arc::clone(&hub),
+                vec![
+                    fix_x(),
+                    call(
+                        "settle_thread",
+                        json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
+                    ),
+                    done(),
+                ],
+                Arc::new(provider.clone()),
+                CONFIG,
+            );
+            let error = run_address(&app, request(&run), CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(why), "{case}: {error}");
+            assert_eq!(
+                remote_feature(remote.path()).await.0,
+                head.as_str(),
+                "{case}: nothing pushed"
+            );
+            assert_failed_visibly(&hub, case);
+            assert!(hub.comments.lock().unwrap()[0].contains(why), "{case}");
+            assert!(provider.closed(), "{case}: the workspace is destroyed");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_push_comes_from_a_clean_checkout_with_only_the_changeset() {
+        let check = r#"echo stray > stray.txt; mkdir -p "$HOME/.cache" && echo c > "$HOME/.cache/x"; mkdir -p .git/hooks && echo evil > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit; echo checked"#;
+        let config = CONFIG.replace(
+            r#"check_commands = [["true"]]"#,
+            &format!(
+                "check_commands = [[\"sh\", \"-c\", {}]]",
+                toml_string(check)
+            ),
+        );
+        let (remote, head) = bare_remote("henk-address-clean").await;
+        let hub = hub(remote.path(), &head, None);
+        let app = app_on(
+            Arc::clone(&hub),
+            vec![
+                fix_x(),
+                call(
+                    "settle_thread",
+                    json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
+                ),
+                done(),
+            ],
+            Arc::new(HostProvider),
+            &config,
+        );
+        let report = run_address(&app, request("r-addr-6"), CancellationToken::new())
+            .await
+            .unwrap();
+        let sha = report.commit.unwrap();
+        assert_eq!(remote_feature(remote.path()).await.0, sha);
+        // What the check left in the tree is part of the changeset and its
+        // limits; its HOME and a .git it made are not, and no hook it
+        // planted ran when Henk committed.
+        let (changed, stray) = remote_change(remote.path(), head.as_str(), "stray.txt").await;
+        assert_eq!(changed, ["src/a.rs", "stray.txt"]);
+        assert_eq!(stray, "stray\n");
+        let execs = execs(&app, "r-addr-6").await;
+        assert_eq!(execs.len(), 1, "{execs:?}");
+        assert!(execs[0].contains("exit 0"), "{execs:?}");
+        assert!(execs[0].ends_with("\nchecked"), "{execs:?}");
+        assert!(
+            !std::env::temp_dir()
+                .join("henk-address-r-addr-6-push")
+                .exists(),
+            "the push checkout is gone"
+        );
+    }
+
+    /// `text` as a TOML basic string.
+    fn toml_string(text: &str) -> String {
+        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// A model that never answers, and says when it was asked.
+    struct Stalled(Arc<tokio::sync::Notify>);
+
+    #[async_trait::async_trait]
+    impl ModelClient for Stalled {
+        fn model(&self) -> &'static str {
+            "stalled"
+        }
+        async fn complete(
+            &self,
+            _: &henk_llm::CompletionRequest,
+        ) -> Result<Completion, henk_llm::LlmError> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_destroys_its_workspace_and_says_so() {
+        let (remote, head) = bare_remote("henk-address-cancel").await;
+        let hub = hub(remote.path(), &head, None);
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let provider = fake();
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::new(Stalled(Arc::clone(&asked))),
+            Arc::new(provider.clone()),
+            CONFIG,
+        );
+        let cancel = CancellationToken::new();
+        let stop = async {
+            asked.notified().await;
+            assert!(!provider.closed(), "open while the model works");
+            cancel.cancel();
+        };
+        let (result, ()) =
+            tokio::join!(run_address(&app, request("r-addr-7"), cancel.clone()), stop);
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(provider.closed());
+        assert_failed_visibly(&hub, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_run_destroys_its_workspace() {
+        let (remote, head) = bare_remote("henk-address-dropped").await;
+        let hub = hub(remote.path(), &head, None);
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let provider = fake();
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::new(Stalled(Arc::clone(&asked))),
+            Arc::new(provider.clone()),
+            CONFIG,
+        );
+        tokio::select! {
+            _ = run_address(&app, request("r-addr-8"), CancellationToken::new()) => {
+                panic!("the stalled run finished");
+            }
+            () = asked.notified() => {}
+        }
+        assert!(provider.closed(), "dropping the run future destroys it");
     }
 
     #[tokio::test]

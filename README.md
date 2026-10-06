@@ -267,17 +267,23 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 
 `henk address` (spec §3.5) is the one thing that changes code. Asked by a
 colleague, Henk reads every unresolved review thread of a GitHub pull
-request, fixes what the feedback is right about in a throwaway checkout,
-runs the configured `[address].check_commands` there, and pushes one
-commit to the pull request's branch with `Henk-Run` and `Requested-by`
-trailers. The push is a fast-forward only. A fork, the default branch, a
+request, fixes what the feedback is right about in a workspace, runs the
+configured `[address].check_commands` there, and pushes one commit to the
+pull request's branch with `Henk-Run` and `Requested-by` trailers. Only a
+changeset leaves the workspace: Henk refuses it whole when a path leads
+into `.git` or out of the repository, becomes a symbolic link or a
+submodule, or the run changed more files than allowed, and otherwise
+applies it to a fresh checkout nothing ran in and commits from there. The push is a fast-forward only. A fork, the default branch, a
 protected branch or a branch that moved while he worked gets nothing.
 Then he replies in each thread (fixed with the commit link, declined with
 why, or a question), resolves only the threads of his own findings that he
 fixed, and sums up with the run link. The model never holds the token or a
-git command; Henk's code commits and pushes. The checks run the pull
-request's code on the host with an empty environment, so they see none of
-Henk's secrets; a container comes later. The App needs `Contents: write`.
+git command; Henk's code commits and pushes. `[workspace]` picks the
+backend and its limits. The only backend today is `host`: the checks run
+the pull request's code as Henk's user with an empty environment, so they
+see none of Henk's secrets, but nothing else isolates them, and
+`henk config check` warns about that. Every command is on the run's
+timeline (`henk runs show`). A container comes later. The App needs `Contents: write`.
 GitLab follows in #67.
 
 Every inbound event is recorded in Henk's own database with what each listener
