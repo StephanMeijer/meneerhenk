@@ -422,7 +422,7 @@ impl Workspace for HostWorkspace {
             let Ok(text) = std::fs::read_to_string(&full) else {
                 continue;
             };
-            for (index, line) in text.lines().enumerate() {
+            for (index, line) in super::lines(&text).enumerate() {
                 if pattern.is_match(line) {
                     hits.push(Hit {
                         path: file.clone(),

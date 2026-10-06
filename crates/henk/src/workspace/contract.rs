@@ -69,6 +69,8 @@ async fn open(
 pub async fn every_backend_does_this(provider: Arc<dyn WorkspaceProvider>, name: &str) {
     files_are_read_written_listed_and_searched(&provider, name).await;
     patterns_mean_the_same_beyond_ascii(&provider, name).await;
+    crlf_lines_read_alike(&provider, name).await;
+    a_glob_keeps_files_out_of_the_search(&provider, name).await;
     links_out_of_the_tree_and_into_git_are_refused(&provider, name).await;
     commands_run_with_an_empty_environment_and_limits(&provider, name).await;
     the_changes_are_exported_with_their_modes(&provider, name).await;
@@ -270,6 +272,88 @@ async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvide
         .await
         .is_ok(),
         "an unreadable file does not fail the search"
+    );
+    ws.close().await;
+}
+
+/// A CRLF line reads alike everywhere: `$` is before its `\r`, and the
+/// `\r` is there for what asks for it.
+async fn crlf_lines_read_alike(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-crlf"), Limits::default()).await;
+    ws.write(&path("dos.txt"), b"let a = 1;\r\nlet b = 2;\nend\r\n")
+        .await
+        .unwrap();
+    let only = PathFilter::new(["dos.txt"]);
+    let lines = async |source: &str| -> Vec<usize> {
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse(source).unwrap(),
+            Some(&only),
+            1024,
+            10,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.line)
+        .collect()
+    };
+    assert_eq!(lines(";$").await, [1, 2], "a CRLF line ends before its \\r");
+    assert_eq!(lines("^end$").await, [3]);
+    assert_eq!(lines(r"\r").await, [1, 3], "the \\r is there");
+    assert_eq!(
+        lines(r"\s$").await,
+        [1, 3],
+        "and is a space, on every backend"
+    );
+    let hits = ws
+        .search(
+            &WorkspacePath::root(),
+            &Pattern::parse("^end").unwrap(),
+            Some(&only),
+            1024,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits[0].text, "end", "a hit's text is trimmed");
+    ws.close().await;
+}
+
+/// A glob keeps a file out of the search altogether: here one grep -P
+/// would give up on is never read.
+async fn a_glob_keeps_files_out_of_the_search(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-narrowed"), Limits::default()).await;
+    let long = format!("{}b\n", "a".repeat(5000));
+    ws.write(&path("bundle.min.js"), long.as_bytes())
+        .await
+        .unwrap();
+    ws.write(&path("src/b.rs"), b"aaa\n").await.unwrap();
+    let rust = PathFilter::new(["*.rs"]);
+    let hits = ws
+        .search(
+            &WorkspacePath::root(),
+            &Pattern::parse("(a+)+$").unwrap(),
+            Some(&rust),
+            1 << 20,
+            10,
+        )
+        .await
+        .unwrap();
+    let found: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+    assert_eq!(found, ["src/b.rs"]);
+    assert!(
+        ws.search(
+            &WorkspacePath::root(),
+            &Pattern::parse("x").unwrap(),
+            Some(&PathFilter::new(["*.none"])),
+            1024,
+            10
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "a glob that matches nothing finds nothing"
     );
     ws.close().await;
 }

@@ -538,14 +538,22 @@ const WRITE: &str = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
 /// `.git` directory left out.
 const LIST: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -print0 \)"#;
 
-/// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), in the
-/// text files under `$1` of fewer than `$2` bytes, as `path NUL line:text`.
-/// Files the run's user cannot read are left out first, so a grep that
-/// says 2 failed on the pattern itself: no `-P`, a pattern PCRE refuses or
-/// its backtracking limit. Each grep's 1, no match, becomes 0 and its 2
-/// becomes 255, on which xargs stops and says 124, so that is an error and
-/// never "no matches".
-const SEARCH: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \) |
+/// The regular files under `$1` of fewer than `$2` bytes, NUL-separated,
+/// links not followed and any `.git` directory left out: what `search`
+/// would read, for Henk to narrow by a glob first.
+const SEARCHED: &str =
+    r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \)"#;
+
+/// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), as
+/// `path NUL line:text`, in the text files under `$1` of fewer than `$2`
+/// bytes, or with `$1` `-` in the NUL-separated files on stdin, so a glob
+/// keeps the others from grep altogether. Files the run's user cannot read
+/// are left out first, so a grep that says 2 failed on the pattern itself:
+/// no `-P`, a pattern PCRE refuses or its backtracking limit. Each grep's
+/// 1, no match, becomes 0 and its 2 becomes 255, on which xargs stops and
+/// says 124, so that is an error and never "no matches".
+const SEARCH: &str = r#"if [ "$1" = - ]; then cat; else
+find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \); fi |
 xargs -0 -r sh -c 'p=$1
 shift
 for f; do
@@ -820,8 +828,31 @@ impl Workspace for SshWorkspace {
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let (_, real) = self.existing(dir).await?;
         let under = max_file_bytes.saturating_add(1).to_string();
+        // With a glob, the files are narrowed here and sent on stdin, so
+        // grep never reads one the glob leaves out.
+        let mut files = Vec::new();
+        if let Some(only) = only {
+            let found = self
+                .script(SEARCHED, &[&real, &under], &[])
+                .await?
+                .ok("listing files")?;
+            for file in found.stdout.split(|b| *b == 0) {
+                let kept = std::str::from_utf8(file)
+                    .ok()
+                    .and_then(|f| self.relative(f))
+                    .is_some_and(|f| only.matches(&f));
+                if kept {
+                    files.extend_from_slice(file);
+                    files.push(0);
+                }
+            }
+            if files.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        let from = if only.is_some() { "-" } else { real.as_str() };
         let reply = self
-            .script(SEARCH, &[&real, &under, pattern.pcre()], &[])
+            .script(SEARCH, &[from, &under, pattern.pcre()], &files)
             .await?
             .ok("searching")?;
         let mut hits = Vec::new();

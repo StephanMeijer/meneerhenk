@@ -75,9 +75,10 @@ pub struct ExecResult {
 /// refused with a reason: class set operations and nested classes (POSIX
 /// classes among them), `\<`, `\>`, `\b{...}`, `\D` inside a class and the
 /// flags `x`, `R` and `u`. What is left is made to mean the same in both:
-/// `\d` is the ASCII digits in both, and PCRE gets `(*UCP)` so `\w`, `\s`
-/// and `\b` know letters and spaces beyond ASCII as Rust's do, whatever
-/// grep's version.
+/// `\d` is the ASCII digits in both, `$` also matches before the `\r` of a
+/// CRLF line, which both see, and PCRE gets `(*UCP)` so `\w`, `\s` and
+/// `\b` know letters and spaces beyond ASCII as Rust's do, whatever grep's
+/// version.
 #[derive(Debug, Clone)]
 pub struct Pattern {
     pcre: String,
@@ -195,6 +196,8 @@ fn translate(source: &str) -> Result<String, String> {
                 in_class = false;
                 out.push(']');
             }
+            // A CRLF line ends in `\r` on every backend; `$` is before it.
+            '$' if !in_class => out.push_str(r"\r?$"),
             '&' | '-' | '~' if in_class && chars.peek() == Some(&c) => {
                 return Err(
                     "class set operations (&&, --, ~~ inside [...]) are not supported; escape the characters or use a simpler class".to_owned(),
@@ -215,6 +218,14 @@ fn translate(source: &str) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// The lines of `text` as grep reads them: split at `\n` only, so a CRLF
+/// line keeps its `\r` on every backend and [`Pattern`] reads `$` as
+/// `\r?$` for both engines alike.
+pub(crate) fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
 }
 
 /// One search hit.
