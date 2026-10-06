@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +23,8 @@ pub struct Scripted {
     pub output: String,
     /// Files it writes, by path.
     pub writes: Vec<(String, Vec<u8>)>,
+    /// How long it takes.
+    pub delay: Duration,
 }
 
 /// Content and executable bit by path.
@@ -41,12 +43,33 @@ pub struct FakeProvider {
     pub closed: Arc<AtomicBool>,
     /// Every command run, in order.
     pub ran: Arc<Mutex<Vec<String>>>,
+    /// How many workspaces were opened.
+    pub opened: Arc<AtomicUsize>,
+    /// How many are open now: neither closed nor dropped.
+    pub live: Arc<AtomicUsize>,
+    /// How many were dropped without being closed first.
+    pub unclosed: Arc<AtomicUsize>,
 }
 
 impl FakeProvider {
     /// Whether the last workspace opened was destroyed.
     pub fn closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// How many workspaces were opened.
+    pub fn opened(&self) -> usize {
+        self.opened.load(Ordering::SeqCst)
+    }
+
+    /// How many are still open.
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::SeqCst)
+    }
+
+    /// How many were only destroyed because they were dropped.
+    pub fn unclosed(&self) -> usize {
+        self.unclosed.load(Ordering::SeqCst)
     }
 }
 
@@ -61,9 +84,12 @@ impl WorkspaceProvider for FakeProvider {
         import(source, source, &mut files)
             .map_err(|e| WorkspaceError::Backend(format!("cannot import: {e}")))?;
         self.closed.store(false, Ordering::SeqCst);
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        self.live.fetch_add(1, Ordering::SeqCst);
         Ok(Arc::new(FakeWorkspace {
             base: Mutex::new(files.clone()),
             files: Mutex::new(files),
+            done: AtomicBool::new(false),
             provider: self.clone(),
         }))
     }
@@ -98,12 +124,14 @@ pub struct FakeWorkspace {
     /// What `export` compares with: the import, or the last baseline.
     base: Mutex<Files>,
     files: Mutex<Files>,
+    /// This workspace is closed.
+    done: AtomicBool,
     provider: FakeProvider,
 }
 
 impl FakeWorkspace {
     fn files(&self) -> Result<std::sync::MutexGuard<'_, Files>, WorkspaceError> {
-        if self.provider.closed() {
+        if self.done.load(Ordering::SeqCst) {
             return Err(WorkspaceError::Backend(
                 "the workspace is closed".to_owned(),
             ));
@@ -147,6 +175,7 @@ impl Workspace for FakeWorkspace {
                 duration: Duration::ZERO,
             });
         };
+        tokio::time::sleep(scripted.delay).await;
         let mut files = self.files()?;
         for (path, content) in &scripted.writes {
             let executable = files.get(path).is_some_and(|f| f.1);
@@ -270,12 +299,24 @@ impl Workspace for FakeWorkspace {
     }
 
     async fn close(&self) {
+        self.destroy();
+    }
+}
+
+impl FakeWorkspace {
+    fn destroy(&self) {
+        if !self.done.swap(true, Ordering::SeqCst) {
+            self.provider.live.fetch_sub(1, Ordering::SeqCst);
+        }
         self.provider.closed.store(true, Ordering::SeqCst);
     }
 }
 
 impl Drop for FakeWorkspace {
     fn drop(&mut self) {
-        self.provider.closed.store(true, Ordering::SeqCst);
+        if !self.done.load(Ordering::SeqCst) {
+            self.provider.unclosed.fetch_add(1, Ordering::SeqCst);
+        }
+        self.destroy();
     }
 }

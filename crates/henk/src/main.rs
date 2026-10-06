@@ -29,6 +29,7 @@ mod recorder;
 mod review;
 mod review_many;
 mod review_tools;
+mod review_workspace;
 mod runs;
 mod server;
 mod skill_tools;

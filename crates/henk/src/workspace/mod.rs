@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use henk_domain::address::{PathError, WorkspacePath};
 use henk_domain::workspace::{
-    BackendKind, Change, ChangeKind, FileMode, Limits, Profile, RawChange, changeset_refusal,
+    BackendKind, Change, ChangeKind, EnvLane, FileMode, Limits, Profile, RawChange,
+    changeset_refusal,
 };
 
 #[cfg(test)]
@@ -21,6 +22,7 @@ pub mod contract;
 #[cfg(test)]
 pub mod fake;
 pub mod host;
+pub mod setup;
 pub mod ssh;
 pub mod toolchain;
 pub mod traced;
@@ -271,6 +273,72 @@ impl WorkspaceProvider for Backends {
     }
 }
 
+/// `workspace` as a run of kind `lane` may use it: a workspace whose
+/// changes are never taken out (a review's, #170) refuses `export`, so no
+/// tool or later change can turn what a lane did there into a commit
+/// (§8.2). An address run's is returned as it is.
+#[must_use]
+pub fn for_lane(workspace: Arc<dyn Workspace>, lane: EnvLane) -> Arc<dyn Workspace> {
+    if lane.exports() {
+        workspace
+    } else {
+        Arc::new(NoExport { inner: workspace })
+    }
+}
+
+/// A workspace nothing is ever exported from; everything else passes.
+struct NoExport {
+    inner: Arc<dyn Workspace>,
+}
+
+#[async_trait::async_trait]
+impl Workspace for NoExport {
+    async fn exec(
+        &self,
+        argv: &[String],
+        cwd: &WorkspacePath,
+        timeout: Duration,
+    ) -> Result<ExecResult, WorkspaceError> {
+        self.inner.exec(argv, cwd, timeout).await
+    }
+
+    async fn read(&self, path: &WorkspacePath, max_bytes: u64) -> Result<Vec<u8>, WorkspaceError> {
+        self.inner.read(path, max_bytes).await
+    }
+
+    async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
+        self.inner.write(path, content).await
+    }
+
+    async fn list(&self, dir: &WorkspacePath, cap: usize) -> Result<Vec<String>, WorkspaceError> {
+        self.inner.list(dir, cap).await
+    }
+
+    async fn search(
+        &self,
+        dir: &WorkspacePath,
+        needle: &str,
+        max_file_bytes: u64,
+        cap: usize,
+    ) -> Result<Vec<Hit>, WorkspaceError> {
+        self.inner.search(dir, needle, max_file_bytes, cap).await
+    }
+
+    async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
+        Err(WorkspaceError::Refused(
+            "a review workspace is never exported".to_owned(),
+        ))
+    }
+
+    async fn baseline(&self) -> Result<(), WorkspaceError> {
+        self.inner.baseline().await
+    }
+
+    async fn close(&self) {
+        self.inner.close().await;
+    }
+}
+
 /// The sandbox host's provider from the settings, when `[workspace.ssh]` is
 /// there: its key read from the file the configured variable names.
 ///
@@ -425,6 +493,32 @@ mod tests {
             },
             content: if deleted { Vec::new() } else { b"x\n".to_vec() },
         }
+    }
+
+    #[tokio::test]
+    async fn a_review_workspace_is_never_exported_but_works_otherwise() {
+        let source = crate::git::ScratchDir::new("review-no-export").unwrap();
+        std::fs::write(source.path().join("a.txt"), "one\n").unwrap();
+        let provider = fake::FakeProvider::default();
+        let opened = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let review = for_lane(Arc::clone(&opened), EnvLane::Review);
+        let path = WorkspacePath::parse("a.txt").unwrap();
+        review.write(&path, b"two\n").await.unwrap();
+        assert_eq!(review.read(&path, 100).await.unwrap(), b"two\n");
+        let refused = review.export().await.unwrap_err();
+        assert!(refused.to_string().contains("never exported"), "{refused}");
+        assert_eq!(
+            opened.export().await.unwrap().len(),
+            1,
+            "the change is there"
+        );
+        let address = for_lane(Arc::clone(&opened), EnvLane::Address);
+        assert_eq!(address.export().await.unwrap().len(), 1);
+        review.close().await;
+        assert_eq!(provider.live(), 0);
     }
 
     #[test]

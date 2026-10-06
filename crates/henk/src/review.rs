@@ -31,6 +31,7 @@ use crate::review_tools::{
     DiffFiles, GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings,
     PostFinding, ReadFile, WithdrawFinding, lane_continuation,
 };
+use crate::review_workspace::ReviewWorkspaces;
 
 /// The review was cancelled because a newer commit arrived.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -567,6 +568,7 @@ async fn run_lanes(
         app,
         target,
         commit,
+        run,
         ..
     } = review;
     let platform = target.platform();
@@ -592,7 +594,11 @@ async fn run_lanes(
     };
     lanes.fact_check = build_fact_check(review, &lanes).await?;
 
-    let mut set = spawn_lanes(review, &lanes).await?;
+    // Each lane's own workspace, when the profile reviews in one (#170).
+    // Lanes close theirs when they end; the rest closes once all have.
+    // On an early error they are dropped, which destroys them too.
+    let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
+    let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
     let mut results = Vec::new();
     while let Some(joined) = set.join_next().await {
@@ -607,6 +613,7 @@ async fn run_lanes(
             }
         }
     }
+    workspaces.close_all().await;
     results.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
     Ok(results)
 }
@@ -695,11 +702,13 @@ async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc
 async fn spawn_lanes(
     review: ReviewRun<'_>,
     lanes: &LaneInputs,
+    workspaces: &mut ReviewWorkspaces,
 ) -> anyhow::Result<JoinSet<LaneResult>> {
     let ReviewRun { app, run, .. } = review;
     let mut set = JoinSet::new();
     for lane in &app.settings.lanes {
-        let spec = build_lane(review, lanes, lane).await?;
+        let workspace = workspaces.take_lane(&lane.name);
+        let spec = build_lane(review, lanes, lane, workspace).await?;
         let lane_name = lane.name.clone();
         let store = Arc::clone(&app.store);
         let run_id = run.clone();
@@ -707,6 +716,9 @@ async fn spawn_lanes(
         let context = Arc::clone(&spec.context);
         set.spawn(async move {
             let outcome = run_session(store.as_ref(), &run_id, spec.session, cancel).await;
+            if let Some(workspace) = &context.workspace {
+                workspace.close().await;
+            }
             let unopened = context.unopened_files();
             if !unopened.is_empty() {
                 let shown: Vec<&str> = unopened.iter().take(20).map(String::as_str).collect();
@@ -795,6 +807,7 @@ async fn build_lane(
     review: ReviewRun<'_>,
     lanes: &LaneInputs,
     lane: &LaneSpec,
+    workspace: Option<Arc<dyn crate::workspace::Workspace>>,
 ) -> anyhow::Result<Lane> {
     let ReviewRun {
         app,
@@ -842,6 +855,7 @@ async fn build_lane(
         files: Arc::new(DiffFiles::new(Arc::clone(&lanes.diff))),
         fact_check: lanes.fact_check.clone(),
         rejections: Mutex::new(BTreeMap::new()),
+        workspace,
     });
     set.add(ListChangedFiles(Arc::clone(&context.files)));
     set.add(GetFileDiff(Arc::clone(&context.files)));
@@ -1061,11 +1075,32 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// An app whose writer, read session and model are fakes. `patches`
     /// is the diff the writer serves; `model` answers the lane.
     async fn fixture(diff: &str, model: ScriptedClient) -> Fixture {
-        let settings = Config::parse(CONFIG)
+        fixture_on(
+            diff,
+            model,
+            CONFIG,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await
+    }
+
+    /// [`fixture`] with its own configuration, reviewed head, workspace
+    /// backend and address writer (the review's way to the source, #170).
+    async fn fixture_on(
+        diff: &str,
+        model: ScriptedClient,
+        config: &str,
+        head: &str,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+        source: Option<Arc<dyn henk_platform::address::AddressWriter>>,
+    ) -> Fixture {
+        let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         let writer = Arc::new(FakeWriter {
-            head: SHA.to_owned(),
+            head: head.to_owned(),
             patches: henk_domain::diff::split_unified(diff),
             ..FakeWriter::default()
         });
@@ -1086,10 +1121,10 @@ lanes = [{ name = "lane-a", model = "m" }]
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
                 cancels: crate::cancel::Cancels::default(),
-                workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
+                workspace_provider: provider,
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
-                test_address_writer: None,
+                test_address_writer: source,
                 test_issue_writer: None,
             },
             writer,
@@ -1602,6 +1637,461 @@ lanes = [{ name = "lane-a", model = "m" }]
             record.error.as_deref(),
             Some("superseded by a review of a newer commit")
         );
+    }
+
+    /// The pull request's head repository as a review sees it (#170): where
+    /// to fetch from and no credential. Nothing else is asked of it.
+    struct Source(henk_platform::address::PullFacts);
+
+    fn unused() -> henk_platform::PlatformError {
+        henk_platform::PlatformError::Decode("not used by a review".to_owned())
+    }
+
+    #[async_trait::async_trait]
+    impl henk_platform::address::AddressWriter for Source {
+        async fn pull_facts(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+            Ok(self.0.clone())
+        }
+        async fn open_threads(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn git_credential(
+            &self,
+        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        {
+            Ok(None)
+        }
+        async fn commit_identity(
+            &self,
+        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn commit_url(&self, _: &ReviewTarget, _: &str) -> String {
+            String::new()
+        }
+        async fn reply_in_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &henk_platform::address::OpenThread,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn resolve_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<(), henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn post_comment(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+    }
+
+    /// The fake backend, noting what `src/a.rs` held in each source it
+    /// was asked to open.
+    #[derive(Default)]
+    struct Peek {
+        inner: crate::workspace::fake::FakeProvider,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workspace::WorkspaceProvider for Peek {
+        async fn open(
+            &self,
+            source: &std::path::Path,
+            profile: &henk_domain::workspace::Profile,
+        ) -> Result<Arc<dyn crate::workspace::Workspace>, crate::workspace::WorkspaceError>
+        {
+            let content = std::fs::read_to_string(source.join("src/a.rs")).unwrap_or_default();
+            self.seen.lock().unwrap().push(content);
+            self.inner.open(source, profile).await
+        }
+    }
+
+    /// Two lanes and the fact-checker, reviewing in a workspace with one
+    /// setup step.
+    fn reviewing_config(extra: &str) -> String {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let host_key = key.public_key().to_openssh().unwrap();
+        CONFIG.replace(
+            "lanes = [{ name = \"lane-a\", model = \"m\" }]\n",
+            &format!(
+                "lanes = [{{ name = \"lane-a\", model = \"m\" }}, {{ name = \"lane-b\", model = \"m\" }}]\n[review.fact_check]\nmodel = \"m\"\n[workspace]\nbackend = \"ssh\"\nreview = true\nsetup = [[\"make\", \"deps\"]]\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{host_key}\"\n{extra}"
+            ),
+        )
+    }
+
+    struct Reviewed {
+        f: Fixture,
+        peek: Arc<Peek>,
+        /// Keeps the remote while the review fetches from it.
+        _remote: crate::git::ScratchDir,
+    }
+
+    /// A review of the seeded commit of a local remote whose branch has
+    /// moved on since, so only a fetch by sha finds what is reviewed.
+    async fn reviewed(
+        name: &str,
+        config: &str,
+        model: ScriptedClient,
+        setup_code: i32,
+    ) -> Reviewed {
+        reviewed_slow(name, config, model, setup_code, Duration::ZERO).await
+    }
+
+    /// [`reviewed`] with a setup step that takes `delay`.
+    async fn reviewed_slow(
+        name: &str,
+        config: &str,
+        model: ScriptedClient,
+        setup_code: i32,
+        delay: Duration,
+    ) -> Reviewed {
+        let mut inner = crate::workspace::fake::FakeProvider::default();
+        inner.script.insert(
+            "make deps".to_owned(),
+            crate::workspace::fake::Scripted {
+                code: setup_code,
+                output: "deps ready".to_owned(),
+                writes: Vec::new(),
+                delay,
+            },
+        );
+        let peek = Arc::new(Peek {
+            inner,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let (f, remote) = reviewed_on(
+            name,
+            config,
+            model,
+            Arc::clone(&peek) as Arc<dyn crate::workspace::WorkspaceProvider>,
+        )
+        .await;
+        Reviewed {
+            f,
+            peek,
+            _remote: remote,
+        }
+    }
+
+    /// [`reviewed`] on any backend; the remote is returned to be kept.
+    async fn reviewed_on(
+        name: &str,
+        config: &str,
+        model: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (Fixture, crate::git::ScratchDir) {
+        let (remote, reviewed) = crate::git::tests::bare_remote(name).await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let later = crate::git::Checkout::clone_at(
+            crate::git::ScratchDir::new(&format!("{name}-later")).unwrap(),
+            &url,
+            "feature",
+            &reviewed,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(later.path().join("src/a.rs"), "moved on\n").unwrap();
+        later
+            .commit(
+                &henk_platform::address::CommitIdentity {
+                    name: "Later".to_owned(),
+                    email: "later@example.com".to_owned(),
+                },
+                "Later\n",
+            )
+            .await
+            .unwrap();
+        later.push("feature").await.unwrap();
+
+        let facts = henk_platform::address::PullFacts {
+            push: henk_domain::address::PushFacts {
+                open: true,
+                head_repo: Some("o/r".to_owned()),
+                base_repo: "o/r".to_owned(),
+                head_ref: "feature".to_owned(),
+                default_branch: "main".to_owned(),
+                head_protected: false,
+            },
+            head: reviewed.clone(),
+            remote: url,
+        };
+        let f = fixture_on(
+            DIFF,
+            model,
+            config,
+            reviewed.as_str(),
+            provider,
+            Some(Arc::new(Source(facts))),
+        )
+        .await;
+        (f, remote)
+    }
+
+    /// The ssh backend's runner, run locally, and a setup step that exists
+    /// there.
+    async fn review_on_ssh(
+        name: &str,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> Fixture {
+        let config = reviewing_config("").replace("[[\"make\", \"deps\"]]", "[[\"true\"]]");
+        let (f, _remote) = reviewed_on(name, &config, many_done(), provider).await;
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let events = f.app.store.events(&run).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.starts_with("review workspaces: 3 of 3 ready")),
+            "{events:?}"
+        );
+        f
+    }
+
+    #[tokio::test]
+    async fn a_review_on_the_ssh_backend_leaves_nothing_on_the_host() {
+        use crate::workspace::ssh::tests::LocalRunner;
+        let runner = LocalRunner::new("henk-review-ssh");
+        let provider = crate::workspace::ssh::SshProvider::with_runner(
+            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+        );
+        review_on_ssh("ssh-local", Arc::new(provider)).await;
+        assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    async fn live_a_review_on_a_real_sandbox_host_opens_and_closes_its_workspaces() {
+        let provider =
+            crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
+        review_on_ssh("ssh-live", Arc::new(provider)).await;
+    }
+
+    fn many_done() -> ScriptedClient {
+        ScriptedClient::new("scripted", (0..12).map(|_| done()))
+    }
+
+    #[tokio::test]
+    async fn every_lane_and_the_fact_checker_review_in_their_own_workspace_at_the_commit() {
+        let r = reviewed("henk-review-ws", &reviewing_config(""), many_done(), 0).await;
+        let run = RunId::parse("r-ws").unwrap();
+        run_review(&r.f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let fake = &r.peek.inner;
+        assert_eq!(fake.opened(), 3, "lane-a, lane-b and the fact-checker");
+        assert_eq!(fake.live(), 0, "every workspace is closed");
+        assert_eq!(fake.unclosed(), 0, "closed, not just dropped");
+        assert_eq!(
+            *r.peek.seen.lock().unwrap(),
+            vec!["fn main() {\n    let x = 1;\n}\n"; 3],
+            "the reviewed commit, not the branch head"
+        );
+        assert_eq!(
+            *fake.ran.lock().unwrap(),
+            vec!["make deps"; 3],
+            "each one set up"
+        );
+        let events = r.f.app.store.events(&run).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "info"
+                && e.message
+                    .starts_with("review workspaces: 3 of 3 ready on ssh at ")),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.starts_with("exec make deps exit 0")),
+            "setup is on the timeline: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_review_in_the_profile_a_review_opens_no_workspace() {
+        let config = reviewing_config("").replace("review = true\n", "");
+        let r = reviewed("henk-review-nows", &config, many_done(), 0).await;
+        let run = RunId::parse("r-nows").unwrap();
+        run_review(&r.f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(r.peek.inner.opened(), 0);
+        let events = r.f.app.store.events(&run).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.starts_with("review workspaces")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_setup_costs_the_lanes_their_workspaces_not_the_review() {
+        let r = reviewed(
+            "henk-review-badsetup",
+            &reviewing_config(""),
+            many_done(),
+            2,
+        )
+        .await;
+        let run = RunId::parse("r-badsetup").unwrap();
+        let report = run_review(&r.f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.outcome.unwrap().completed());
+        assert_eq!(r.peek.inner.opened(), 3);
+        assert_eq!(
+            r.peek.inner.live(),
+            0,
+            "a workspace whose setup failed is closed"
+        );
+        assert_eq!(r.peek.inner.unclosed(), 0);
+        let events = r.f.app.store.events(&run).await.unwrap();
+        let warning = events
+            .iter()
+            .find(|e| e.level == "warn" && e.message.starts_with("review workspaces: 0 of 3"))
+            .unwrap_or_else(|| panic!("{events:?}"));
+        for lane in ["lane-a", "lane-b", "fact-check"] {
+            assert!(
+                warning.message.contains(&format!(
+                    "no workspace for {lane}: setup step `make deps` exited with 2"
+                )),
+                "{}",
+                warning.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_without_its_source_goes_on_without_workspaces() {
+        let config = reviewing_config("");
+        let model = many_done();
+        let peek = Arc::new(Peek::default());
+        let f = fixture_on(
+            DIFF,
+            model,
+            &config,
+            SHA,
+            Arc::clone(&peek) as Arc<dyn crate::workspace::WorkspaceProvider>,
+            None,
+        )
+        .await;
+        let run = RunId::parse("r-nosource").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.outcome.unwrap().completed());
+        assert_eq!(peek.inner.opened(), 0);
+        let events = f.app.store.events(&run).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "warn"
+                && e.message.starts_with(
+                    "review workspaces: none, the reviewed commit could not be checked out"
+                )),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_review_closes_every_workspace() {
+        let run = RunId::parse("r-ws-cancel").unwrap();
+        let model = ScriptedClient::new("scripted", (0..12).map(|_| done()))
+            .with_delay(Duration::from_secs(30));
+        let r = reviewed("henk-review-ws-cancel", &reviewing_config(""), model, 0).await;
+        let cancel = r.f.app.shutdown.child_token();
+        let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (r.f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&r.f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        assert_eq!(r.peek.inner.opened(), 3);
+        assert_eq!(r.peek.inner.live(), 0);
+        assert_eq!(r.peek.inner.unclosed(), 0, "closed, not just dropped");
+    }
+
+    #[tokio::test]
+    async fn a_review_cancelled_during_setup_stops_at_once_and_keeps_no_workspace() {
+        let run = RunId::parse("r-ws-cancel-setup").unwrap();
+        let r = reviewed_slow(
+            "henk-review-ws-cancel-setup",
+            &reviewing_config(""),
+            many_done(),
+            0,
+            Duration::from_secs(45),
+        )
+        .await;
+        let cancel = r.f.app.shutdown.child_token();
+        let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (r.f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&r.f.app, request(&run), cancel),
+        )
+        .await
+        .expect("the setup is not waited for");
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        assert_eq!(r.peek.inner.opened(), 3);
+        assert_eq!(r.peek.inner.live(), 0, "dropped mid-setup, so destroyed");
+    }
+
+    #[tokio::test]
+    async fn a_lane_out_of_time_still_closes_its_workspace() {
+        let run = RunId::parse("r-ws-timeout").unwrap();
+        let model = ScriptedClient::new("scripted", (0..12).map(|_| done()))
+            .with_delay(Duration::from_secs(30));
+        let config = reviewing_config("").replace(
+            "[review.fact_check]",
+            "lane_timeout_secs = 1\n[review.fact_check]",
+        );
+        let r = reviewed("henk-review-ws-timeout", &config, model, 0).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&r.f.app, request(&run), CancellationToken::new()),
+        )
+        .await
+        .expect("the lanes stop at their time limit");
+        assert!(result.is_ok());
+        assert_eq!(r.peek.inner.opened(), 3);
+        assert_eq!(r.peek.inner.live(), 0);
+        assert_eq!(r.peek.inner.unclosed(), 0, "closed, not just dropped");
     }
 }
 

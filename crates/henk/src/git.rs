@@ -216,6 +216,53 @@ impl Checkout {
         Ok(checkout)
     }
 
+    /// Fetches exactly `commit` of `remote` into `dir` and checks it out,
+    /// detached: a review's workspace holds the commit it reviews, even when
+    /// the branch moved on since (#170). Only that commit is fetched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when the remote does not serve the commit.
+    pub async fn fetch_at(
+        dir: ScratchDir,
+        remote: &str,
+        commit: &CommitSha,
+        credential: Option<GitCredential>,
+    ) -> Result<Self, GitError> {
+        let checkout = Self { dir, credential };
+        run(checkout.path(), &["init", "--quiet"], None, None).await?;
+        run(
+            checkout.path(),
+            &[
+                "fetch",
+                "--quiet",
+                "--depth",
+                "1",
+                "--no-tags",
+                remote,
+                commit.as_str(),
+            ],
+            checkout.credential.as_ref(),
+            None,
+        )
+        .await?;
+        run(
+            checkout.path(),
+            &["checkout", "--quiet", "--detach", "FETCH_HEAD"],
+            None,
+            None,
+        )
+        .await?;
+        let found = checkout.head().await?;
+        if !found.eq_ignore_ascii_case(commit.as_str()) {
+            return Err(GitError::HeadMoved {
+                expected: commit.as_str().to_owned(),
+                found,
+            });
+        }
+        Ok(checkout)
+    }
+
     /// The working tree.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -539,6 +586,48 @@ pub(crate) mod tests {
             "{log}"
         );
         assert!(log.contains("Henk-Run: r-1"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn a_commit_is_fetched_as_it_was_after_the_branch_moved() {
+        let (remote, reviewed) = bare_remote("henk-git-fetch").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let pusher = Checkout::clone_at(
+            ScratchDir::new("henk-git-fetch-push").unwrap(),
+            &url,
+            "feature",
+            &reviewed,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(pusher.path().join("src/a.rs"), "moved on\n").unwrap();
+        pusher.commit(&identity(), "Later\n").await.unwrap();
+        pusher.push("feature").await.unwrap();
+
+        let at = Checkout::fetch_at(
+            ScratchDir::new("henk-git-fetch-at").unwrap(),
+            &url,
+            &reviewed,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(at.head().await.unwrap(), reviewed.as_str());
+        assert_eq!(
+            std::fs::read_to_string(at.path().join("src/a.rs")).unwrap(),
+            "fn main() {\n    let x = 1;\n}\n"
+        );
+
+        let unknown = CommitSha::parse(&"1".repeat(40)).unwrap();
+        let missing = Checkout::fetch_at(
+            ScratchDir::new("henk-git-fetch-missing").unwrap(),
+            &url,
+            &unknown,
+            None,
+        )
+        .await;
+        assert!(missing.is_err());
     }
 
     #[tokio::test]

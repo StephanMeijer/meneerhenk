@@ -1,0 +1,218 @@
+//! Workspaces for a review (#170): when the repository's profile says
+//! `review = true`, every lane and the fact-checker get a workspace of their
+//! own, holding the reviewed commit and prepared by the setup stage before
+//! the lanes start. A lane may change files in its copy, so copies are never
+//! shared, and nothing in one is ever exported (§8.2): each is wrapped by
+//! [`for_lane`] as a review's.
+//!
+//! A workspace that cannot be had costs that lane its workspace, not the
+//! review: the lane reads through its MCP session as before, and the run
+//! record says why.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Context as _;
+use henk_domain::review::{CommitSha, LaneName};
+use henk_domain::run::RunId;
+use henk_domain::workspace::{EnvLane, Profile};
+use henk_platform::ReviewTarget;
+use henk_store::RunStore;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
+
+use crate::app::App;
+use crate::git::{Checkout, ScratchDir};
+use crate::workspace::traced::Traced;
+use crate::workspace::{Workspace, WorkspaceProvider, for_lane, setup};
+
+/// The name the fact-checker's workspace goes by on the run record.
+const FACT_CHECK: &str = "fact-check";
+
+/// The workspaces of one review, by lane, and the fact-checker's.
+#[derive(Default)]
+pub struct ReviewWorkspaces {
+    lanes: BTreeMap<String, Arc<dyn Workspace>>,
+    fact_check: Option<Arc<dyn Workspace>>,
+}
+
+impl ReviewWorkspaces {
+    /// Opens a workspace for each configured lane, and one for the
+    /// fact-checker when it is configured, all at `commit` and in parallel.
+    /// None when the repository's profile does not review in a workspace.
+    /// Whatever fails is a warning on the run and leaves that lane without
+    /// one; this never fails the review. A cancelled review stops waiting
+    /// at once: what is still being opened is dropped, which destroys it,
+    /// and what is open is closed.
+    pub async fn open(
+        app: &App,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        run: &RunId,
+        cancel: &CancellationToken,
+    ) -> Self {
+        let repo = target.repo.path();
+        let profile = app.settings.workspace.profile_for(&repo);
+        if !profile.serves(EnvLane::Review) {
+            return Self::default();
+        }
+        let mut names: Vec<String> = app
+            .settings
+            .lanes
+            .iter()
+            .map(|lane| lane.name.as_str().to_owned())
+            .collect();
+        if app.settings.review.fact_check.is_some() {
+            names.push(FACT_CHECK.to_owned());
+        }
+        let checkout = match source(app, target, commit, run).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                note(
+                    app,
+                    run,
+                    "warn",
+                    &format!("review workspaces: none, the reviewed commit could not be checked out: {error:#}"),
+                )
+                .await;
+                return Self::default();
+            }
+        };
+        let mut opening = JoinSet::new();
+        for name in &names {
+            opening.spawn(open_one(
+                Arc::clone(&app.workspace_provider),
+                Arc::clone(&app.store),
+                checkout.path().to_path_buf(),
+                profile.clone(),
+                run.clone(),
+                name.clone(),
+            ));
+        }
+        let mut workspaces = Self::default();
+        let mut failed = Vec::new();
+        loop {
+            let joined = tokio::select! {
+                joined = opening.join_next() => joined,
+                () = cancel.cancelled() => {
+                    opening.abort_all();
+                    while let Some(joined) = opening.join_next().await {
+                        if let Ok((_, Ok(workspace))) = joined {
+                            workspace.close().await;
+                        }
+                    }
+                    workspaces.close_all().await;
+                    return Self::default();
+                }
+            };
+            let Some(joined) = joined else { break };
+            match joined {
+                Ok((name, Ok(workspace))) if name == FACT_CHECK => {
+                    workspaces.fact_check = Some(workspace);
+                }
+                Ok((name, Ok(workspace))) => {
+                    workspaces.lanes.insert(name, workspace);
+                }
+                Ok((name, Err(error))) => failed.push(format!("{name}: {error:#}")),
+                Err(error) => failed.push(format!("a lane: {error}")),
+            }
+        }
+        failed.sort();
+        drop(checkout);
+        let ready = names.len() - failed.len();
+        let mut text = format!(
+            "review workspaces: {ready} of {} ready on {} at {}",
+            names.len(),
+            profile.backend,
+            commit.short()
+        );
+        for why in &failed {
+            text.push_str("\nno workspace for ");
+            text.push_str(why);
+        }
+        note(
+            app,
+            run,
+            if failed.is_empty() { "info" } else { "warn" },
+            &text,
+        )
+        .await;
+        workspaces
+    }
+
+    /// Takes `lane`'s workspace, if it has one.
+    pub fn take_lane(&mut self, lane: &LaneName) -> Option<Arc<dyn Workspace>> {
+        self.lanes.remove(lane.as_str())
+    }
+
+    /// Closes every workspace still held. Closing one twice does nothing,
+    /// so a lane may close its own first.
+    pub async fn close_all(self) {
+        let mut closing = JoinSet::new();
+        for workspace in self.lanes.into_values().chain(self.fact_check) {
+            closing.spawn(async move { workspace.close().await });
+        }
+        while closing.join_next().await.is_some() {}
+    }
+}
+
+/// The reviewed commit, fetched by its sha from the pull request's head
+/// repository with the platform's git credential, which stays in git's
+/// environment on Henk's side and never reaches a workspace (§8.4).
+async fn source(
+    app: &App,
+    target: &ReviewTarget,
+    commit: &CommitSha,
+    run: &RunId,
+) -> anyhow::Result<Checkout> {
+    let writer = app.address_writer(target.repo.platform())?;
+    let facts = writer
+        .pull_facts(target)
+        .await
+        .context("reading the pull request")?;
+    let credential = writer
+        .git_credential()
+        .await
+        .context("getting a credential for git")?;
+    let dir =
+        ScratchDir::new(&format!("henk-review-{run}")).context("making the checkout directory")?;
+    Ok(Checkout::fetch_at(dir, &facts.remote, commit, credential).await?)
+}
+
+/// One workspace: opened from the checkout, recorded on the run, set up as
+/// the profile says and wrapped as a review's. A workspace whose setup
+/// failed is closed again.
+async fn open_one(
+    provider: Arc<dyn WorkspaceProvider>,
+    store: Arc<dyn RunStore>,
+    source: PathBuf,
+    profile: Profile,
+    run: RunId,
+    name: String,
+) -> (String, anyhow::Result<Arc<dyn Workspace>>) {
+    let opened = match provider.open(&source, &profile).await {
+        Ok(opened) => opened,
+        Err(error) => {
+            return (
+                name,
+                Err(anyhow::Error::new(error).context("opening the workspace")),
+            );
+        }
+    };
+    let traced: Arc<dyn Workspace> = Arc::new(Traced::new(opened, store, run));
+    match setup::prepare(&traced, &profile).await {
+        Ok(ready) => (name, Ok(for_lane(ready, EnvLane::Review))),
+        Err(error) => {
+            traced.close().await;
+            (name, Err(error))
+        }
+    }
+}
+
+async fn note(app: &App, run: &RunId, level: &str, text: &str) {
+    if let Err(error) = app.store.event(run, level, text).await {
+        warn!(%error, "could not record the review workspaces");
+    }
+}

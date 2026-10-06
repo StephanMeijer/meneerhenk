@@ -695,6 +695,8 @@ pub struct WorkspaceConfig {
     pub setup: Vec<Vec<String>>,
     /// The tool manager for the repository's toolchain: `"mise"`.
     pub toolchain: Option<Toolchain>,
+    /// Whether reviews get workspaces too (#170), one per lane.
+    pub review: bool,
     /// Named profiles; what they leave out comes from the default.
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
@@ -788,6 +790,7 @@ impl Default for WorkspaceConfig {
             disk_mib: profile.limits.disk_mib,
             setup: profile.setup,
             toolchain: profile.toolchain,
+            review: profile.review,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
@@ -822,6 +825,8 @@ pub struct ProfileConfig {
     pub setup: Option<Vec<Vec<String>>>,
     /// The tool manager; replaces the default's when given.
     pub toolchain: Option<Toolchain>,
+    /// Whether reviews get workspaces; the default's when not given.
+    pub review: Option<bool>,
 }
 
 impl WorkspaceConfig {
@@ -858,6 +863,7 @@ impl WorkspaceConfig {
             },
             setup: self.setup,
             toolchain: self.toolchain,
+            review: self.review,
         };
         let profiles = self
             .profiles
@@ -878,6 +884,7 @@ impl WorkspaceConfig {
                     },
                     setup: p.setup.unwrap_or_else(|| base.setup.clone()),
                     toolchain: p.toolchain.or(base.toolchain),
+                    review: p.review.unwrap_or(base.review),
                 };
                 (name, profile)
             })
@@ -1645,6 +1652,9 @@ impl Settings {
                 n => {
                     let _ = write!(out, ", {n} setup steps");
                 }
+            }
+            if profile.review {
+                out.push_str(", reviews in a workspace");
             }
             for (what, value, unit) in [
                 ("memory", limits.memory_mib, " MiB"),
@@ -2420,6 +2430,63 @@ github_owners = ["docspec"]
             "[workspace]\ntoolchain = \"asdf\"\n",
         ] {
             assert!(database(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn reviews_get_workspaces_only_where_a_profile_turns_them_on() {
+        let ssh = format!(
+            "[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            host_key_line()
+        );
+        let settings = database(&format!(
+            "[workspace.profiles.reviewed]\nbackend = \"ssh\"\nreview = true\n[workspace.profiles.inherits]\ncommand_secs = 60\n{ssh}"
+        ))
+        .unwrap();
+        let policy = &settings.workspace;
+        assert!(!policy.default.review, "off by default");
+        assert!(policy.profiles.get("reviewed").unwrap().review);
+        assert!(!policy.profiles.get("inherits").unwrap().review);
+        let text = settings.describe();
+        assert!(
+            text.contains("  reviewed: ssh, 600s per command, 1800s per run, 20480 bytes of output, reviews in a workspace"),
+            "{text}"
+        );
+        assert!(
+            !text.contains(
+                "  default: host, 600s per command, 1800s per run, 20480 bytes of output, reviews"
+            ),
+            "{text}"
+        );
+
+        let all = database(&format!("[workspace]\nbackend = \"ssh\"\nreview = true\n[workspace.profiles.quiet]\nreview = false\n[workspace.profiles.loud]\n{ssh}")).unwrap();
+        assert!(all.workspace.default.review);
+        assert!(!all.workspace.profiles.get("quiet").unwrap().review);
+        assert!(
+            all.workspace.profiles.get("loud").unwrap().review,
+            "inherited"
+        );
+    }
+
+    #[test]
+    fn a_review_workspace_on_the_host_backend_is_refused() {
+        for (bad, profile) in [
+            ("[workspace]\nreview = true\n", "default"),
+            ("[workspace.profiles.p]\nreview = true\n", "p"),
+            (
+                "[workspace]\nreview = true\n[workspace.profiles.p]\nbackend = \"ssh\"\n",
+                "default",
+            ),
+        ] {
+            let error = database(bad).unwrap_err();
+            assert!(matches!(error, ConfigError::Workspace(_)), "{bad}: {error}");
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!(
+                    "workspace profile {profile}: review = true needs a backend apart from Henk"
+                )),
+                "{bad}: {text}"
+            );
         }
     }
 
