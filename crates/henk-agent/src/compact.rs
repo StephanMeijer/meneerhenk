@@ -15,6 +15,13 @@
 //! edit is refused. So whenever anything is stubbed, every provider-specific
 //! block (thinking) is dropped from the whole conversation. Dropping all of
 //! them is allowed; the model answers on without that earlier reasoning.
+//!
+//! An edit is expensive in two ways: it restarts every prefix cache (the
+//! provider's own, or Anthropic's explicit one) and it costs the model its
+//! earlier reasoning. So once over budget, compaction stubs down to a
+//! low-water mark well under the budget, not to the budget itself: the
+//! history then stays append-only for several turns before the next edit,
+//! instead of being rewritten on every turn (#54).
 
 use std::fmt::Write as _;
 
@@ -23,6 +30,9 @@ use henk_llm::{Block, ChatMessage, Role, ToolArguments};
 /// Results shorter than this are never stubbed; the stub would not be
 /// much shorter.
 const MIN_STUB_CHARS: usize = 200;
+
+/// Once over budget, stub down to this share of it, in percent.
+const LOW_WATER_PERCENT: usize = 75;
 
 /// Characters the conversation takes as the model sees it: text, tool call
 /// arguments and tool results.
@@ -43,7 +53,8 @@ pub fn size(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
-/// Brings `messages` under `budget` characters by stubbing old tool
+/// When `messages` is over `budget` characters, brings it down to the
+/// low-water mark ([`LOW_WATER_PERCENT`] of the budget) by stubbing old tool
 /// results, oldest first, leaving the last `keep_recent_turns` turns intact.
 /// A turn starts at an assistant message. Returns how many results were
 /// stubbed. When that is more than zero, opaque blocks are dropped too.
@@ -74,6 +85,7 @@ fn stub_old_results(
     if total <= budget {
         return 0;
     }
+    let target = budget / 100 * LOW_WATER_PERCENT + budget % 100 * LOW_WATER_PERCENT / 100;
     // The index of the first message of the turns to keep intact.
     let assistant_indices: Vec<usize> = messages
         .iter()
@@ -95,7 +107,7 @@ fn stub_old_results(
     // enough, the results a tool marks as the work itself (the diffs).
     let mut stubbed = 0;
     for kept in [false, true] {
-        stubbed += stub_pass(messages, protected_from, budget, &mut total, |tool| {
+        stubbed += stub_pass(messages, protected_from, target, &mut total, |tool| {
             keep(tool) == kept
         });
     }
@@ -230,9 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn stops_as_soon_as_the_budget_is_met_and_never_stubs_twice() {
+    fn stops_at_the_low_water_mark_and_never_stubs_twice() {
         let mut messages = conversation(&[5000, 5000, 5000, 5000]);
-        assert_eq!(compact(&mut messages, 16_000, 1, |_| false), 1);
+        assert_eq!(
+            compact(&mut messages, 16_000, 1, |_| false),
+            2,
+            "down to 12,000, not just under 16,000"
+        );
+        assert!(size(&messages) <= 12_000);
         assert_eq!(
             compact(&mut messages, 16_000, 1, |_| false),
             0,
@@ -240,8 +257,8 @@ mod tests {
         );
         assert_eq!(
             compact(&mut messages, 6_000, 1, |_| false),
-            2,
-            "stubs are skipped, the next two go"
+            1,
+            "stubs are skipped, only the third is left"
         );
     }
 
@@ -252,7 +269,7 @@ mod tests {
         let mut messages = conversation(&[5000, 5000, 5000]);
         messages[1].blocks.insert(0, thinking());
         messages[5].blocks.insert(0, thinking());
-        assert_eq!(compact(&mut messages, 11_000, 1, |_| false), 1);
+        assert_eq!(compact(&mut messages, 11_000, 1, |_| false), 2);
         assert!(
             messages
                 .iter()
@@ -297,7 +314,7 @@ mod tests {
         messages.extend(named_turn(2, "read_file", 30_000));
         messages.extend(named_turn(3, "read_file", 100));
         messages.extend(named_turn(4, "read_file", 100));
-        let stubbed = compact(&mut messages, 40_000, 2, |tool| tool == "get_file_diff");
+        let stubbed = compact(&mut messages, 45_000, 2, |tool| tool == "get_file_diff");
         assert_eq!(stubbed, 1);
         assert_eq!(content(&messages, 2).len(), 30_000, "the older diff stays");
         assert!(content(&messages, 4).starts_with("[result of read_file from turn 2 elided"));
@@ -310,12 +327,12 @@ mod tests {
         messages.extend(named_turn(2, "get_file_diff", 30_000));
         messages.extend(named_turn(3, "read_file", 30_000));
         messages.extend(named_turn(4, "read_file", 100));
-        let stubbed = compact(&mut messages, 35_000, 1, |tool| tool == "get_file_diff");
+        let stubbed = compact(&mut messages, 41_000, 1, |tool| tool == "get_file_diff");
         assert_eq!(stubbed, 2, "the read first, then the oldest diff");
         assert!(content(&messages, 6).starts_with("[result of read_file"));
         assert!(content(&messages, 2).starts_with("[result of get_file_diff from turn 1"));
         assert_eq!(content(&messages, 4).len(), 30_000, "the newer diff stays");
-        assert!(size(&messages) <= 35_000);
+        assert!(size(&messages) <= 30_750, "the low-water mark of 41,000");
     }
 
     #[test]
@@ -323,5 +340,27 @@ mod tests {
         let mut messages = conversation(&[5000, 5000]);
         assert_eq!(compact(&mut messages, 100, 0, |_| false), 2);
         assert!(size(&messages) < 300);
+    }
+
+    /// The hunt's scenario (#54): one 6,000-character file read per turn,
+    /// a 160,000-character budget, two recent turns kept. Before the
+    /// low-water mark, every turn past the budget rewrote earlier history.
+    #[test]
+    fn a_growing_conversation_is_edited_only_every_few_turns() {
+        let mut messages = vec![ChatMessage::user("go")];
+        let mut edited = Vec::new();
+        for n in 1..=60 {
+            messages.extend(turn(n, 6_000));
+            if compact(&mut messages, 160_000, 2, |_| false) > 0 {
+                edited.push(n);
+            }
+        }
+        assert!(edited.len() >= 3, "it does compact: {edited:?}");
+        for pair in edited.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 5,
+                "edits at turns {edited:?}: history must stay append-only between them"
+            );
+        }
     }
 }

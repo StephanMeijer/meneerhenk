@@ -292,8 +292,18 @@ fn decode_usage(usage: &Value) -> Usage {
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))
             .unwrap_or(0)
     };
+    // OpenAI-style prompt counts include the cached part; caching there is
+    // automatic and prefix-based, and reported as cached_tokens.
+    let prompt = count(["prompt_tokens", "input_tokens"]);
+    let cached = ["prompt_tokens_details", "input_tokens_details"]
+        .iter()
+        .find_map(|key| usage.get(*key)?.get("cached_tokens")?.as_u64())
+        .unwrap_or(0)
+        .min(prompt);
     Usage {
-        input_tokens: count(["prompt_tokens", "input_tokens"]),
+        input_tokens: prompt - cached,
         output_tokens: count(["completion_tokens", "output_tokens"]),
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
     }
 }
