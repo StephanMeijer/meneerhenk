@@ -357,6 +357,7 @@ async fn one_address_run_per_pull_request_at_a_time() {
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
         live_runs: crate::liveness::LiveRuns::default(),
+        workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
         test_writer: None,
         test_session: None,
         test_address_writer: None,

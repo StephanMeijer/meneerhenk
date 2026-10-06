@@ -478,6 +478,7 @@ requester_id = 3
                 gitlab: None,
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
+                workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
                 test_writer: None,
                 test_session: Some(session),
                 test_address_writer: None,

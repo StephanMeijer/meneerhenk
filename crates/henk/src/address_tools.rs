@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checks_run_in_the_checkout() {
+    async fn checks_run_in_the_workspace() {
         let (provider, ctx) = workspace("henk-tools-checks").await;
         let out = RunChecks(Arc::clone(&ctx)).call(json!({})).await;
         assert_eq!(out.content, "$ true: passed");

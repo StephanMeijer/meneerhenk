@@ -436,6 +436,30 @@ pub(crate) mod tests {
         (head, log)
     }
 
+    /// The paths the head of `feature` on a bare remote changed since
+    /// `base`, sorted, and the content of `path` there.
+    pub(crate) async fn remote_change(
+        remote: &Path,
+        base: &str,
+        path: &str,
+    ) -> (Vec<String>, String) {
+        let names = run(
+            remote,
+            &["diff", "--name-only", base, "refs/heads/feature"],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut names: Vec<String> = names.lines().map(str::to_owned).collect();
+        names.sort();
+        let spec = format!("refs/heads/feature:{path}");
+        let content = run(remote, &["show", &spec], None, None)
+            .await
+            .unwrap_or_default();
+        (names, content)
+    }
+
     fn identity() -> CommitIdentity {
         CommitIdentity {
             name: "meneer-henk[bot]".to_owned(),

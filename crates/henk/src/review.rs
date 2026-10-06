@@ -951,6 +951,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 gitlab: None,
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
+                workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
                 test_address_writer: None,

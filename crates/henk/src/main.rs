@@ -29,13 +29,6 @@ mod runs;
 mod server;
 mod urls;
 mod web_fetch;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the address run moves onto it in the next commits"
-    )
-)]
 mod workspace;
 
 use std::path::{Path, PathBuf};
