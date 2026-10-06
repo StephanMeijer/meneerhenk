@@ -1,11 +1,11 @@
 //! The tools an address run's model works with (§3.5): read, search and
-//! edit files in the checkout, run the project's checks, and settle each
-//! review thread. Nothing here reaches the network, git or a credential;
-//! committing, pushing and replying are Henk's code, after the session.
+//! edit files in the workspace, run the project's checks, and settle each
+//! review thread. The tools talk only to a [`Workspace`]; nothing here
+//! reaches the network, git or a credential. Committing, pushing and
+//! replying are Henk's code, after the session.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,18 +17,19 @@ use henk_platform::address::OpenThread;
 use serde_json::{Value, json};
 
 use crate::checks::{describe, run_checks};
+use crate::workspace::Workspace;
 
 /// Lines `read_file` returns at most per call.
 const READ_LINES: usize = 400;
-/// Files larger than this are not read or searched.
+/// Files larger than this are not read, searched or written.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Entries `list_files` and hits `search` return at most.
 const LIST_CAP: usize = 500;
 
 /// What all address tools share.
 pub struct AddressContext {
-    /// The checkout.
-    pub root: PathBuf,
+    /// Where the files are and the checks run.
+    pub workspace: Arc<dyn Workspace>,
     /// The open threads, in the order they were listed.
     pub threads: Vec<OpenThread>,
     /// The project's checks.
@@ -60,59 +61,13 @@ pub struct AddressState {
 }
 
 impl AddressContext {
-    /// The real path of `path`, refused when it is not inside the checkout
-    /// once symlinks are followed.
-    fn existing(&self, path: &WorkspacePath) -> Result<PathBuf, String> {
-        let root = self
-            .root
-            .canonicalize()
-            .map_err(|e| format!("the checkout is unavailable: {e}"))?;
-        let real = root
-            .join(path.as_str())
-            .canonicalize()
-            .map_err(|_| format!("{path} does not exist"))?;
-        if !real.starts_with(&root) {
-            return Err(format!("{path} leads out of the repository"));
+    /// Refuses a write to a new file beyond the limit, or of more bytes
+    /// than a file may have. Nothing is recorded yet.
+    fn may_write(&self, path: &WorkspacePath, bytes: usize) -> Result<(), String> {
+        if u64::try_from(bytes).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+            return Err(format!("{path} would be larger than 1 MB"));
         }
-        if real
-            .strip_prefix(&root)
-            .is_ok_and(|rest| rest.starts_with(".git"))
-        {
-            return Err(format!("{path} leads into .git"));
-        }
-        Ok(real)
-    }
-
-    /// Where to write `path`: its parent must be inside the checkout and it
-    /// must not itself be a symlink.
-    fn writable(&self, path: &WorkspacePath) -> Result<PathBuf, String> {
-        let target = self.root.join(path.as_str());
-        if target
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink())
-        {
-            return Err(format!("{path} is a symbolic link; edit what it points to"));
-        }
-        let parent = target
-            .parent()
-            .ok_or_else(|| format!("{path} has no directory"))?;
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot make the directory: {e}"))?;
-        let root = self
-            .root
-            .canonicalize()
-            .map_err(|e| format!("the checkout is unavailable: {e}"))?;
-        let real_parent = parent
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve the directory: {e}"))?;
-        if !real_parent.starts_with(&root) {
-            return Err(format!("{path} leads out of the repository"));
-        }
-        Ok(target)
-    }
-
-    /// Records a write, refusing a new file beyond the limit.
-    fn note_write(&self, path: &WorkspacePath) -> Result<(), String> {
-        let mut state = self
+        let state = self
             .state
             .lock()
             .map_err(|_| "address state unavailable".to_owned())?;
@@ -122,7 +77,21 @@ impl AddressContext {
                 self.max_changed_files
             ));
         }
-        state.written.insert(path.as_str().to_owned());
+        Ok(())
+    }
+
+    /// Writes `content` to `path` within the limits and records it.
+    async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), String> {
+        self.may_write(path, content.len())?;
+        self.workspace
+            .write(path, content)
+            .await
+            .map_err(|e| format!("cannot write {path}: {e}"))?;
+        self.state
+            .lock()
+            .map_err(|_| "address state unavailable".to_owned())?
+            .written
+            .insert(path.as_str().to_owned());
         Ok(())
     }
 
@@ -167,33 +136,6 @@ fn schema(properties: &Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
-/// Every file under `dir`, `.git` left out, at most `cap`.
-fn walk(root: &Path, dir: &Path, cap: usize, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        if out.len() >= cap {
-            return;
-        }
-        let path = entry.path();
-        if path.file_name().is_some_and(|n| n == ".git") {
-            continue;
-        }
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => walk(root, &path, cap, out),
-            Ok(kind) if kind.is_file() => {
-                if let Ok(relative) = path.strip_prefix(root) {
-                    out.push(relative.to_path_buf());
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 macro_rules! address_tool {
     ($name:ident) => {
         /// An address tool.
@@ -227,20 +169,13 @@ impl Tool for ListFiles {
             Ok(dir) => dir,
             Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let start = if dir.as_str().is_empty() {
-            ctx.root.clone()
-        } else {
-            match ctx.existing(&dir) {
-                Ok(real) => real,
-                Err(error) => return ToolOutput::error(error),
-            }
+        let files = match ctx.workspace.list(&dir, LIST_CAP).await {
+            Ok(files) => files,
+            Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let root = ctx.root.canonicalize().unwrap_or_else(|_| ctx.root.clone());
-        let mut files = Vec::new();
-        walk(&root, &start, LIST_CAP, &mut files);
         let mut text = String::new();
         for file in &files {
-            let _ = writeln!(text, "{}", file.display());
+            let _ = writeln!(text, "{file}");
         }
         if files.len() >= LIST_CAP {
             text.push_str("[more files; list a subdirectory]\n");
@@ -274,14 +209,7 @@ impl Tool for ReadFile {
             Ok(path) => path,
             Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let real = match ctx.existing(&path) {
-            Ok(real) => real,
-            Err(error) => return ToolOutput::error(error),
-        };
-        if real.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            return ToolOutput::error(format!("{path} is larger than 1 MB"));
-        }
-        let text = match std::fs::read(&real) {
+        let text = match ctx.workspace.read(&path, MAX_FILE_BYTES).await {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(error) => return ToolOutput::error(format!("cannot read {path}: {error}")),
         };
@@ -327,29 +255,20 @@ impl Tool for SearchFiles {
         let Some(needle) = arg_str(&args, "text").filter(|t| !t.is_empty()) else {
             return ToolOutput::error("text is required");
         };
-        let root = ctx.root.canonicalize().unwrap_or_else(|_| ctx.root.clone());
-        let mut files = Vec::new();
-        walk(&root, &root, usize::MAX, &mut files);
+        let hits = match ctx
+            .workspace
+            .search(&WorkspacePath::root(), needle, MAX_FILE_BYTES, LIST_CAP)
+            .await
+        {
+            Ok(hits) => hits,
+            Err(error) => return ToolOutput::error(error.to_string()),
+        };
         let mut out = String::new();
-        let mut hits = 0;
-        'files: for file in files {
-            let full = root.join(&file);
-            if full.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&full) else {
-                continue;
-            };
-            for (index, line) in text.lines().enumerate() {
-                if line.contains(needle) {
-                    let _ = writeln!(out, "{}:{}: {}", file.display(), index + 1, line.trim());
-                    hits += 1;
-                    if hits >= LIST_CAP {
-                        out.push_str("[more matches; search for something narrower]\n");
-                        break 'files;
-                    }
-                }
-            }
+        for hit in &hits {
+            let _ = writeln!(out, "{}:{}: {}", hit.path, hit.line, hit.text);
+        }
+        if hits.len() >= LIST_CAP {
+            out.push_str("[more matches; search for something narrower]\n");
         }
         ToolOutput::ok(if out.is_empty() {
             "No matches.".to_owned()
@@ -388,11 +307,11 @@ impl Tool for EditFile {
             Ok(path) => path,
             Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let real = match ctx.existing(&path) {
-            Ok(real) => real,
-            Err(error) => return ToolOutput::error(error),
+        let bytes = match ctx.workspace.read(&path, MAX_FILE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(error) => return ToolOutput::error(format!("cannot read {path}: {error}")),
         };
-        let Ok(text) = std::fs::read_to_string(&real) else {
+        let Ok(text) = String::from_utf8(bytes) else {
             return ToolOutput::error(format!("{path} is not a text file"));
         };
         match text.matches(old).count() {
@@ -404,12 +323,12 @@ impl Tool for EditFile {
                 ));
             }
         }
-        if let Err(error) = ctx.note_write(&path) {
-            return ToolOutput::error(error);
-        }
-        match std::fs::write(&real, text.replacen(old, new, 1)) {
+        match ctx
+            .write(&path, text.replacen(old, new, 1).as_bytes())
+            .await
+        {
             Ok(()) => ToolOutput::ok(format!("Edited {path}.")),
-            Err(error) => ToolOutput::error(format!("cannot write {path}: {error}")),
+            Err(error) => ToolOutput::error(error),
         }
     }
 }
@@ -436,16 +355,9 @@ impl Tool for WriteFile {
             Ok(path) => path,
             Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let target = match ctx.writable(&path) {
-            Ok(target) => target,
-            Err(error) => return ToolOutput::error(error),
-        };
-        if let Err(error) = ctx.note_write(&path) {
-            return ToolOutput::error(error);
-        }
-        match std::fs::write(&target, content) {
+        match ctx.write(&path, content.as_bytes()).await {
             Ok(()) => ToolOutput::ok(format!("Wrote {path}.")),
-            Err(error) => ToolOutput::error(format!("cannot write {path}: {error}")),
+            Err(error) => ToolOutput::error(error),
         }
     }
 }
@@ -455,14 +367,19 @@ impl Tool for RunChecks {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("run_checks"),
-            description: "Runs the project's configured checks (build, tests, lint) in the checkout and reports each.".to_owned(),
+            description: "Runs the project's configured checks (build, tests, lint) in the workspace and reports each.".to_owned(),
             input_schema: schema(&json!({}), &[]),
         }
     }
 
     async fn call(&self, _args: Value) -> ToolOutput {
         let ctx = &self.0;
-        let results = run_checks(&ctx.root, &ctx.check_commands, ctx.check_timeout).await;
+        let results = run_checks(
+            ctx.workspace.as_ref(),
+            &ctx.check_commands,
+            ctx.check_timeout,
+        )
+        .await;
         ToolOutput::ok(describe(&results))
     }
 }
@@ -571,8 +488,12 @@ mod tests {
 
     use henk_platform::address::ThreadNote;
 
+    use henk_domain::workspace::Profile;
+
     use super::*;
     use crate::git::ScratchDir;
+    use crate::workspace::WorkspaceProvider as _;
+    use crate::workspace::fake::{FakeProvider, Scripted};
 
     pub(crate) fn thread(id: &str, by_henk: bool) -> OpenThread {
         OpenThread {
@@ -590,7 +511,10 @@ mod tests {
         }
     }
 
-    fn workspace(name: &str) -> (ScratchDir, Arc<AddressContext>) {
+    /// The tools over a fake workspace holding `src/a.rs`, where `true`
+    /// passes. Path checks on a real file system are the host backend's
+    /// tests.
+    async fn workspace(name: &str) -> (FakeProvider, Arc<AddressContext>) {
         let dir = ScratchDir::new(name).unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
@@ -600,46 +524,65 @@ mod tests {
             "fn main() {\n    let x = 1;\n    let x = 1;\n}\n",
         )
         .unwrap();
+        let mut provider = FakeProvider::default();
+        provider
+            .script
+            .insert("true".to_owned(), Scripted::default());
+        let workspace = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
         let ctx = Arc::new(AddressContext {
-            root: dir.path().to_path_buf(),
+            workspace,
             threads: vec![thread("T1", true)],
             check_commands: vec![vec!["true".to_owned()]],
             check_timeout: Duration::from_secs(5),
             max_changed_files: 2,
             state: Mutex::default(),
         });
-        (dir, ctx)
+        (provider, ctx)
+    }
+
+    async fn content(ctx: &AddressContext, path: &str) -> String {
+        let bytes = ctx
+            .workspace
+            .read(&WorkspacePath::parse(path).unwrap(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
     }
 
     #[tokio::test]
-    async fn files_outside_the_checkout_cannot_be_read_or_written() {
-        let (dir, ctx) = workspace("henk-tools-escape");
-        std::os::unix::fs::symlink("/etc", dir.path().join("etc")).unwrap();
+    async fn paths_out_of_the_repository_are_refused_before_the_workspace() {
+        let (_provider, ctx) = workspace("henk-tools-escape").await;
         for args in [
             json!({"path": "../outside"}),
             json!({"path": "/etc/passwd"}),
             json!({"path": ".git/config"}),
-            json!({"path": "etc/passwd"}),
         ] {
             let out = ReadFile(Arc::clone(&ctx)).call(args.clone()).await;
             assert!(out.is_error, "read {args}");
         }
         for args in [
-            json!({"path": "etc/x", "content": "y"}),
-            json!({"path": "etc", "content": "y"}),
+            json!({"path": "../x", "content": "y"}),
             json!({"path": ".git/hooks/pre-commit", "content": "y"}),
         ] {
             let out = WriteFile(Arc::clone(&ctx)).call(args.clone()).await;
             assert!(out.is_error, "write {args}");
         }
-        assert!(!Path::new("/etc/x").exists());
+        assert!(ctx.workspace.export().await.unwrap().is_empty());
         let listed = ListFiles(Arc::clone(&ctx)).call(json!({})).await;
-        assert!(!listed.content.contains(".git"), "{}", listed.content);
+        assert_eq!(listed.content, "src/a.rs\n");
+        let big = "x".repeat(1024 * 1024 + 1);
+        let out = WriteFile(Arc::clone(&ctx))
+            .call(json!({"path": "big.txt", "content": big}))
+            .await;
+        assert!(out.content.contains("larger than 1 MB"), "{}", out.content);
     }
 
     #[tokio::test]
     async fn an_edit_must_match_exactly_once() {
-        let (dir, ctx) = workspace("henk-tools-edit");
+        let (_provider, ctx) = workspace("henk-tools-edit").await;
         let twice = EditFile(Arc::clone(&ctx))
             .call(json!({"path": "src/a.rs", "old": "let x = 1;", "new": "let x = 2;"}))
             .await;
@@ -650,7 +593,7 @@ mod tests {
             .await;
         assert!(!once.is_error, "{once:?}");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("src/a.rs")).unwrap(),
+            content(&ctx, "src/a.rs").await,
             "fn main() {\n    let x = 1;\n}\n"
         );
         let read = ReadFile(Arc::clone(&ctx))
@@ -665,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_files_stop_at_the_limit() {
-        let (_dir, ctx) = workspace("henk-tools-limit");
+        let (_provider, ctx) = workspace("henk-tools-limit").await;
         for path in ["one.md", "two.md"] {
             let out = WriteFile(Arc::clone(&ctx))
                 .call(json!({"path": path, "content": "x"}))
@@ -684,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_thread_is_settled_once_with_a_reply_in_style() {
-        let (_dir, ctx) = workspace("henk-tools-settle");
+        let (_provider, ctx) = workspace("henk-tools-settle").await;
         for (args, ok) in [
             (
                 json!({"thread_id": "T9", "outcome": "fixed", "reply": "Done."}),
@@ -721,9 +664,10 @@ mod tests {
 
     #[tokio::test]
     async fn checks_run_in_the_checkout() {
-        let (_dir, ctx) = workspace("henk-tools-checks");
+        let (provider, ctx) = workspace("henk-tools-checks").await;
         let out = RunChecks(Arc::clone(&ctx)).call(json!({})).await;
         assert_eq!(out.content, "$ true: passed");
+        assert_eq!(*provider.ran.lock().unwrap(), ["true"]);
         let threads = ctx.threads_text();
         assert!(
             threads.contains("<thread id=\"T1\" at=\"src/a.rs:2\">"),

@@ -1,6 +1,6 @@
 //! The address run (§3.5): read the open review threads of one pull
-//! request, let a model fix what it can in a checkout, push one commit as a
-//! fast-forward, then reply in each thread and sum up.
+//! request, let a model fix what it can in a workspace, push one commit as
+//! a fast-forward, then reply in each thread and sum up.
 //!
 //! Everything that can fail with an error happens before the push. After
 //! it, replies and the summary are best-effort: a run that failed never
@@ -15,6 +15,7 @@ use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::address::{ThreadOutcome, commit_message, push_refusal};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::run::{RunId, RunKind};
+use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
 use henk_platform::address::{AddressWriter, OpenThread};
@@ -29,6 +30,8 @@ use crate::checks::{describe, run_checks};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
+use crate::workspace::host::HostProvider;
+use crate::workspace::{Workspace, WorkspaceProvider as _, checked_changeset};
 
 /// A request to address one pull request's review feedback.
 #[derive(Debug, Clone)]
@@ -236,8 +239,13 @@ impl Session<'_> {
                 .await
                 .context("checking out the pull request")?;
 
+        let profile = self.app.settings.workspace.profile_for(&target.repo.path());
+        let workspace = HostProvider
+            .open(checkout.path(), profile)
+            .await
+            .context("opening the workspace")?;
         let context = Arc::new(AddressContext {
-            root: checkout.path().to_path_buf(),
+            workspace: Arc::clone(&workspace),
             threads: threads.clone(),
             check_commands: config.check_commands.clone(),
             check_timeout: self.command_limit(),
@@ -251,23 +259,14 @@ impl Session<'_> {
             .lock()
             .map(|s| s.settled.clone())
             .map_err(|_| anyhow!("address state unavailable"))?;
-        let changed = checkout
-            .changed_files()
-            .await
-            .context("listing the changes")?;
-        if changed.len() > config.max_changed_files {
-            return Err(anyhow!(
-                "{} files changed; a run may change at most {}",
-                changed.len(),
-                config.max_changed_files
-            ));
-        }
-
-        let (commit, checks_text) = if changed.is_empty() {
-            (None, String::new())
+        let (changes, checks_text) = self.changeset(workspace.as_ref()).await?;
+        let commit = if changes.is_empty() {
+            None
         } else {
-            self.commit_and_push(&checkout, facts, &threads, &settled, changed.len())
-                .await?
+            Some(
+                self.commit_and_push(&checkout, facts, &threads, &settled, &changes)
+                    .await?,
+            )
         };
 
         Ok(self
@@ -275,31 +274,45 @@ impl Session<'_> {
             .await)
     }
 
-    /// Runs the checks once more, commits as Henk, makes sure the branch has
-    /// not moved, and pushes. Returns the commit and the checks' report.
+    /// What the run changed, checked against the policy (§3.5), and the
+    /// report of the checks. When anything changed, the checks run once more
+    /// in the workspace first, so what they leave behind is part of the
+    /// changeset and its limits.
+    async fn changeset(&self, workspace: &dyn Workspace) -> anyhow::Result<(Vec<Change>, String)> {
+        let Some(config) = self.app.settings.address.as_ref() else {
+            return Err(anyhow!("address runs are not configured"));
+        };
+        if workspace
+            .export()
+            .await
+            .context("listing the changes")?
+            .is_empty()
+        {
+            return Ok((Vec::new(), String::new()));
+        }
+        let results = run_checks(workspace, &config.check_commands, self.command_limit()).await;
+        let checks_text = if results.is_empty() {
+            String::new()
+        } else {
+            describe(&results)
+        };
+        let exported = workspace.export().await.context("listing the changes")?;
+        let changes =
+            checked_changeset(exported, config.max_changed_files).map_err(|why| anyhow!(why))?;
+        Ok((changes, checks_text))
+    }
+
+    /// Applies the changeset to the checkout, commits as Henk, makes sure
+    /// the branch has not moved, and pushes. Returns the commit.
     async fn commit_and_push(
         &self,
         checkout: &Checkout,
         facts: &henk_platform::address::PullFacts,
         threads: &[OpenThread],
         settled: &std::collections::BTreeMap<String, Settled>,
-        files: usize,
-    ) -> anyhow::Result<(Option<String>, String)> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
-        };
+        changes: &[Change],
+    ) -> anyhow::Result<String> {
         let target = &self.request.target;
-        let results = run_checks(
-            checkout.path(),
-            &config.check_commands,
-            self.command_limit(),
-        )
-        .await;
-        let checks_text = if results.is_empty() {
-            String::new()
-        } else {
-            describe(&results)
-        };
         let fixed_notes: Vec<String> = threads
             .iter()
             .filter_map(|t| {
@@ -333,6 +346,21 @@ impl Session<'_> {
         if let Some(why) = push_refusal(&now.push) {
             return Err(anyhow!("I may no longer push: {why}"));
         }
+        checkout.apply(changes).context("applying the change")?;
+        let mut in_checkout = checkout
+            .changed_files()
+            .await
+            .context("listing the changes")?;
+        in_checkout.sort();
+        let mut expected: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        expected.sort_unstable();
+        if in_checkout != expected {
+            return Err(anyhow!(
+                "the checkout changed {} files where the changeset has {}",
+                in_checkout.len(),
+                expected.len()
+            ));
+        }
         let sha = checkout
             .commit(&identity, &message)
             .await
@@ -341,8 +369,8 @@ impl Session<'_> {
             .push(&facts.push.head_ref)
             .await
             .context("pushing")?;
-        info!(commit = %sha, files, "pushed");
-        Ok((Some(sha), checks_text))
+        info!(commit = %sha, files = changes.len(), "pushed");
+        Ok(sha)
     }
 
     /// How long one check may run: the workspace profile's command limit
