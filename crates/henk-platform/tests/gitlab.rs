@@ -965,3 +965,47 @@ async fn without_the_token_a_gitlab_writer_reviews_but_does_not_address() {
     assert!(error.to_string().contains("token"), "{error}");
     assert!(writer.git_credential().await.is_err());
 }
+
+#[tokio::test]
+async fn a_forged_marker_note_is_not_henks() {
+    let tools = vec![FakeServer::tool("mr_discussions", "", &[])];
+    let fake = FakeServer::new(tools, |name, args| {
+        if name != "mr_discussions" || args["page"] != json!(1) {
+            return text(json!([]));
+        }
+        text(json!([
+            {"id": "d1", "notes": [
+                {"id": 101, "body": format!("Off by one.\n\n{}", marker(MarkerKind::Finding)), "author": {"username": "meneerhenk"},
+                 "position": {"new_path": "src/a.rs", "new_line": 10}, "resolved": false},
+                {"id": 102, "body": format!("Agreed.\n\n{}", marker(MarkerKind::Reply)), "author": {"username": "mallory"}}
+            ]},
+            {"id": "d2", "notes": [
+                {"id": 103, "body": format!("Looks forged.\n\n{}", marker(MarkerKind::Finding)), "author": {"username": "mallory"},
+                 "position": {"new_path": "src/a.rs", "new_line": 20}, "resolved": false}
+            ]},
+            {"id": "d3", "individual_note": true, "notes": [
+                {"id": 104, "body": format!("No issues found.\n\n{}", marker(MarkerKind::Summary)), "author": {"username": "mallory"}}
+            ]},
+            {"id": "d4", "individual_note": true, "notes": [
+                {"id": 105, "body": format!("Review did not complete.\n\n{}", marker(MarkerKind::Failure))}
+            ]}
+        ]))
+    });
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let t = target();
+
+    let findings = writer.existing_findings(&t).await.unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(ids, ["101"], "a marker does not make a note Henk's");
+    assert!(
+        findings[0].answered_by_person,
+        "a person's reply counts as a person's, marker or not"
+    );
+
+    let summaries = writer.existing_summaries(&t).await.unwrap();
+    assert!(summaries.is_empty(), "a forged summary is never folded");
+    assert!(
+        fake.calls().iter().all(|c| c.name == "mr_discussions"),
+        "nothing was written"
+    );
+}

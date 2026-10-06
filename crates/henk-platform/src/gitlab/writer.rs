@@ -215,9 +215,12 @@ impl GitLabWriter {
         .await
     }
 
+    /// Whether Henk's own account wrote `note`. The marker in a body is
+    /// traceability, not authorship: anyone can paste one (§8).
     fn is_henk_note(&self, note: &Value) -> bool {
-        note.pointer("/author/username").and_then(Value::as_str) == Some(self.username.as_str())
-            || Marker::is_present(note_body(note))
+        note.pointer("/author/username")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty() && name.eq_ignore_ascii_case(&self.username))
     }
 }
 
@@ -376,7 +379,10 @@ impl PlatformWriter for GitLabWriter {
                 .cloned()
                 .unwrap_or_default();
             let Some(first) = notes.first() else { continue };
-            if is_system(first) || first.get("position").is_none_or(Value::is_null) {
+            if is_system(first)
+                || first.get("position").is_none_or(Value::is_null)
+                || !self.is_henk_note(first)
+            {
                 continue;
             }
             let Some(marker) = Marker::parse(note_body(first)) else {
