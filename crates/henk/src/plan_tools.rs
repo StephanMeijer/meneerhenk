@@ -481,6 +481,15 @@ impl Tool for CreateSubIssue {
                 ));
             }
         }
+        // A parent that cannot have children is refused before the budget
+        // is spent, as nothing would be created.
+        let parent = match ctx.writer.issue(&ctx.target).await {
+            Ok(parent) => parent,
+            Err(error) => return ToolOutput::error(format!("Could not read the issue: {error}")),
+        };
+        if let Err(error) = ctx.writer.may_have_children(&parent) {
+            return ToolOutput::error(format!("Could not create the sub-issue: {error}"));
+        }
         if let Err(refusal) = ctx.spend(2, &format!("created sub-issue {title:?} ({reason})")) {
             return refusal;
         }
@@ -752,18 +761,23 @@ pub(crate) mod tests {
             })
         }
 
+        fn may_have_children(&self, parent: &IssueInfo) -> Result<(), PlatformError> {
+            if self.platform == Platform::GitLab && parent.kind.as_deref() == Some("Task") {
+                return Err(PlatformError::Unsupported(
+                    "a GitLab task cannot have children".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+
         async fn create_sub_issue(
             &self,
             target: &IssueTarget,
             title: &str,
             body: &str,
         ) -> Result<CreatedSubIssue, PlatformError> {
-            let parent = self.issue.lock().unwrap().kind.clone();
-            if self.platform == Platform::GitLab && parent.as_deref() == Some("Task") {
-                return Err(PlatformError::Unsupported(
-                    "a GitLab task cannot have children".to_owned(),
-                ));
-            }
+            let parent = self.issue.lock().unwrap().clone();
+            self.may_have_children(&parent)?;
             let issue = self.create_issue(&target.repo, title, body).await?;
             self.links
                 .lock()
@@ -912,6 +926,12 @@ pub(crate) mod tests {
         );
         assert!(writer.created.lock().unwrap().is_empty());
         assert!(ctx.state.lock().unwrap().sub_issues.is_empty());
+        assert!(changes(&ctx).is_empty(), "a refusal is not a change");
+        assert_eq!(
+            ctx.state.lock().unwrap().budget.remaining(),
+            20,
+            "and costs nothing"
+        );
 
         let (writer, ctx) = gitlab("Issue");
         let out = CreateSubIssue(Arc::clone(&ctx)).call(args).await;

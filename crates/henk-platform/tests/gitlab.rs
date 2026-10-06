@@ -493,6 +493,11 @@ async fn a_sub_issue_is_a_task_made_under_its_parent_in_one_call() {
 
     let fake = work_items("Task");
     let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let task = writer.issue(&issue_target()).await.unwrap();
+    assert!(matches!(
+        writer.may_have_children(&task),
+        Err(henk_platform::PlatformError::Unsupported(_))
+    ));
     let refused = writer
         .create_sub_issue(&issue_target(), "Export CSV", "The CSV half.")
         .await;

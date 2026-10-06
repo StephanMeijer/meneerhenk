@@ -228,6 +228,10 @@ impl IssueWriter for GitLabWriter {
         })
     }
 
+    fn may_have_children(&self, parent: &IssueInfo) -> Result<(), PlatformError> {
+        child_type(parent.kind.as_deref()).map(|_| ())
+    }
+
     async fn create_sub_issue(
         &self,
         target: &IssueTarget,
@@ -235,6 +239,7 @@ impl IssueWriter for GitLabWriter {
         body: &str,
     ) -> Result<CreatedSubIssue, PlatformError> {
         let parent = self.work_item(target).await?;
+        // Checked again here: the caller's read may be stale.
         let kind = child_type(parent.kind.as_deref())?;
         let created = self
             .call_tool(

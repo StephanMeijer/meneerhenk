@@ -116,6 +116,17 @@ pub trait IssueWriter: Send + Sync {
         body: &str,
     ) -> Result<IssueInfo, PlatformError>;
 
+    /// Whether `parent` may get a sub-issue, decided from an issue already
+    /// read, so a caller can refuse before it spends or writes anything. By
+    /// default it may: a GitHub issue of any type can have sub-issues.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError::Unsupported`] when this kind of issue has no children.
+    fn may_have_children(&self, _parent: &IssueInfo) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
     /// Creates an issue below `target` in the hierarchy. By default an issue
     /// created and then linked as a sub-issue; a tracker that can do both in
     /// one step overrides it, so a failed link cannot leave an orphan.
