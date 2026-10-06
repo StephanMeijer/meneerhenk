@@ -412,7 +412,18 @@ needs it and it is missing.
 backend = "ssh"
 toolchain = "mise"
 setup = [["npm", "ci"]]
+review = true
 ```
+
+With `review = true` on a profile, reviews of its repositories get
+workspaces too: every lane and the fact-checker get their own, holding the
+reviewed commit (fetched by its sha, so a push during the review changes
+nothing), set up as above before the lanes start. They are opened in
+parallel, so a review waits about one setup, and closed when the lanes
+end. A review workspace is never exported, and a lane whose workspace
+could not be opened or set up reviews through the platform as before, with
+the reason on the run's timeline. The tools that use these workspaces are
+#90 (`read_file`, `list_files`, `search`) and #85 (`bash`).
 
 `henk doctor --probe` connects and reports the connection, the host key and
 the runner's tools on lines of their own. The live tests run against such a

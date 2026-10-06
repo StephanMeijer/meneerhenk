@@ -78,6 +78,9 @@ pub struct LaneContext {
     pub fact_check: Option<Arc<dyn FactCheck>>,
     /// Fact-check rejections per line, for this lane.
     pub rejections: Mutex<BTreeMap<FindingKey, u32>>,
+    /// This lane's own workspace at the reviewed commit, when its profile
+    /// reviews in one (#170). Never exported.
+    pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
 }
 
 impl LaneContext {
@@ -965,6 +968,7 @@ diff --git a/README.md b/README.md
             files: Arc::new(DiffFiles::new(Arc::new(diff))),
             fact_check: None,
             rejections: Mutex::new(BTreeMap::new()),
+            workspace: None,
         })
     }
 
@@ -1226,6 +1230,7 @@ mod gate_tests {
             files: Arc::clone(&base.files),
             fact_check: Some(Arc::clone(&checker) as Arc<dyn FactCheck>),
             rejections: Mutex::new(BTreeMap::new()),
+            workspace: None,
         });
         (ctx, writer, checker)
     }

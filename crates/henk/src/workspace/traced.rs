@@ -144,6 +144,7 @@ mod tests {
                 code: 101,
                 output: "test failed\n".to_owned(),
                 writes: Vec::new(),
+                delay: Duration::ZERO,
             },
         );
         let src = ScratchDir::new("henk-trace-src").unwrap();

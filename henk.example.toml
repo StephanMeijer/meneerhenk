@@ -228,6 +228,9 @@ requester_id = 523456789012345678
 # the operator's setup commands, in order. Never steps from the repository.
 # toolchain = "mise"
 # setup = [["npm", "ci"]]
+# Reviews get workspaces too: one per lane and one for the fact-checker, at
+# the reviewed commit, set up as above, never exported.
+# review = true
 # [workspace.ssh]
 # host = "sandbox.example.com"
 # The host's key as `ssh-keyscan -t ed25519 sandbox.example.com` prints it.

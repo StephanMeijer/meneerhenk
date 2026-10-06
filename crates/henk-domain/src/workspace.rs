@@ -119,6 +119,10 @@ pub struct Profile {
     pub setup: Vec<Vec<String>>,
     /// The tool manager that provides the repository's toolchain, if any.
     pub toolchain: Option<Toolchain>,
+    /// Whether reviews of the repository get workspaces too (#170): one
+    /// per lane and one for the fact-checker, at the reviewed commit. Off
+    /// by default, so a review reads through its MCP session only.
+    pub review: bool,
 }
 
 /// A tool manager that installs what the repository's own configuration
@@ -149,11 +153,24 @@ impl Default for Profile {
             limits: Limits::default(),
             setup: Vec::new(),
             toolchain: None,
+            review: false,
         }
     }
 }
 
 impl Profile {
+    /// Whether a run of this kind opens a workspace with this profile. An
+    /// address run always does; a review only when the profile says so;
+    /// a planner not yet.
+    #[must_use]
+    pub const fn serves(&self, lane: EnvLane) -> bool {
+        match lane {
+            EnvLane::Address => true,
+            EnvLane::Review => self.review,
+            EnvLane::Plan => false,
+        }
+    }
+
     fn refusal(&self, name: &str) -> Option<String> {
         if let Some(limit) = self.limits.zero() {
             return Some(format!(
@@ -246,6 +263,16 @@ pub enum EnvLane {
     Plan,
     /// An address run (§3.5).
     Address,
+}
+
+impl EnvLane {
+    /// Whether what the run changed in its workspace is ever taken out.
+    /// Only an address run's is, and only to become its one commit
+    /// (§3.5); a review or a plan never changes the pull request (§8.2).
+    #[must_use]
+    pub const fn exports(self) -> bool {
+        matches!(self, Self::Address)
+    }
 }
 
 /// What a model can do in a workspace, through Henk's tools.
@@ -517,5 +544,23 @@ mod tests {
         assert!(tools(EnvLane::Review).is_empty());
         assert!(tools(EnvLane::Plan).is_empty());
         assert!(tools(EnvLane::Address).contains(&ToolKind::Exec));
+    }
+
+    #[test]
+    fn only_an_address_run_is_exported() {
+        assert!(EnvLane::Address.exports());
+        assert!(!EnvLane::Review.exports());
+        assert!(!EnvLane::Plan.exports());
+    }
+
+    #[test]
+    fn a_review_opens_a_workspace_only_when_its_profile_says_so() {
+        let mut profile = Profile::default();
+        assert!(profile.serves(EnvLane::Address));
+        assert!(!profile.serves(EnvLane::Review));
+        assert!(!profile.serves(EnvLane::Plan));
+        profile.review = true;
+        assert!(profile.serves(EnvLane::Review));
+        assert!(!profile.serves(EnvLane::Plan));
     }
 }

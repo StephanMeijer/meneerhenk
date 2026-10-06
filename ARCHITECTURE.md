@@ -442,6 +442,14 @@ never the tree the checks ran in, only the checked changeset applied to a
 fresh checkout. Every backend passes the same contract tests
 (`workspace/contract.rs`).
 
+A review opens workspaces only when its repository's profile has
+`review = true` (`review_workspace.rs`): one per lane and one for the
+fact-checker, at the reviewed commit, through the same setup stage
+(`workspace/setup.rs`). They are wrapped by `workspace::for_lane`, which
+refuses `export` for every run but an address run
+(`henk_domain::workspace::EnvLane::exports`), so nothing a lane does in one
+can become a commit.
+
 Every error happens before the push: a failed run posts a failure comment
 saying nothing was pushed. After the push, replies and the summary are
 best-effort, so a run that pushed is never reported as failed.

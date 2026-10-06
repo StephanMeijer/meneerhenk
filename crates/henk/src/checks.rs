@@ -123,6 +123,7 @@ mod tests {
                 code: 3,
                 output: "broken\n".to_owned(),
                 writes: Vec::new(),
+                delay: std::time::Duration::ZERO,
             },
         );
         let ws = provider
