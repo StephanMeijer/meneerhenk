@@ -31,6 +31,37 @@ pub struct Session {
     pub github_id: u64,
     /// GitHub login, for display only.
     pub login: String,
+    /// This sign-in's own random id, which its CSRF token is bound to: a
+    /// token from another session never matches (#69).
+    pub sid: String,
+}
+
+impl Session {
+    /// A session for `github_id` with a fresh random id, or nothing when
+    /// the system has no randomness.
+    #[must_use]
+    pub fn fresh(github_id: u64, login: String) -> Option<Self> {
+        let mut bytes = [0_u8; 16];
+        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).ok()?;
+        Some(Self {
+            github_id,
+            login,
+            sid: hex(&bytes),
+        })
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
+/// A session id: 32 lowercase hex digits.
+fn is_sid(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn now() -> u64 {
@@ -88,20 +119,48 @@ impl Signer {
         self.cookie(name, "", Duration::ZERO)
     }
 
-    /// The session cookie value for `session`.
+    /// The session cookie value for `session`. The login comes last, since
+    /// it is the one part not of a fixed shape.
     #[must_use]
     pub fn session(&self, session: &Session, ttl: Duration) -> String {
-        self.sign(&format!("{}|{}", session.github_id, session.login), ttl)
+        self.sign(
+            &format!("{}|{}|{}", session.github_id, session.sid, session.login),
+            ttl,
+        )
     }
 
-    /// The session a cookie value carries, if it is genuine and current.
+    /// The session a cookie value carries, if it is genuine and current. A
+    /// cookie from before sessions had an id carries none: signing in again
+    /// gives one.
     #[must_use]
     pub fn read_session(&self, value: &str) -> Option<Session> {
         let payload = self.open(value)?;
-        let (id, login) = payload.split_once('|')?;
+        let (id, rest) = payload.split_once('|')?;
+        let (sid, login) = rest.split_once('|')?;
+        if !is_sid(sid) {
+            return None;
+        }
         Some(Session {
             github_id: id.parse().ok()?,
             login: login.to_owned(),
+            sid: sid.to_owned(),
+        })
+    }
+
+    /// The CSRF token of `session`: a signature over its id, so it holds
+    /// for that sign-in only and cannot be made without the key.
+    #[must_use]
+    pub fn csrf(&self, session: &Session) -> String {
+        let tag = hmac::sign(&self.key, format!("csrf|{}", session.sid).as_bytes());
+        URL_SAFE_NO_PAD.encode(tag.as_ref())
+    }
+
+    /// Whether `token` is the CSRF token of `session`. The comparison is
+    /// constant-time.
+    #[must_use]
+    pub fn csrf_matches(&self, session: &Session, token: &str) -> bool {
+        URL_SAFE_NO_PAD.decode(token).is_ok_and(|tag| {
+            hmac::verify(&self.key, format!("csrf|{}", session.sid).as_bytes(), &tag).is_ok()
         })
     }
 
@@ -138,7 +197,42 @@ mod tests {
         Session {
             github_id: 1234,
             login: "alice".to_owned(),
+            sid: "abcdefabcdefabcdefabcdefabcdefab".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_session_has_a_fresh_id_and_old_cookies_have_none() {
+        let a = Session::fresh(1, "a".to_owned()).unwrap();
+        let b = Session::fresh(1, "a".to_owned()).unwrap();
+        assert!(is_sid(&a.sid) && a.sid != b.sid);
+        let signer = Signer::new(&[7; 32], true);
+        let old = signer.sign("1234|alice", Duration::from_hours(1));
+        assert_eq!(signer.read_session(&old), None, "signed in before ids");
+        let odd = Session {
+            login: "a|b".to_owned(),
+            ..session()
+        };
+        let value = signer.session(&odd, Duration::from_hours(1));
+        assert_eq!(signer.read_session(&value), Some(odd));
+    }
+
+    #[test]
+    fn a_csrf_token_holds_for_its_own_session_only() {
+        let signer = Signer::new(&[7; 32], true);
+        let token = signer.csrf(&session());
+        assert!(signer.csrf_matches(&session(), &token));
+        let other = Session {
+            sid: "0123456789abcdef0123456789abcdef".to_owned(),
+            ..session()
+        };
+        assert!(!signer.csrf_matches(&other, &token), "another sign-in");
+        assert!(
+            !Signer::new(&[8; 32], true).csrf_matches(&session(), &token),
+            "another key"
+        );
+        assert!(!signer.csrf_matches(&session(), ""));
+        assert!(!signer.csrf_matches(&session(), "not base64 !"));
     }
 
     #[test]

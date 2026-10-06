@@ -46,10 +46,12 @@ impl Listener for AddressListener {
         let trigger = requester
             .as_deref()
             .map_or_else(|| "requested".to_owned(), |r| format!("requested by {r}"));
-        match self
-            .coordinator
-            .submit_address(target.clone(), note.clone(), trigger)
-        {
+        match self.coordinator.submit_address(
+            target.clone(),
+            note.clone(),
+            trigger,
+            requester.clone(),
+        ) {
             Ok(run) => Handled::Started(run),
             Err(why) => Handled::Ignored(why),
         }

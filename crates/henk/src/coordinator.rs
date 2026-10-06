@@ -17,7 +17,7 @@ use crate::address::{AddressRequest, run_address};
 use crate::app::App;
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
-use crate::review::{ReviewRequest, run_review};
+use crate::review::{ReviewRequest, report_cancelled_while_queued, run_review};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
@@ -147,12 +147,31 @@ impl Coordinator {
             run: Some(run.clone()),
             ..request
         };
+        let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
         tokio::spawn(async move {
-            let Ok(_permit) = slots.acquire_owned().await else {
-                return;
+            let _cancellable = cancellable;
+            // A review waiting for a slot still hears its token: a cancel
+            // ends it now, not once a slot frees.
+            let _permit = tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                permit = slots.acquire_owned() => match permit {
+                    Ok(permit) => Some(permit),
+                    Err(_) => return,
+                },
             };
             if cancel.is_cancelled() {
-                info!("review superseded before it started");
+                let by = request
+                    .run
+                    .as_ref()
+                    .and_then(|run| app.cancels.cancelled_by(run));
+                if let Some(by) = by {
+                    if let Err(error) = report_cancelled_while_queued(&app, &request, &by).await {
+                        warn!(%error, "could not record the cancelled review");
+                    }
+                } else {
+                    info!("review superseded before it started");
+                }
             } else if let Err(error) = run_review(&app, request, cancel).await {
                 warn!(%error, "review ended with an error");
             }
@@ -165,18 +184,43 @@ impl Coordinator {
         (decision, run)
     }
 
+    /// Cancels a running review, plan or address run on behalf of `by`
+    /// (#69). A cancelled review leaves the running set at once, so a new
+    /// request for the same pull request starts afresh instead of joining
+    /// it. False when the run is not one this process is running.
+    pub fn cancel(&self, run: &RunId, by: String) -> bool {
+        if !self.app.cancels.cancel(run, by) {
+            return false;
+        }
+        if let Ok(mut active) = self.active.lock() {
+            active.retain(|_, a| a.run != *run);
+        }
+        true
+    }
+
     /// Starts a plan in the background and returns its run id.
-    pub fn submit_plan(&self, target: IssueTarget, note: Option<String>, trigger: String) -> RunId {
+    /// `requester` is who asked, for the run record, when known.
+    pub fn submit_plan(
+        &self,
+        target: IssueTarget,
+        note: Option<String>,
+        trigger: String,
+        requester: Option<String>,
+    ) -> RunId {
         let run = new_run_id();
         let request = PlanRequest {
             target,
             note,
             trigger,
             run: Some(run.clone()),
+            requester,
         };
         let app = Arc::clone(&self.app);
+        let cancel = app.shutdown.child_token();
+        let cancellable = app.cancels.register(run.clone(), cancel.clone());
         tokio::spawn(async move {
-            if let Err(error) = run_plan(&app, request, app.shutdown.child_token()).await {
+            let _cancellable = cancellable;
+            if let Err(error) = run_plan(&app, request, cancel).await {
                 warn!(%error, "plan ended with an error");
             }
         });
@@ -195,6 +239,7 @@ impl Coordinator {
         target: ReviewTarget,
         note: Option<String>,
         trigger: String,
+        requester: Option<String>,
     ) -> Result<RunId, String> {
         let key = Key::of(&target);
         {
@@ -214,11 +259,15 @@ impl Coordinator {
             note,
             trigger,
             run: Some(run.clone()),
+            requester,
         };
         let app = Arc::clone(&self.app);
         let addressing = Arc::clone(&self.addressing);
+        let cancel = app.shutdown.child_token();
+        let cancellable = app.cancels.register(run.clone(), cancel.clone());
         tokio::spawn(async move {
-            if let Err(error) = run_address(&app, request, app.shutdown.child_token()).await {
+            let _cancellable = cancellable;
+            if let Err(error) = run_address(&app, request, cancel).await {
                 warn!(%error, "address run ended with an error");
             }
             if let Ok(mut busy) = addressing.lock() {

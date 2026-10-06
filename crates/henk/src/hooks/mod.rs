@@ -8,6 +8,7 @@
 pub mod api;
 pub mod github;
 pub mod gitlab;
+pub mod requests;
 
 use std::sync::Arc;
 

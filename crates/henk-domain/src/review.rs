@@ -229,12 +229,22 @@ pub struct ReviewOutcome {
     /// Every changed file was left out by `review.ignore`, so no lane ran
     /// (§3.2). Such a review is complete.
     pub nothing_to_review: bool,
-    /// A newer commit arrived and this review stopped; the review of the
-    /// newer commit stands (§3.3). Not Henk's failure, and not complete.
-    pub superseded: bool,
-    /// Henk was stopped before the review ended: Ctrl-C, a shutdown, or a
-    /// process that died. Not complete (§3.3).
-    pub interrupted: bool,
+    /// Why the review stopped before it ended, if it did. A stopped review
+    /// is not complete (§3.3).
+    pub stopped: Option<Stopped>,
+}
+
+/// Why a review stopped before it ended. The three exclude each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// A newer commit arrived; the review of the newer commit stands
+    /// (§3.3). Not Henk's failure.
+    Superseded,
+    /// Henk was stopped: Ctrl-C, a shutdown, or a process that died (§3.3).
+    Interrupted,
+    /// A person cancelled the review from the dashboard (#69). Not Henk's
+    /// failure.
+    Cancelled,
 }
 
 impl ReviewOutcome {
@@ -246,8 +256,19 @@ impl ReviewOutcome {
             lanes: Vec::new(),
             open_findings: 0,
             nothing_to_review: false,
-            superseded: true,
-            interrupted: false,
+            stopped: Some(Stopped::Superseded),
+        }
+    }
+
+    /// The outcome of a review a person cancelled from the dashboard.
+    #[must_use]
+    pub fn cancelled(commit: CommitSha) -> Self {
+        Self {
+            commit,
+            lanes: Vec::new(),
+            open_findings: 0,
+            nothing_to_review: false,
+            stopped: Some(Stopped::Cancelled),
         }
     }
 
@@ -259,8 +280,7 @@ impl ReviewOutcome {
             lanes: Vec::new(),
             open_findings: 0,
             nothing_to_review: false,
-            superseded: false,
-            interrupted: true,
+            stopped: Some(Stopped::Interrupted),
         }
     }
 
@@ -268,7 +288,7 @@ impl ReviewOutcome {
     /// was nothing to review.
     #[must_use]
     pub fn completed(&self) -> bool {
-        !self.interrupted
+        self.stopped.is_none()
             && (self.nothing_to_review
                 || self.lanes.iter().any(|lane| {
                     matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped)
@@ -294,7 +314,8 @@ impl ReviewOutcome {
     /// The GitHub check conclusion.
     #[must_use]
     pub fn check_conclusion(&self) -> CheckConclusion {
-        if self.superseded {
+        if matches!(self.stopped, Some(Stopped::Superseded | Stopped::Cancelled)) {
+            // Stopped on purpose: neither a pass nor Henk's failure (§8.2).
             CheckConclusion::Neutral
         } else if !self.completed() {
             CheckConclusion::Failure
@@ -316,11 +337,11 @@ impl ReviewOutcome {
     /// The first line of the summary: the count, or that the review did not complete.
     #[must_use]
     pub fn headline(&self) -> String {
-        if self.superseded {
-            return "Superseded by a newer commit.".to_owned();
-        }
-        if self.interrupted {
-            return "Review interrupted.".to_owned();
+        match self.stopped {
+            Some(Stopped::Superseded) => return "Superseded by a newer commit.".to_owned(),
+            Some(Stopped::Interrupted) => return "Review interrupted.".to_owned(),
+            Some(Stopped::Cancelled) => return "Cancelled from the dashboard.".to_owned(),
+            None => {}
         }
         if !self.completed() {
             return "Review did not complete.".to_owned();
@@ -388,8 +409,7 @@ mod tests {
                 .collect(),
             open_findings,
             nothing_to_review: false,
-            superseded: false,
-            interrupted: false,
+            stopped: None,
         }
     }
 
@@ -490,7 +510,7 @@ mod tests {
         assert_eq!(interrupted.headline(), "Review interrupted.");
         assert!(crate::text::is_in_style(&interrupted.summary()));
         let partway = ReviewOutcome {
-            interrupted: true,
+            stopped: Some(Stopped::Interrupted),
             ..outcome(&[("a", LaneOutcome::Finished)], 0)
         };
         assert!(
@@ -506,6 +526,20 @@ mod tests {
         assert_eq!(superseded.check_conclusion(), CheckConclusion::Neutral);
         assert_eq!(superseded.headline(), "Superseded by a newer commit.");
         assert!(crate::text::is_in_style(&superseded.summary()));
+    }
+
+    #[test]
+    fn a_cancelled_review_is_neutral_and_says_so() {
+        let cancelled = ReviewOutcome::cancelled(outcome(&[], 0).commit);
+        assert!(!cancelled.completed());
+        assert_eq!(cancelled.stopped, Some(Stopped::Cancelled));
+        assert_eq!(cancelled.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(cancelled.headline(), "Cancelled from the dashboard.");
+        assert_eq!(
+            cancelled.commit_status().description,
+            "Cancelled from the dashboard."
+        );
+        assert!(crate::text::is_in_style(&cancelled.summary()));
     }
 
     #[test]

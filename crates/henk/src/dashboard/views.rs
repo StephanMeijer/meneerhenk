@@ -23,12 +23,28 @@ use crate::pages::{Links, escape, event_page, page, run_page};
 /// Rows per page.
 const PER_PAGE: u32 = 50;
 
-/// The menu above every page. Logging out is a form: a link would be a GET.
-const NAV: &str = "<nav><a href=\"/dashboard\">Runs</a><a href=\"/dashboard/events\">Events</a><a href=\"/dashboard/health\">Health</a><form method=\"post\" action=\"/dashboard/logout\" style=\"display:inline\"><button>Sign out</button></form></nav>";
+/// The menu above every page. Signing out is a form with the viewer's
+/// token: a link would be a GET, and a form without a token is refused.
+fn nav(csrf: &str) -> String {
+    format!(
+        "<nav><a href=\"/dashboard\">Runs</a><a href=\"/dashboard/events\">Events</a><a href=\"/dashboard/health\">Health</a><form method=\"post\" action=\"/dashboard/logout\" style=\"display:inline\">{}<button>Sign out</button></form></nav>",
+        csrf_field(csrf)
+    )
+}
 
-const LINKS: Links = Links {
+/// The hidden field that carries a form's CSRF token.
+pub(super) fn csrf_field(csrf: &str) -> String {
+    format!(
+        "<input type=\"hidden\" name=\"csrf\" value=\"{}\">",
+        escape(csrf)
+    )
+}
+
+/// Paths of run and event pages; for links only, not for a whole page.
+const LINKS: Links<'static> = Links {
     prefix: "/dashboard",
-    nav: NAV,
+    nav: "",
+    csrf: None,
 };
 
 const KINDS: &[(&str, RunKind)] = &[
@@ -171,6 +187,26 @@ fn pager(base: &str, query: &HashMap<String, String>, page: u32, full: bool) -> 
     html
 }
 
+/// The form that starts work, as `POST /review`, `/plan` and `/address`
+/// would (#69). An address run is offered only when configured.
+fn start_form(settings: &Settings, csrf: &str) -> String {
+    let address = if settings.address.is_some() {
+        "<option value=\"address\">address the review feedback</option>"
+    } else {
+        ""
+    };
+    format!(
+        "<h2>Start</h2><form class=\"filters\" method=\"post\" action=\"/dashboard/start\">{}\
+         <label>what <select name=\"kind\"><option value=\"review\">review a pull request</option>\
+         <option value=\"plan\">plan an issue</option>{address}</select></label>\
+         <label>URL <input name=\"url\" required placeholder=\"https://github.com/owner/name/pull/7\"></label>\
+         <label>commit <input name=\"commit\" placeholder=\"review only; default the head\"></label>\
+         <label>note <input name=\"note\" placeholder=\"plan or address only\"></label>\
+         <button>Start</button></form>",
+        csrf_field(csrf)
+    )
+}
+
 /// Runs: what is running now, and every run by filter.
 pub async fn overview(
     State(dashboard): State<Arc<Dashboard>>,
@@ -197,10 +233,12 @@ pub async fn overview(
         }
     };
 
+    let token = dashboard.signer.csrf(&viewer);
     let mut html = format!(
         "<h1>Meneer Henk</h1><p class=\"muted\">Signed in as {}.</p>",
         escape(&viewer.login)
     );
+    html.push_str(&start_form(settings, &token));
     let _ = write!(
         html,
         "<h2>Running now (<span id=\"running-count\">{running_total}</span>)</h2>{}",
@@ -241,25 +279,32 @@ pub async fn overview(
         u32::try_from(runs.len()).unwrap_or(0) == PER_PAGE,
     ));
     html.push_str("<script src=\"/dashboard/app.js\"></script>");
-    page("Meneer Henk", NAV, &html)
+    page("Meneer Henk", &nav(&token), &html)
 }
 
 /// One run.
 pub async fn run(
     State(dashboard): State<Arc<Dashboard>>,
-    _viewer: Viewer,
+    Viewer(viewer): Viewer,
     Path(id): Path<String>,
 ) -> Response {
     let Ok(run_id) = RunId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad run id").into_response();
     };
-    run_page(dashboard.app.store.as_ref(), &run_id, LINKS).await
+    let token = dashboard.signer.csrf(&viewer);
+    let nav = nav(&token);
+    let links = Links {
+        nav: &nav,
+        csrf: Some(&token),
+        ..LINKS
+    };
+    run_page(dashboard.app.store.as_ref(), &run_id, links).await
 }
 
 /// Inbound events, with what each listener did.
 pub async fn events(
     State(dashboard): State<Arc<Dashboard>>,
-    _viewer: Viewer,
+    Viewer(viewer): Viewer,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let filter = EventFilter {
@@ -335,24 +380,31 @@ pub async fn events(
         number,
         u32::try_from(listed.len()).unwrap_or(0) == PER_PAGE,
     ));
-    page("Events", NAV, &html)
+    page("Events", &nav(&dashboard.signer.csrf(&viewer)), &html)
 }
 
 /// One event.
 pub async fn event(
     State(dashboard): State<Arc<Dashboard>>,
-    _viewer: Viewer,
+    Viewer(viewer): Viewer,
     Path(id): Path<String>,
 ) -> Response {
     let Ok(event_id) = EventId::parse(id) else {
         return (StatusCode::BAD_REQUEST, "bad event id").into_response();
     };
-    event_page(dashboard.app.store.as_ref(), &event_id, LINKS).await
+    let token = dashboard.signer.csrf(&viewer);
+    let nav = nav(&token);
+    let links = Links {
+        nav: &nav,
+        csrf: Some(&token),
+        ..LINKS
+    };
+    event_page(dashboard.app.store.as_ref(), &event_id, links).await
 }
 
 /// What the service has, from configuration and the store. Nothing here
 /// starts a process or calls a model; that is `henk doctor --probe`.
-pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) -> Response {
+pub async fn health(State(dashboard): State<Arc<Dashboard>>, Viewer(viewer): Viewer) -> Response {
     let settings = &dashboard.app.settings;
     let store = &dashboard.app.store;
     let mut rows: Vec<(String, String, String)> = Vec::new();
@@ -420,7 +472,7 @@ pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) ->
         );
     }
     html.push_str("</table>");
-    page("Health", NAV, &html)
+    page("Health", &nav(&dashboard.signer.csrf(&viewer)), &html)
 }
 
 /// The newest page of running runs, and how many are running in all: the

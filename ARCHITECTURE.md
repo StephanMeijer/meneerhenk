@@ -569,9 +569,11 @@ flowchart LR
 
 The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth
 says who someone is; the configured GitHub user ids decide, on every
-request, whether they may look. It only reads the store and the settings:
-no page starts, stops or changes anything, and every value it shows is
-escaped. The run and event links posted in comments, `/runs/{id}` and
+request, whether they may look and act. Starting work publishes the same
+event as the API on the same bus, so the listeners decide as they do for
+any request; cancelling fires one run's token through the coordinator, and
+the run ends `cancelled`. Every action is a POST with the session's CSRF
+token from the dashboard's own origin. Every value it shows is escaped. The run and event links posted in comments, `/runs/{id}` and
 `/events/{id}`, redirect to the dashboard's pages and so need sign-in too;
 without a dashboard they are not served.
 

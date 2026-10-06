@@ -6,13 +6,14 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{FromRequestParts, Query, State};
+use axum::extract::{Form, FromRequest, FromRequestParts, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use secrecy::ExposeSecret as _;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq as _;
 use tracing::warn;
@@ -32,16 +33,7 @@ impl FromRequestParts<Arc<Dashboard>> for Viewer {
         parts: &mut Parts,
         dashboard: &Arc<Dashboard>,
     ) -> Result<Self, Self::Rejection> {
-        let session = parts
-            .headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|cookies| cookie_value(cookies, SESSION_COOKIE))
-            .and_then(|value| dashboard.signer.read_session(value))
-            // Checked on every request, so taking an id off the list ends
-            // its access at once.
-            .filter(|s| dashboard.config.allowed_github_ids.contains(&s.github_id));
-        match session {
+        match signed_in(parts, dashboard) {
             Some(session) => Ok(Self(session)),
             None if parts.uri.path() == "/dashboard/running.json" => {
                 Err((StatusCode::UNAUTHORIZED, "sign in first").into_response())
@@ -80,7 +72,126 @@ pub struct LoginQuery {
     next: Option<String>,
 }
 
-fn redirect(to: &str, cookie: Option<String>) -> Response {
+/// The session of the request, when genuine, current and of an id on the
+/// list. The list is checked on every request, so taking an id off it ends
+/// its access at once.
+fn signed_in(parts: &Parts, dashboard: &Dashboard) -> Option<Session> {
+    parts
+        .headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| cookie_value(cookies, SESSION_COOKIE))
+        .and_then(|value| dashboard.signer.read_session(value))
+        .filter(|s| dashboard.config.allowed_github_ids.contains(&s.github_id))
+}
+
+/// A signed-in person doing something: every dashboard POST takes one
+/// (#69). Every allowed id may act. Besides the session, the request must
+/// come from the dashboard itself: its `Origin` (or, without one, its
+/// `Referer`) is `server.public_base_url`, and its form carries the
+/// session's CSRF token. `SameSite=Lax` alone does not stop a form posted
+/// from another site in every browser. Any failure is a 403, never a
+/// redirect, so nothing happens by accident.
+#[derive(Debug)]
+pub struct Act<T> {
+    /// Who acts.
+    pub session: Session,
+    /// The form, without its token.
+    pub form: T,
+}
+
+/// A form with its CSRF token.
+#[derive(Debug, Deserialize)]
+struct WithToken<T> {
+    csrf: Option<String>,
+    #[serde(flatten)]
+    form: T,
+}
+
+/// A form with nothing but the token.
+#[derive(Debug, Deserialize)]
+pub struct NoFields {}
+
+impl<T> FromRequest<Arc<Dashboard>> for Act<T>
+where
+    T: DeserializeOwned + Send,
+{
+    type Rejection = Response;
+
+    async fn from_request(request: Request, dashboard: &Arc<Dashboard>) -> Result<Self, Response> {
+        let (parts, body) = request.into_parts();
+        let Some(session) = signed_in(&parts, dashboard) else {
+            return Err(refused("Sign in first."));
+        };
+        if !from_the_dashboard(
+            &parts.headers,
+            &dashboard.app.settings.server.public_base_url,
+        ) {
+            warn!(
+                github_id = session.github_id,
+                "a dashboard action came from another origin"
+            );
+            return Err(refused("This request did not come from Henk's dashboard."));
+        }
+        let Form(with) = Form::<WithToken<T>>::from_request(Request::from_parts(parts, body), &())
+            .await
+            .map_err(|rejection| {
+                notice(
+                    StatusCode::BAD_REQUEST,
+                    "Not understood",
+                    &rejection.body_text(),
+                )
+            })?;
+        let token = with.csrf.unwrap_or_default();
+        if !dashboard.signer.csrf_matches(&session, &token) {
+            warn!(
+                github_id = session.github_id,
+                "a dashboard action without its session's token"
+            );
+            return Err(refused(
+                "This form is out of date or not from your session. Reload the page and try again.",
+            ));
+        }
+        Ok(Self {
+            session,
+            form: with.form,
+        })
+    }
+}
+
+fn refused(text: &str) -> Response {
+    notice(StatusCode::FORBIDDEN, "Not done", text)
+}
+
+/// Whether a request names the dashboard's own origin: `Origin` when the
+/// browser sent one, else `Referer`. A request with neither is refused.
+pub(super) fn from_the_dashboard(headers: &HeaderMap, public_base_url: &str) -> bool {
+    let origin = origin_of(public_base_url);
+    let text = |name| {
+        headers
+            .get(name)
+            .and_then(|v: &HeaderValue| v.to_str().ok())
+    };
+    match text(header::ORIGIN) {
+        Some(sent) => sent.eq_ignore_ascii_case(origin),
+        None => text(header::REFERER).is_some_and(|referer| {
+            referer
+                .get(..origin.len() + 1)
+                .is_some_and(|start| start.eq_ignore_ascii_case(&format!("{origin}/")))
+        }),
+    }
+}
+
+/// `scheme://host[:port]` of a URL.
+fn origin_of(url: &str) -> &str {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url;
+    };
+    let authority = rest.find('/').unwrap_or(rest.len());
+    url.get(..scheme.len() + 3 + authority).unwrap_or(url)
+}
+
+pub(super) fn redirect(to: &str, cookie: Option<String>) -> Response {
     let mut response = StatusCode::SEE_OTHER.into_response();
     if let Ok(location) = HeaderValue::from_str(to) {
         response.headers_mut().insert(header::LOCATION, location);
@@ -106,7 +217,7 @@ pub(super) fn encode(value: &str) -> String {
     out
 }
 
-fn notice(status: StatusCode, title: &str, text: &str) -> Response {
+pub(super) fn notice(status: StatusCode, title: &str, text: &str) -> Response {
     let body = format!(
         "<h1>{}</h1><p>{}</p>",
         crate::pages::escape(title),
@@ -266,21 +377,21 @@ async fn github_user(dashboard: &Dashboard, code: &str) -> anyhow::Result<Sessio
         .error_for_status()?
         .json()
         .await?;
-    Ok(Session {
-        github_id: user
-            .get("id")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| anyhow::anyhow!("GitHub user without id"))?,
-        login: user
-            .get("login")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-    })
+    let github_id = user
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("GitHub user without id"))?;
+    let login = user
+        .get("login")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    Session::fresh(github_id, login).ok_or_else(|| anyhow::anyhow!("no randomness for a session"))
 }
 
-/// Signs out.
-pub async fn logout(State(dashboard): State<Arc<Dashboard>>) -> Response {
+/// Signs out. A form like every other action, so another site cannot sign
+/// someone out.
+pub async fn logout(State(dashboard): State<Arc<Dashboard>>, _act: Act<NoFields>) -> Response {
     let mut response = notice(
         StatusCode::OK,
         "Signed out",

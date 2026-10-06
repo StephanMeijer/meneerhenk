@@ -350,9 +350,21 @@ serves `/dashboard`:
   status, platform and repository, and paging;
 - each run with its lanes, findings, timeline and the events that led to it;
 - the inbound events with what each listener did;
-- a health page from configuration and the database.
+- a health page from configuration and the database;
+- a form that starts a review, plan or address run, and a button that
+  cancels a running one.
 
-It is read-only. People sign in with GitHub, and only the GitHub user ids in
+Starting works exactly like `POST /review`, `/plan` and `/address`: the
+request becomes an event, the listeners apply the allowlist and every
+refusal, and the browser goes to the event's page to see what they did.
+Each event records who asked as `github:<user id>`. A cancelled run ends
+`cancelled`, with a neutral check for a review and one comment saying which
+GitHub account cancelled it; an address run cancelled before its push
+pushes nothing. Every action is a form carrying the session's CSRF token
+and must come from `public_base_url` (its `Origin`, or else its `Referer`);
+anything else is refused.
+
+People sign in with GitHub, and only the GitHub user ids in
 `allowed_github_ids` get in. The id is checked on every request, so taking an
 id off the list ends that access at once. To set it up:
 1. Create a GitHub OAuth App (Settings, Developer settings, OAuth Apps).

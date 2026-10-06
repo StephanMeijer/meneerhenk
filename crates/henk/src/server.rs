@@ -86,7 +86,7 @@ pub fn compose(app: &Arc<App>) -> Composed {
                 Dashboard::new(
                     Arc::clone(app),
                     Arc::clone(&composed.coordinator),
-                    composed.bus.listeners().collect(),
+                    Arc::clone(&composed.bus),
                     config.clone(),
                     &secrets,
                 )

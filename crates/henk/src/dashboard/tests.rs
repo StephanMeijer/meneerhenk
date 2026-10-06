@@ -66,6 +66,7 @@ fn fixture(github: &str) -> Fixture {
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
         live_runs: crate::liveness::LiveRuns::default(),
+        cancels: crate::cancel::Cancels::default(),
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: None,
         test_session: None,
@@ -73,21 +74,30 @@ fn fixture(github: &str) -> Fixture {
         test_issue_writer: None,
     });
     let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
+    let writers: Arc<dyn crate::listeners::Writers> =
+        Arc::clone(&app) as Arc<dyn crate::listeners::Writers>;
+    let bus = Arc::new(henk_events::EventBus::new(
+        Arc::new(crate::recorder::StoreRecorder(Arc::clone(&app.store))),
+        vec![
+            Arc::new(crate::listeners::ReviewListener::new(
+                Arc::clone(&coordinator),
+                writers,
+            )),
+            Arc::new(crate::listeners::PlanListener::new(Arc::clone(
+                &coordinator,
+            ))),
+            Arc::new(crate::listeners::AddressListener::new(Arc::clone(
+                &coordinator,
+            ))),
+        ],
+    ));
     let secrets = DashboardSecrets {
         client_id: "cid".to_owned(),
         client_secret: SecretString::from("csecret".to_owned()),
         session_key: SecretString::from("k".repeat(32)),
     };
-    let dashboard = Arc::new(
-        Dashboard::new(
-            app,
-            coordinator,
-            vec!["review", "plan"],
-            dashboard_config,
-            &secrets,
-        )
-        .unwrap(),
-    );
+    let dashboard =
+        Arc::new(Dashboard::new(app, coordinator, bus, dashboard_config, &secrets).unwrap());
     Fixture {
         router: routes(Arc::clone(&dashboard)),
         dashboard,
@@ -95,15 +105,17 @@ fn fixture(github: &str) -> Fixture {
 }
 
 fn signed_in(f: &Fixture, github_id: u64) -> String {
-    let session = Session {
-        github_id,
-        login: "alice".to_owned(),
-    };
-    format!(
-        "{SESSION_COOKIE}={}",
-        f.dashboard
-            .signer
-            .session(&session, Duration::from_hours(1))
+    signed_in_as(f, &Session::fresh(github_id, "alice".to_owned()).unwrap()).0
+}
+
+/// The session cookie and the CSRF token of `session`.
+fn signed_in_as(f: &Fixture, session: &Session) -> (String, String) {
+    (
+        format!(
+            "{SESSION_COOKIE}={}",
+            f.dashboard.signer.session(session, Duration::from_hours(1))
+        ),
+        f.dashboard.signer.csrf(session),
     )
 }
 
@@ -212,6 +224,7 @@ async fn seed(f: &Fixture) {
             repo: Some("docspec/app".into()),
             target: Some(7),
             payload: Some("{\"title\": \"<img src=x onerror=alert(1)>\"}".into()),
+            requester: None,
         })
         .await
         .unwrap();
@@ -688,4 +701,334 @@ async fn a_run_link_leads_through_sign_in_back_to_the_run() {
         );
     }
     assert_eq!(sign_in_from(&f, "/dashboard/login").await, "/dashboard");
+}
+
+/// A refused action: what is wrong with it, the headers sent, the form.
+type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, String);
+
+/// The dashboard's own origin, as `public_base_url` in [`config`] says.
+const ORIGIN: &str = "https://henk.example";
+
+/// A form POST with `cookie` and the given extra headers.
+async fn post(
+    f: &Fixture,
+    uri: &str,
+    cookie: &str,
+    headers: &[(&str, &str)],
+    form: &str,
+) -> Answer {
+    let mut request = Request::post(uri)
+        .header(header::COOKIE, cookie)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = f
+        .router
+        .clone()
+        .oneshot(request.body(Body::from(form.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    Answer {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+/// The outcomes of `event` once every listener has answered.
+async fn outcomes_of(f: &Fixture, event: &EventId, listeners: usize) -> Vec<OutcomeRecord> {
+    for _ in 0..200 {
+        let outcomes = f.dashboard.app.store.outcomes(event).await.unwrap();
+        if outcomes.len() >= listeners {
+            return outcomes;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the listeners did not answer {event}");
+}
+
+#[tokio::test]
+async fn a_start_from_the_dashboard_is_an_event_like_the_api_with_who_asked() {
+    let f = fixture("https://127.0.0.1:9");
+    let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
+    let (cookie, csrf) = signed_in_as(&f, &session);
+    let origin = [("origin", ORIGIN)];
+
+    let started = post(
+        &f,
+        "/dashboard/start",
+        &cookie,
+        &origin,
+        &format!("csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3&commit=&note=split+it"),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::SEE_OTHER, "{}", started.body);
+    let to = started.headers[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let event = EventId::parse(to.strip_prefix("/dashboard/events/").unwrap()).unwrap();
+    // Published like an API request: recorded and handled in the background.
+    let outcomes = outcomes_of(&f, &event, 3).await;
+    let recorded = f
+        .dashboard
+        .app
+        .store
+        .inbound_event(&event)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.source, "dashboard");
+    assert_eq!(recorded.kind, "plan_requested");
+    assert_eq!(recorded.requester.as_deref(), Some("github:1234"));
+    let plan = outcomes.into_iter().find(|o| o.listener == "plan").unwrap();
+    assert_eq!(plan.outcome, "started", "{}", plan.detail);
+    let page = get(&f, &to, Some(&cookie)).await;
+    assert!(page.body.contains("Asked by: github:1234"), "{}", page.body);
+
+    let elsewhere = post(
+        &f,
+        "/dashboard/start",
+        &cookie,
+        &origin,
+        &format!("csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fother%2Fapp%2Fissues%2F3"),
+    )
+    .await;
+    assert_eq!(elsewhere.status, StatusCode::SEE_OTHER);
+    let to = elsewhere.headers[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let event = EventId::parse(to.strip_prefix("/dashboard/events/").unwrap()).unwrap();
+    let refused = outcomes_of(&f, &event, 3)
+        .await
+        .into_iter()
+        .find(|o| o.listener == "plan")
+        .unwrap();
+    assert_eq!(refused.outcome, "ignored");
+    assert!(
+        refused.detail.contains("not on the allowlist"),
+        "{}",
+        refused.detail
+    );
+
+    for form in [
+        format!("csrf={csrf}&kind=plan&url=not-a-url"),
+        format!(
+            "csrf={csrf}&kind=review&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fpull%2F7&commit=xyz"
+        ),
+        format!(
+            "csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3&commit=0123456789abcdef0123456789abcdef01234567"
+        ),
+        format!(
+            "csrf={csrf}&kind=deploy&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3"
+        ),
+    ] {
+        let answer = post(&f, "/dashboard/start", &cookie, &origin, &form).await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{form}");
+    }
+}
+
+#[tokio::test]
+async fn an_action_without_its_token_or_from_elsewhere_is_refused_and_does_nothing() {
+    let f = fixture("https://127.0.0.1:9");
+    let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
+    let (cookie, csrf) = signed_in_as(&f, &session);
+    let (_, other_csrf) = signed_in_as(&f, &Session::fresh(ALLOWED, "alice".to_owned()).unwrap());
+    let form = |token: &str| {
+        format!("csrf={token}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3")
+    };
+    let no_token = "kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3".to_owned();
+    let cases: Vec<Case> = vec![
+        ("no token", vec![("origin", ORIGIN)], no_token),
+        (
+            "another session's token",
+            vec![("origin", ORIGIN)],
+            form(&other_csrf),
+        ),
+        ("a forged token", vec![("origin", ORIGIN)], form("AAAA")),
+        (
+            "another origin",
+            vec![("origin", "https://evil.example")],
+            form(&csrf),
+        ),
+        (
+            "a look-alike origin",
+            vec![("origin", "https://henk.example.evil.com")],
+            form(&csrf),
+        ),
+        ("a null origin", vec![("origin", "null")], form(&csrf)),
+        (
+            "another referer",
+            vec![("referer", "https://evil.example/dashboard")],
+            form(&csrf),
+        ),
+        (
+            "a look-alike referer",
+            vec![("referer", "https://henk.example.evil.com/")],
+            form(&csrf),
+        ),
+        ("neither origin nor referer", vec![], form(&csrf)),
+    ];
+    for (what, headers, body) in cases {
+        let answer = post(&f, "/dashboard/start", &cookie, &headers, &body).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::FORBIDDEN,
+            "{what}: {}",
+            answer.body
+        );
+    }
+    let removed = signed_in(&f, 999);
+    let answer = post(
+        &f,
+        "/dashboard/start",
+        &removed,
+        &[("origin", ORIGIN)],
+        &form(&csrf),
+    )
+    .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::FORBIDDEN,
+        "an id not on the list"
+    );
+    let none = f
+        .dashboard
+        .app
+        .store
+        .list_inbound_events(&henk_store::EventFilter::default(), Page::new(10, 0))
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "nothing refused was published");
+
+    let by_referer = post(
+        &f,
+        "/dashboard/start",
+        &cookie,
+        &[("referer", "https://henk.example/dashboard")],
+        &form(&csrf),
+    )
+    .await;
+    assert_eq!(
+        by_referer.status,
+        StatusCode::SEE_OTHER,
+        "the dashboard's own referer"
+    );
+
+    let logout = post(&f, "/dashboard/logout", &cookie, &[("origin", ORIGIN)], "").await;
+    assert_eq!(
+        logout.status,
+        StatusCode::FORBIDDEN,
+        "signing out needs the token too"
+    );
+    let logout = post(
+        &f,
+        "/dashboard/logout",
+        &cookie,
+        &[("origin", ORIGIN)],
+        &format!("csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(logout.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cancelling_fires_the_runs_token_and_records_who_asked() {
+    let f = fixture("https://127.0.0.1:9");
+    let store = Arc::clone(&f.dashboard.app.store);
+    seed(&f).await;
+    let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
+    let (cookie, csrf) = signed_in_as(&f, &session);
+    let origin = [("origin", ORIGIN)];
+    let running = RunId::parse("r-review").unwrap();
+    assert_eq!(
+        store.run(&running).await.unwrap().unwrap().status,
+        RunStatus::Running
+    );
+
+    let page = get(&f, "/dashboard/runs/r-review", Some(&cookie)).await;
+    assert!(
+        page.body
+            .contains("action=\"/dashboard/runs/r-review/cancel\""),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains(&csrf));
+    let finished = get(&f, "/dashboard/runs/r-plan", Some(&cookie)).await;
+    assert!(
+        !finished.body.contains("Cancel this run"),
+        "only a running run"
+    );
+    let finished = get(&f, "/dashboard/runs/r-plan", Some(&cookie)).await;
+    assert!(
+        !finished.body.contains("Cancel this run"),
+        "only a running run"
+    );
+
+    let not_here = post(
+        &f,
+        "/dashboard/runs/r-review/cancel",
+        &cookie,
+        &origin,
+        &format!("csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(
+        not_here.status,
+        StatusCode::CONFLICT,
+        "nothing here runs it"
+    );
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancellable = f
+        .dashboard
+        .app
+        .cancels
+        .register(running.clone(), token.clone());
+    let cancelled = post(
+        &f,
+        "/dashboard/runs/r-review/cancel",
+        &cookie,
+        &origin,
+        &format!("csrf={csrf}"),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        cancelled.headers[header::LOCATION],
+        "/dashboard/runs/r-review"
+    );
+    assert!(token.is_cancelled());
+    assert_eq!(
+        f.dashboard.app.cancels.cancelled_by(&running).as_deref(),
+        Some("github:1234")
+    );
+    let requests: Vec<_> = store
+        .inbound_events_for_run(&running)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "cancel_requested")
+        .collect();
+    assert_eq!(requests.len(), 2, "both requests are recorded");
+    assert!(
+        requests
+            .iter()
+            .all(|e| e.source == "dashboard" && e.requester.as_deref() == Some("github:1234"))
+    );
+
+    let forged = post(
+        &f,
+        "/dashboard/runs/r-review/cancel",
+        &cookie,
+        &origin,
+        "csrf=AAAA",
+    )
+    .await;
+    assert_eq!(forged.status, StatusCode::FORBIDDEN);
 }

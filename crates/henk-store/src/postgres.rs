@@ -26,6 +26,7 @@ use crate::types::{
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/001_initial.sql"),
     include_str!("../migrations/postgres/002_dashboard.sql"),
+    include_str!("../migrations/postgres/003_event_requester.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -233,6 +234,7 @@ fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
             .map(|t| to_u64("inbound_events.target", t))
             .transpose()?,
         payload: row.try_get(6)?,
+        requester: row.try_get(7)?,
     })
 }
 
@@ -538,7 +540,7 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .execute(
-                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload, requester) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 &[
                     &event.id.as_str(),
                     &parse_time("inbound_events.received_at", &event.received_at)?,
@@ -547,6 +549,7 @@ impl RunStore for PgStore {
                     &event.repo,
                     &target,
                     &payload,
+                    &event.requester,
                 ],
             )
             .await?;
@@ -575,7 +578,7 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .query_opt(
-                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events WHERE id = $1",
+                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events WHERE id = $1",
                 &[&id.as_str()],
             )
             .await?
@@ -632,7 +635,7 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT e.id, e.received_at, e.source, e.kind, e.repo, e.target, e.payload
+                "SELECT e.id, e.received_at, e.source, e.kind, e.repo, e.target, e.payload, e.requester
                  FROM inbound_events e
                  WHERE e.id IN (SELECT o.event_id FROM event_outcomes o WHERE o.run_id = $1)
                  ORDER BY e.received_at, e.id",
@@ -700,7 +703,7 @@ impl RunStore for PgStore {
         let client = self.client().await?;
         let events = client
             .query(
-                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events
+                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
                  WHERE ($1::text IS NULL OR source = $1) AND ($2::text IS NULL OR kind = $2)
                    AND ($3::text IS NULL OR repo = $3)
                  ORDER BY received_at DESC, id DESC LIMIT $4 OFFSET $5",

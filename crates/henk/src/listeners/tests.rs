@@ -357,6 +357,7 @@ async fn one_address_run_per_pull_request_at_a_time() {
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
         live_runs: crate::liveness::LiveRuns::default(),
+        cancels: crate::cancel::Cancels::default(),
         workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
         test_writer: None,
         test_session: None,
@@ -371,17 +372,19 @@ async fn one_address_run_per_pull_request_at_a_time() {
     // Both before the first run gets to start: the second is refused.
     assert!(
         coordinator
-            .submit_address(target.clone(), None, "a".into())
+            .submit_address(target.clone(), None, "a".into(), None)
             .is_ok()
     );
-    let second = coordinator.submit_address(target.clone(), None, "b".into());
+    let second = coordinator.submit_address(target.clone(), None, "b".into(), None);
     assert!(matches!(second, Err(r) if r.contains("already going")));
     let other = ReviewTarget {
         repo: repo("docspec/app"),
         number: 8,
     };
     assert!(
-        coordinator.submit_address(other, None, "c".into()).is_ok(),
+        coordinator
+            .submit_address(other, None, "c".into(), None)
+            .is_ok(),
         "another pull request may"
     );
 }

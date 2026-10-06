@@ -136,8 +136,9 @@ backup_model = "claude"
 timeout_secs = 180
 max_turns = 12
 
-# The web dashboard at /dashboard: read-only, sign in with GitHub. Only these
-# GitHub user ids (find yours at https://api.github.com/users/<login>) get in.
+# The web dashboard at /dashboard: sign in with GitHub. Only these GitHub
+# user ids (find yours at https://api.github.com/users/<login>) get in, and
+# each of them may start reviews, plans and address runs and cancel them.
 # The OAuth App's callback is {public_base_url}/dashboard/auth/callback.
 # [dashboard]
 # allowed_github_ids = [1234567]

@@ -32,6 +32,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/003_run_liveness.sql")),
         M::up(include_str!("../migrations/sqlite/004_dashboard.sql")),
         M::up(include_str!("../migrations/sqlite/005_prune_events.sql")),
+        M::up(include_str!("../migrations/sqlite/006_event_requester.sql")),
     ])
 }
 
@@ -343,7 +344,7 @@ impl RunStore for SqliteStore {
             .transpose()?;
         self.with(|c| {
             c.execute(
-                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload, requester) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     event.id.as_str(),
                     event.received_at,
@@ -352,6 +353,7 @@ impl RunStore for SqliteStore {
                     event.repo,
                     target,
                     payload,
+                    event.requester,
                 ],
             )?;
             Ok(())
@@ -378,7 +380,7 @@ impl RunStore for SqliteStore {
     async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events WHERE id = ?1",
+                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events WHERE id = ?1",
                 params![id.as_str()],
                 raw_inbound,
             )
@@ -507,7 +509,7 @@ impl RunStore for SqliteStore {
     ) -> Result<Vec<EventWithOutcomes>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT id, received_at, source, kind, repo, target, payload FROM inbound_events
+                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
                  WHERE (?1 IS NULL OR source = ?1) AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR repo = ?3)
                  ORDER BY received_at DESC, id DESC LIMIT ?4 OFFSET ?5",
             )?;
@@ -557,6 +559,7 @@ struct RawInbound {
     repo: Option<String>,
     target: Option<i64>,
     payload: Option<String>,
+    requester: Option<String>,
 }
 
 fn raw_inbound(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawInbound> {
@@ -568,6 +571,7 @@ fn raw_inbound(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawInbound> {
         repo: row.get(4)?,
         target: row.get(5)?,
         payload: row.get(6)?,
+        requester: row.get(7)?,
     })
 }
 
@@ -588,6 +592,7 @@ impl RawInbound {
                 .map(|t| to_u64("inbound_events.target", t))
                 .transpose()?,
             payload: self.payload,
+            requester: self.requester,
         })
     }
 }

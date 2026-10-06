@@ -9,6 +9,7 @@
 mod address;
 mod address_tools;
 mod app;
+mod cancel;
 mod checks;
 mod config;
 mod coordinator;
@@ -387,6 +388,7 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
             note,
             trigger: "cli".to_owned(),
             run: None,
+            requester: None,
         },
         app.shutdown.child_token(),
     )
@@ -412,6 +414,7 @@ async fn cmd_address(config: &Path, url: &str, note: Option<String>) -> anyhow::
             note,
             trigger: "cli".to_owned(),
             run: None,
+            requester: None,
         },
         app.shutdown.child_token(),
     )

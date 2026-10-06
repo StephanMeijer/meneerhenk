@@ -58,6 +58,11 @@ pub enum EventSource {
         /// Who the request runs for, as a stable id.
         requester: Option<String>,
     },
+    /// The web dashboard, by someone signed in (#69).
+    Dashboard {
+        /// Who asked: `github:<user id>`, never a display name (§2).
+        requester: String,
+    },
 }
 
 impl EventSource {
@@ -68,6 +73,18 @@ impl EventSource {
             Self::GitHubWebhook { .. } => "github_webhook",
             Self::GitLabWebhook { .. } => "gitlab_webhook",
             Self::Api { .. } => "api",
+            Self::Dashboard { .. } => "dashboard",
+        }
+    }
+
+    /// Who asked, when the source knows: the API's configured requester
+    /// or the person signed in to the dashboard.
+    #[must_use]
+    pub fn requester(&self) -> Option<&str> {
+        match self {
+            Self::Api { requester } => requester.as_deref(),
+            Self::Dashboard { requester } => Some(requester),
+            Self::GitHubWebhook { .. } | Self::GitLabWebhook { .. } => None,
         }
     }
 }
