@@ -106,7 +106,7 @@ OpenBao.
 |---|---|
 | `LLM3_API_KEY`, `ANTHROPIC_API_KEY`, ... | Whatever `[models.*].api_key_env` names |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | The GitHub App key, for check runs, comments and the read session |
-| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions |
+| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and address runs on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan`, `POST /address` |
@@ -283,13 +283,14 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 
 `henk address` (spec §3.5) is the one thing that changes code. Asked by a
 colleague, Henk reads every unresolved review thread of a GitHub pull
-request, fixes what the feedback is right about in a workspace, runs the
-configured `[address].check_commands` there, and pushes one commit to the
-pull request's branch with `Henk-Run` and `Requested-by` trailers. Only a
-changeset leaves the workspace: Henk refuses it whole when a path leads
-into `.git` or out of the repository, becomes a symbolic link or a
-submodule, or the run changed more files than allowed, and otherwise
-applies it to a fresh checkout nothing ran in and commits from there. The push is a fast-forward only. A fork, the default branch, a
+request or GitLab merge request, fixes what the feedback is right about
+in a workspace, runs the configured `[address].check_commands` there, and
+pushes one commit to the pull request's branch with `Henk-Run` and
+`Requested-by` trailers. Only a changeset leaves the workspace: Henk
+refuses it whole when a path leads into `.git` or out of the repository,
+becomes a symbolic link or a submodule, or the run changed more files than
+allowed, and otherwise applies it to a fresh checkout nothing ran in and
+commits from there. The push is a fast-forward only. A fork, the default branch, a
 protected branch or a branch that moved while he worked gets nothing.
 Then he replies in each thread (fixed with the commit link, declined with
 why, or a question), resolves only the threads of his own findings that he
@@ -299,8 +300,14 @@ backend and its limits. The only backend today is `host`: the checks run
 the pull request's code as Henk's user with an empty environment, so they
 see none of Henk's secrets, but nothing else isolates them, and
 `henk config check` warns about that. Every command is on the run's
-timeline (`henk runs show`). A container comes later. The App needs `Contents: write`.
-GitLab follows in #67.
+timeline (`henk runs show`). A container comes later. On GitHub the App
+needs `Contents: write`. On GitLab Henk reads `[gitlab].token_env`
+himself: git pushes with it as `oauth2`, and the merge request's projects,
+the branch's protection and his account id come from the REST API with it
+in the `PRIVATE-TOKEN` header, because the MCP server's merge request
+leaves the project ids out. Without it GitLab reviews still run and
+address runs are refused. The token's account needs Developer access to
+push.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in

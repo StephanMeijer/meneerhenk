@@ -545,6 +545,31 @@ github_owners = ["docspec"]
             .unwrap();
         assert_eq!(outcome.outcome, "ignored");
         assert_eq!(outcome.detail, "address runs are not configured");
+
+        let gitlab = Request::post("/address")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://gitlab.com/9xxlab/tools/cli/-/merge_requests/5"}"#,
+            ))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, gitlab).await;
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "a merge request is addressed too"
+        );
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "address_requested");
     }
 
     #[tokio::test]

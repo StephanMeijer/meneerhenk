@@ -15,7 +15,7 @@ and code reviewer with a fixed persona. He works where the team works:
 |---|---|
 | GitHub pull requests | Reviews every new commit; answers when mentioned; reviews again on request |
 | GitLab merge requests (9xxlab) | The same, GitLab's way |
-| GitHub pull requests, on request | Addresses the review feedback: fixes, one commit pushed to the pull request's branch, a reply in every thread (§3.5) |
+| GitHub pull requests and GitLab merge requests, on request | Addresses the review feedback: fixes, one commit pushed to the pull request's branch, a reply in every thread (§3.5) |
 | GitHub / GitLab issues | Plans how to carry out an issue, and triages it, when a colleague asks in Discord (§4) |
 | Discord (his own channel) | Talks with the team; looks things up; starts reviews and plans; manages issues |
 | Email (his own mailbox) | Answers the mail he receives |
@@ -154,7 +154,8 @@ change against the target branch.
 
 A colleague asks Henk to address the review feedback on one pull request
 (`henk address <url>` or the API, with an optional note). Nobody starts it
-with a comment on the pull request. GitHub only for now.
+with a comment on the pull request. On GitLab a pull request is a merge
+request and a thread is a discussion.
 
 Henk then:
 
@@ -600,6 +601,8 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.5 (new), §1, §8.2, §8.5, §9: Henk may address review feedback when a
   colleague asks, pushing one fast-forward commit to that pull request's
   branch (#35). Approving, blocking and merging stay out.
+- §1, §3.5: address runs work on GitLab merge requests too, with the same
+  refusals (#67).
 - §4: what triage sets on GitLab, answering open question 7, which stays
   in §10 marked decided so the numbers of the others do not change. Fields
   are only filled when empty, on both platforms, as §4 already said for
