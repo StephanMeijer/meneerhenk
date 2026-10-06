@@ -32,7 +32,7 @@ pub struct AgentConfig {
     /// Turns whose tool results are never stubbed, counted from the end.
     pub keep_recent_turns: u32,
     /// Identical tool calls in a row that are let through. The next one is
-    /// refused, and one more after that ends the run with
+    /// refused, and one more in a later turn ends the run with
     /// [`StopCause::Stuck`]. 0 turns the guard off (see
     /// [`henk_domain::repeat`]).
     pub max_repeated_calls: u32,
@@ -464,6 +464,8 @@ impl Agent {
                 is_error: output.is_error,
             });
         }
+        // The results, refusals included, now go back to the model.
+        guard.end_turn();
         match stuck {
             Some((tool, repeats)) => ToolRound::Stuck(results, StopCause::Stuck { tool, repeats }),
             None => ToolRound::Done(results),

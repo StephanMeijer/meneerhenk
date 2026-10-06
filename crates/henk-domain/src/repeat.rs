@@ -1,7 +1,8 @@
 //! The repeat guard: a model that calls the same tool with the same
 //! arguments over and over is stuck, and the result will not change. After
-//! `limit` identical calls in a row the next one is refused; one more after
-//! the refusal ends the session. Each firing is recorded on the run (§8.6).
+//! `limit` identical calls in a row the next one is refused; one more, made
+//! in a later turn after the model has seen the refusal, ends the session.
+//! Each firing is recorded on the run (§8.6).
 
 use serde_json::Value;
 
@@ -41,6 +42,20 @@ pub struct RepeatGuard {
     limit: u32,
     last: Option<(String, String)>,
     streak: u32,
+    refused: Refused,
+}
+
+/// Whether the current streak was refused, and whether the model has seen
+/// it. Results go back to the model only after a whole turn, so a call in
+/// the turn that holds the refusal was made without knowing of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    /// Not refused.
+    No,
+    /// Refused in the turn still running.
+    ThisTurn,
+    /// Refused in an earlier turn; the model has seen it.
+    Seen,
 }
 
 impl RepeatGuard {
@@ -52,11 +67,14 @@ impl RepeatGuard {
             limit,
             last: None,
             streak: 0,
+            refused: Refused::No,
         }
     }
 
     /// Records a call and says what to do with it. A refused call still
-    /// counts, so the call after a refusal, if identical, is the stuck one.
+    /// counts. An identical call in a later turn than the refusal, once the
+    /// model has seen it, is the stuck one; in the refusal's own turn it is
+    /// refused too.
     pub fn observe(&mut self, tool: &str, arguments: CallArguments<'_>) -> RepeatVerdict {
         if self.limit == 0 {
             return RepeatVerdict::Allow;
@@ -71,14 +89,24 @@ impl RepeatGuard {
         } else {
             self.last = Some((tool.to_owned(), key));
             self.streak = 1;
+            self.refused = Refused::No;
         }
         let repeats = self.streak;
         if repeats <= self.limit {
             RepeatVerdict::Allow
-        } else if repeats == self.limit.saturating_add(1) {
-            RepeatVerdict::Refuse { repeats }
-        } else {
+        } else if self.refused == Refused::Seen {
             RepeatVerdict::Stuck { repeats }
+        } else {
+            self.refused = Refused::ThisTurn;
+            RepeatVerdict::Refuse { repeats }
+        }
+    }
+
+    /// Marks the end of a turn: its results, refusals included, go back to
+    /// the model.
+    pub fn end_turn(&mut self) {
+        if self.refused == Refused::ThisTurn {
+            self.refused = Refused::Seen;
         }
     }
 }
@@ -162,11 +190,23 @@ mod tests {
             .collect()
     }
 
+    /// One call per turn.
+    fn turns(guard: &mut RepeatGuard, calls: &[(&str, Value)]) -> Vec<RepeatVerdict> {
+        calls
+            .iter()
+            .map(|(tool, args)| {
+                let verdict = guard.observe(tool, CallArguments::Json(args));
+                guard.end_turn();
+                verdict
+            })
+            .collect()
+    }
+
     #[test]
     fn refused_after_the_limit_then_stuck() {
         let mut guard = RepeatGuard::new(3);
         let call = ("read_file", json!({"path": "a.rs"}));
-        let got = verdicts(&mut guard, &vec![call; 5]);
+        let got = turns(&mut guard, &vec![call; 5]);
         assert_eq!(
             got,
             vec![
@@ -175,6 +215,50 @@ mod tests {
                 RepeatVerdict::Allow,
                 RepeatVerdict::Refuse { repeats: 4 },
                 RepeatVerdict::Stuck { repeats: 5 },
+            ]
+        );
+    }
+
+    #[test]
+    fn repeats_in_the_refusal_turn_are_refused_not_stuck() {
+        let mut guard = RepeatGuard::new(3);
+        let call = ("read_file", json!({"path": "a.rs"}));
+        let mut got = turns(&mut guard, &vec![call.clone(); 3]);
+        // Turn 4 holds two identical calls: the model has not seen the
+        // first refusal when it makes the second.
+        got.extend(verdicts(&mut guard, &[call.clone(), call.clone()]));
+        guard.end_turn();
+        got.extend(verdicts(&mut guard, &[call]));
+        assert_eq!(
+            got,
+            vec![
+                RepeatVerdict::Allow,
+                RepeatVerdict::Allow,
+                RepeatVerdict::Allow,
+                RepeatVerdict::Refuse { repeats: 4 },
+                RepeatVerdict::Refuse { repeats: 5 },
+                RepeatVerdict::Stuck { repeats: 6 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_streak_needs_a_new_refusal() {
+        let mut guard = RepeatGuard::new(1);
+        let same = ("read_file", json!({"path": "a.rs"}));
+        let other = ("list_files", json!({}));
+        let got = turns(
+            &mut guard,
+            &[same.clone(), same.clone(), other, same.clone(), same],
+        );
+        assert_eq!(
+            got,
+            vec![
+                RepeatVerdict::Allow,
+                RepeatVerdict::Refuse { repeats: 2 },
+                RepeatVerdict::Allow,
+                RepeatVerdict::Allow,
+                RepeatVerdict::Refuse { repeats: 2 },
             ]
         );
     }

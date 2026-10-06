@@ -500,8 +500,8 @@ impl Default for ReviewConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AgentFileConfig {
     /// Identical tool calls in a row a session may make. The next one is
-    /// refused, and one more ends the session as stuck. 0 turns the guard
-    /// off.
+    /// refused, and one more in a later turn ends the session as stuck. 0
+    /// turns the guard off.
     pub max_repeated_calls: u32,
 }
 

@@ -754,6 +754,64 @@ async fn repeating_after_the_refusal_ends_the_run_as_stuck() {
 }
 
 #[tokio::test]
+async fn identical_calls_in_the_refusal_turn_are_refused_not_stuck() {
+    let (set, reads, _) = counted_tools();
+    let read = |id: &str| {
+        Block::ToolCall(ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: ToolArguments::Parsed(json!({"path": "a.rs"})),
+        })
+    };
+    // Turn 4 holds two identical calls; the model has not seen the
+    // refusal of the first when it makes the second.
+    let both = Ok(Completion {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![read("c4"), read("c5")],
+        },
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c1", "read", json!({"path": "a.rs"})),
+            call("c2", "read", json!({"path": "a.rs"})),
+            call("c3", "read", json!({"path": "a.rs"})),
+            both,
+            text("Done."),
+        ],
+    ));
+    let agent = Agent::new(model.clone(), set, "s", roomy());
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+
+    assert!(
+        matches!(outcome.stop, StopCause::EndTurn),
+        "{:?}",
+        outcome.stop
+    );
+    assert_eq!(count(&reads), 3);
+    assert_eq!(
+        outcome
+            .repeats
+            .iter()
+            .map(|f| (f.repeats, f.ended))
+            .collect::<Vec<_>>(),
+        vec![(4, false), (5, false)]
+    );
+    let refused = results_of(&model.requests()[4].messages[8]);
+    assert_eq!(refused.len(), 2);
+    assert!(
+        refused
+            .iter()
+            .all(|(_, content, is_error)| *is_error && content.starts_with("Refused:"))
+    );
+}
+
+#[tokio::test]
 async fn other_arguments_or_a_call_in_between_do_not_trigger_the_guard() {
     let (set, reads, lists) = counted_tools();
     let model = Arc::new(ScriptedClient::new(

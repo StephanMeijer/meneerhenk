@@ -220,7 +220,8 @@ requester_id = 523456789012345678
 
 # Limits every model session shares. A session that calls one tool with the
 # same arguments max_repeated_calls times in a row has its next such call
-# refused; one more ends the session as stuck, and the run records it.
+# refused; one more in a later turn ends the session as stuck, and the run
+# records it.
 # The default is 3; 0 turns the guard off.
 # [agent]
 # max_repeated_calls = 3
