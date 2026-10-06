@@ -8,10 +8,11 @@ use henk_store::{InboundEvent, OutcomeRecord, RunStore};
 
 /// Records events and outcomes in [`RunStore`].
 #[derive(Debug, Clone)]
-pub struct StoreRecorder(pub Arc<RunStore>);
+pub struct StoreRecorder(pub Arc<dyn RunStore>);
 
+#[async_trait::async_trait]
 impl EventRecorder for StoreRecorder {
-    fn record_event(&self, event: &Event) -> Result<(), String> {
+    async fn record_event(&self, event: &Event) -> Result<(), String> {
         let (repo, target) = event.kind.locator().map_or((None, None), |(repo, number)| {
             (Some(repo.path()), Some(number))
         });
@@ -25,10 +26,11 @@ impl EventRecorder for StoreRecorder {
                 target,
                 payload: event.payload.as_ref().map(serde_json::Value::to_string),
             })
+            .await
             .map_err(|e| e.to_string())
     }
 
-    fn record_outcome(
+    async fn record_outcome(
         &self,
         event: &EventId,
         listener: &str,
@@ -43,6 +45,7 @@ impl EventRecorder for StoreRecorder {
                 run_id: outcome.run().map(ToString::to_string),
                 at: String::new(),
             })
+            .await
             .map_err(|e| e.to_string())
     }
 }

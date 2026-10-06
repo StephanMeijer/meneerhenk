@@ -106,7 +106,12 @@ impl Coordinator {
                         .get(&key)
                         .map_or_else(|| run.clone(), |a| a.run.clone());
                     info!(repo = %key.repo, number = key.number, run = %joined, "joined the running review");
-                    let _ = self.app.store.joined(&joined, &request.trigger);
+                    // Recorded off the lock: the store is async and this guard is not.
+                    let store = Arc::clone(&self.app.store);
+                    let (run_id, trigger) = (joined.clone(), request.trigger.clone());
+                    tokio::spawn(async move {
+                        let _ = store.joined(&run_id, &trigger).await;
+                    });
                     return (Decision::Join, joined);
                 }
                 Decision::Supersede => {

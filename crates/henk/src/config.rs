@@ -28,6 +28,9 @@ pub struct Config {
     /// The HTTP server and run links.
     #[serde(default)]
     pub server: ServerConfig,
+    /// Where run records live.
+    #[serde(default)]
+    pub database: Option<DatabaseConfig>,
     /// Discord ids.
     pub discord: DiscordConfig,
     /// Henk's mailbox.
@@ -67,9 +70,9 @@ pub struct ServerConfig {
     /// Public base URL run links point at, without a trailing slash.
     #[serde(default = "default_public_base_url")]
     pub public_base_url: String,
-    /// SQLite file.
-    #[serde(default = "default_database_path")]
-    pub database_path: String,
+    /// Deprecated: the `SQLite` file. Use `[database]`.
+    #[serde(default)]
+    pub database_path: Option<String>,
     /// Env var with the GitHub webhook secret.
     #[serde(default = "default_github_webhook_secret_env")]
     pub github_webhook_secret_env: String,
@@ -105,10 +108,47 @@ impl Default for ServerConfig {
         Self {
             bind: default_bind(),
             public_base_url: default_public_base_url(),
-            database_path: default_database_path(),
+            database_path: None,
             github_webhook_secret_env: default_github_webhook_secret_env(),
             gitlab_webhook_token_env: default_gitlab_webhook_token_env(),
             api_token_env: default_api_token_env(),
+        }
+    }
+}
+
+/// Where run records live.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
+pub enum DatabaseConfig {
+    /// One local `SQLite` file.
+    Sqlite {
+        /// The file; created when missing.
+        #[serde(default = "default_database_path")]
+        path: String,
+    },
+    /// A `PostgreSQL` server. The URL holds the password, so the file names
+    /// only the environment variable that has it (§8.4).
+    Postgres {
+        /// Env var with the connection URL.
+        url_env: String,
+    },
+}
+
+impl DatabaseConfig {
+    /// Where records go, in words, without any secret.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Sqlite { path } => format!("SQLite {path}"),
+            Self::Postgres { url_env } => format!("PostgreSQL (URL from ${url_env})"),
+        }
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self::Sqlite {
+            path: default_database_path(),
         }
     }
 }
@@ -463,6 +503,9 @@ pub enum ConfigError {
     /// A review setting is unusable.
     #[error("{0}")]
     Review(String),
+    /// The database setting is unusable.
+    #[error("{0}")]
+    Database(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -470,6 +513,10 @@ pub enum ConfigError {
 pub struct Settings {
     /// The HTTP server.
     pub server: ServerConfig,
+    /// Where run records live.
+    pub database: DatabaseConfig,
+    /// True when `database` came from the deprecated `server.database_path`.
+    pub legacy_database_path: bool,
     /// Henk on Discord.
     pub henk: HenkIdentity,
     /// Henk's mail address.
@@ -555,6 +602,28 @@ impl Config {
             }
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
+        let legacy_database_path = self.server.database_path.is_some();
+        let database = match (self.database, self.server.database_path.clone()) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::Database(
+                    "set either [database] or server.database_path, not both".to_owned(),
+                ));
+            }
+            (Some(database), None) => database,
+            (None, Some(path)) => DatabaseConfig::Sqlite { path },
+            (None, None) => DatabaseConfig::default(),
+        };
+        match &database {
+            DatabaseConfig::Sqlite { path } if path.trim().is_empty() => {
+                return Err(ConfigError::Database("database.path is empty".to_owned()));
+            }
+            DatabaseConfig::Postgres { url_env } if url_env.trim().is_empty() => {
+                return Err(ConfigError::Database(
+                    "database.url_env is empty".to_owned(),
+                ));
+            }
+            _ => {}
+        }
 
         let people = People::new(
             self.discord.team_lead_ids.iter().copied(),
@@ -572,6 +641,8 @@ impl Config {
 
         Ok(Settings {
             server: self.server,
+            database,
+            legacy_database_path,
             henk: HenkIdentity {
                 user: henk_id,
                 role: self.discord.henk_role_id,
@@ -749,10 +820,8 @@ impl Settings {
         )
     }
 
-    /// A plain-text description of what Henk would work with.
-    #[must_use]
-    pub fn describe(&self) -> String {
-        let mut out = String::new();
+    /// The server, its secrets and the database, for [`Self::describe`].
+    fn describe_server(&self, out: &mut String) {
         let _ = writeln!(
             out,
             "Server:          {} (public {})",
@@ -765,6 +834,19 @@ impl Settings {
             self.server.gitlab_webhook_token_env,
             self.server.api_token_env
         );
+        let legacy = if self.legacy_database_path {
+            " (server.database_path is deprecated; use [database])"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "Database:        {}{legacy}", self.database.describe());
+    }
+
+    /// A plain-text description of what Henk would work with.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut out = String::new();
+        self.describe_server(&mut out);
         let _ = writeln!(out, "Discord channel: {}", self.henk.channel);
         let _ = writeln!(out, "Henk's user id:  {}", self.henk.user);
         let _ = writeln!(out, "Mail address:    {}", self.mail_address);
@@ -880,12 +962,119 @@ github_owners = ["docspec"]
         assert!(settings.gitlab.is_some());
         assert_eq!(settings.mcp.len(), 3);
         assert!(settings.models.contains_key("proxy-fast"));
+        assert_eq!(
+            settings.database,
+            DatabaseConfig::Sqlite {
+                path: "/var/lib/henk/henk.db".into()
+            }
+        );
+        assert!(
+            !settings.legacy_database_path,
+            "the example uses [database]"
+        );
         let scratch = RepoRef::parse(Platform::GitHub, "StephanMeijer/scratch-repo").unwrap();
         assert!(settings.allowlist.allows(&scratch));
         assert_eq!(
             settings.run_link(&henk_domain::run::RunId::parse("r-1").unwrap()),
             "https://henk.example.com/runs/r-1"
         );
+    }
+
+    fn database(extra: &str) -> Result<Settings, ConfigError> {
+        Config::parse(&format!("{MINIMAL}{extra}")).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn the_database_defaults_to_a_local_sqlite_file() {
+        let settings = database("").unwrap();
+        assert_eq!(
+            settings.database,
+            DatabaseConfig::Sqlite {
+                path: "henk.db".into()
+            }
+        );
+        assert!(!settings.legacy_database_path);
+    }
+
+    #[test]
+    fn each_backend_parses() {
+        let sqlite =
+            database("[database]\nbackend = \"sqlite\"\npath = \"/var/lib/henk/henk.db\"\n")
+                .unwrap();
+        assert_eq!(
+            sqlite.database,
+            DatabaseConfig::Sqlite {
+                path: "/var/lib/henk/henk.db".into()
+            }
+        );
+        let postgres =
+            database("[database]\nbackend = \"postgres\"\nurl_env = \"HENK_DATABASE_URL\"\n")
+                .unwrap();
+        assert_eq!(
+            postgres.database,
+            DatabaseConfig::Postgres {
+                url_env: "HENK_DATABASE_URL".into()
+            }
+        );
+        assert!(
+            postgres
+                .describe()
+                .contains("PostgreSQL (URL from $HENK_DATABASE_URL)")
+        );
+    }
+
+    #[test]
+    fn the_old_database_path_still_works_and_says_it_is_deprecated() {
+        let settings = database("[server]\ndatabase_path = \"old.db\"\n").unwrap();
+        assert_eq!(
+            settings.database,
+            DatabaseConfig::Sqlite {
+                path: "old.db".into()
+            }
+        );
+        assert!(settings.legacy_database_path);
+        assert!(
+            settings
+                .describe()
+                .contains("server.database_path is deprecated")
+        );
+    }
+
+    #[test]
+    fn bad_database_settings_are_refused() {
+        let both = "[server]\ndatabase_path = \"old.db\"\n[database]\nbackend = \"sqlite\"\n";
+        assert!(matches!(database(both), Err(ConfigError::Database(_))));
+        assert!(matches!(
+            database("[database]\nbackend = \"mysql\"\n"),
+            Err(ConfigError::Syntax(_))
+        ));
+        assert!(
+            matches!(
+                database("[database]\nbackend = \"postgres\"\n"),
+                Err(ConfigError::Syntax(_)),
+            ),
+            "postgres needs url_env"
+        );
+        assert!(
+            matches!(
+                database("[database]\nbackend = \"postgres\"\nurl_env = \"X\"\npath = \"a.db\"\n"),
+                Err(ConfigError::Syntax(_))
+            ),
+            "a sqlite field on postgres is refused"
+        );
+        assert!(matches!(
+            database("[database]\nbackend = \"postgres\"\nurl_env = \" \"\n"),
+            Err(ConfigError::Database(_))
+        ));
+    }
+
+    #[test]
+    fn container_example_is_valid() {
+        let text = include_str!("../../../deploy/henk.container.example.toml");
+        let settings = Config::parse(text)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!settings.legacy_database_path);
     }
 
     #[test]

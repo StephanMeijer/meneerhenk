@@ -99,7 +99,7 @@ pub trait FactCheck: Send + Sync {
 /// Checks each claim in a session of its own on the run.
 pub struct SessionFactCheck {
     /// Run records; each check is a session row named `check-<lane>-<n>`.
-    pub store: Arc<RunStore>,
+    pub store: Arc<dyn RunStore>,
     /// The run.
     pub run: RunId,
     /// The checking model first, then the backup, if any.
@@ -160,7 +160,7 @@ impl SessionFactCheck {
             continuation: Some(ask_for_verdict(Arc::clone(&slot))),
             turn_warning: None,
         };
-        let outcome = run_session(&self.store, &self.run, spec, self.cancel.clone()).await;
+        let outcome = run_session(self.store.as_ref(), &self.run, spec, self.cancel.clone()).await;
         let verdict = slot.lock().ok().and_then(|v| v.clone());
         if verdict.is_none() {
             warn!(stop = ?outcome.stop, lane = %request.lane, "fact-check ended without a verdict");
@@ -181,18 +181,21 @@ impl FactCheck for SessionFactCheck {
             if let Some((confirmed, reason)) = self.check_with(model, request).await {
                 let word = if confirmed { "confirmed" } else { "rejected" };
                 info!(lane = %request.lane, path = %request.path, line = request.line, %by, verdict = word, "fact-check");
-                let _ = self.store.event(
-                    &self.run,
-                    "info",
-                    &format!(
-                        "{}: {} {} on {}:{} ({by}): {reason}",
-                        request.lane,
-                        word,
-                        kind_name(&request.kind),
-                        request.path,
-                        request.line
-                    ),
-                );
+                let _ = self
+                    .store
+                    .event(
+                        &self.run,
+                        "info",
+                        &format!(
+                            "{}: {} {} on {}:{} ({by}): {reason}",
+                            request.lane,
+                            word,
+                            kind_name(&request.kind),
+                            request.path,
+                            request.line
+                        ),
+                    )
+                    .await;
                 return if confirmed {
                     CheckVerdict::Confirmed { by, reason }
                 } else {
@@ -206,17 +209,20 @@ impl FactCheck for SessionFactCheck {
         } else {
             format!("no verdict from {}", tried.join(" or "))
         };
-        let _ = self.store.event(
-            &self.run,
-            "warn",
-            &format!(
-                "{}: {} on {}:{} went out unchecked: {why}",
-                request.lane,
-                kind_name(&request.kind),
-                request.path,
-                request.line
-            ),
-        );
+        let _ = self
+            .store
+            .event(
+                &self.run,
+                "warn",
+                &format!(
+                    "{}: {} on {}:{} went out unchecked: {why}",
+                    request.lane,
+                    kind_name(&request.kind),
+                    request.path,
+                    request.line
+                ),
+            )
+            .await;
         CheckVerdict::Unavailable { why }
     }
 }
@@ -356,8 +362,8 @@ diff --git a/src/a.rs b/src/a.rs
  }
 ";
 
-    fn store() -> (Arc<RunStore>, RunId) {
-        let store = Arc::new(RunStore::in_memory().unwrap());
+    async fn store() -> (Arc<dyn RunStore>, RunId) {
+        let store = Arc::new(henk_store::SqliteStore::in_memory().unwrap());
         let run = RunId::parse("r-1").unwrap();
         store
             .create_run(&henk_store::NewRun {
@@ -371,6 +377,7 @@ diff --git a/src/a.rs b/src/a.rs
                 trigger: "test".into(),
                 link: "l".into(),
             })
+            .await
             .unwrap();
         (store, run)
     }
@@ -398,8 +405,8 @@ diff --git a/src/a.rs b/src/a.rs
         })
     }
 
-    fn checker(models: Vec<Arc<dyn ModelClient>>) -> SessionFactCheck {
-        let (store, run) = store();
+    async fn checker(models: Vec<Arc<dyn ModelClient>>) -> SessionFactCheck {
+        let (store, run) = store().await;
         SessionFactCheck {
             store,
             run,
@@ -435,7 +442,7 @@ diff --git a/src/a.rs b/src/a.rs
             "opus",
             [verdict_call("rejected", "src/a.rs:2 sets x."), done()],
         ));
-        let check = checker(vec![model.clone()]);
+        let check = checker(vec![model.clone()]).await;
         let verdict = check.check(&request("lane-model")).await;
         assert_eq!(
             verdict,
@@ -447,7 +454,7 @@ diff --git a/src/a.rs b/src/a.rs
         let opening = model.requests()[0].messages[0].text();
         assert!(opening.contains("x is never set."), "{opening}");
         assert!(opening.contains("+    let x = 2;"), "{opening}");
-        let events = check.store.events(&check.run).unwrap();
+        let events = check.store.events(&check.run).await.unwrap();
         assert!(
             events
                 .iter()
@@ -464,7 +471,7 @@ diff --git a/src/a.rs b/src/a.rs
             "opus",
             [verdict_call("confirmed", "It holds."), done()],
         ));
-        let check = checker(vec![opus.clone(), sonnet.clone()]);
+        let check = checker(vec![opus.clone(), sonnet.clone()]).await;
         let verdict = check.check(&request("opus")).await;
         assert!(matches!(verdict, CheckVerdict::Confirmed { ref by, .. } if by.as_str() == "opus"));
         assert_eq!(
@@ -479,7 +486,7 @@ diff --git a/src/a.rs b/src/a.rs
     #[tokio::test]
     async fn no_verdict_from_anyone_is_unavailable() {
         let model = Arc::new(ScriptedClient::new("opus", [done(), done()]));
-        let check = checker(vec![model]);
+        let check = checker(vec![model]).await;
         let verdict = check.check(&request("lane-model")).await;
         assert!(matches!(verdict, CheckVerdict::Unavailable { ref why } if why.contains("opus")));
     }

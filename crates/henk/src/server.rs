@@ -220,16 +220,19 @@ async fn run_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -> 
         return (StatusCode::BAD_REQUEST, "bad run id").into_response();
     };
     let store = &shared.coordinator.app().store;
-    let run = match store.run(&run_id) {
+    let run = match store.run(&run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
         Err(error) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
         }
     };
-    let lanes = store.lanes(&run_id).unwrap_or_default();
-    let events = store.events(&run_id).unwrap_or_default();
-    let inbound = store.inbound_events_for_run(&run_id).unwrap_or_default();
+    let lanes = store.lanes(&run_id).await.unwrap_or_default();
+    let events = store.events(&run_id).await.unwrap_or_default();
+    let inbound = store
+        .inbound_events_for_run(&run_id)
+        .await
+        .unwrap_or_default();
 
     let mut html = String::new();
     let _ = write!(
@@ -314,14 +317,14 @@ async fn event_page(State(shared): State<Arc<Shared>>, Path(id): Path<String>) -
         return (StatusCode::BAD_REQUEST, "bad event id").into_response();
     };
     let store = &shared.coordinator.app().store;
-    let event = match store.inbound_event(&event_id) {
+    let event = match store.inbound_event(&event_id).await {
         Ok(Some(event)) => event,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such event").into_response(),
         Err(error) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
         }
     };
-    let outcomes = store.outcomes(&event_id).unwrap_or_default();
+    let outcomes = store.outcomes(&event_id).await.unwrap_or_default();
     let mut html = String::new();
     let _ = write!(
         html,
@@ -436,7 +439,7 @@ github_owners = ["docspec"]
     async fn wait_for_outcomes(app: &Arc<App>, event: &str) -> usize {
         let id = EventId::parse(event).unwrap();
         for _ in 0..100 {
-            let n = app.store.outcomes(&id).map_or(0, |o| o.len());
+            let n = app.store.outcomes(&id).await.map_or(0, |o| o.len());
             if n >= 3 {
                 return n;
             }
@@ -492,6 +495,7 @@ github_owners = ["docspec"]
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event.clone()).unwrap())
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(recorded.kind, "unmodelled");
@@ -574,6 +578,7 @@ github_owners = ["docspec"]
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(recorded.kind, "plan_requested");

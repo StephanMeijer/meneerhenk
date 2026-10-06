@@ -4,14 +4,13 @@
 //! secret does not hide the next problem.
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::time::Duration;
 
 use henk_mcp::{McpSession as _, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth};
 
 use crate::app::env_var;
-use crate::config::Settings;
+use crate::config::{DatabaseConfig, Settings};
 
 /// The outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +68,7 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks.extend(check_models(settings, probe_models).await);
     checks.extend(check_github(settings).await);
     checks.extend(check_mcp(settings).await);
-    checks.push(check_database(settings));
+    checks.push(check_database(settings).await);
     checks
 }
 
@@ -385,14 +384,19 @@ async fn check_mcp(settings: &Settings) -> Vec<Check> {
     checks
 }
 
-fn check_database(settings: &Settings) -> Check {
-    let path = Path::new(&settings.server.database_path);
-    match henk_store::RunStore::open(path) {
-        Ok(_) => Check::ok(
-            "database",
-            format!("{} opens and is migrated", path.display()),
-        ),
-        Err(error) => Check::fail("database", format!("{}: {error}", path.display())),
+async fn check_database(settings: &Settings) -> Check {
+    let what = match &settings.database {
+        DatabaseConfig::Sqlite { path } => path.clone(),
+        DatabaseConfig::Postgres { url_env } => env_var(url_env)
+            .and_then(|url| henk_store::describe_url(&url).ok())
+            .map_or_else(
+                || format!("${url_env}"),
+                |place| format!("PostgreSQL at {place}"),
+            ),
+    };
+    match crate::app::open_store(&settings.database).await {
+        Ok(_) => Check::ok("database", format!("{what} opens and is migrated")),
+        Err(error) => Check::fail("database", format!("{what}: {error:#}")),
     }
 }
 

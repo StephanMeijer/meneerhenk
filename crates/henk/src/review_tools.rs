@@ -70,7 +70,7 @@ pub struct LaneContext {
     /// Where comments go.
     pub writer: Arc<dyn PlatformWriter>,
     /// Run records.
-    pub store: Arc<RunStore>,
+    pub store: Arc<dyn RunStore>,
     /// The diff of the review. Findings are checked against it before
     /// anything is posted.
     pub files: Arc<DiffFiles>,
@@ -156,14 +156,17 @@ impl LaneContext {
                     *count += 1;
                     *count
                 });
-                let _ = self.store.record_finding(
-                    &self.run,
-                    self.lane.as_str(),
-                    &key.path,
-                    key.line,
-                    comment_id.unwrap_or(""),
-                    FindingAction::Rejected,
-                );
+                let _ = self
+                    .store
+                    .record_finding(
+                        &self.run,
+                        self.lane.as_str(),
+                        &key.path,
+                        key.line,
+                        comment_id.unwrap_or(""),
+                        FindingAction::Rejected,
+                    )
+                    .await;
                 let next = if count >= MAX_REJECTIONS {
                     "It has now been rejected twice: do not try this line again; move on."
                 } else {
@@ -182,7 +185,7 @@ impl LaneContext {
     /// guard must not live across an await. Two lanes racing between the
     /// claim and the post is rare, and the registry stays consistent because
     /// the post result is recorded under the lock again.
-    fn refuse_if_taken(&self, key: &FindingKey) -> Option<ToolOutput> {
+    async fn refuse_if_taken(&self, key: &FindingKey) -> Option<ToolOutput> {
         let taken: Option<String> = {
             let Ok(registry) = self.registry.lock() else {
                 return Some(ToolOutput::error("finding registry unavailable"));
@@ -194,32 +197,38 @@ impl LaneContext {
         };
         let existing_id = taken?;
         let (path, line) = (&key.path, key.line);
-        let _ = self.store.record_finding(
-            &self.run,
-            self.lane.as_str(),
-            path,
-            line,
-            &existing_id,
-            FindingAction::Refused,
-        );
+        let _ = self
+            .store
+            .record_finding(
+                &self.run,
+                self.lane.as_str(),
+                path,
+                line,
+                &existing_id,
+                FindingAction::Refused,
+            )
+            .await;
         Some(ToolOutput::error(format!(
             "Line {path}:{line} already has finding {existing_id}. Improve it with improve_finding if you can explain it better, otherwise move on."
         )))
     }
 
     /// Records a write that went out unchecked and says so to the lane.
-    fn unverified(&self, key: &FindingKey, comment_id: &str, why: Option<&str>) -> String {
+    async fn unverified(&self, key: &FindingKey, comment_id: &str, why: Option<&str>) -> String {
         let Some(why) = why else {
             return String::new();
         };
-        let _ = self.store.record_finding(
-            &self.run,
-            self.lane.as_str(),
-            &key.path,
-            key.line,
-            comment_id,
-            FindingAction::Unverified,
-        );
+        let _ = self
+            .store
+            .record_finding(
+                &self.run,
+                self.lane.as_str(),
+                &key.path,
+                key.line,
+                comment_id,
+                FindingAction::Unverified,
+            )
+            .await;
         format!(" The fact-check could not run ({why}), so it went out unchecked.")
     }
 }
@@ -604,7 +613,7 @@ impl Tool for PostFinding {
             line,
         };
 
-        if let Some(refusal) = ctx.refuse_if_taken(&key) {
+        if let Some(refusal) = ctx.refuse_if_taken(&key).await {
             return refusal;
         }
 
@@ -630,14 +639,17 @@ impl Tool for PostFinding {
                 warn!(%error, path, line, "posting a finding failed");
                 // On the timeline too, so a lane whose every post failed does
                 // not look like a lane that found nothing.
-                let _ = ctx.store.event(
-                    &ctx.run,
-                    "warn",
-                    &format!(
-                        "{}: could not post a finding on {path}:{line}: {error}",
-                        ctx.lane
-                    ),
-                );
+                let _ = ctx
+                    .store
+                    .event(
+                        &ctx.run,
+                        "warn",
+                        &format!(
+                            "{}: could not post a finding on {path}:{line}: {error}",
+                            ctx.lane
+                        ),
+                    )
+                    .await;
                 return ToolOutput::error(format!(
                     "Could not post on {path}:{line}: {error}. If the line is not part of the diff, pick a line that is."
                 ));
@@ -654,16 +666,19 @@ impl Tool for PostFinding {
                 in_diff: true,
             });
         }
-        let _ = ctx.store.record_finding(
-            &ctx.run,
-            ctx.lane.as_str(),
-            path,
-            line,
-            &posted.id,
-            FindingAction::Posted,
-        );
+        let _ = ctx
+            .store
+            .record_finding(
+                &ctx.run,
+                ctx.lane.as_str(),
+                path,
+                line,
+                &posted.id,
+                FindingAction::Posted,
+            )
+            .await;
         info!(lane = %ctx.lane, path, line, comment = %posted.id, "finding posted");
-        let note = ctx.unverified(&key, &posted.id, unchecked.as_deref());
+        let note = ctx.unverified(&key, &posted.id, unchecked.as_deref()).await;
         ToolOutput::ok(format!("Posted as comment {}.{note}", posted.id))
     }
 }
@@ -739,15 +754,20 @@ impl Tool for ImproveFinding {
         if let Ok(mut registry) = ctx.registry.lock() {
             registry.improve(&existing.key, full_body, Some(ctx.lane.clone()));
         }
-        let _ = ctx.store.record_finding(
-            &ctx.run,
-            ctx.lane.as_str(),
-            &existing.key.path,
-            existing.key.line,
-            comment_id,
-            FindingAction::Improved,
-        );
-        let note = ctx.unverified(&existing.key, comment_id, unchecked.as_deref());
+        let _ = ctx
+            .store
+            .record_finding(
+                &ctx.run,
+                ctx.lane.as_str(),
+                &existing.key.path,
+                existing.key.line,
+                comment_id,
+                FindingAction::Improved,
+            )
+            .await;
+        let note = ctx
+            .unverified(&existing.key, comment_id, unchecked.as_deref())
+            .await;
         ToolOutput::ok(format!("Updated comment {comment_id}.{note}"))
     }
 }
@@ -845,28 +865,36 @@ impl Tool for WithdrawFinding {
             // The text already says it is withdrawn; an open thread only
             // means it still counts until someone resolves it.
             warn!(%error, comment = comment_id, "could not resolve a withdrawn finding");
-            let _ = ctx.store.event(
-                &ctx.run,
-                "warn",
-                &format!(
-                    "{}: withdrew {comment_id} but could not resolve its thread: {error}",
-                    ctx.lane
-                ),
-            );
+            let _ = ctx
+                .store
+                .event(
+                    &ctx.run,
+                    "warn",
+                    &format!(
+                        "{}: withdrew {comment_id} but could not resolve its thread: {error}",
+                        ctx.lane
+                    ),
+                )
+                .await;
         }
         if let Ok(mut registry) = ctx.registry.lock() {
             registry.withdraw(&existing.key, full_body);
         }
-        let _ = ctx.store.record_finding(
-            &ctx.run,
-            ctx.lane.as_str(),
-            &existing.key.path,
-            existing.key.line,
-            comment_id,
-            FindingAction::Withdrawn,
-        );
+        let _ = ctx
+            .store
+            .record_finding(
+                &ctx.run,
+                ctx.lane.as_str(),
+                &existing.key.path,
+                existing.key.line,
+                comment_id,
+                FindingAction::Withdrawn,
+            )
+            .await;
         info!(lane = %ctx.lane, comment = comment_id, "finding withdrawn");
-        let note = ctx.unverified(&existing.key, comment_id, unchecked.as_deref());
+        let note = ctx
+            .unverified(&existing.key, comment_id, unchecked.as_deref())
+            .await;
         ToolOutput::ok(format!("Withdrew comment {comment_id}.{note}"))
     }
 }
@@ -905,8 +933,8 @@ diff --git a/README.md b/README.md
 +new
 ";
 
-    pub(super) fn context(diff: ReviewDiff) -> Arc<LaneContext> {
-        let store = Arc::new(RunStore::in_memory().unwrap());
+    pub(super) async fn context(diff: ReviewDiff) -> Arc<LaneContext> {
+        let store = Arc::new(henk_store::SqliteStore::in_memory().unwrap());
         let run = RunId::parse("r-1").unwrap();
         store
             .create_run(&henk_store::NewRun {
@@ -920,6 +948,7 @@ diff --git a/README.md b/README.md
                 trigger: "test".into(),
                 link: "l".into(),
             })
+            .await
             .unwrap();
         Arc::new(LaneContext {
             run,
@@ -959,7 +988,7 @@ diff --git a/README.md b/README.md
 
     #[tokio::test]
     async fn list_and_file_diff_track_what_the_lane_opened() {
-        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let ctx = context(ReviewDiff::from_unified(DIFF)).await;
         let list = ListChangedFiles(Arc::clone(&ctx.files))
             .call(json!({}))
             .await;
@@ -987,7 +1016,7 @@ diff --git a/README.md b/README.md
 
     #[tokio::test]
     async fn get_file_diff_reads_several_files_in_one_call() {
-        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let ctx = context(ReviewDiff::from_unified(DIFF)).await;
         let both = GetFileDiff(Arc::clone(&ctx.files))
             .call(json!({"paths": ["src/a.rs", "README.md"]}))
             .await;
@@ -1029,9 +1058,9 @@ diff --git a/README.md b/README.md
         );
     }
 
-    #[test]
-    fn a_batch_stops_at_the_cap_and_names_what_it_left_out() {
-        let ctx = context(ReviewDiff::from_unified(DIFF));
+    #[tokio::test]
+    async fn a_batch_stops_at_the_cap_and_names_what_it_left_out() {
+        let ctx = context(ReviewDiff::from_unified(DIFF)).await;
         let text = render_files(&ctx.files, &["src/a.rs", "README.md"], 10).unwrap();
         assert!(
             text.starts_with("== src/a.rs =="),
@@ -1090,7 +1119,7 @@ diff --git a/README.md b/README.md
 
     #[tokio::test]
     async fn post_finding_refuses_lines_outside_the_diff_before_posting() {
-        let ctx = context(ReviewDiff::from_unified(DIFF));
+        let ctx = context(ReviewDiff::from_unified(DIFF)).await;
         let tool = PostFinding(Arc::clone(&ctx));
         let outside = tool
             .call(json!({"path": "src/a.rs", "line": 40, "body": "Wrong."}))
@@ -1115,7 +1144,7 @@ diff --git a/README.md b/README.md
             "{}",
             inside.content
         );
-        assert_eq!(ctx.store.events(&ctx.run).unwrap().len(), 1);
+        assert_eq!(ctx.store.events(&ctx.run).await.unwrap().len(), 1);
     }
 }
 
@@ -1170,10 +1199,10 @@ mod gate_tests {
         }
     }
 
-    fn setup(
+    async fn setup(
         verdicts: impl IntoIterator<Item = CheckVerdict>,
     ) -> (Arc<LaneContext>, Arc<FakeWriter>, Arc<Fixed>) {
-        let base = super::tests::context(ReviewDiff::from_unified(DIFF));
+        let base = super::tests::context(ReviewDiff::from_unified(DIFF)).await;
         let writer = Arc::new(FakeWriter {
             accept_posts: true,
             ..FakeWriter::default()
@@ -1205,9 +1234,10 @@ mod gate_tests {
         json!({"path": "src/a.rs", "line": 2, "body": "x is never set."})
     }
 
-    fn actions(ctx: &LaneContext) -> Vec<String> {
+    async fn actions(ctx: &LaneContext) -> Vec<String> {
         ctx.store
             .findings(&ctx.run)
+            .await
             .unwrap()
             .into_iter()
             .map(|f| f.action)
@@ -1216,7 +1246,7 @@ mod gate_tests {
 
     #[tokio::test]
     async fn a_confirmed_finding_is_posted() {
-        let (ctx, writer, checker) = setup([confirmed()]);
+        let (ctx, writer, checker) = setup([confirmed()]).await;
         let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
         assert!(!out.is_error, "{out:?}");
         let posts = writer.posts.lock().unwrap();
@@ -1230,7 +1260,8 @@ mod gate_tests {
 
     #[tokio::test]
     async fn a_rejected_finding_is_not_posted_and_the_lane_hears_why_and_twice_is_final() {
-        let (ctx, writer, _) = setup([rejected("src/a.rs:2 sets x."), rejected("Still set.")]);
+        let (ctx, writer, _) =
+            setup([rejected("src/a.rs:2 sets x."), rejected("Still set.")]).await;
         let tool = PostFinding(Arc::clone(&ctx));
         let first = tool.call(post()).await;
         assert!(first.is_error);
@@ -1253,14 +1284,15 @@ mod gate_tests {
             third.content
         );
         assert!(writer.posts.lock().unwrap().is_empty());
-        assert_eq!(actions(&ctx), vec!["rejected", "rejected"]);
+        assert_eq!(actions(&ctx).await, vec!["rejected", "rejected"]);
     }
 
     #[tokio::test]
     async fn an_unavailable_check_posts_unchecked_and_says_so() {
         let (ctx, writer, _) = setup([CheckVerdict::Unavailable {
             why: "no verdict from opus".into(),
-        }]);
+        }])
+        .await;
         let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
         assert!(!out.is_error);
         assert!(
@@ -1268,21 +1300,22 @@ mod gate_tests {
             "{}",
             out.content
         );
+        assert_eq!(actions(&ctx).await, vec!["posted", "unverified"]);
         let posts = writer.posts.lock().unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(Marker::parse(&posts[0].2).unwrap().checked_by, None);
-        assert_eq!(actions(&ctx), vec!["posted", "unverified"]);
     }
 
     #[tokio::test]
     async fn a_confirmed_withdrawal_rewrites_resolves_and_stops_counting() {
-        let (ctx, writer, checker) = setup([confirmed(), confirmed()]);
+        let (ctx, writer, checker) = setup([confirmed(), confirmed()]).await;
         PostFinding(Arc::clone(&ctx)).call(post()).await;
         assert_eq!(ctx.registry.lock().unwrap().open_count(), 1);
         let out = WithdrawFinding(Arc::clone(&ctx))
             .call(json!({"comment_id": "c1", "reason": "src/a.rs:2 does set x."}))
             .await;
         assert!(!out.is_error, "{out:?}");
+        assert_eq!(actions(&ctx).await, vec!["posted", "withdrawn"]);
         let updates = writer.updates.lock().unwrap();
         assert!(
             updates[0]
@@ -1297,12 +1330,11 @@ mod gate_tests {
         assert!(
             matches!(&seen[1].kind, CheckKind::Withdrawal { finding } if finding == "x is never set.")
         );
-        assert_eq!(actions(&ctx), vec!["posted", "withdrawn"]);
     }
 
     #[tokio::test]
     async fn a_withdrawn_finding_keeps_its_author_and_names_who_withdrew_it() {
-        let (ctx, writer, _) = setup([confirmed()]);
+        let (ctx, writer, _) = setup([confirmed()]).await;
         // A finding an earlier run posted, with another model.
         let original = Marker {
             run: RunId::parse("r-0").unwrap(),
@@ -1347,7 +1379,7 @@ mod gate_tests {
 
     #[tokio::test]
     async fn a_rejected_rewrite_leaves_the_finding_alone() {
-        let (ctx, writer, _) = setup([confirmed(), rejected("The rewrite is wrong.")]);
+        let (ctx, writer, _) = setup([confirmed(), rejected("The rewrite is wrong.")]).await;
         PostFinding(Arc::clone(&ctx)).call(post()).await;
         let out = ImproveFinding(Arc::clone(&ctx))
             .call(json!({"comment_id": "c1", "body": "Nothing is wrong here."}))
@@ -1377,7 +1409,7 @@ mod continuation_tests {
 
     #[tokio::test]
     async fn nudges_once_for_coverage_and_once_for_an_output_cap() {
-        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF)).await;
         let nudge = lane_continuation(Arc::clone(&ctx));
         let first = nudge(&ending(EndReason::EndTurn)).unwrap();
         assert!(
@@ -1392,7 +1424,7 @@ mod continuation_tests {
 
     #[tokio::test]
     async fn no_coverage_nudge_when_every_file_was_opened() {
-        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF));
+        let ctx = context(ReviewDiff::from_unified(super::tests::DIFF)).await;
         for path in ["src/a.rs", "README.md"] {
             GetFileDiff(Arc::clone(&ctx.files))
                 .call(json!({"path": path}))

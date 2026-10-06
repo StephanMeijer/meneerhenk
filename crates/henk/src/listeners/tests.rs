@@ -42,7 +42,7 @@ github_owners = ["docspec"]
 
 struct Harness {
     bus: EventBus,
-    store: Arc<RunStore>,
+    store: Arc<dyn RunStore>,
     writer: Arc<FakeWriter>,
     next: std::sync::atomic::AtomicU32,
 }
@@ -212,11 +212,11 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     assert!(matches!(out.of("mention"), Handled::Ignored(_)));
     assert!(matches!(out.of("plan"), Handled::Ignored(_)));
 
-    let recorded = h.store.inbound_event(&out.id).unwrap().unwrap();
+    let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
     assert_eq!(recorded.kind, "pull_request");
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
-    let outcomes = h.store.outcomes(&out.id).unwrap();
+    let outcomes = h.store.outcomes(&out.id).await.unwrap();
     assert_eq!(outcomes.len(), 3);
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
