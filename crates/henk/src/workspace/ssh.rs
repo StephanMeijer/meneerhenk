@@ -821,7 +821,7 @@ impl Workspace for SshWorkspace {
         let (_, real) = self.existing(dir).await?;
         let under = max_file_bytes.saturating_add(1).to_string();
         let reply = self
-            .script(SEARCH, &[&real, &under, pattern.as_str()], &[])
+            .script(SEARCH, &[&real, &under, pattern.pcre()], &[])
             .await?
             .ok("searching")?;
         let mut hits = Vec::new();

@@ -70,14 +70,17 @@ pub struct ExecResult {
 
 /// What `search` looks for: a regular expression, checked here before any
 /// backend sees it. The syntax is what Rust's `regex` and PCRE (`grep -P`,
-/// which the `ssh` backend runs) read alike: classes, `\b`, `\d`, `\w`,
-/// `(?i)`, alternation, repetition. Class set operations, which only Rust
-/// has, are refused, so the backends never disagree on what matches. `\d`
-/// is the ASCII digits, as GNU grep -P has it, and `\w` and `\b` know
-/// letters beyond ASCII in both.
+/// which the `ssh` backend runs) read alike: classes, `\b`, `\d`, `\s`,
+/// `\w`, `(?i)`, alternation, repetition. What the two read differently is
+/// refused with a reason: class set operations and nested classes (POSIX
+/// classes among them), `\<`, `\>`, `\b{...}`, `\D` inside a class and the
+/// flags `x`, `R` and `u`. What is left is made to mean the same in both:
+/// `\d` is the ASCII digits in both, and PCRE gets `(*UCP)` so `\w`, `\s`
+/// and `\b` know letters and spaces beyond ASCII as Rust's do, whatever
+/// grep's version.
 #[derive(Debug, Clone)]
 pub struct Pattern {
-    source: String,
+    pcre: String,
     regex: regex::Regex,
 }
 
@@ -104,30 +107,27 @@ impl Pattern {
         if source.contains('\n') {
             return Err("the pattern spans lines; search matches one line at a time".to_owned());
         }
-        if has_class_set_operation(source) {
-            return Err(
-                "class set operations (&&, --, ~~ inside [...]) are not supported; escape the characters or use a simpler class".to_owned(),
-            );
-        }
         let build = |source: &str| {
             regex::RegexBuilder::new(source)
                 .size_limit(PATTERN_SIZE)
                 .build()
                 .map_err(|e| format!("not a regular expression: {e}"))
         };
-        // Checked as given, so an error quotes the model's own pattern.
+        // Checked as given first, so an error quotes the model's own pattern.
         build(source)?;
-        let regex = build(&ascii_digits(source))?;
+        let common = translate(source)?;
+        let regex = build(&common)?;
         Ok(Self {
-            source: source.to_owned(),
+            pcre: format!("(*UCP){common}"),
             regex,
         })
     }
 
-    /// The pattern as given.
+    /// The pattern as `grep -P` gets it, to match what [`Pattern::is_match`]
+    /// does.
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.source
+    pub fn pcre(&self) -> &str {
+        &self.pcre
     }
 
     /// Whether `line` has a match.
@@ -137,72 +137,84 @@ impl Pattern {
     }
 }
 
-/// Whether `source` has `&&`, `--` or `~~` inside a bracketed class, where
-/// Rust reads them as intersection, difference and symmetric difference and
-/// PCRE as literal characters. Outside a class, or escaped, they are the
-/// same literal characters in both and are allowed.
-fn has_class_set_operation(source: &str) -> bool {
-    let chars: Vec<char> = source.chars().collect();
-    let at = |i: usize| chars.get(i).copied();
-    let mut depth = 0_usize;
-    let mut i = 0;
-    while let Some(c) = at(i) {
+/// `source` in the part of the syntax Rust's `regex` and PCRE read alike,
+/// with `\d` and `\D` spelled as ASCII classes, or why it cannot be. Every
+/// backslash escapes the one character after it, and a class cannot nest,
+/// so one flag says whether the scan is inside `[...]`.
+fn translate(source: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_class = false;
+    while let Some(c) = chars.next() {
         match c {
-            '\\' => i += 1,
-            '[' if depth > 0 && at(i + 1) == Some(':') => {
-                // An ASCII class such as `[:alpha:]`, up to its `:]`.
-                let mut j = i + 2;
-                while at(j).is_some_and(|c| c != ']') {
-                    j += 1;
+            '\\' => match chars.next() {
+                Some('d') if in_class => out.push_str("0-9"),
+                Some('d') => out.push_str("[0-9]"),
+                Some('D') if in_class => {
+                    return Err(
+                        r"\D inside [...] is not supported; use [^0-9] or list the characters"
+                            .to_owned(),
+                    );
                 }
-                if at(j.saturating_sub(1)) == Some(':') && j > i + 2 {
-                    i = j;
-                } else {
-                    depth += 1;
+                Some('D') => out.push_str("[^0-9]"),
+                Some('<' | '>') => {
+                    return Err(
+                        r"\< and \> are word boundaries in Rust and plain characters in grep -P; use \b"
+                            .to_owned(),
+                    );
                 }
+                Some('b' | 'B') if !in_class && chars.peek() == Some(&'{') => {
+                    return Err(
+                        r"\b{...} is not supported; use \b, or \b with a \w beside it".to_owned(),
+                    );
+                }
+                Some(next) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+                None => out.push('\\'),
+            },
+            '[' if in_class => {
+                return Err(
+                    r"a [ inside [...] (a nested class or a POSIX class such as [:alpha:]) is not supported; escape it as \[ or use ranges such as a-z"
+                        .to_owned(),
+                );
             }
             '[' => {
-                depth += 1;
-                if at(i + 1) == Some('^') {
-                    i += 1;
+                in_class = true;
+                out.push('[');
+                if chars.next_if_eq(&'^').is_some() {
+                    out.push('^');
                 }
                 // A `]` first in a class is the character itself.
-                if at(i + 1) == Some(']') {
-                    i += 1;
+                if chars.next_if_eq(&']').is_some() {
+                    out.push(']');
                 }
             }
-            ']' if depth > 0 => depth -= 1,
-            '&' | '-' | '~' if depth > 0 && at(i + 1) == Some(c) => return true,
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-/// `source` with `\d` and `\D` spelled as the ASCII classes they are in
-/// GNU grep -P; Rust's are every Unicode digit. Every backslash in the
-/// syntax escapes the one character after it, and a nested class is
-/// allowed inside a class, so `[\d_]` becomes `[[0-9]_]`.
-fn ascii_digits(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('d') => out.push_str("[0-9]"),
-            Some('D') => out.push_str("[^0-9]"),
-            Some(next) => {
-                out.push('\\');
-                out.push(next);
+            ']' if in_class => {
+                in_class = false;
+                out.push(']');
             }
-            None => out.push('\\'),
+            '&' | '-' | '~' if in_class && chars.peek() == Some(&c) => {
+                return Err(
+                    "class set operations (&&, --, ~~ inside [...]) are not supported; escape the characters or use a simpler class".to_owned(),
+                );
+            }
+            '(' if !in_class && chars.peek() == Some(&'?') => {
+                let flags: String = chars
+                    .clone()
+                    .skip(1)
+                    .take_while(|f| "imsUuxR-".contains(*f))
+                    .collect();
+                if flags.contains(['x', 'R', 'u']) {
+                    return Err("of the flags only i, m, s and U are supported".to_owned());
+                }
+                out.push('(');
+            }
+            _ => out.push(c),
         }
     }
-    out
+    Ok(out)
 }
 
 /// One search hit.
@@ -656,23 +668,38 @@ mod tests {
             r"\[x\] -- y",
             r"[]]&&",
             r"[\]]--",
-            r"[[:alpha:]] ~~",
+            r"[a] ~~",
             r"a && b",
         ] {
             assert!(Pattern::parse(allowed).is_ok(), "{allowed}");
         }
         let condition = Pattern::parse(r"[A-Za-z_]\w*\s*&&").unwrap();
         assert!(condition.is_match("if ready && done"));
-        for refused in [
-            r"[a&&b]",
-            r"[\w--\d]",
-            r"[[a]~~b]",
-            r"[^]&&]",
-            r"[[:alpha:]--x]",
-            r"x [a[b]--c]",
-        ] {
+        for refused in [r"[a&&b]", r"[\w--\d]", r"[^]&&]", r"x [a-c--b]"] {
             let error = Pattern::parse(refused).unwrap_err();
             assert!(error.contains("class set operations"), "{refused}: {error}");
+        }
+    }
+
+    #[test]
+    fn what_the_engines_read_differently_is_refused() {
+        for (refused, says) in [
+            (r"\<word\>", r"\<"),
+            (r"\b{start}x", r"\b{"),
+            (r"[a[b]]", "nested"),
+            (r"[[:alpha:]]", "POSIX"),
+            (r"[^\D]", r"\D inside"),
+            (r"(?x) a b", "flags"),
+            (r"(?R)a$", "flags"),
+            (r"(?-u:\w)", "flags"),
+        ] {
+            let error = Pattern::parse(refused).unwrap_err();
+            assert!(error.contains(says), "{refused}: {error}");
+        }
+        for allowed in [
+            r"(?i)x", r"(?ms)x", r"(?U)a+", r"(?:a|b)", r"(?i:a)b", r"\b\w+\b", r"[<>]",
+        ] {
+            assert!(Pattern::parse(allowed).is_ok(), "{allowed}");
         }
     }
 
@@ -681,11 +708,15 @@ mod tests {
         let digit = Pattern::parse(r"^\d$").unwrap();
         assert!(digit.is_match("7"));
         assert!(!digit.is_match("\u{663}"));
-        assert!(Pattern::parse(r"^[^\D]$").unwrap().is_match("7"));
+        assert!(Pattern::parse(r"^[\d_]+$").unwrap().is_match("7_"));
+        assert_eq!(
+            Pattern::parse(r"[\d_]\D").unwrap().pcre(),
+            "(*UCP)[0-9_][^0-9]"
+        );
         let literal = Pattern::parse(r"^\\d$").unwrap();
         assert!(literal.is_match(r"\d"));
         assert!(!literal.is_match("7"));
-        assert_eq!(Pattern::parse(r"\d").unwrap().as_str(), r"\d");
+        assert_eq!(Pattern::parse(r"\\d").unwrap().pcre(), r"(*UCP)\\d");
         let refused = Pattern::parse(r"(\d").unwrap_err();
         assert!(refused.contains(r"(\d"), "{refused}");
     }

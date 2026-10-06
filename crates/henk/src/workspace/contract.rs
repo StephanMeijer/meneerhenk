@@ -200,14 +200,17 @@ async fn files_are_read_written_listed_and_searched(
     ws.close().await;
 }
 
-/// `\w` and `\b` know letters beyond ASCII and `\d` is the ASCII digits
-/// only, as GNU grep -P reads them in a UTF-8 locale; a file the run's user
-/// cannot read is skipped, not an error.
+/// `\w`, `\s` and `\b` know letters and spaces beyond ASCII and `\d` is the
+/// ASCII digits only, on every backend and whatever grep's version; a file
+/// the run's user cannot read is skipped, not an error.
 async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
     let ws = open(provider, &format!("{name}-unicode"), Limits::default()).await;
-    ws.write(&path("u.txt"), "caf\u{e9} = 7\nx = \u{663}\n".as_bytes())
-        .await
-        .unwrap();
+    ws.write(
+        &path("u.txt"),
+        "caf\u{e9} = 7\nx = \u{663}\nfoo\u{a0}bar\n".as_bytes(),
+    )
+    .await
+    .unwrap();
     ws.write(&path("locked.txt"), b"locked 7\n").await.unwrap();
     let locked = ws
         .exec(
@@ -242,9 +245,15 @@ async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvide
         lines(r"caf\b").await.is_empty(),
         "no boundary inside a word"
     );
+    assert_eq!(lines(r"foo\sbar").await, [3], "a no-break space is a space");
+    assert_eq!(
+        lines("(?i)^CAF\u{c9}\\b").await,
+        [1],
+        "any case beyond ASCII"
+    );
     assert_eq!(lines(r"\d").await, [1], "an Arabic-Indic digit is not \\d");
     assert_eq!(lines(r"[\d]").await, [1], "nor inside a class");
-    assert_eq!(lines(r"^\D+$").await, [2], "but it is \\D");
+    assert_eq!(lines(r"^\D+$").await, [2, 3], "but it is \\D");
     assert_eq!(
         lines(r"\p{Nd}").await,
         [1, 2],
