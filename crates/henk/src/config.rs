@@ -15,6 +15,7 @@ use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, Peop
 use henk_domain::mail::EmailAddress;
 use henk_domain::marker::ModelId;
 use henk_domain::review::{LaneName, LaneSpec};
+use henk_domain::skill::SkillName;
 use henk_domain::workspace::{BackendKind, Limits, Profile, WorkspacePolicy};
 use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
@@ -62,6 +63,9 @@ pub struct Config {
     /// External MCP servers by alias.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServerConfig>,
+    /// Where the team's skills live. Absent: no agent has skills.
+    #[serde(default)]
+    pub skills: Option<SkillsConfig>,
     /// People Henk knows by id.
     #[serde(default)]
     pub people: Vec<PersonConfig>,
@@ -353,6 +357,15 @@ fn default_review_ignore() -> Vec<String> {
     .collect()
 }
 
+/// The team's skills: one folder per skill, each with a `SKILL.md`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsConfig {
+    /// The folder holding the skill folders, relative to the configuration
+    /// file's own folder unless absolute.
+    pub dir: String,
+}
+
 /// A second model checks every finding before it is posted (§3.2).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -369,6 +382,9 @@ pub struct FactCheckConfig {
     /// Model calls per check.
     #[serde(default = "default_fact_check_max_turns")]
     pub max_turns: u32,
+    /// The skills the checker may load.
+    #[serde(default)]
+    pub skills: Vec<SkillName>,
 }
 
 fn default_fact_check_timeout_secs() -> u64 {
@@ -418,6 +434,9 @@ pub struct LaneFileConfig {
     pub name: String,
     /// Model id from `[models]`.
     pub model: String,
+    /// The skills this lane may load.
+    #[serde(default)]
+    pub skills: Vec<SkillName>,
 }
 
 /// Planning settings.
@@ -440,6 +459,9 @@ pub struct PlanningConfig {
     pub sub_issue_cap: u32,
     /// The Team Lead on whose behalf CLI and API plans run.
     pub requester_id: DiscordUserId,
+    /// The skills the planner may load.
+    #[serde(default)]
+    pub skills: Vec<SkillName>,
 }
 
 /// Addressing review feedback (§3.5).
@@ -679,6 +701,9 @@ pub enum ConfigError {
     /// The workspace setting is unusable.
     #[error("{0}")]
     Workspace(String),
+    /// A skill or a reference to one is unusable.
+    #[error("skills: {0}")]
+    Skill(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -719,6 +744,10 @@ pub struct Settings {
     pub legacy_check_timeout: bool,
     /// MCP servers by alias.
     pub mcp: BTreeMap<String, McpServerConfig>,
+    /// `[skills].dir` as written, when configured.
+    pub skills_dir: Option<String>,
+    /// The loaded skills. Empty until [`crate::skills::attach`] loads them.
+    pub skills: std::sync::Arc<crate::skills::SkillCatalog>,
 }
 
 impl Config {
@@ -759,17 +788,7 @@ impl Config {
                 "review.ignore has an empty pattern".to_owned(),
             ));
         }
-        if let Some(fact_check) = &self.review.fact_check {
-            let models = std::iter::once(&fact_check.model).chain(&fact_check.backup_model);
-            for model in models {
-                if !self.models.contains_key(model) {
-                    return Err(ConfigError::UnknownModel {
-                        what: "review.fact_check".to_owned(),
-                        model: model.clone(),
-                    });
-                }
-            }
-        }
+        validate_fact_check(self.review.fact_check.as_ref(), &self.models)?;
         if let Some(planning) = &self.planning {
             if !self.models.contains_key(&planning.model) {
                 return Err(ConfigError::UnknownModel {
@@ -785,6 +804,8 @@ impl Config {
         if let Some(address) = &self.address {
             validate_address(address, &self.models, &self.discord.team_lead_ids)?;
         }
+        let skills_dir = self.skills.map(|s| s.dir);
+        validate_skill_references(skills_dir.as_deref(), &self.review, self.planning.as_ref())?;
         let legacy_database_path = self.server.database_path.is_some();
         let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
         let workspace = self.workspace.into_policy(check_timeout_secs)?;
@@ -826,6 +847,8 @@ impl Config {
             workspace,
             legacy_check_timeout: check_timeout_secs.is_some(),
             mcp: self.mcp,
+            skills_dir,
+            skills: std::sync::Arc::default(),
         })
     }
 }
@@ -921,6 +944,73 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
     Ok(())
 }
 
+fn validate_fact_check(
+    fact_check: Option<&FactCheckConfig>,
+    models: &BTreeMap<String, ModelFileConfig>,
+) -> Result<(), ConfigError> {
+    let Some(fact_check) = fact_check else {
+        return Ok(());
+    };
+    let named = std::iter::once(&fact_check.model).chain(&fact_check.backup_model);
+    for model in named {
+        if !models.contains_key(model) {
+            return Err(ConfigError::UnknownModel {
+                what: "review.fact_check".to_owned(),
+                model: model.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `; skills: a, b`, or nothing when there are none.
+fn skills_note(skills: &[SkillName]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = skills.iter().map(SkillName::as_str).collect();
+    format!("; skills: {}", names.join(", "))
+}
+
+/// Skills may be listed only with a `[skills]` folder to load them from.
+/// Whether each listed skill exists is checked when they are loaded.
+fn validate_skill_references(
+    dir: Option<&str>,
+    review: &ReviewConfig,
+    planning: Option<&PlanningConfig>,
+) -> Result<(), ConfigError> {
+    if dir.is_some_and(|d| d.trim().is_empty()) {
+        return Err(ConfigError::Skill("skills.dir is empty".to_owned()));
+    }
+    if dir.is_some() {
+        return Ok(());
+    }
+    let lists = review
+        .lanes
+        .iter()
+        .filter(|lane| !lane.skills.is_empty())
+        .map(|lane| format!("lane {}", lane.name))
+        .chain(
+            review
+                .fact_check
+                .as_ref()
+                .filter(|f| !f.skills.is_empty())
+                .map(|_| "review.fact_check".to_owned()),
+        )
+        .chain(
+            planning
+                .filter(|p| !p.skills.is_empty())
+                .map(|_| "planning".to_owned()),
+        )
+        .next();
+    match lists {
+        Some(what) => Err(ConfigError::Skill(format!(
+            "{what} lists skills, but there is no [skills] section to load them from"
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn validate_lanes(
     lanes: &[LaneFileConfig],
     models: &BTreeMap<String, ModelFileConfig>,
@@ -961,6 +1051,7 @@ fn validate_lanes(
         specs.push(LaneSpec {
             name: LaneName::new(lane.name.clone()),
             model,
+            skills: lane.skills.clone(),
         });
     }
     Ok(specs)
@@ -1140,6 +1231,86 @@ impl Settings {
         }
     }
 
+    /// The lanes, the fact-check, planning and their skills.
+    fn describe_agents(&self, out: &mut String) {
+        let _ = writeln!(out, "Review lanes:");
+        for lane in &self.lanes {
+            let _ = writeln!(
+                out,
+                "  {} on model {}{}",
+                lane.name,
+                lane.model,
+                skills_note(&lane.skills)
+            );
+        }
+        if let Some(fact_check) = &self.review.fact_check {
+            let _ = writeln!(
+                out,
+                "Fact-check:      model {}{}{}",
+                fact_check.model,
+                fact_check
+                    .backup_model
+                    .as_deref()
+                    .map_or(String::new(), |b| format!(", backup {b}")),
+                skills_note(&fact_check.skills)
+            );
+        }
+        if let Some(planning) = &self.planning {
+            let _ = writeln!(
+                out,
+                "Planning:        model {} for Team Lead {}; {}s, {} turns, {} changes, {} sub-issues",
+                planning.model,
+                planning.requester_id,
+                planning.timeout_secs,
+                planning.max_turns,
+                planning.change_budget,
+                planning.sub_issue_cap
+            );
+            if !planning.skills.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "                 {}",
+                    skills_note(&planning.skills).trim_start_matches("; ")
+                );
+            }
+        }
+        if let Some(address) = &self.address {
+            let _ = writeln!(
+                out,
+                "Address runs:    model {} for Team Lead {}; {}s, {} turns, {} files, {} checks",
+                address.model,
+                address.requester_id,
+                address.timeout_secs,
+                address.max_turns,
+                address.max_changed_files,
+                address.check_commands.len()
+            );
+        }
+        self.describe_skills(out);
+    }
+
+    fn describe_skills(&self, out: &mut String) {
+        let Some(dir) = &self.skills.dir else {
+            return;
+        };
+        let _ = writeln!(
+            out,
+            "Skills:          {} from {}",
+            self.skills.skills.len(),
+            dir.display()
+        );
+        for name in self.skills.skills.keys() {
+            match self.skills.ignored.get(name) {
+                Some(files) => {
+                    let _ = writeln!(out, "  {name} (not read: {})", files.join(", "));
+                }
+                None => {
+                    let _ = writeln!(out, "  {name}");
+                }
+            }
+        }
+    }
+
     /// A plain-text description of what Henk would work with.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -1191,34 +1362,7 @@ impl Settings {
                 self.review.ignore.join(", ")
             }
         );
-        let _ = writeln!(out, "Review lanes:");
-        for lane in &self.lanes {
-            let _ = writeln!(out, "  {} on model {}", lane.name, lane.model);
-        }
-        if let Some(planning) = &self.planning {
-            let _ = writeln!(
-                out,
-                "Planning:        model {} for Team Lead {}; {}s, {} turns, {} changes, {} sub-issues",
-                planning.model,
-                planning.requester_id,
-                planning.timeout_secs,
-                planning.max_turns,
-                planning.change_budget,
-                planning.sub_issue_cap
-            );
-        }
-        if let Some(address) = &self.address {
-            let _ = writeln!(
-                out,
-                "Address runs:    model {} for Team Lead {}; {}s, {} turns, {} files, {} checks",
-                address.model,
-                address.requester_id,
-                address.timeout_secs,
-                address.max_turns,
-                address.max_changed_files,
-                address.check_commands.len()
-            );
-        }
+        self.describe_agents(&mut out);
         self.describe_workspace(&mut out);
         let _ = writeln!(out, "MCP servers:");
         for (alias, server) in &self.mcp {

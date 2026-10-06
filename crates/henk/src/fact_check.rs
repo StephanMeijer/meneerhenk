@@ -108,8 +108,10 @@ pub struct SessionFactCheck {
     pub diff: Arc<ReviewDiff>,
     /// The guarded file read at the reviewed commit, when the platform has one.
     pub file_reader: Option<Arc<dyn Tool>>,
-    /// The rendered system prompt.
+    /// The rendered system prompt, without skills.
     pub system: String,
+    /// The skills the checker may load.
+    pub skills: crate::skill_tools::AgentSkills,
     /// Turn and time limits per check.
     pub limits: AgentConfig,
     /// The review's cancellation.
@@ -150,10 +152,12 @@ impl SessionFactCheck {
             });
         }
         tools.add(GiveVerdict(Arc::clone(&slot)));
+        let mut system = self.system.clone();
+        crate::skill_tools::equip(&mut system, &mut tools, self.skills.clone());
         let spec = SessionSpec {
             name: format!("check-{}-{number}", request.lane),
             model,
-            system: self.system.clone(),
+            system,
             opening: vec![ChatMessage::user(opening(request, &self.diff))],
             tools,
             limits: self.limits,
@@ -414,6 +418,7 @@ diff --git a/src/a.rs b/src/a.rs
             diff: Arc::new(ReviewDiff::from_unified(DIFF)),
             file_reader: None,
             system: "check".into(),
+            skills: crate::skill_tools::AgentSkills::new(),
             limits: AgentConfig {
                 max_turns: 6,
                 timeout: Duration::from_secs(10),

@@ -720,7 +720,7 @@ async fn build_lane(
     set.add(ImproveFinding(Arc::clone(&context)));
     set.add(WithdrawFinding(Arc::clone(&context)));
 
-    let system = format!(
+    let mut system = format!(
         "{}\n\n{}",
         prompts::PERSONA,
         prompts::render(
@@ -734,6 +734,11 @@ async fn build_lane(
                 ("title", &lanes.title),
             ],
         )
+    );
+    crate::skill_tools::equip(
+        &mut system,
+        &mut set,
+        app.settings.skills.select(&lane.skills),
     );
     let limits = AgentConfig {
         max_turns: app.settings.review.lane_max_turns,
@@ -826,6 +831,7 @@ async fn build_fact_check(
         diff: Arc::clone(diff),
         file_reader,
         system,
+        skills: app.settings.skills.select(&config.skills),
         limits: AgentConfig {
             max_turns: config.max_turns,
             timeout: Duration::from_secs(config.timeout_secs),

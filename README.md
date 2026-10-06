@@ -67,7 +67,7 @@ Anthropic Messages API. Lanes and their models are configuration.
 
 | Crate | Purpose |
 |---|---|
-| `henk-domain` | The spec's vocabulary and rules, no I/O: identities and standing, allowlist, findings, markers, scope guard, review outcomes, plan sections, queue decisions, style rules |
+| `henk-domain` | The spec's vocabulary and rules, no I/O: identities and standing, allowlist, findings, markers, scope guard, review outcomes, plan sections, queue decisions, style rules, skills |
 | `henk-llm` | `ModelClient` with the OpenAI-compatible and Anthropic adapters, retries, schema cleaning |
 | `henk-mcp` | MCP sessions over stdio child processes or streamable HTTP, tool-name mapping, an in-process fake server for tests |
 | `henk-agent` | The tool-calling loop with turn limit, deadline and cancellation; prompts |
@@ -134,6 +134,18 @@ is not posted; the lane gets the reason and may correct it once. `henk runs
 show <id>` lists each check as a `check-<lane>-<n>` session, with its
 verdict on the timeline. `effort` on an Anthropic model sets how much it
 thinks; it needs a `max_tokens` of 16384 or so and a longer `timeout_secs`.
+
+Skills give lanes, the fact-checker and the planner the team's own
+instructions for one kind of work, such as reviewing SQL migrations. Each
+skill is a folder with a `SKILL.md` in the Agent Skills format: front matter
+with a `name` (the folder's name) and a one-line `description`, then
+Markdown. `[skills].dir` names the folder that holds them, and `skills =
+[...]` on a lane, `[review.fact_check]` or `[planning]` says who gets which.
+An agent sees the names and descriptions of its own skills and loads one
+with `load_skill`; a prompt without skills is unchanged. Only `SKILL.md` is
+read, never scripts or other files, and the text follows the style rules
+(no emoji, no em-dash). `config check` loads every skill and lists what it
+did not read.
 
 The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node

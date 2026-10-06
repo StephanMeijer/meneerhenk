@@ -310,7 +310,8 @@ async fn plan_body(
         issue: request.target.number,
     };
 
-    let set = planner_tools(Arc::clone(&session), platform, &scope, Arc::clone(&context)).await?;
+    let mut set =
+        planner_tools(Arc::clone(&session), platform, &scope, Arc::clone(&context)).await?;
 
     let previous = extract_plan(body)
         .map(|s| s.plan)
@@ -326,7 +327,7 @@ async fn plan_body(
         .as_deref()
         .map_or(String::new(), |n| format!("Their note: {n}"));
     let reference = format!("#{}", request.target.number);
-    let system = format!(
+    let mut system = format!(
         "{}\n\n{}",
         prompts::PERSONA,
         prompts::render(
@@ -340,6 +341,11 @@ async fn plan_body(
                 ("previous", &previous_text),
             ],
         )
+    );
+    crate::skill_tools::equip(
+        &mut system,
+        &mut set,
+        app.settings.skills.select(&planning.skills),
     );
     let limits = AgentConfig {
         max_turns: planning.max_turns,

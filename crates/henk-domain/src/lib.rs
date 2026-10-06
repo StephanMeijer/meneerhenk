@@ -21,6 +21,7 @@ pub mod queue;
 pub mod review;
 pub mod run;
 pub mod scope;
+pub mod skill;
 pub mod text;
 pub mod triage;
 pub mod workspace;

@@ -93,6 +93,7 @@ timeout_secs = 300
 # Lanes are independent reviewers. Names appear in summaries when a lane
 # does not finish, so they must not name a model (spec §3.2).
 lanes = [
+  # A lane may also list skills: skills = ["sql-migrations"] (see [skills]).
   { name = "lane-a", model = "proxy-fast" },
   { name = "lane-b", model = "claude" },
 ]
@@ -135,6 +136,16 @@ change_budget = 20
 sub_issue_cap = 5
 # CLI and API plans run on behalf of this Team Lead.
 requester_id = 523456789012345678
+# skills = ["issue-sizing"]
+
+# Skills: the team's own instructions for one kind of work, one folder per
+# skill with a SKILL.md (front matter with name and description, then
+# Markdown). dir is relative to this file. An agent gets only the skills it
+# lists, as `skills = [...]` on a lane, [review.fact_check] or [planning];
+# it sees their names and descriptions and loads one with load_skill. Only
+# SKILL.md is read: scripts and other files in a skill folder are ignored.
+# [skills]
+# dir = "skills"
 
 # Addressing review feedback (spec §3.5): `henk address <pull request URL>`.
 # Henk fixes what he can in a throwaway checkout, pushes one fast-forward
