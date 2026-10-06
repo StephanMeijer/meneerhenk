@@ -13,17 +13,21 @@
 # Each workspace is a throwaway user `henk-<id>` with its own home, holding
 # the run's checkout in ~/work, and a record of the checkout that only root
 # can write, outside the home. Everything a run does in its tree is done as
-# that user. The request arrives in SSH_ORIGINAL_COMMAND: a subcommand, then
+# that user. Root never reads or walks that tree, since the user can change
+# it at any moment: the record is fed from a tar the user makes of it and
+# root unpacks into a copy only root can reach. The request arrives in SSH_ORIGINAL_COMMAND: a subcommand, then
 # tokens that are a workspace id, a number, a hex sha, or `b` and base64 (the
 # `b` keeps an empty value a token), so splitting on spaces is the whole parse
 # and no part of a request is shell-evaluated.
 #
-#   create ID                 make the user, ~/work and the record; print ~/work
+#   create ID                 make the user, ~/work and the record; print the
+#                             real path of ~/work
 #   import ID                 unpack a tar from stdin into ~/work, record it
 #   as ID SECS CWD ARGV...    run ARGV (b+base64) in ~/work/CWD (b+base64) as the
 #                             user, empty environment, at most SECS seconds
 #                             (a decimal number)
-#   record ID diff            the changes since import, as `git diff --raw -z`
+#   record ID diff            stop the user's processes, then the changes since
+#                             import, as `git diff --raw -z`
 #   record ID blob SHA        the content of one changed file
 #   destroy ID                kill the user's processes, remove it and its files
 #   sweep                     destroy every workspace on this host
@@ -99,12 +103,44 @@ as_user() {
 }
 
 # git on the record, never on the tree's own .git, with no hooks, no
-# fsmonitor and no system or global configuration.
+# fsmonitor and no system or global configuration. Its work tree is the copy
+# `snapshot` makes, never the user's tree.
 record_git() {
     env -i PATH="$RUN_PATH" HOME="$record" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
         git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgSign=false \
         -c user.name=Henk -c user.email=henk@workspace.invalid -c 'safe.directory=*' \
-        --git-dir="$record/git" --work-tree="$work" "$@"
+        --git-dir="$record/git" --work-tree="$record/tree" "$@"
+}
+
+# Kills every process of the workspace's user, until none is left; fails
+# when they keep coming.
+stop() {
+    [ -z "$BASE" ] || return 0
+    uid=$(id -u "$user" 2>/dev/null) || return 0
+    tries=0
+    while pkill -KILL -u "$uid" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 50 ] || return 1
+        sleep 0.1
+    done
+}
+
+# Copies the tree into $record/tree, which only root can reach. The user
+# makes the tar, so it holds only what the user can read and a link is kept
+# as a link; root unpacks it and never follows a path the user controls. The
+# tree's own top-level .git is left out: the record never looks at it.
+snapshot() {
+    if [ -L "$work" ] || [ ! -d "$work" ]; then
+        die "the tree is not a directory any more"
+    fi
+    rm -rf "${record:?}/tree" "$record/tree.tar"
+    mkdir -m 700 "$record/tree"
+    as_user tar -c -f - -C "$work" --anchored --exclude=./.git . >"$record/tree.tar" ||
+        die "cannot read the tree"
+    tar -x -f "$record/tree.tar" -C "$record/tree" \
+        --no-same-owner --no-same-permissions --no-overwrite-dir ||
+        die "cannot copy the tree"
+    rm -f "$record/tree.tar"
 }
 
 # The value of one `b` and base64 token, trailing newlines kept.
@@ -121,7 +157,7 @@ destroy() {
     fi
     if id -u "$user" >/dev/null 2>&1; then
         uid=$(id -u "$user")
-        pkill -KILL -u "$uid" 2>/dev/null || true
+        stop || true
         loginctl terminate-user "$user" 2>/dev/null || true
         for dir in /tmp /var/tmp /dev/shm; do
             find "$dir" -xdev -uid "$uid" -delete 2>/dev/null || true
@@ -146,12 +182,15 @@ create)
     mkdir -p "$record"
     chmod 700 "$record"
     as_user mkdir "$work"
-    echo "$work"
+    # The real path: Henk compares it with what realpath prints in the tree,
+    # and /home may itself be a link (/var/home on Fedora Atomic).
+    realpath -e -- "$work"
     ;;
 import)
     [ $# -eq 1 ] || die "usage: import ID"
     workspace "$1"
     as_user tar -x -f - -C "$work" --no-same-owner
+    snapshot
     record_git init --quiet
     record_git add --all --force
     record_git commit --quiet --allow-empty --message import
@@ -171,18 +210,26 @@ as)
         set -- "$@" "$value"
         count=$((count - 1))
     done
-    cd "$work/$cwd" || die "no such directory: $cwd"
+    # The user changes directory, not root, so the kernel checks the user's
+    # own permissions on every link in the way.
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    enter='cd -- "$1" 2>/dev/null || { echo "henk-runner: no such directory: $2" >&2; exit 64; }
+shift 2
+exec env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 "$@"'
     if [ -n "$BASE" ]; then
-        exec env -i PATH="$RUN_PATH" HOME="$home" LANG=C.UTF-8 timeout --kill-after=5 "$secs" "$@"
+        exec env -i PATH="$RUN_PATH" HOME="$home" LANG=C.UTF-8 \
+            /bin/sh -c "$enter" sh "$work/$cwd" "$cwd" timeout --kill-after=5 "$secs" "$@"
     fi
     exec runuser -u "$user" -- env -i PATH="$RUN_PATH" HOME="$home" LANG=C.UTF-8 \
-        timeout --kill-after=5 "$secs" "$@"
+        /bin/sh -c "$enter" sh "$work/$cwd" "$cwd" timeout --kill-after=5 "$secs" "$@"
     ;;
 record)
     [ $# -ge 2 ] || die "usage: record ID diff | record ID blob SHA"
     workspace "$1"
     case $2 in
     diff)
+        stop || die "the processes of $user do not stop"
+        snapshot
         record_git add --all
         record_git diff --cached --raw -z --no-renames --no-ext-diff --no-textconv --no-abbrev HEAD
         ;;

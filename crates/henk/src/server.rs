@@ -192,9 +192,11 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     // within the staleness window is closed too (#47).
     let reaper = crate::liveness::spawn_reaper(Arc::clone(&app), cancel.clone());
     // Workspaces a process that died left on the sandbox host go now (#84).
-    if let Ok(Some(sandbox)) = crate::workspace::ssh_provider(&app.settings) {
+    // The sweep starts here, before any run: a workspace opened meanwhile
+    // waits for it instead of being swept.
+    if let Some(sweep) = app.workspace_provider.sweep() {
         tokio::spawn(async move {
-            match sandbox.sweep().await {
+            match sweep.await {
                 Ok(()) => info!("sandbox host swept"),
                 Err(error) => warn!(%error, "could not sweep the sandbox host"),
             }
