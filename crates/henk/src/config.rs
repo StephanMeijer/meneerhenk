@@ -293,7 +293,8 @@ pub struct GitLabConfig {
     pub api_url: String,
     /// Henk's GitLab username.
     pub username: String,
-    /// Env var with the personal access token used for writes.
+    /// Env var with the personal access token: the MCP servers sign in with
+    /// it, and address runs (§3.5) push and read the merge request with it.
     #[serde(default = "default_gitlab_token_env")]
     pub token_env: String,
     /// Alias of the `[mcp.*]` server lanes read GitLab through.

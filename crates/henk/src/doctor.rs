@@ -74,7 +74,7 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
 
 pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {
     let server = &settings.server;
-    [
+    let mut checks: Vec<Check> = [
         (
             &server.github_webhook_secret_env,
             "GitHub webhooks",
@@ -98,7 +98,24 @@ pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {
             }
         }
     })
-    .collect()
+    .collect();
+    if let Some(gitlab) = &settings.gitlab {
+        checks.push(gitlab_token(&gitlab.token_env, settings.address.is_some()));
+    }
+    checks
+}
+
+/// Henk reads the GitLab token himself only for address runs (§3.5): to
+/// push, and for the REST reads the MCP server does not give. Set or not
+/// set, never its value.
+fn gitlab_token(variable: &str, address: bool) -> Check {
+    let name = format!("secret ${variable}");
+    match (env_var(variable).is_some(), address) {
+        (true, true) => Check::ok(name, "set; GitLab address runs can push"),
+        (true, false) => Check::ok(name, "set; address runs are not configured"),
+        (false, true) => Check::warn(name, "not set; GitLab address runs are refused"),
+        (false, false) => Check::ok(name, "not set; address runs are not configured anyway"),
+    }
 }
 
 async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
@@ -434,5 +451,15 @@ mod tests {
         assert!(text.contains("[ok  ] a: fine"));
         assert!(text.contains("[FAIL] c: no"));
         assert!(text.ends_with("1 failing check(s)"));
+    }
+
+    #[test]
+    fn a_missing_gitlab_token_warns_only_when_address_runs_need_it() {
+        let unset = "HENK_TEST_GITLAB_TOKEN_THAT_IS_NEVER_SET";
+        assert_eq!(
+            gitlab_token(unset, true).verdict,
+            Verdict::Warn("not set; GitLab address runs are refused".to_owned())
+        );
+        assert!(matches!(gitlab_token(unset, false).verdict, Verdict::Ok(_)));
     }
 }
