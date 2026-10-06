@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tracing::{debug, instrument, warn};
 
 use crate::error::PlatformError;
+use crate::gitlab::rest::GitLabRest;
 use crate::writer::{
     DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
     PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
@@ -24,10 +25,19 @@ pub const STATUS_NAME: &str = "Meneer Henk";
 /// Prefix of a folded summary note.
 pub const OUTDATED_PREFIX: &str = "*Outdated.*";
 
+/// The account the token belongs to (§2: by id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BotUser {
+    pub(crate) id: u64,
+    pub(crate) username: String,
+}
+
 /// Writes to GitLab through a write-mode MCP session.
 pub struct GitLabWriter {
     session: Arc<dyn McpSession>,
     username: String,
+    rest: Option<GitLabRest>,
+    bot: tokio::sync::OnceCell<BotUser>,
 }
 
 impl std::fmt::Debug for GitLabWriter {
@@ -35,7 +45,8 @@ impl std::fmt::Debug for GitLabWriter {
         f.debug_struct("GitLabWriter")
             .field("session", &self.session.alias())
             .field("username", &self.username)
-            .finish()
+            .field("rest", &self.rest)
+            .finish_non_exhaustive()
     }
 }
 
@@ -55,7 +66,52 @@ impl GitLabWriter {
         Self {
             session,
             username: username.into(),
+            rest: None,
+            bot: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Adds the REST reads and the git credential an address run (§3.5)
+    /// needs. Without them the writer reviews but does not address.
+    #[must_use]
+    pub fn with_rest(mut self, rest: GitLabRest) -> Self {
+        self.rest = Some(rest);
+        self
+    }
+
+    /// Whether this writer can do an address run.
+    #[must_use]
+    pub fn can_address(&self) -> bool {
+        self.rest.is_some()
+    }
+
+    pub(crate) fn rest(&self) -> Result<&GitLabRest, PlatformError> {
+        self.rest.as_ref().ok_or_else(|| {
+            PlatformError::Auth(
+                "GitLab address runs need the GitLab token, which is not set".to_owned(),
+            )
+        })
+    }
+
+    /// The account the token belongs to, read once.
+    pub(crate) async fn bot_user(&self) -> Result<&BotUser, PlatformError> {
+        let rest = self.rest()?;
+        self.bot
+            .get_or_try_init(|| async {
+                let user = rest.get("/user").await?;
+                let id = user
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| PlatformError::Decode("user without id".to_owned()))?;
+                let username = user
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| PlatformError::Decode("user without username".to_owned()))?
+                    .to_owned();
+                Ok(BotUser { id, username })
+            })
+            .await
     }
 
     /// Calls a tool and parses its text as JSON. A result the server flags
@@ -78,14 +134,17 @@ impl GitLabWriter {
         Ok(serde_json::from_str(&outcome.text).unwrap_or(Value::String(outcome.text)))
     }
 
-    fn base_args(target: &ReviewTarget) -> serde_json::Map<String, Value> {
+    pub(crate) fn base_args(target: &ReviewTarget) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();
         map.insert("project_id".into(), json!(target.repo.path()));
         map.insert("merge_request_iid".into(), json!(target.number.to_string()));
         map
     }
 
-    async fn merge_request(&self, target: &ReviewTarget) -> Result<Value, PlatformError> {
+    pub(crate) async fn merge_request(
+        &self,
+        target: &ReviewTarget,
+    ) -> Result<Value, PlatformError> {
         self.call_tool("get_merge_request", Value::Object(Self::base_args(target)))
             .await
     }
@@ -144,7 +203,10 @@ impl GitLabWriter {
     }
 
     /// All discussions of a merge request, across pages.
-    async fn discussions(&self, target: &ReviewTarget) -> Result<Vec<Value>, PlatformError> {
+    pub(crate) async fn discussions(
+        &self,
+        target: &ReviewTarget,
+    ) -> Result<Vec<Value>, PlatformError> {
         self.call_tool_all(
             "mr_discussions",
             Self::base_args(target),
@@ -159,11 +221,11 @@ impl GitLabWriter {
     }
 }
 
-fn note_body(note: &Value) -> &str {
+pub(crate) fn note_body(note: &Value) -> &str {
     note.get("body").and_then(Value::as_str).unwrap_or("")
 }
 
-fn note_id(note: &Value) -> Option<String> {
+pub(crate) fn note_id(note: &Value) -> Option<String> {
     match note.get("id") {
         Some(Value::Number(n)) => Some(n.to_string()),
         Some(Value::String(s)) => Some(s.clone()),
@@ -171,7 +233,7 @@ fn note_id(note: &Value) -> Option<String> {
     }
 }
 
-fn is_system(note: &Value) -> bool {
+pub(crate) fn is_system(note: &Value) -> bool {
     note.get("system").and_then(Value::as_bool).unwrap_or(false)
 }
 
