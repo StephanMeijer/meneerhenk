@@ -1,6 +1,9 @@
 //! The web dashboard (#36): what Henk is doing and has done, behind a GitHub
-//! sign-in. Read-only: nothing here starts, stops or changes a run.
+//! sign-in. Someone signed in may also start a review, plan or address run,
+//! and cancel one that is running (#69); every such action is a form with
+//! the session's CSRF token, from the dashboard's own origin.
 
+mod actions;
 mod auth;
 mod session;
 mod views;
@@ -14,12 +17,15 @@ use secrecy::SecretString;
 use crate::app::{App, env_var};
 use crate::config::DashboardConfig;
 use crate::coordinator::Coordinator;
+use henk_events::EventBus;
 use session::Signer;
 
 /// Everything the dashboard's handlers share.
 pub struct Dashboard {
     app: Arc<App>,
     coordinator: Arc<Coordinator>,
+    /// Where a start from the dashboard is published, like an API request.
+    bus: Arc<EventBus>,
     listeners: Vec<&'static str>,
     config: DashboardConfig,
     client_id: String,
@@ -80,7 +86,7 @@ impl Dashboard {
     pub fn new(
         app: Arc<App>,
         coordinator: Arc<Coordinator>,
-        listeners: Vec<&'static str>,
+        bus: Arc<EventBus>,
         config: DashboardConfig,
         secrets: &DashboardSecrets,
     ) -> anyhow::Result<Self> {
@@ -95,9 +101,10 @@ impl Dashboard {
             signer: Signer::new(secrets.session_key.expose_secret().as_bytes(), secure),
             client_id: secrets.client_id.clone(),
             client_secret: secrets.client_secret.clone(),
+            listeners: bus.listeners().collect(),
             app,
             coordinator,
-            listeners,
+            bus,
             config,
             http,
         })
@@ -129,6 +136,8 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/dashboard/login", get(auth::login))
         .route("/dashboard/auth/callback", get(auth::callback))
         .route("/dashboard/logout", post(auth::logout))
+        .route("/dashboard/start", post(actions::start))
+        .route("/dashboard/runs/{id}/cancel", post(actions::cancel))
         .with_state(dashboard)
 }
 

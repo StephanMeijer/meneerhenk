@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use henk_domain::run::{EventId, RunId};
-use henk_store::{EventRecord, FindingRecord, LaneRecord, RunStore};
+use henk_store::{EventRecord, FindingRecord, LaneRecord, RunStatus, RunStore};
 
 /// Escapes text for HTML content and attribute values.
 #[must_use]
@@ -49,16 +49,18 @@ pub fn page(title: &str, nav: &str, body: &str) -> Response {
     response
 }
 
-/// Where links between runs and events point.
+/// Where links between runs and events point, and what a page may offer.
 #[derive(Debug, Clone, Copy)]
-pub struct Links {
+pub struct Links<'a> {
     /// Prefix of run and event paths, such as `/dashboard`.
     pub prefix: &'static str,
     /// The menu above the page.
-    pub nav: &'static str,
+    pub nav: &'a str,
+    /// The viewer's CSRF token, when the page may offer actions (#69).
+    pub csrf: Option<&'a str>,
 }
 
-impl Links {
+impl Links<'_> {
     /// The run page of `run`.
     #[must_use]
     pub fn run(self, run: &str) -> String {
@@ -73,7 +75,7 @@ impl Links {
 }
 
 /// A run with its lanes, findings, timeline and the events that led to it.
-pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links) -> Response {
+pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) -> Response {
     let run = match store.run(run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
@@ -118,6 +120,16 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links) -> Res
             .map(|c| format!("<br>Check: <code>{}</code>", escape(c)))
             .unwrap_or_default(),
     );
+    if let Some(csrf) = links.csrf
+        && run.status == RunStatus::Running
+    {
+        let _ = write!(
+            html,
+            "<form method=\"post\" action=\"{}/cancel\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button>Cancel this run</button></form>",
+            links.run(run.id.as_str()),
+            escape(csrf)
+        );
+    }
     if let Some(summary) = &run.summary {
         let _ = write!(html, "<p><b>Summary:</b> {}</p>", escape(summary));
     }
@@ -146,7 +158,7 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links) -> Res
 }
 
 /// One inbound event with what each listener did with it.
-pub async fn event_page(store: &dyn RunStore, event_id: &EventId, links: Links) -> Response {
+pub async fn event_page(store: &dyn RunStore, event_id: &EventId, links: Links<'_>) -> Response {
     let event = match store.inbound_event(event_id).await {
         Ok(Some(event)) => event,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such event").into_response(),
@@ -158,7 +170,7 @@ pub async fn event_page(store: &dyn RunStore, event_id: &EventId, links: Links) 
     let mut html = String::new();
     let _ = write!(
         html,
-        "<h1>Event {}</h1><p>Received {}<br>Source: <b>{}</b><br>Kind: <b>{}</b>{}</p>",
+        "<h1>Event {}</h1><p>Received {}<br>Source: <b>{}</b><br>Kind: <b>{}</b>{}{}</p>",
         escape(event.id.as_str()),
         escape(&event.received_at),
         escape(&event.source),
@@ -167,9 +179,20 @@ pub async fn event_page(store: &dyn RunStore, event_id: &EventId, links: Links) 
             (Some(repo), Some(target)) => format!("<br>About: {} #{target}", escape(repo)),
             (Some(repo), None) => format!("<br>About: {}", escape(repo)),
             _ => String::new(),
-        }
+        },
+        event
+            .requester
+            .as_deref()
+            .map(|r| format!("<br>Asked by: {}", escape(r)))
+            .unwrap_or_default(),
     );
-    html.push_str("<h2>What the listeners did</h2><table><tr><th>Listener</th><th>Outcome</th><th>Detail</th><th>Run</th><th>At</th></tr>");
+    html.push_str("<h2>What the listeners did</h2>");
+    if outcomes.is_empty() {
+        html.push_str("<p>No listener has answered yet. Reload in a moment.</p>");
+    }
+    html.push_str(
+        "<table><tr><th>Listener</th><th>Outcome</th><th>Detail</th><th>Run</th><th>At</th></tr>",
+    );
     for outcome in &outcomes {
         let _ = write!(
             html,

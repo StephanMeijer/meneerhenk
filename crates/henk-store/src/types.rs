@@ -72,7 +72,8 @@ pub enum RunStatus {
     Finished,
     /// Ended because something broke.
     Failed,
-    /// Ended because a newer request superseded it.
+    /// Ended because a person cancelled it from the dashboard (#69). A
+    /// review superseded by a newer commit ends `Failed`, with the reason.
     Cancelled,
 }
 
@@ -281,6 +282,9 @@ pub struct InboundEvent {
     pub target: Option<u64>,
     /// The raw payload as received, when recorded.
     pub payload: Option<String>,
+    /// Who asked, when the source knows: the API's requester or
+    /// `github:<id>` from the dashboard (#69). Never a display name.
+    pub requester: Option<String>,
 }
 
 /// What one pruning pass deleted.

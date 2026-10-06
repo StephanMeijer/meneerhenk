@@ -44,6 +44,9 @@ pub struct AddressRequest {
     pub trigger: String,
     /// The run id to use, when the caller already announced one.
     pub run: Option<RunId>,
+    /// Who asked, for the run record, when not the configured Team Lead:
+    /// `github:<id>` from the dashboard (#69).
+    pub requester: Option<String>,
 }
 
 /// What an address run did.
@@ -107,7 +110,12 @@ pub async fn run_address(
             repo: request.target.repo.path(),
             target: request.target.number,
             commit: Some(facts.head.as_str().to_owned()),
-            requester: Some(requester.clone()),
+            requester: Some(
+                request
+                    .requester
+                    .clone()
+                    .unwrap_or_else(|| requester.clone()),
+            ),
             trigger: request.trigger.clone(),
             link: link.clone(),
         })
@@ -135,6 +143,22 @@ pub async fn run_address(
                 .await?;
             info!(run = %run, commit = ?report.commit, "address run ended");
             Ok(report)
+        }
+        Err(failure) if app.cancels.cancelled_by(&run).is_some() => {
+            // A person cancelled it from the dashboard (#69). Everything that
+            // can fail does so before the push, so nothing was pushed.
+            let by = app.cancels.cancelled_by(&run).unwrap_or_default();
+            info!(run = %run, by, %failure, "address run cancelled from the dashboard");
+            let body = marker(&run, &model_id, MarkerKind::Reply)
+                .attach(&crate::cancel::cancelled_notice(&by, &link, true));
+            if let Err(post_error) = writer.post_comment(&request.target, &body).await {
+                error!(%post_error, "could not post that the address run was cancelled");
+            }
+            let reason = format!("cancelled from the dashboard by {by}");
+            app.store
+                .finish_run(&run, RunStatus::Cancelled, None, Some(&reason))
+                .await?;
+            Err(anyhow!(reason))
         }
         Err(failure) => {
             let reason = format!("{failure:#}");
@@ -831,6 +855,7 @@ check_commands = [["true"]]
             gitlab: None,
             shutdown: CancellationToken::new(),
             live_runs: crate::liveness::LiveRuns::default(),
+            cancels: crate::cancel::Cancels::default(),
             workspace_provider: provider,
             test_writer: None,
             test_session: None,
@@ -857,6 +882,7 @@ check_commands = [["true"]]
             note: None,
             trigger: "test".to_owned(),
             run: Some(RunId::parse(run).unwrap()),
+            requester: None,
         }
     }
 
@@ -1296,6 +1322,45 @@ check_commands = [["true"]]
             self.0.notify_one();
             std::future::pending().await
         }
+    }
+
+    #[tokio::test]
+    async fn a_run_cancelled_from_the_dashboard_pushes_nothing_and_says_by_whom() {
+        let (remote, head) = bare_remote("henk-address-dashboard-cancel").await;
+        let hub = hub(remote.path(), &head, None);
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let provider = fake();
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::new(Stalled(Arc::clone(&asked))),
+            Arc::new(provider.clone()),
+            CONFIG,
+        );
+        let run = RunId::parse("r-addr-9").unwrap();
+        let cancel = CancellationToken::new();
+        let _cancellable = app.cancels.register(run.clone(), cancel.clone());
+        let stop = async {
+            asked.notified().await;
+            assert!(app.cancels.cancel(&run, "github:1234".to_owned()));
+        };
+        let (result, ()) = tokio::join!(run_address(&app, request("r-addr-9"), cancel), stop);
+
+        assert!(result.is_err());
+        assert!(provider.closed(), "the workspace is destroyed");
+        let comments = hub.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "one comment");
+        assert!(
+            comments[0].contains(
+                "Cancelled from the dashboard by GitHub account 1234. Nothing was pushed."
+            ),
+            "{}",
+            comments[0]
+        );
+        assert!(!comments[0].contains("kind=failure"), "{}", comments[0]);
+        let (remote_head, _) = remote_feature(remote.path()).await;
+        assert_eq!(remote_head, head.as_str(), "nothing was pushed");
+        let record = app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
     }
 
     #[tokio::test]

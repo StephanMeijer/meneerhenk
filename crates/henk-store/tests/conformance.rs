@@ -51,6 +51,7 @@ fn inbound(id: &str, received_at: &str) -> InboundEvent {
         repo: Some("o/r".into()),
         target: Some(7),
         payload: Some("{}".into()),
+        requester: None,
     }
 }
 
@@ -306,6 +307,24 @@ async fn events_and_outcomes_round_trip(store: &dyn RunStore) {
     assert_eq!(read.repo.as_deref(), Some("o/r"));
     assert_eq!(read.target, Some(7));
     assert_eq!(read.payload.as_deref(), Some("{}"));
+    assert_eq!(read.requester, None);
+    let asked = InboundEvent {
+        source: "dashboard".into(),
+        requester: Some("github:1234".into()),
+        ..inbound("e-asked", "2026-10-03T00:00:01Z")
+    };
+    store.record_event(&asked).await.unwrap();
+    assert_eq!(
+        store
+            .inbound_event(&event_id("e-asked"))
+            .await
+            .unwrap()
+            .unwrap()
+            .requester
+            .as_deref(),
+        Some("github:1234"),
+        "who asked is kept"
+    );
     let received = OffsetDateTime::parse(&read.received_at, &Rfc3339).unwrap();
     assert_eq!(
         received.unix_timestamp(),

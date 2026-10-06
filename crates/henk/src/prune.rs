@@ -84,6 +84,7 @@ github_owners = ["docspec"]
             repo: Some("docspec/app".to_owned()),
             target: Some(1),
             payload: None,
+            requester: None,
         }
     }
 

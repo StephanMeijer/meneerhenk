@@ -39,6 +39,8 @@ pub struct App {
     pub shutdown: CancellationToken,
     /// The runs this process is working on, which the reaper leaves alone.
     pub live_runs: LiveRuns,
+    /// The runs a person may cancel from the dashboard, and who did (#69).
+    pub cancels: crate::cancel::Cancels,
     /// Opens the workspaces address runs work in (§3.5). The host backend
     /// in production; tests swap in another.
     pub workspace_provider: Arc<dyn WorkspaceProvider>,
@@ -174,6 +176,7 @@ impl App {
             gitlab,
             shutdown: CancellationToken::new(),
             live_runs: LiveRuns::default(),
+            cancels: crate::cancel::Cancels::default(),
             workspace_provider: Arc::new(HostProvider),
             #[cfg(test)]
             test_writer: None,

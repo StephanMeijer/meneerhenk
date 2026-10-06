@@ -25,6 +25,7 @@ impl EventRecorder for StoreRecorder {
                 repo,
                 target,
                 payload: event.payload.as_ref().map(serde_json::Value::to_string),
+                requester: event.source.requester().map(str::to_owned),
             })
             .await
             .map_err(|e| e.to_string())

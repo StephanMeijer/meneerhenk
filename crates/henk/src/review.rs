@@ -37,6 +37,11 @@ use crate::review_tools::{
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
 
+/// A person cancelled the review from the dashboard (#69).
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("cancelled from the dashboard by {0}")]
+pub struct CancelledBy(pub String);
+
 /// The review was cancelled because Henk was told to stop.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("interrupted")]
@@ -197,6 +202,13 @@ pub async fn run_review(
             report_superseded(review, handle.as_ref()).await?;
             Err(error)
         }
+        Err(error) if error.is::<CancelledBy>() => {
+            let by = error
+                .downcast_ref::<CancelledBy>()
+                .map_or_else(String::new, |c| c.0.clone());
+            report_cancelled(review, handle.as_ref(), &by).await?;
+            Err(error)
+        }
         Err(error) => {
             report_failure(review, handle.as_ref(), &error).await?;
             Err(error)
@@ -266,6 +278,53 @@ async fn report_superseded(
     Ok(())
 }
 
+/// A person cancelled the review from the dashboard (#69): one comment
+/// saying who, a neutral check, and the run ends `cancelled`. Not Henk's
+/// failure, so nothing says it is.
+async fn report_cancelled(
+    review: ReviewRun<'_>,
+    handle: Option<&henk_platform::ReviewHandle>,
+    by: &str,
+) -> anyhow::Result<()> {
+    let ReviewRun {
+        app,
+        writer,
+        target,
+        commit,
+        run,
+        link,
+    } = review;
+    info!(run = %run, by, "review cancelled from the dashboard");
+    let body = Marker {
+        run: run.clone(),
+        model: ModelId::parse("none").unwrap_or_else(|_| unreachable!("constant")),
+        requested_by: None,
+        kind: Some(MarkerKind::Reply),
+        checked_by: None,
+        withdrawn: None,
+    }
+    .attach(&crate::cancel::cancelled_notice(by, link, false));
+    if let Err(post_error) = writer.post_comment(target, &body).await {
+        error!(%post_error, "could not post that the review was cancelled");
+    }
+    let outcome = ReviewOutcome::cancelled(commit.clone());
+    if let Err(finish_error) = writer
+        .finish_review(target, commit, handle, &outcome, link)
+        .await
+    {
+        error!(%finish_error, "could not finish the check of a cancelled review");
+    }
+    app.store
+        .finish_run(
+            run,
+            RunStatus::Cancelled,
+            None,
+            Some(&CancelledBy(by.to_owned()).to_string()),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Henk was told to stop: the check completes as interrupted, the run
 /// ends `failed`, and nothing is posted; the next review posts (§3.3).
 async fn report_interrupted(
@@ -314,8 +373,7 @@ async fn report_failure(
         lanes: Vec::new(),
         open_findings: 0,
         nothing_to_review: false,
-        superseded: false,
-        interrupted: false,
+        stopped: None,
     };
     let body = Marker {
         run: run.clone(),
@@ -388,6 +446,9 @@ async fn review_body(
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
     };
     if cancel.is_cancelled() {
+        if let Some(by) = review.app.cancels.cancelled_by(review.run) {
+            return Err(CancelledBy(by).into());
+        }
         // A shutdown cancels every review; superseding cancels only one.
         return Err(if review.app.shutdown.is_cancelled() {
             Interrupted.into()
@@ -410,8 +471,7 @@ async fn review_body(
         lanes: results,
         open_findings,
         nothing_to_review,
-        superseded: false,
-        interrupted: false,
+        stopped: None,
     };
 
     fold_outdated(writer, target, &after).await;
@@ -957,6 +1017,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 gitlab: None,
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
+                cancels: crate::cancel::Cancels::default(),
                 workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
@@ -1287,6 +1348,97 @@ lanes = [{ name = "lane-a", model = "m" }]
 
     /// #8: a review superseded by a newer commit is not Henk's failure. It
     /// must not post the failure comment, and its check is neutral.
+    #[tokio::test]
+    async fn a_review_cancelled_from_the_dashboard_says_by_whom_and_ends_cancelled() {
+        let run = RunId::parse("r-cancelled").unwrap();
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let f = fixture(DIFF, model).await;
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        let kinds = posted_kinds(&f.writer);
+        assert!(
+            !kinds.contains(&Some(MarkerKind::Failure)),
+            "no failure comment"
+        );
+        let notice = f
+            .writer
+            .replies
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.body.contains("Cancelled from the dashboard"))
+            .map(|r| r.body.clone())
+            .expect("one comment says it was cancelled");
+        assert!(notice.contains("by GitHub account 1234."), "{notice}");
+        assert_eq!(
+            Marker::parse(&notice).and_then(|m| m.kind),
+            Some(MarkerKind::Reply)
+        );
+        {
+            let finished = f.writer.finished.lock().unwrap();
+            assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+            assert_eq!(finished[0].headline(), "Cancelled from the dashboard.");
+        }
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("cancelled from the dashboard by github:1234")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_review_leaves_the_queue_so_the_next_request_starts_afresh() {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let app = Arc::new(fixture(DIFF, model).await.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let commit = CommitSha::parse(SHA).unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, run) = coordinator.submit_review(request(&placeholder), commit.clone());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&run).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        assert!(coordinator.cancel(&run, "github:1234".to_owned()));
+        let (decision, again) = coordinator.submit_review(request(&placeholder), commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Start, "not joined");
+        assert_ne!(again, run);
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&run).await.unwrap().map(|r| r.status);
+            if status != Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Cancelled));
+        assert!(
+            !coordinator.cancel(&run, "github:1234".to_owned()),
+            "an ended run is not cancellable"
+        );
+        app.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn a_superseded_review_posts_no_failure() {
         let run = RunId::parse("r-superseded").unwrap();

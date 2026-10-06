@@ -48,9 +48,11 @@ impl Listener for PlanListener {
         let trigger = requester
             .as_deref()
             .map_or_else(|| "requested".to_owned(), |r| format!("requested by {r}"));
-        Handled::Started(
-            self.coordinator
-                .submit_plan(target.clone(), note.clone(), trigger),
-        )
+        Handled::Started(self.coordinator.submit_plan(
+            target.clone(),
+            note.clone(),
+            trigger,
+            requester.clone(),
+        ))
     }
 }
