@@ -659,6 +659,18 @@ fn target_ref(platform: Platform, number: u64) -> String {
     }
 }
 
+/// A review lane's session limits, from the settings.
+fn lane_limits(settings: &crate::config::Settings) -> AgentConfig {
+    AgentConfig {
+        max_turns: settings.review.lane_max_turns,
+        timeout: Duration::from_secs(settings.review.lane_timeout_secs),
+        max_conversation_chars: settings.review.max_conversation_chars,
+        keep_recent_turns: settings.review.keep_recent_turns,
+        max_repeated_calls: settings.agent.max_repeated_calls,
+        ..AgentConfig::default()
+    }
+}
+
 async fn build_lane(
     review: ReviewRun<'_>,
     lanes: &LaneInputs,
@@ -741,14 +753,7 @@ async fn build_lane(
         &mut set,
         app.settings.skills.select(&lane.skills),
     );
-    let limits = AgentConfig {
-        max_turns: app.settings.review.lane_max_turns,
-        timeout: Duration::from_secs(app.settings.review.lane_timeout_secs),
-        max_conversation_chars: app.settings.review.max_conversation_chars,
-        keep_recent_turns: app.settings.review.keep_recent_turns,
-        max_repeated_calls: app.settings.agent.max_repeated_calls,
-        ..AgentConfig::default()
-    };
+    let limits = lane_limits(&app.settings);
     let opening = lane_opening(target, commit, &context.files.diff);
     Ok(Lane {
         session: SessionSpec {
