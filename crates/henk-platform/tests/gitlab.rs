@@ -1050,6 +1050,42 @@ async fn discussions_on_the_eleventh_page_are_read() {
 }
 
 #[tokio::test]
+async fn a_discussion_list_of_exactly_the_cap_is_read_whole() {
+    let tools = vec![FakeServer::tool("mr_discussions", "", &[])];
+    let fake = FakeServer::new(tools, |_, args| {
+        let page = args["page"].as_u64().unwrap_or(0);
+        if page > 100 {
+            return text(json!([]));
+        }
+        let mut discussions: Vec<Value> = (0..100)
+            .map(|i| {
+                json!({"id": format!("d-{page}-{i}"), "notes": [
+                    {"id": page * 1000 + i, "body": "looks fine", "author": {"username": "alice"},
+                     "position": {"new_path": "src/a.rs", "new_line": 1}}
+                ]})
+            })
+            .collect();
+        if page == 100 {
+            discussions[99] = json!({"id": "d-last", "notes": [
+                {"id": 99_999, "body": format!("Off by one.\n\n{}", marker(MarkerKind::Finding)),
+                 "author": {"username": "meneerhenk"},
+                 "position": {"new_path": "src/a.rs", "new_line": 10}, "resolved": false}
+            ]});
+        }
+        text(Value::Array(discussions))
+    });
+    let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
+    let findings = writer.existing_findings(&target()).await.unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["99999"],
+        "10,000 discussions is the cap, not past it: the list is whole"
+    );
+    assert_eq!(fake.calls().len(), 101, "one empty page shows the end");
+}
+
+#[tokio::test]
 async fn a_discussion_list_past_the_cap_is_an_error() {
     let fake = paged_discussions(u64::MAX);
     let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
@@ -1061,5 +1097,5 @@ async fn a_discussion_list_past_the_cap_is_an_error() {
         ),
         "{result:?}"
     );
-    assert_eq!(fake.calls().len(), 100, "stops at the cap");
+    assert_eq!(fake.calls().len(), 101, "stops one page past the cap");
 }

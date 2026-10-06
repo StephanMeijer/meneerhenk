@@ -168,8 +168,8 @@ impl GitLabWriter {
 
     /// Every item of a paged list tool, to its end: `per_page` 100, until a
     /// page has fewer than 100 items. A page is an array or an object
-    /// holding the array under one of `keys`. Past 100 full pages the list
-    /// is [`PlatformError::TooMany`], never a quietly partial one (#113).
+    /// holding the array under one of `keys`. A list that goes on past 100
+    /// full pages is [`PlatformError::TooMany`], never a quietly partial one (#113).
     pub(crate) async fn call_tool_all(
         &self,
         tool: &str,
@@ -180,7 +180,9 @@ impl GitLabWriter {
         // Lists are read to their end (#113); this only stops a runaway.
         const MAX_PAGES: usize = 100;
         let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
+        // One page past the cap tells a list of exactly the cap, which ends
+        // there, from one that goes on.
+        for page in 1..=MAX_PAGES + 1 {
             let mut args = arguments.clone();
             args.insert("per_page".into(), json!(PAGE_SIZE));
             args.insert("page".into(), json!(page));
@@ -195,6 +197,9 @@ impl GitLabWriter {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
+            if page > MAX_PAGES && !items.is_empty() {
+                break;
+            }
             let count = items.len();
             all.extend(items);
             if count < PAGE_SIZE {

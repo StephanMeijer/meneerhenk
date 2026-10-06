@@ -724,6 +724,36 @@ async fn findings_on_the_eleventh_page_are_counted() {
 }
 
 #[tokio::test]
+async fn a_list_of_exactly_the_cap_is_read_whole() {
+    let server = MockServer::start().await;
+    let finding = format!("Off by one.\n\n{}", marker(MarkerKind::Finding));
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls/7/comments"))
+        .respond_with(move |request: &wiremock::Request| {
+            let page = page_of(request);
+            let mut comments = people_comments(page, page <= 100);
+            if page == 100 {
+                comments[99] = json!({"id": 99_999, "node_id": "PRRC_last", "path": "src/a.rs",
+                    "line": 10, "body": finding, "user": {"login": "meneer-henk[bot]"}});
+            }
+            ResponseTemplate::new(200).set_body_json(comments)
+        })
+        .mount(&server)
+        .await;
+    no_threads(&server).await;
+    let findings = address_writer(&server)
+        .existing_findings(&target())
+        .await
+        .unwrap();
+    let ids: Vec<&str> = findings.iter().map(|f| f.comment_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["99999"],
+        "10,000 comments is the cap, not past it: the list is whole"
+    );
+}
+
+#[tokio::test]
 async fn a_list_past_the_cap_is_an_error_not_a_partial_count() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

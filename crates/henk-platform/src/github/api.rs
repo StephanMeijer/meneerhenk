@@ -211,11 +211,14 @@ impl GitHubApi {
     /// # Errors
     ///
     /// Returns [`PlatformError`] on transport, status or decode failure, and
-    /// [`PlatformError::TooMany`] past `MAX_PAGES` (100) full pages.
+    /// [`PlatformError::TooMany`] when the list goes on past `MAX_PAGES`
+    /// (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
         let separator = if path.contains('?') { '&' } else { '?' };
-        for page in 1..=MAX_PAGES {
+        // One page past the cap tells a list of exactly the cap, which ends
+        // there, from one that goes on.
+        for page in 1..=MAX_PAGES + 1 {
             let page_items = self
                 .get(&format!(
                     "{path}{separator}per_page={PAGE_SIZE}&page={page}"
@@ -224,6 +227,9 @@ impl GitHubApi {
             let Some(array) = page_items.as_array() else {
                 return Ok(items);
             };
+            if page > MAX_PAGES && !array.is_empty() {
+                break;
+            }
             let count = array.len();
             items.extend(array.iter().cloned());
             if count < PAGE_SIZE {
