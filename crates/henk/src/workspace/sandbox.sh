@@ -1,24 +1,22 @@
 #!/bin/sh
-# henk-runner: the one program Henk's SSH key may run on a sandbox host (#84).
+# The sandbox script (#84): what Henk runs on a sandbox host, as root.
 #
-# Henk connects as the user `henk`, whose authorized_keys line forces this
-# program:
+# Nothing is installed on the host for it. Henk keeps this script in its
+# binary and sends it with every request, over an SSH session signed in as
+# root (or as a user with passwordless sudo, through `sudo -n`):
 #
-#   restrict,command="/usr/local/sbin/henk-runner" ssh-ed25519 AAAA... henk
-#
-# and a sudoers rule lets that user run it as root:
-#
-#   henk ALL=(root) NOPASSWD: /usr/local/sbin/henk-runner
+#   sh -c '<this script>' henk-sandbox SUBCOMMAND TOKENS...
 #
 # Each workspace is a throwaway user `henk-<id>` with its own home, holding
 # the run's checkout in ~/work, and a record of the checkout that only root
 # can write, outside the home. Everything a run does in its tree is done as
 # that user. Root never reads or walks that tree, since the user can change
 # it at any moment: the record is fed from a tar the user makes of it and
-# root unpacks into a copy only root can reach. The request arrives in SSH_ORIGINAL_COMMAND: a subcommand, then
-# tokens that are a workspace id, a number, a hex sha, or `b` and base64 (the
-# `b` keeps an empty value a token), so splitting on spaces is the whole parse
-# and no part of a request is shell-evaluated.
+# root unpacks into a copy only root can reach. A request is a subcommand,
+# then tokens that are a workspace id, a number, a hex sha, or `b` and base64
+# (the `b` keeps an empty value a token). Henk refuses any other character
+# before it sends a request, and this script checks again, so no part of a
+# request is ever shell-evaluated.
 #
 #   create ID                 make the user, ~/work and the record; print the
 #                             real path of ~/work
@@ -35,37 +33,35 @@
 #   sweep                     destroy every workspace on this host
 #   probe                     print the version and which tools are present
 #
-# For tests only: run as a normal user with HENK_RUNNER_BASE set, a workspace
-# is a directory under it and nothing changes user. As root that variable is
-# ignored.
+# For tests only: run as a normal user with HENK_SANDBOX_BASE set, a
+# workspace is a directory under it and nothing changes user. As root that
+# variable is ignored.
 set -eu
 umask 022
 
-VERSION=3
-RUN_PATH=${HENK_RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin}
+VERSION=4
+RUN_PATH=/usr/local/bin:/usr/bin:/bin
+# Named after the runner this script replaced, so a sweep still finds what
+# an older Henk left on the host.
 RECORDS=/var/lib/henk-runner
 
 die() {
-    echo "henk-runner: $*" >&2
+    echo "henk-sandbox: $*" >&2
     exit 64
 }
 
-if [ $# -eq 0 ] && [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
-    case $SSH_ORIGINAL_COMMAND in
-    *[!A-Za-z0-9+/=_.\ -]*) die "refused: unexpected characters in the request" ;;
+for token in "$@"; do
+    case $token in
+    "" | *[!A-Za-z0-9+/=_.-]*) die "refused: unexpected characters in the request" ;;
     esac
-    set -f
-    # shellcheck disable=SC2086 # splitting is the parse; see the header
-    set -- $SSH_ORIGINAL_COMMAND
-    set +f
-fi
+done
 
 if [ "$(id -u)" -eq 0 ]; then
     BASE=
-elif [ -n "${HENK_RUNNER_BASE:-}" ]; then
-    BASE=$HENK_RUNNER_BASE
+elif [ -n "${HENK_SANDBOX_BASE:-}" ]; then
+    BASE=$HENK_SANDBOX_BASE
 else
-    exec sudo -n "$0" "$@"
+    die "the sandbox script needs root: sign in as root, or as a user with passwordless sudo"
 fi
 
 [ $# -ge 1 ] || die "no request"
@@ -215,7 +211,7 @@ as)
     # The user changes directory, not root, so the kernel checks the user's
     # own permissions on every link in the way.
     # shellcheck disable=SC2016 # expanded by the inner shell
-    enter='cd -- "$1" 2>/dev/null || { echo "henk-runner: no such directory: $2" >&2; exit 64; }
+    enter='cd -- "$1" 2>/dev/null || { echo "henk-sandbox: no such directory: $2" >&2; exit 64; }
 shift 2
 exec env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 "$@"'
     if [ -n "$BASE" ]; then
@@ -271,7 +267,7 @@ sweep)
     done
     ;;
 probe)
-    echo "henk-runner $VERSION"
+    echo "henk-sandbox $VERSION"
     # What runs: on the PATH the run's commands get.
     for tool in git tar timeout realpath find grep stat mise; do
         if found=$(PATH=$RUN_PATH command -v "$tool"); then

@@ -716,7 +716,8 @@ pub struct SshConfig {
     /// SSH port.
     #[serde(default = "default_ssh_port")]
     pub port: u16,
-    /// The user whose key may run `henk-runner` there.
+    /// The user Henk signs in as: root, which Henk's own requests need to
+    /// make and remove each run's user, or one with passwordless sudo.
     #[serde(default = "default_ssh_user")]
     pub user: String,
     /// The variable holding the path of Henk's private key.
@@ -732,7 +733,7 @@ const fn default_ssh_port() -> u16 {
 }
 
 fn default_ssh_user() -> String {
-    "henk".to_owned()
+    "root".to_owned()
 }
 
 fn default_ssh_key_path_env() -> String {
@@ -2511,13 +2512,13 @@ github_owners = ["docspec"]
                 config.user.as_str(),
                 config.key_path_env.as_str()
             ),
-            (22, "henk", "HENK_SANDBOX_KEY_PATH")
+            (22, "root", "HENK_SANDBOX_KEY_PATH")
         );
         let text = settings.describe();
         assert!(text.contains("  sandbox: ssh, 600s per command"), "{text}");
         assert!(
             text.contains(
-                "  sandbox host: henk@sandbox.example:22 (key from $HENK_SANDBOX_KEY_PATH)"
+                "  sandbox host: root@sandbox.example:22 (key from $HENK_SANDBOX_KEY_PATH)"
             ),
             "{text}"
         );

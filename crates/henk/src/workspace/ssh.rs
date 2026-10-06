@@ -1,10 +1,11 @@
 //! The ssh backend (#84): a workspace on a sandbox host, reached over SSH.
 //!
 //! Each workspace is a throwaway user on that host with its own checkout of
-//! the pull request, `.git` and all, in `~/work`. Henk's key may run one
-//! program there, `henk-runner` (`deploy/sandbox/henk-runner`), which makes
-//! the user, runs commands as it, keeps a record of the checkout that only
-//! root can write, and removes the user again. Every file and command the
+//! the pull request, `.git` and all, in `~/work`. Henk signs in as root and
+//! sends its own script with every request (`sandbox.sh`; nothing of Henk's
+//! is installed there), which makes the user, runs commands as it, keeps a
+//! record of the checkout that only root can write, and removes the user
+//! again. The model never runs as root: only Henk's fixed requests do. Every file and command the
 //! run touches goes through that user, so the run reaches nothing on the
 //! host its user cannot. The changeset comes from the record, never from
 //! the tree's own `.git`.
@@ -74,8 +75,8 @@ impl Reply {
     }
 }
 
-/// Carries requests to `henk-runner`: over SSH, or for tests to a local copy
-/// of the script.
+/// Carries requests to the sandbox script: over SSH, or for tests to the
+/// script run here.
 #[async_trait::async_trait]
 pub(crate) trait Runner: Send + Sync {
     /// Sends `tokens` (the subcommand first) with `stdin` and waits at most
@@ -142,7 +143,7 @@ pub struct SshTarget {
     pub host: String,
     /// SSH port.
     pub port: u16,
-    /// The user whose key runs `henk-runner`.
+    /// The user Henk signs in as: root, or one with passwordless sudo.
     pub user: String,
     /// Henk's private key. It never leaves Henk.
     pub key: Arc<PrivateKey>,
@@ -294,7 +295,10 @@ impl Runner for SshRunner {
         };
         let exchange = async {
             let mut channel = handle.channel_open_session().await.map_err(lost)?;
-            channel.exec(true, tokens.join(" ")).await.map_err(lost)?;
+            channel
+                .exec(true, command_line(&self.target.user, tokens)?)
+                .await
+                .map_err(lost)?;
             if !stdin.is_empty() {
                 channel.data(stdin).await.map_err(lost)?;
             }
@@ -346,6 +350,37 @@ impl Runner for SshRunner {
 /// split on spaces.
 fn token(text: &str) -> String {
     format!("b{}", STANDARD.encode(text))
+}
+
+/// The sandbox script, sent with every request: nothing of Henk's is
+/// installed on the host.
+const SCRIPT: &str = include_str!("sandbox.sh");
+
+/// The shell line that runs one request on the host: the script, quoted,
+/// then its tokens, which may only hold `A-Z a-z 0-9 + / = _ . -`, so the
+/// shell takes each as one word and evaluates none. Signed in as anyone but
+/// root, the line runs through `sudo -n`.
+///
+/// # Errors
+///
+/// Refuses a token with any other character before anything is sent.
+fn command_line(user: &str, tokens: &[String]) -> Result<String, WorkspaceError> {
+    let safe = |t: &String| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"+/=_.-".contains(&b))
+    };
+    if let Some(bad) = tokens.iter().find(|t| !safe(t)) {
+        return Err(WorkspaceError::Backend(format!(
+            "refused to send a request with the token {bad:?}"
+        )));
+    }
+    let quoted = SCRIPT.replace('\'', "'\\''");
+    let sudo = if user == "root" { "" } else { "sudo -n " };
+    Ok(format!(
+        "{sudo}sh -c '{quoted}' henk-sandbox {}",
+        tokens.join(" ")
+    ))
 }
 
 /// A new workspace id: `w` and twelve hex digits.
@@ -998,7 +1033,7 @@ pub(crate) mod tests {
 
     use crate::git::ScratchDir;
 
-    /// The runner script of this repository, run here as the current user
+    /// The sandbox script, run here as the current user
     /// in its test mode: a workspace is a directory and nothing changes
     /// user. It checks the script and the backend together without SSH.
     pub(crate) struct LocalRunner {
@@ -1043,17 +1078,14 @@ pub(crate) mod tests {
             keep: Option<usize>,
             wait: Duration,
         ) -> Result<Reply, WorkspaceError> {
-            let script = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../deploy/sandbox/henk-runner"
-            );
-            // The request goes in as over SSH, so the runner's parse is tested.
+            // The very line the host gets, so its quoting is tested too.
+            let line = command_line("root", tokens)?;
             let mut child = tokio::process::Command::new("sh")
-                .arg(script)
+                .arg("-c")
+                .arg(line)
                 .env_clear()
-                .env("SSH_ORIGINAL_COMMAND", tokens.join(" "))
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env("HENK_RUNNER_BASE", &self.base)
+                .env("HENK_SANDBOX_BASE", &self.base)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -1232,7 +1264,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(left, ["not-ours"]);
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner 3\n"), "{probe}");
+        assert!(probe.starts_with("henk-sandbox 4\n"), "{probe}");
         assert!(probe.contains("\ngit "), "{probe}");
     }
 
@@ -1342,11 +1374,6 @@ pub(crate) mod tests {
         for tokens in [
             vec!["create".to_owned(), "../../etc".to_owned()],
             vec![
-                "as".to_owned(),
-                "w0123456789ab".to_owned(),
-                "1;rm".to_owned(),
-            ],
-            vec![
                 "record".to_owned(),
                 "w0123456789ab".to_owned(),
                 "blob".to_owned(),
@@ -1357,6 +1384,30 @@ pub(crate) mod tests {
             let reply = runner.call(&tokens, &[], None, REQUEST_WAIT).await.unwrap();
             assert_eq!(reply.code, Some(64), "{tokens:?}");
         }
+        let unsafe_token = [
+            "as".to_owned(),
+            "w0123456789ab".to_owned(),
+            "1;rm".to_owned(),
+        ];
+        assert!(
+            runner
+                .call(&unsafe_token, &[], None, REQUEST_WAIT)
+                .await
+                .is_err(),
+            "Henk refuses it before anything is sent"
+        );
+        // And the script refuses it too, should it ever arrive.
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(SCRIPT)
+            .arg("henk-sandbox")
+            .args(&unsafe_token)
+            .env("HENK_SANDBOX_BASE", runner.base())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(out.status.code(), Some(64));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected characters"));
     }
 
     /// The sandbox host of the live tests, from `HENK_TEST_SSH_HOST`,
@@ -1376,11 +1427,11 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_the_ssh_backend_keeps_the_workspace_contract_on_a_real_host() {
         let provider = SshProvider::new(live_target());
         let probe = provider.probe().await.unwrap();
-        assert!(probe.starts_with("henk-runner "), "{probe}");
+        assert!(probe.starts_with("henk-sandbox "), "{probe}");
         assert!(!probe.contains("runuser missing"), "{probe}");
         // No sweep here: it removes every workspace on the host, including
         // those of live tests running alongside.
@@ -1392,7 +1443,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner and mise (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host with mise (HENK_TEST_SSH_*)"]
     async fn live_mise_gives_the_run_the_repositorys_own_toolchain() {
         let provider = SshProvider::new(live_target());
         let source = ScratchDir::new("henk-ssh-live-mise").unwrap();
@@ -1475,7 +1526,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_wrong_host_key_is_refused() {
         let target = SshTarget {
             host_key: PublicKey::from_openssh(&key_line(9)).unwrap(),
@@ -1491,7 +1542,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_export_stops_the_run_and_refuses_a_tree_swapped_for_a_link() {
         let provider = SshProvider::new(live_target());
         let source = crate::workspace::contract::source("henk-ssh-live-swap-src");
@@ -1593,6 +1644,52 @@ pub(crate) mod tests {
         let mut whole = Kept::new(None);
         whole.push(b"all of it").unwrap();
         assert_eq!(whole.finish(), b"all of it");
+    }
+
+    #[test]
+    fn a_request_is_the_quoted_script_and_safe_tokens() {
+        let tokens = [
+            "probe".to_owned(),
+            token("it's"),
+            "w0123456789ab".to_owned(),
+        ];
+        let line = command_line("root", &tokens).unwrap();
+        assert!(line.starts_with("sh -c '#!/bin/sh\n"), "{line}");
+        assert!(line.ends_with(&format!(
+            " henk-sandbox probe {} w0123456789ab",
+            token("it's")
+        )));
+        assert!(
+            command_line("deploy", &tokens)
+                .unwrap()
+                .starts_with("sudo -n sh -c '")
+        );
+        for bad in ["a b", "x;rm", "$(id)", "'", ""] {
+            let tokens = ["probe".to_owned(), bad.to_owned()];
+            assert!(command_line("root", &tokens).is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_shell_hands_the_script_exactly_its_tokens() {
+        // The script, quoted as it is sent, run by a local shell: its own
+        // single quotes survive, and the tokens arrive as they were.
+        let tokens = ["nothing".to_owned(), token("a'b"), token("")];
+        let line = command_line("root", &tokens).unwrap();
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(line.replacen("sh -c '", "sh -c 'printf \"%s\\n\" \"$@\"; exit 0;", 1))
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("nothing\n{}\n{}\n", token("a'b"), token(""))
+        );
+        assert!(
+            SCRIPT.contains('\''),
+            "the test means something only if the script has quotes"
+        );
     }
 
     #[test]

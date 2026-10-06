@@ -362,17 +362,26 @@ when it starts. Runs share the host's kernel, `/tmp` and network, and
 memory, cpu, pids and disk are not limited: use a host that holds nothing
 else, and one Henk per host.
 
-To set one up, as root on the host (Debian or alike; it needs `git`, `sudo`,
-`useradd`/`userdel`, `runuser`, `pkill` and GNU `grep` with `-P` on a
-PCRE2 with Unicode support, which the `search` tool uses; any version
-does, 3.8 and later are checked):
-1. Copy `deploy/sandbox/henk-runner` to `/usr/local/sbin/henk-runner`,
-   mode 755, owned by root. It is the only program Henk's key may run.
-2. `useradd --create-home henk`, and put Henk's public key in
-   `~henk/.ssh/authorized_keys` as
-   `restrict,command="/usr/local/sbin/henk-runner" ssh-ed25519 AAAA… henk`.
-3. Let that user run the runner as root, and nothing else:
-   `echo 'henk ALL=(root) NOPASSWD: /usr/local/sbin/henk-runner' > /etc/sudoers.d/henk`.
+Henk signs in as root and installs nothing there: every request carries
+Henk's own script (`crates/henk/src/workspace/sandbox.sh`), run with
+`sh -c`, and its arguments are words of `A-Z a-z 0-9 + / = _ . -` only, so
+nothing a model wrote is ever evaluated by a shell. Root is Henk's, for
+making and removing each run's user; the model's commands always run as
+that user. Henk's key is therefore root on the host: give the host nothing
+else to lose.
+
+To set one up (Debian or alike):
+1. Install the tools the script uses:
+   `apt-get install openssh-server git tar procps findutils grep passwd util-linux`
+   (`runuser`, `useradd`/`userdel`, `pkill`, and GNU `grep` with `-P` on a
+   PCRE2 with Unicode support, which the `search` tool uses; any version
+   does, 3.8 and later are checked).
+2. Put Henk's public key in `/root/.ssh/authorized_keys`, and allow root
+   to sign in with a key (`PermitRootLogin prohibit-password`, Debian's
+   default). Henk only runs commands, so start the line with `restrict`
+   (no pty, no port, agent or X11 forwarding) and `from=` with the address
+   Henk connects from; a stolen key is then of no use anywhere else:
+   `restrict,from="203.0.113.7" ssh-ed25519 AAAA… henk`
 
 Then, in `henk.toml`, with the private key's path in the variable
 `key_path_env` names and the host key pinned (`ssh-keyscan -t ed25519 host`
@@ -386,7 +395,7 @@ backend = "ssh"
 [workspace.ssh]
 host = "sandbox.example.com"
 host_key = "ssh-ed25519 AAAA…"
-# port = 22, user = "henk", key_path_env = "HENK_SANDBOX_KEY_PATH"
+# port = 22, user = "root", key_path_env = "HENK_SANDBOX_KEY_PATH"
 ```
 
 A profile can prepare the workspace before the model starts (#93): with
@@ -405,7 +414,7 @@ that fails ends the run before the model starts, with nothing pushed. mise
 installs into the run user's home, outside the tree, and the tree as setup
 leaves it is where the change starts, so neither what mise fetches nor what
 a setup step writes (a lockfile, `node_modules`) is part of the change. On
-a sandbox host, install mise where the runner's PATH finds it
+a sandbox host, install mise where the run's PATH finds it
 (`/usr/local/bin/mise`); `henk doctor --probe` says when a profile there
 needs it and it is missing.
 
@@ -429,9 +438,8 @@ fact-checker, list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), the same code tools an address run has; `bash` follows in
 #85. Without a workspace a lane reads through the platform as before.
-After updating Henk, copy `deploy/sandbox/henk-runner` to the host again:
-`henk doctor --probe` names the runner's version and says when `grep -P`
-there is missing or does not read Unicode as the `search` tool needs.
+`henk doctor --probe` says when `grep -P` on the host is missing or does
+not read Unicode as the `search` tool needs.
 
 A review runs the setup stage on code that anyone who can open a pull
 request chose, from a fork too, so `review = true` needs a backend apart
@@ -439,7 +447,14 @@ from Henk: `henk config check` refuses it on the `host` backend, where that
 code would run as Henk's own user next to his configuration and keys.
 
 `henk doctor --probe` connects and reports the connection, the host key and
-the runner's tools on lines of their own. The live tests run against such a
+the tools the script needs on lines of their own.
+
+Coming from `henk-runner` (earlier versions signed in as a `henk` user
+whose key could only run that program): put Henk's key in
+`/root/.ssh/authorized_keys` with the options of step 2 and drop
+`user = "henk"` from `[workspace.ssh]`. `/usr/local/sbin/henk-runner`,
+`/etc/sudoers.d/henk` and the `henk` user are no longer used and can go;
+records an older Henk left are still swept. The live tests run against such a
 host: `deploy/sandbox/test-host.Containerfile` builds one, and
 `HENK_TEST_SSH_HOST`, `_PORT`, `_USER`, `_KEY_PATH` and `_HOST_KEY` point
 `cargo test -p henk -- --ignored live_` at it.

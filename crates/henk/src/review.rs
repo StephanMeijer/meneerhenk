@@ -1915,7 +1915,7 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
-    #[ignore = "needs a sandbox host with henk-runner (HENK_TEST_SSH_*)"]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_review_on_a_real_sandbox_host_opens_and_closes_its_workspaces() {
         let provider =
             crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
