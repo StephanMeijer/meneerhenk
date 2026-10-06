@@ -1905,10 +1905,10 @@ lanes = [{ name = "lane-a", model = "m" }]
 
     #[tokio::test]
     async fn a_review_on_the_ssh_backend_leaves_nothing_on_the_host() {
-        use crate::workspace::ssh::tests::LocalRunner;
+        use crate::workspace::remote::tests::LocalRunner;
         let runner = LocalRunner::new("henk-review-ssh");
         let provider = crate::workspace::ssh::SshProvider::with_runner(
-            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
         );
         review_on_ssh("ssh-local", Arc::new(provider)).await;
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);

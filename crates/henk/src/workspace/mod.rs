@@ -23,6 +23,7 @@ pub mod contract;
 #[cfg(test)]
 pub mod fake;
 pub mod host;
+pub mod remote;
 pub mod setup;
 pub mod ssh;
 pub mod toolchain;
