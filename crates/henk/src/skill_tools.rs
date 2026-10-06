@@ -149,6 +149,7 @@ mod tests {
         let usage = Usage {
             input_tokens: 1,
             output_tokens: 1,
+            ..Usage::default()
         };
         let call = Completion {
             message: ChatMessage {
