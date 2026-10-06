@@ -323,10 +323,10 @@ requesters in that repository agree to that.
 Henk commits as the App, `meneer-henk[bot]` with its GitHub noreply
 address, unless `[address.identity]` sets a `name` and `email`; that
 identity is author, committer and Henk's sign-off alike. The requester is
-credited by the `github_id` in their `[[people]]` entry: Henk reads that
-account's current login by id and uses
-`<id>+<login>@users.noreply.github.com`, GitLab's
-`<id>-<username>@users.noreply.gitlab.com` once GitLab runs exist.
+credited by the `github_id` or `gitlab_id` in their `[[people]]` entry,
+for the platform of the run: Henk reads that account's current login by id
+and uses `<id>+<login>@users.noreply.github.com` on GitHub and
+`<id>-<username>@users.noreply.gitlab.com` on GitLab.
 `commit_name` and `commit_email` in the same entry override both. A
 requester with neither gets no trailers of their own, the run notes why,
 and `henk config check` warns about it. Trailer values come only from ids

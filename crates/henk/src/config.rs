@@ -1646,14 +1646,13 @@ impl Settings {
         let credits_requester = address
             .policies()
             .any(|p| p.requester_coauthor || p.requester_signoff);
-        let creditable = self
-            .committers
-            .get(&address.requester_id)
-            .is_some_and(|c| c.github_id.is_some() || c.commit_as.is_some());
+        let creditable = self.committers.get(&address.requester_id).is_some_and(|c| {
+            c.github_id.is_some() || c.gitlab_id.is_some() || c.commit_as.is_some()
+        });
         if credits_requester && !creditable {
             let _ = writeln!(
                 out,
-                "Warning:         requester {} has no github_id or commit_email in [[people]]; their commits get no requester trailers",
+                "Warning:         requester {} has no github_id, gitlab_id or commit_email in [[people]]; their commits get no requester trailers",
                 address.requester_id
             );
         }
@@ -2074,6 +2073,7 @@ github_owners = ["docspec"]
         assert!(on_somewhere.contains(warning), "{on_somewhere}");
         for person in [
             "github_id = 77\n",
+            "gitlab_id = 77\n",
             "commit_name = \"Lead\"\ncommit_email = \"lead@example.com\"\n",
         ] {
             let described = address(person, "").unwrap().describe();
