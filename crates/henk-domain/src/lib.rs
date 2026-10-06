@@ -9,6 +9,7 @@
 
 pub mod address;
 pub mod allowlist;
+pub mod commit;
 pub mod diff;
 pub mod discord;
 pub mod finding;

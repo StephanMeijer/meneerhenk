@@ -924,6 +924,46 @@ async fn henk_commits_as_his_account_with_its_noreply_address() {
 }
 
 #[tokio::test]
+async fn a_requester_is_credited_by_the_username_their_id_has_now() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/users/77"))
+        .and(header("PRIVATE-TOKEN", TOKEN))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id": 77, "username": "alice", "name": "Alice Display"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/users/79"))
+        .and(header("PRIVATE-TOKEN", TOKEN))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id": 79, "name": "No Username"})),
+        )
+        .mount(&server)
+        .await;
+    let (_fake, writer) = address_writer(&server).await;
+    assert_eq!(
+        writer.user_login(77).await.unwrap(),
+        "alice",
+        "the username, never the display name"
+    );
+    assert!(writer.user_login(78).await.is_err(), "an unknown id");
+    assert!(
+        writer.user_login(79).await.is_err(),
+        "a user without a username"
+    );
+    assert_eq!(
+        writer.noreply_host().unwrap(),
+        "127.0.0.1",
+        "the instance's own host, for its noreply addresses"
+    );
+}
+
+#[tokio::test]
 async fn the_token_goes_only_in_its_header() {
     use henk_platform::address::AddressWriter as _;
 

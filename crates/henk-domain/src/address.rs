@@ -1,10 +1,8 @@
 //! Addressing review feedback (§3.5): what a thread ends as, where in the
-//! checkout a model may read and write, when Henk may push at all, and the
-//! commit he pushes.
+//! checkout a model may read and write, and when Henk may push at all. The
+//! commit he pushes is in [`crate::commit`].
 
 use std::fmt;
-
-use crate::run::RunId;
 
 /// How one review thread ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,35 +176,6 @@ pub fn push_refusal(facts: &PushFacts) -> Option<String> {
     None
 }
 
-/// One line of text for a commit message or trailer: no line breaks.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The message of Henk's one commit: a subject, what he fixed, and trailers
-/// naming the run and who asked (§3.5, §8.6).
-#[must_use]
-pub fn commit_message(fixed: &[String], run: &RunId, requester: Option<&str>) -> String {
-    let mut message = String::from("Address review feedback\n");
-    if !fixed.is_empty() {
-        message.push('\n');
-        for note in fixed {
-            message.push_str("- ");
-            message.push_str(&one_line(note));
-            message.push('\n');
-        }
-    }
-    message.push_str("\nHenk-Run: ");
-    message.push_str(run.as_str());
-    message.push('\n');
-    if let Some(requester) = requester.map(one_line).filter(|r| !r.is_empty()) {
-        message.push_str("Requested-by: ");
-        message.push_str(&requester);
-        message.push('\n');
-    }
-    message
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
@@ -334,25 +303,5 @@ mod tests {
         ] {
             assert!(push_refusal(&refused).is_some(), "{case}");
         }
-    }
-
-    #[test]
-    fn the_commit_names_its_run_and_requester() {
-        let run = RunId::parse("r-20261006-0000beef").unwrap();
-        let message = commit_message(
-            &["src/a.rs: off-by-one\nin the loop".to_owned()],
-            &run,
-            Some("discord:3"),
-        );
-        assert_eq!(
-            message,
-            "Address review feedback\n\n- src/a.rs: off-by-one in the loop\n\nHenk-Run: r-20261006-0000beef\nRequested-by: discord:3\n"
-        );
-        assert!(crate::text::is_in_style(&message));
-        let bare = commit_message(&[], &run, None);
-        assert_eq!(
-            bare,
-            "Address review feedback\n\nHenk-Run: r-20261006-0000beef\n"
-        );
     }
 }

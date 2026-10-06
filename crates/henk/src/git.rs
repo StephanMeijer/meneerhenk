@@ -471,6 +471,14 @@ pub(crate) mod tests {
         (names, content)
     }
 
+    /// The last commit of `feature` on a bare remote, in `git log` `format`.
+    pub(crate) async fn remote_log(remote: &Path, format: &str) -> String {
+        let format = format!("--format={format}");
+        run(remote, &["log", "-1", &format, "feature"], None, None)
+            .await
+            .unwrap()
+    }
+
     fn identity() -> CommitIdentity {
         CommitIdentity {
             name: "meneer-henk[bot]".to_owned(),
