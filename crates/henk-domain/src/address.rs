@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use crate::commit::one_line;
 use crate::run::RunId;
 
 /// How one review thread ends.
@@ -176,11 +177,6 @@ pub fn push_refusal(facts: &PushFacts) -> Option<String> {
         ));
     }
     None
-}
-
-/// One line of text for a commit message or trailer: no line breaks.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The message of Henk's one commit: a subject, what he fixed, and trailers
