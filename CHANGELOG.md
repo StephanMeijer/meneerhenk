@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.15...v0.1.16) - 2026-10-07
+
+### Added
+
+- *(dashboard)* tool calls per run and across runs, with what went wrong
+
+### Fixed
+
+- *(dashboard)* link a plan run's tool calls to its issue, not a pull request
+- *(dashboard)* link a listed tool call's turn only while its conversation is kept
+
+### Other
+
+- Merge pull request #222 from StephanMeijer/feat/dashboard-tools
+- Merge branch 'feat/dashboard-live' into feat/dashboard-tools
+
 ## [0.1.15](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.14...v0.1.15) - 2026-10-07
 
 ### Added
