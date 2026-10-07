@@ -230,15 +230,72 @@ pub(crate) fn lines(text: &str) -> impl Iterator<Item = &str> {
         .map(|line| line.strip_suffix('\n').unwrap_or(line))
 }
 
-/// One search hit.
+/// One line of a search result: a hit, or a line of context around one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     /// The file, relative to the workspace root.
     pub path: String,
     /// The line number, from 1.
     pub line: usize,
-    /// The line, trimmed.
+    /// The line as it is in the file, indentation kept, without its line
+    /// ending (`\n` or `\r\n`).
     pub text: String,
+    /// Whether the line matched; false for a line of context.
+    pub matched: bool,
+}
+
+/// The lines of one file a search shows: the lines at `matched` (indices
+/// from 0, ascending) and `context` lines before and after each, merged
+/// where they overlap so no line comes twice, as `grep -C` shows them.
+pub(crate) fn with_context(
+    path: &str,
+    lines: &[&str],
+    matched: &[usize],
+    context: usize,
+) -> Vec<Hit> {
+    let last = lines.len().saturating_sub(1);
+    let mut shown = std::collections::BTreeSet::new();
+    for &at in matched {
+        shown.extend(at.saturating_sub(context)..=at.saturating_add(context).min(last));
+    }
+    shown
+        .into_iter()
+        .filter_map(|at| {
+            lines.get(at).map(|text| Hit {
+                path: path.to_owned(),
+                line: at + 1,
+                text: text.strip_suffix('\r').unwrap_or(text).to_owned(),
+                matched: matched.binary_search(&at).is_ok(),
+            })
+        })
+        .collect()
+}
+
+/// The first `cap` matches of `hits` (sorted by path and line) with their
+/// context: everything up to the `cap`-th match, and the lines after it in
+/// its file within `context`. Every backend cuts its result this way, so a
+/// capped search reads the same on each.
+pub(crate) fn keep_matches(hits: Vec<Hit>, cap: usize, context: usize) -> Vec<Hit> {
+    let mut kept = Vec::new();
+    let mut matches = 0;
+    let mut last: Option<(String, usize)> = None;
+    for hit in hits {
+        if let Some((path, line)) = &last {
+            if hit.matched || *path != hit.path || hit.line > line.saturating_add(context) {
+                break;
+            }
+            kept.push(hit);
+            continue;
+        }
+        if hit.matched {
+            matches += 1;
+            if matches == cap {
+                last = Some((hit.path.clone(), hit.line));
+            }
+        }
+        kept.push(hit);
+    }
+    kept
 }
 
 /// One change as a backend exported it: what git calls it, and the new
@@ -335,8 +392,10 @@ pub trait Workspace: Send + Sync {
     ) -> Result<Vec<String>, WorkspaceError>;
 
     /// Lines matching `pattern` in the files under `dir` (with `only`, just
-    /// the files it matches), sorted by path and line, at most `cap`. Files
-    /// larger than `max_file_bytes` or not text are skipped.
+    /// the files it matches), with `context` lines before and after each
+    /// merged as [`with_context`] does, sorted by path and line. At most
+    /// `cap` matches, cut as [`keep_matches`] does. Files larger than
+    /// `max_file_bytes` or not text are skipped.
     ///
     /// # Errors
     ///
@@ -346,6 +405,7 @@ pub trait Workspace: Send + Sync {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError>;
@@ -526,11 +586,12 @@ impl Workspace for NoExport {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         self.inner
-            .search(dir, pattern, only, max_file_bytes, cap)
+            .search(dir, pattern, only, context, max_file_bytes, cap)
             .await
     }
 
@@ -648,11 +709,12 @@ impl Workspace for Metered {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         self.inner
-            .search(dir, pattern, only, max_file_bytes, cap)
+            .search(dir, pattern, only, context, max_file_bytes, cap)
             .await
     }
 
@@ -1021,6 +1083,84 @@ mod tests {
         assert_eq!(address.export().await.unwrap().len(), 1);
         review.close().await;
         assert_eq!(provider.live(), 0);
+    }
+
+    fn hit(line: usize, matched: bool) -> Hit {
+        Hit {
+            path: "a".to_owned(),
+            line,
+            text: format!("l{line}"),
+            matched,
+        }
+    }
+
+    #[test]
+    fn context_windows_merge_and_stop_at_the_file_s_ends() {
+        let lines = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8"];
+        let shown = |matched: &[usize], context: usize| -> Vec<(usize, bool)> {
+            with_context("a", &lines, matched, context)
+                .into_iter()
+                .map(|h| (h.line, h.matched))
+                .collect()
+        };
+        assert_eq!(
+            shown(&[1, 3], 1),
+            [(1, false), (2, true), (3, false), (4, true), (5, false)]
+        );
+        assert_eq!(
+            shown(&[0, 7], 2),
+            [
+                (1, true),
+                (2, false),
+                (3, false),
+                (6, false),
+                (7, false),
+                (8, true)
+            ]
+        );
+        assert_eq!(shown(&[4], 0), [(5, true)]);
+        assert_eq!(shown(&[], 3), []);
+        let text: Vec<String> = with_context("a", &lines, &[2], 1)
+            .into_iter()
+            .map(|h| h.text)
+            .collect();
+        assert_eq!(text, ["l2", "l3", "l4"]);
+    }
+
+    #[test]
+    fn a_capped_search_keeps_the_last_match_s_context_and_nothing_after() {
+        let hits = vec![
+            hit(1, false),
+            hit(2, true),
+            hit(3, false),
+            hit(4, true),
+            hit(5, false),
+            hit(6, false),
+            hit(7, true),
+        ];
+        let kept = |cap: usize, context: usize| -> Vec<usize> {
+            keep_matches(hits.clone(), cap, context)
+                .into_iter()
+                .map(|h| h.line)
+                .collect()
+        };
+        assert_eq!(kept(1, 1), [1, 2, 3]);
+        assert_eq!(kept(2, 1), [1, 2, 3, 4, 5]);
+        assert_eq!(
+            kept(2, 2),
+            [1, 2, 3, 4, 5, 6],
+            "a later match is never kept as context"
+        );
+        assert_eq!(kept(3, 1), [1, 2, 3, 4, 5, 6, 7]);
+        let mut two_files = hits.clone();
+        if let Some(third) = two_files.get_mut(2) {
+            third.path = "b".to_owned();
+        }
+        assert_eq!(
+            keep_matches(two_files, 1, 3).len(),
+            2,
+            "context stays in its file"
+        );
     }
 
     #[test]

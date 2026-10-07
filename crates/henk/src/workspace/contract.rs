@@ -71,6 +71,7 @@ pub async fn every_backend_does_this(provider: Arc<dyn WorkspaceProvider>, name:
     patterns_mean_the_same_beyond_ascii(&provider, name).await;
     crlf_lines_read_alike(&provider, name).await;
     a_glob_keeps_files_out_of_the_search(&provider, name).await;
+    hits_come_with_their_context(&provider, name).await;
     links_out_of_the_tree_and_into_git_are_refused(&provider, name).await;
     commands_run_with_an_empty_environment_and_limits(&provider, name).await;
     the_changes_are_exported_with_their_modes(&provider, name).await;
@@ -137,18 +138,19 @@ async fn files_are_read_written_listed_and_searched(
 
     let find = |source: &str| Pattern::parse(source).unwrap();
     let hits = ws
-        .search(&root, &find("let x"), None, 1024, 10)
+        .search(&root, &find("let x"), None, 0, 1024, 10)
         .await
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!((hits[0].path.as_str(), hits[0].line), ("src/a.rs", 2));
-    assert_eq!(hits[0].text, "let x = 1;");
+    assert_eq!(hits[0].text, "    let x = 1;", "the line as it is");
+    assert!(hits[0].matched);
     let shown = |hits: Vec<Hit>| -> Vec<(String, usize)> {
         hits.into_iter().map(|h| (h.path, h.line)).collect()
     };
     assert_eq!(
         shown(
-            ws.search(&root, &find(r"\blet\s+x\s*=\s*\d+;$"), None, 1024, 10)
+            ws.search(&root, &find(r"\blet\s+x\s*=\s*\d+;$"), None, 0, 1024, 10)
                 .await
                 .unwrap()
         ),
@@ -157,7 +159,7 @@ async fn files_are_read_written_listed_and_searched(
     );
     assert_eq!(
         shown(
-            ws.search(&root, &find("(?i)FN MAIN|^// NEW"), None, 1024, 10)
+            ws.search(&root, &find("(?i)FN MAIN|^// NEW"), None, 0, 1024, 10)
                 .await
                 .unwrap()
         ),
@@ -170,7 +172,7 @@ async fn files_are_read_written_listed_and_searched(
     let deep = PathFilter::new(["src/deep/**"]);
     assert_eq!(
         shown(
-            ws.search(&root, &find("."), Some(&deep), 1024, 10)
+            ws.search(&root, &find("."), Some(&deep), 0, 1024, 10)
                 .await
                 .unwrap()
         ),
@@ -178,7 +180,7 @@ async fn files_are_read_written_listed_and_searched(
         "only the files the glob matches"
     );
     assert_eq!(
-        ws.search(&root, &find("."), None, 1024, 2)
+        ws.search(&root, &find("."), None, 0, 1024, 2)
             .await
             .unwrap()
             .len(),
@@ -186,14 +188,14 @@ async fn files_are_read_written_listed_and_searched(
         "capped"
     );
     assert!(
-        ws.search(&root, &find("core"), None, 1024, 10)
+        ws.search(&root, &find("core"), None, 0, 1024, 10)
             .await
             .unwrap()
             .is_empty(),
         "nothing in .git is searched"
     );
     assert!(
-        ws.search(&root, &find("let x"), None, 5, 10)
+        ws.search(&root, &find("let x"), None, 0, 5, 10)
             .await
             .unwrap()
             .is_empty(),
@@ -229,6 +231,7 @@ async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvide
             &WorkspacePath::root(),
             &Pattern::parse(source).unwrap(),
             Some(&only),
+            0,
             1024,
             10,
         )
@@ -266,6 +269,7 @@ async fn patterns_mean_the_same_beyond_ascii(provider: &Arc<dyn WorkspaceProvide
             &WorkspacePath::root(),
             &Pattern::parse("7").unwrap(),
             None,
+            0,
             1024,
             10
         )
@@ -289,6 +293,7 @@ async fn crlf_lines_read_alike(provider: &Arc<dyn WorkspaceProvider>, name: &str
             &WorkspacePath::root(),
             &Pattern::parse(source).unwrap(),
             Some(&only),
+            0,
             1024,
             10,
         )
@@ -311,12 +316,13 @@ async fn crlf_lines_read_alike(provider: &Arc<dyn WorkspaceProvider>, name: &str
             &WorkspacePath::root(),
             &Pattern::parse("^end").unwrap(),
             Some(&only),
+            0,
             1024,
             10,
         )
         .await
         .unwrap();
-    assert_eq!(hits[0].text, "end", "a hit's text is trimmed");
+    assert_eq!(hits[0].text, "end", "a hit's text has no CRLF line ending");
     ws.close().await;
 }
 
@@ -335,6 +341,7 @@ async fn a_glob_keeps_files_out_of_the_search(provider: &Arc<dyn WorkspaceProvid
             &WorkspacePath::root(),
             &Pattern::parse("(a+)+$").unwrap(),
             Some(&rust),
+            0,
             1 << 20,
             10,
         )
@@ -347,6 +354,7 @@ async fn a_glob_keeps_files_out_of_the_search(provider: &Arc<dyn WorkspaceProvid
             &WorkspacePath::root(),
             &Pattern::parse("x").unwrap(),
             Some(&PathFilter::new(["*.none"])),
+            0,
             1024,
             10
         )
@@ -354,6 +362,75 @@ async fn a_glob_keeps_files_out_of_the_search(provider: &Arc<dyn WorkspaceProvid
         .unwrap()
         .is_empty(),
         "a glob that matches nothing finds nothing"
+    );
+    ws.close().await;
+}
+
+async fn hits_come_with_their_context(provider: &Arc<dyn WorkspaceProvider>, name: &str) {
+    let ws = open(provider, &format!("{name}-context"), Limits::default()).await;
+    ws.write(
+        &path("notes/ctx.txt"),
+        b"alpha\n  hit one\nbeta\nhit two\ngamma\ndelta\nepsilon\nhit three\n",
+    )
+    .await
+    .unwrap();
+    ws.write(&path("notes/other.md"), b"hit four\n")
+        .await
+        .unwrap();
+    let hit = Pattern::parse("hit").unwrap();
+    let shown = |hits: &[Hit]| -> Vec<(String, usize, bool)> {
+        hits.iter()
+            .map(|h| (h.path.clone(), h.line, h.matched))
+            .collect()
+    };
+    let ctx = |line: usize, matched: bool| ("notes/ctx.txt".to_owned(), line, matched);
+    let txt = PathFilter::new(["*.txt"]);
+    let hits = ws
+        .search(&path("notes"), &hit, Some(&txt), 1, 1024, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        shown(&hits),
+        [
+            ctx(1, false),
+            ctx(2, true),
+            ctx(3, false),
+            ctx(4, true),
+            ctx(5, false),
+            ctx(7, false),
+            ctx(8, true),
+        ],
+        "overlapping context merged, no line twice, and none past the end of the file"
+    );
+    assert_eq!(hits[1].text, "  hit one", "indentation kept");
+    assert_eq!(hits[0].text, "alpha");
+    let capped = ws
+        .search(&path("notes"), &hit, Some(&txt), 1, 1024, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        shown(&capped),
+        [
+            ctx(1, false),
+            ctx(2, true),
+            ctx(3, false),
+            ctx(4, true),
+            ctx(5, false),
+        ],
+        "the cap counts matches and keeps the last one's context"
+    );
+    let everywhere = ws
+        .search(&path("notes"), &hit, None, 0, 1024, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        shown(&everywhere),
+        [
+            ctx(2, true),
+            ctx(4, true),
+            ctx(8, true),
+            ("notes/other.md".to_owned(), 1, true),
+        ]
     );
     ws.close().await;
 }

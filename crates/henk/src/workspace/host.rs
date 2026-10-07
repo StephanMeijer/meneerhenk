@@ -407,6 +407,7 @@ impl Workspace for HostWorkspace {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
@@ -423,20 +424,19 @@ impl Workspace for HostWorkspace {
             let Ok(text) = std::fs::read_to_string(&full) else {
                 continue;
             };
-            for (index, line) in super::lines(&text).enumerate() {
-                if pattern.is_match(line) {
-                    hits.push(Hit {
-                        path: file.clone(),
-                        line: index + 1,
-                        text: line.trim().to_owned(),
-                    });
-                    if hits.len() >= cap {
-                        return Ok(hits);
-                    }
-                }
-            }
+            let lines: Vec<&str> = super::lines(&text).collect();
+            let matched: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| pattern.is_match(line))
+                .map(|(at, _)| at)
+                .collect();
+            hits.extend(super::with_context(&file, &lines, &matched, context));
         }
-        Ok(hits)
+        // By path, as the other backends cut them: the walk's order puts
+        // `a/b` before `a-c`.
+        hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+        Ok(super::keep_matches(hits, cap, context))
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
@@ -603,7 +603,7 @@ mod tests {
             .await
             .unwrap();
         let hits = ws
-            .search(&WorkspacePath::root(), &find("let x"), None, 50, 10)
+            .search(&WorkspacePath::root(), &find("let x"), None, 0, 50, 10)
             .await
             .unwrap();
         assert_eq!(
@@ -611,16 +611,17 @@ mod tests {
             [Hit {
                 path: "src/a.rs".to_owned(),
                 line: 2,
-                text: "let x = 1;".to_owned()
+                text: "    let x = 1;".to_owned(),
+                matched: true,
             }]
         );
         let capped = ws
-            .search(&p("src"), &find("let x"), None, 1 << 20, 3)
+            .search(&p("src"), &find("let x"), None, 0, 1 << 20, 3)
             .await
             .unwrap();
         assert_eq!(capped.len(), 3);
         assert!(
-            ws.search(&p("nope"), &find("x"), None, 10, 10)
+            ws.search(&p("nope"), &find("x"), None, 0, 10, 10)
                 .await
                 .is_err()
         );

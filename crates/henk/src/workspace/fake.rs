@@ -241,11 +241,13 @@ impl Workspace for FakeWorkspace {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         let files = self.files()?;
         let mut hits = Vec::new();
+        let mut found = 0;
         for (path, (content, _)) in files
             .iter()
             .filter(|(p, _)| under(dir, p) && only.is_none_or(|o| o.matches(p)))
@@ -256,20 +258,20 @@ impl Workspace for FakeWorkspace {
             let Ok(text) = std::str::from_utf8(content) else {
                 continue;
             };
-            for (index, line) in super::lines(text).enumerate() {
-                if pattern.is_match(line) {
-                    hits.push(Hit {
-                        path: path.clone(),
-                        line: index + 1,
-                        text: line.trim().to_owned(),
-                    });
-                    if hits.len() >= cap {
-                        return Ok(hits);
-                    }
-                }
+            if found >= cap {
+                break;
             }
+            let lines: Vec<&str> = super::lines(text).collect();
+            let matched: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| pattern.is_match(line))
+                .map(|(at, _)| at)
+                .collect();
+            found += matched.len();
+            hits.extend(super::with_context(path, &lines, &matched, context));
         }
-        Ok(hits)
+        Ok(super::keep_matches(hits, cap, context))
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
