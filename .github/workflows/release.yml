@@ -111,6 +111,14 @@ jobs:
         run: |
           ${{ matrix.packages_install }}
 
+      # The dashboard app, which build.rs embeds in the binary (#199).
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: dashboard/.node-version
+      - name: Build the dashboard app
+        working-directory: dashboard
+        run: npm ci --ignore-scripts --no-fund && npm run build
+
       - name: Build artifacts
         run: dist build --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
 

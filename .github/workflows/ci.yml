@@ -111,6 +111,32 @@ jobs:
           tool: cargo-machete@0.9.2
       - run: cargo machete
 
+  # The dashboard app (dashboard/, #199): types, lint, tests, a production
+  # build and the npm advisories. Node's version is dashboard/.node-version,
+  # as Rust's is rust-toolchain.toml. `--ignore-scripts`: no dependency runs
+  # code at install. The Rust jobs above need none of this; a binary built
+  # without dashboard/dist serves a page saying the app was not built.
+  dashboard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: dashboard/.node-version
+      - run: npm ci --ignore-scripts --no-fund
+      - run: npm run check
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
   # The whole of deny.toml: advisories, licences, sources and the bans that
   # keep TLS on rustls with ring. Runs on pull requests and on pushes to
   # `main`; the `main` run is what tells an author that a red advisory check
@@ -189,7 +215,7 @@ jobs:
   #      PR update is safe, the newest run writes a correct PR.
   release-plz-release:
     name: Tag and create the GitHub Release
-    needs: [fmt, clippy, test, deny, machete]
+    needs: [fmt, clippy, test, deny, machete, dashboard]
     if: >-
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'

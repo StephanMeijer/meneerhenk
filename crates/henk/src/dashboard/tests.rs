@@ -54,6 +54,11 @@ pub(super) struct Fixture {
 }
 
 pub(super) fn fixture(github: &str) -> Fixture {
+    fixture_with_assets(github, app::Assets(&[]))
+}
+
+/// A fixture whose dashboard app is `assets`.
+pub(super) fn fixture_with_assets(github: &str, assets: app::Assets) -> Fixture {
     let settings = Config::parse(&config(github))
         .and_then(Config::into_settings)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -96,8 +101,9 @@ pub(super) fn fixture(github: &str) -> Fixture {
         client_secret: SecretString::from("csecret".to_owned()),
         session_key: SecretString::from("k".repeat(32)),
     };
-    let dashboard =
-        Arc::new(Dashboard::new(app, coordinator, bus, dashboard_config, &secrets).unwrap());
+    let mut dashboard = Dashboard::new(app, coordinator, bus, dashboard_config, &secrets).unwrap();
+    dashboard.assets = assets;
+    let dashboard = Arc::new(dashboard);
     Fixture {
         router: routes(Arc::clone(&dashboard)),
         dashboard,

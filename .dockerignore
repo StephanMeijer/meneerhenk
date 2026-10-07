@@ -1,10 +1,14 @@
-# Build context for the Dockerfile: the workspace manifests, the crates and
-# the example config that config.rs embeds. Everything else stays out.
+# Build context for the Dockerfile: the workspace manifests, the crates, the
+# example config that config.rs embeds and the dashboard app's sources (the
+# spa stage builds them). Everything else stays out.
 *
 !Cargo.toml
 !Cargo.lock
 !henk.example.toml
 !crates/
+!dashboard/
+dashboard/node_modules/
+dashboard/dist/
 crates/*/tests/
 **/target/
 **/*.db

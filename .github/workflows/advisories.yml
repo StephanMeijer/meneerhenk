@@ -55,3 +55,21 @@ jobs:
             recorded=1
           done
           [ "$recorded" = 1 ] || echo "::warning::$dbs exists but holds no git checkout to record"
+
+  # The same for the dashboard app's npm dependencies (dashboard/, #199).
+  npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: dashboard/.node-version
+      - run: npm audit --audit-level=high

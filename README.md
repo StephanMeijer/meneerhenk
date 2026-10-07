@@ -619,6 +619,25 @@ the session's CSRF token on every action: runs, a run's drafts, tool calls
 and transcripts, events, health, start and cancel. `docs/API.md` lists the
 endpoints.
 
+The new dashboard, a single-page app in `dashboard/` (Svelte, Vite and
+TypeScript), is at `/dashboard/app/` while its views are built (#197); it
+reads only that API. The release binary and the container image embed it.
+To build it into a binary of your own, with the Node of
+`dashboard/.node-version`:
+
+```sh
+cd dashboard && npm ci --ignore-scripts && npm run build && cd ..
+cargo build --release   # build.rs embeds dashboard/dist
+```
+
+To work on it, run Henk, sign in on Henk's own `/dashboard/login`, and
+start Vite's dev server on the same host: it forwards the API and sign-in
+to `HENK_URL` (default `http://127.0.0.1:8080`).
+
+```sh
+cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
+```
+
 ## Decisions taken for this version
 
 These answer open questions of the spec provisionally; each becomes a
