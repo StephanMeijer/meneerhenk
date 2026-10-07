@@ -100,8 +100,9 @@ pub struct ServerConfig {
     /// Env var with the bearer token for `POST /plan` and `POST /review`.
     #[serde(default = "default_api_token_env")]
     pub api_token_env: String,
-    /// Inbound events and their outcomes older than this many days are
-    /// deleted while serving. Runs are kept: their links are posted.
+    /// Inbound events, their outcomes and session transcripts older than
+    /// this many days are deleted while serving. Runs are kept: their links
+    /// are posted.
     #[serde(default = "default_keep_events_days")]
     pub keep_events_days: u32,
 }

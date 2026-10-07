@@ -2,7 +2,10 @@
 
 use std::fmt::Write as _;
 
-use henk_store::{EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage};
+use henk_store::{
+    EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage, TranscriptSummary,
+};
+use serde_json::Value;
 
 /// One tool's calls in words: `12 calls, 1 error, 840 ms`.
 #[must_use]
@@ -26,12 +29,213 @@ pub fn tally_text(tally: &ToolTally) -> String {
     parts.join(", ")
 }
 
-/// Renders one run with its lanes, tool calls, findings and timeline.
+/// A stored transcript (#191), read back for people: the `henk runs show
+/// --transcript` text and the dashboard page both render this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptView {
+    /// The session's name.
+    pub session: String,
+    /// The model it ran on.
+    pub model: String,
+    /// Why it stopped.
+    pub stop: String,
+    /// Model turns taken.
+    pub turns: u64,
+    /// Prompt tokens, all of them, and tokens generated.
+    pub tokens: (u64, u64),
+    /// The system prompt.
+    pub system: String,
+    /// The conversation, in order.
+    pub messages: Vec<MessageView>,
+}
+
+/// One message of a transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageView {
+    /// `user` or `assistant`.
+    pub role: String,
+    /// The model turn this message belongs to: the assistant's message is
+    /// turn n, and the results it is answered with are of turn n too.
+    pub turn: u64,
+    /// Its content, in order.
+    pub parts: Vec<PartView>,
+}
+
+/// One block of a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartView {
+    /// Text.
+    Text(String),
+    /// A call the model made, with its arguments as JSON or as the model
+    /// wrote them when they were not JSON.
+    Call {
+        /// The tool.
+        name: String,
+        /// The arguments.
+        arguments: String,
+    },
+    /// What a call returned.
+    Result {
+        /// Whether the tool failed.
+        error: bool,
+        /// What it returned.
+        content: String,
+    },
+    /// Provider content the model wanted echoed back, such as thinking.
+    Opaque,
+}
+
+impl TranscriptView {
+    /// Reads a stored transcript's JSON. Anything it does not know is
+    /// skipped, so an older or newer transcript still reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error when the body is not JSON.
+    pub fn parse(body: &str) -> Result<Self, serde_json::Error> {
+        let value: Value = serde_json::from_str(body)?;
+        let text = |key: &str| field(&value, key).as_str().unwrap_or_default().to_owned();
+        let usage = field(&value, "usage");
+        let count = |key: &str| field(usage, key).as_u64().unwrap_or(0);
+        let mut turn = 0;
+        let messages = field(&value, "messages")
+            .as_array()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let role = field(message, "role")
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        if role == "assistant" {
+                            turn += 1;
+                        }
+                        let parts = field(message, "blocks")
+                            .as_array()
+                            .map(|blocks| blocks.iter().filter_map(part).collect())
+                            .unwrap_or_default();
+                        MessageView { role, turn, parts }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            session: text("session"),
+            model: text("model"),
+            stop: text("stop"),
+            turns: field(&value, "turns").as_u64().unwrap_or(0),
+            tokens: (
+                count("input_tokens") + count("cache_read_tokens") + count("cache_write_tokens"),
+                count("output_tokens"),
+            ),
+            system: text("system"),
+            messages,
+        })
+    }
+}
+
+/// `value[key]`, or null.
+fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
+    value.get(key).unwrap_or(&Value::Null)
+}
+
+fn part(block: &Value) -> Option<PartView> {
+    let (kind, inner) = block.as_object()?.iter().next()?;
+    Some(match kind.as_str() {
+        "text" => PartView::Text(inner.as_str()?.to_owned()),
+        "tool_call" => PartView::Call {
+            name: field(inner, "name").as_str().unwrap_or_default().to_owned(),
+            arguments: match &field(inner, "arguments") {
+                Value::Object(arguments) => match arguments.iter().next() {
+                    Some((_, Value::String(raw))) => raw.clone(),
+                    Some((_, parsed)) => parsed.to_string(),
+                    None => String::new(),
+                },
+                other => other.to_string(),
+            },
+        },
+        "tool_result" => PartView::Result {
+            error: field(inner, "is_error").as_bool().unwrap_or(false),
+            content: field(inner, "content")
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        },
+        "opaque" => PartView::Opaque,
+        _ => return None,
+    })
+}
+
+/// A stored transcript as text, for `henk runs show --transcript`.
+///
+/// # Errors
+///
+/// Returns the error when the body is not JSON.
+pub fn transcript_text(body: &str) -> Result<String, serde_json::Error> {
+    let view = TranscriptView::parse(body)?;
+    let mut out = String::new();
+    let _ = writeln!(out, "transcript {}", view.session);
+    let _ = writeln!(
+        out,
+        "  model {}, stopped {}, {} turns, tokens in {} out {}",
+        view.model, view.stop, view.turns, view.tokens.0, view.tokens.1
+    );
+    let _ = writeln!(out, "\nsystem\n{}", indent(&view.system));
+    for message in &view.messages {
+        let _ = writeln!(out, "\n{} (turn {})", message.role, message.turn);
+        for part in &message.parts {
+            let _ = match part {
+                PartView::Text(text) => writeln!(out, "{}", indent(text)),
+                PartView::Call { name, arguments } => {
+                    writeln!(out, "  call {name} {arguments}")
+                }
+                PartView::Result { error, content } => writeln!(
+                    out,
+                    "  result {}\n{}",
+                    if *error { "error" } else { "ok" },
+                    indent(&indent(content))
+                ),
+                PartView::Opaque => writeln!(out, "  (provider content, not shown)"),
+            };
+        }
+    }
+    Ok(terminal_safe(&out))
+}
+
+/// Text for a terminal: every control character but newline and tab is
+/// written as its Rust escape, so `ESC` becomes `\u{1b}`. Tool results,
+/// summaries and errors carry other people's words (§8.3), and a raw
+/// escape sequence in them would reach the operator's terminal as a
+/// command: a changed title, hidden lines, a clipboard write. What is
+/// stored is left as it is.
+fn terminal_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Renders one run with its lanes, tool calls, transcripts, findings and
+/// timeline.
 #[must_use]
 pub fn render(
     run: &RunRecord,
     lanes: &[LaneRecord],
     tools: &[ToolUsage],
+    transcripts: &[TranscriptSummary],
     findings: &[FindingRecord],
     events: &[EventRecord],
 ) -> String {
@@ -98,6 +302,24 @@ pub fn render(
         }
     }
 
+    if !transcripts.is_empty() {
+        let _ = writeln!(
+            out,
+            "\ntranscripts ({}), read one with --transcript <session>",
+            transcripts.len()
+        );
+        for transcript in transcripts {
+            let _ = writeln!(
+                out,
+                "  {:<28} {:<9} turns {:>3}  {} bytes",
+                transcript.session,
+                transcript.stop.to_lowercase(),
+                transcript.turns,
+                transcript.bytes
+            );
+        }
+    }
+
     let _ = writeln!(out, "\nfindings ({})", findings.len());
     for finding in findings {
         let _ = writeln!(
@@ -116,12 +338,17 @@ pub fn render(
     for event in events {
         let _ = writeln!(out, "  {} {:<5} {}", event.at, event.level, event.message);
     }
-    out
+    terminal_safe(&out)
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing
+    )]
 
     use henk_domain::allowlist::Platform;
     use henk_domain::run::{RunId, RunKind};
@@ -171,7 +398,15 @@ mod tests {
             level: "warn".into(),
             message: "lane-a: could not post".into(),
         }];
-        let text = render(&run, &lanes, &[], &findings, &events);
+        let transcripts = vec![TranscriptSummary {
+            at: "t".into(),
+            session: "lane-a".into(),
+            model: "m".into(),
+            stop: "EndTurn".into(),
+            turns: 3,
+            bytes: 1234,
+        }];
+        let text = render(&run, &lanes, &[], &transcripts, &findings, &events);
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
         assert!(text.contains("lanes (1)"));
@@ -181,6 +416,111 @@ mod tests {
         assert!(text.contains("timeline (1)"));
         assert!(text.contains("warn  lane-a: could not post"));
         assert!(text.contains("             Second line."), "{text}");
+        assert!(text.contains("transcripts (1)"), "{text}");
+        assert!(
+            text.contains("lane-a                       endturn   turns   3  1234 bytes"),
+            "{text}"
+        );
+    }
+
+    /// A transcript as `henk-session` stores it: text, a tool call, an
+    /// error result and provider content.
+    const STORED: &str = r#"{"run":"r-1","session":"lane-a","model":"m","stop":"EndTurn","turns":2,
+        "usage":{"input_tokens":10,"output_tokens":5,"cache_read_tokens":3,"cache_write_tokens":0},
+        "system":"You review.\nCarefully.",
+        "messages":[
+          {"role":"user","blocks":[{"text":"Review <this>."}]},
+          {"role":"assistant","blocks":[{"opaque":{"thinking":"x"}},{"tool_call":{"id":"c1","name":"read_file","arguments":{"parsed":{"path":"a.rs"}}}},{"tool_call":{"id":"c2","name":"search","arguments":{"malformed":"{oops"}}}]},
+          {"role":"user","blocks":[{"tool_result":{"call_id":"c1","content":"fn main() {}","is_error":false}},{"tool_result":{"call_id":"c2","content":"bad arguments","is_error":true}}]},
+          {"role":"assistant","blocks":[{"text":"No findings."}]}
+        ]}"#;
+
+    #[test]
+    fn a_transcript_reads_as_its_conversation() {
+        let view = TranscriptView::parse(STORED).unwrap();
+        assert_eq!(view.tokens, (13, 5));
+        assert_eq!(
+            view.messages.iter().map(|m| m.turn).collect::<Vec<_>>(),
+            [0, 1, 1, 2]
+        );
+        let text = transcript_text(STORED).unwrap();
+        for expected in [
+            "transcript lane-a\n",
+            "model m, stopped EndTurn, 2 turns, tokens in 13 out 5",
+            "system\n  You review.\n  Carefully.",
+            "user (turn 0)\n  Review <this>.",
+            "assistant (turn 1)\n  (provider content, not shown)",
+            "  call read_file {\"path\":\"a.rs\"}",
+            "  call search {oops",
+            "  result ok\n    fn main() {}",
+            "  result error\n    bad arguments",
+            "assistant (turn 2)\n  No findings.",
+        ] {
+            assert!(text.contains(expected), "{expected:?} in\n{text}");
+        }
+        assert!(transcript_text("not json").is_err());
+    }
+
+    #[test]
+    fn escape_sequences_do_not_reach_the_terminal() {
+        let stored = r#"{"session":"s","system":"a\u001b[2Jb",
+            "messages":[{"role":"user","blocks":[
+              {"text":"x\u009b31my"},
+              {"tool_result":{"content":"ok\u001b]52;c;aGk=\u0007\r\tend","is_error":false}}]}]}"#;
+        let view = TranscriptView::parse(stored).unwrap();
+        assert!(
+            matches!(&view.messages[0].parts[1], PartView::Result { content, .. } if content.contains('\u{1b}')),
+            "the parsed transcript keeps what was stored"
+        );
+        let text = transcript_text(stored).unwrap();
+        assert!(
+            !text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t'),
+            "{text:?}"
+        );
+        assert!(text.contains("a\\u{1b}[2Jb"), "{text}");
+        assert!(text.contains("x\\u{9b}31my"), "{text}");
+        assert!(text.contains("ok\\u{1b}]52;c;aGk=\\u{7}\\r\tend"), "{text}");
+
+        let events = [EventRecord {
+            at: "t".into(),
+            level: "warn".into(),
+            message: "lane-a: \u{1b}]0;title\u{7}".into(),
+        }];
+        let run = RunRecord {
+            id: RunId::parse("r-1").unwrap(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "o/r".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "cli".into(),
+            status: RunStatus::Failed,
+            started_at: "t0".into(),
+            finished_at: None,
+            link: "l".into(),
+            summary: Some("s\u{1b}[8m".into()),
+            error: Some("e\u{1b}[1A".into()),
+            heartbeat_at: None,
+            check_id: None,
+        };
+        let text = render(&run, &[], &[], &[], &[], &events);
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+        assert!(text.contains("lane-a: \\u{1b}]0;title\\u{7}"), "{text}");
+    }
+
+    #[test]
+    fn a_transcript_from_another_version_still_reads() {
+        let view =
+            TranscriptView::parse(r#"{"session":"s","messages":[{"role":"assistant","blocks":[{"image":1},{"text":"hi"}]}]}"#)
+                .unwrap();
+        assert_eq!(view.messages[0].parts, [PartView::Text("hi".into())]);
+        assert_eq!(view.turns, 0);
     }
 
     /// A model asking for the same call each turn, as `henk runs show`
@@ -244,10 +584,25 @@ mod tests {
             &store.run(&id).await.unwrap().unwrap(),
             &store.lanes(&id).await.unwrap(),
             &ToolUsage::from_calls(&store.tool_calls(&id).await.unwrap()),
+            &store.transcripts(&id).await.unwrap(),
             &store.findings(&id).await.unwrap(),
             &store.events(&id).await.unwrap(),
         );
         assert!(text.contains("stuck repeating get_file_diff"), "{text}");
+        assert!(text.contains("transcripts (1)"), "{text}");
+        let stored = store.transcript(&id, "lane-a").await.unwrap().unwrap();
+        let conversation = transcript_text(&stored.body).unwrap();
+        assert!(
+            conversation.contains("user (turn 0)\n  go\n"),
+            "{conversation}"
+        );
+        assert_eq!(
+            conversation
+                .matches("  call get_file_diff {\"path\":\"a.rs\"}")
+                .count(),
+            5,
+            "every call the model made is in its transcript: {conversation}"
+        );
         assert!(
             text.contains("tool calls (5)\n  lane-a\n    get_file_diff                5 calls, 2 refused, 3 not run, 0 ms\n"),
             "every call is on the run, even one that never ran: {text}"

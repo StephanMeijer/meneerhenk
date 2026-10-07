@@ -15,5 +15,6 @@ pub use store::RunStore;
 pub use types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
-    RunRecord, RunStatus, StoreError, ToolCallRecord, ToolTally, ToolUsage, session_kind,
+    RunRecord, RunStatus, StoreError, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord,
+    TranscriptSummary, session_kind,
 };

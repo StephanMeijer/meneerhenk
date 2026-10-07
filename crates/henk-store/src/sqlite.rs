@@ -16,7 +16,8 @@ use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
     PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage,
-    attach_outcomes, kind_str, now, platform_str, status_str, to_i64, to_u64,
+    TranscriptRecord, TranscriptSummary, attach_outcomes, kind_str, now, platform_str, status_str,
+    to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -34,6 +35,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/005_prune_events.sql")),
         M::up(include_str!("../migrations/sqlite/006_event_requester.sql")),
         M::up(include_str!("../migrations/sqlite/007_tool_calls.sql")),
+        M::up(include_str!("../migrations/sqlite/008_transcripts.sql")),
     ])
 }
 
@@ -278,6 +280,77 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn record_transcript(
+        &self,
+        run: &RunId,
+        transcript: &TranscriptRecord,
+    ) -> Result<(), StoreError> {
+        let at = if transcript.at.is_empty() {
+            now()
+        } else {
+            transcript.at.clone()
+        };
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO transcripts (run_id, session, model, stop, turns, bytes, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    run.as_str(),
+                    transcript.session,
+                    transcript.model,
+                    transcript.stop,
+                    transcript.turns,
+                    i64::try_from(transcript.bytes).unwrap_or(i64::MAX),
+                    transcript.body,
+                    at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT recorded_at, session, model, stop, turns, bytes FROM transcripts WHERE run_id = ?1 ORDER BY id",
+            )?;
+            let rows = statement.query_map(params![run.as_str()], |row| {
+                Ok(TranscriptSummary {
+                    at: row.get(0)?,
+                    session: row.get(1)?,
+                    model: row.get(2)?,
+                    stop: row.get(3)?,
+                    turns: row.get(4)?,
+                    bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        })
+    }
+
+    async fn transcript(
+        &self,
+        run: &RunId,
+        session: &str,
+    ) -> Result<Option<TranscriptRecord>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT recorded_at, session, model, stop, turns, bytes, body FROM transcripts WHERE run_id = ?1 AND session = ?2 ORDER BY id DESC LIMIT 1",
+            )?;
+            let mut rows = statement.query_map(params![run.as_str(), session], |row| {
+                Ok(TranscriptRecord {
+                    at: row.get(0)?,
+                    session: row.get(1)?,
+                    model: row.get(2)?,
+                    stop: row.get(3)?,
+                    turns: row.get(4)?,
+                    bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+                    body: row.get(6)?,
+                })
+            })?;
+            rows.next().transpose().map_err(StoreError::from)
+        })
+    }
+
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
         let at = if call.at.is_empty() {
             now()
@@ -504,10 +577,15 @@ impl RunStore for SqliteStore {
                 "DELETE FROM inbound_events WHERE received_at < ?1",
                 params![cutoff],
             )?;
+            let transcripts = transaction.execute(
+                "DELETE FROM transcripts WHERE recorded_at < ?1",
+                params![cutoff],
+            )?;
             transaction.commit()?;
             Ok(PruneCounts {
                 events: u64::try_from(events).unwrap_or(u64::MAX),
                 outcomes: u64::try_from(outcomes).unwrap_or(u64::MAX),
+                transcripts: u64::try_from(transcripts).unwrap_or(u64::MAX),
             })
         })
     }

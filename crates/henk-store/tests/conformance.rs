@@ -16,7 +16,7 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     EventFilter, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
     Page, PgStore, PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
-    ToolCallRecord,
+    ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -85,8 +85,71 @@ macro_rules! for_each_scenario {
             inbound_events_are_listed_with_their_outcomes,
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
             tool_calls_are_kept_in_order_and_add_up_across_runs,
+            transcripts_are_kept_whole_listed_and_pruned,
         );
     };
+}
+
+fn transcript(session: &str, at: &str, body: &str) -> TranscriptRecord {
+    TranscriptRecord {
+        at: at.into(),
+        session: session.into(),
+        model: "opus".into(),
+        stop: "EndTurn".into(),
+        turns: 4,
+        bytes: u64::try_from(body.len()).unwrap(),
+        body: body.into(),
+    }
+}
+
+async fn transcripts_are_kept_whole_listed_and_pruned(store: &dyn RunStore) {
+    let run = new_run("r-transcripts");
+    store.create_run(&run).await.unwrap();
+    // Large and with every kind of character a conversation has: kept
+    // byte for byte, never cut.
+    let large = format!(
+        "{{\"messages\":\"{}\"}}",
+        "caf\u{e9} \\n \u{1f50d} ".repeat(150_000)
+    );
+    assert!(large.len() > 2 * 1024 * 1024);
+    store
+        .record_transcript(
+            &run.id,
+            &transcript("lane-a", "2026-01-01T00:00:00Z", "old"),
+        )
+        .await
+        .unwrap();
+    store
+        .record_transcript(&run.id, &transcript("lane-a", "", &large))
+        .await
+        .unwrap();
+    store
+        .record_transcript(&run.id, &transcript("check-lane-a-1", "", "{}"))
+        .await
+        .unwrap();
+
+    let listed = store.transcripts(&run.id).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|t| t.session.as_str())
+            .collect::<Vec<_>>(),
+        ["lane-a", "lane-a", "check-lane-a-1"]
+    );
+    assert_eq!(listed[1].bytes, u64::try_from(large.len()).unwrap());
+    let kept = store.transcript(&run.id, "lane-a").await.unwrap().unwrap();
+    assert_eq!(kept.body, large, "the latest of the name, whole");
+    assert_eq!(
+        (kept.model.as_str(), kept.stop.as_str(), kept.turns),
+        ("opus", "EndTurn", 4)
+    );
+    assert!(store.transcript(&run.id, "lane-b").await.unwrap().is_none());
+
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(30);
+    let pruned = store.prune_events(cutoff).await.unwrap();
+    assert_eq!(pruned.transcripts, 1, "only the old one");
+    assert_eq!(store.transcripts(&run.id).await.unwrap().len(), 2);
+    assert!(store.run(&run.id).await.unwrap().is_some(), "the run stays");
 }
 
 fn tool_call(session: &str, model: &str, tool: &str, outcome: &str, ms: u64) -> ToolCallRecord {
@@ -218,7 +281,8 @@ async fn old_events_and_their_outcomes_are_pruned(store: &dyn RunStore) {
         counts,
         PruneCounts {
             events: 1,
-            outcomes: 2
+            outcomes: 2,
+            transcripts: 0,
         }
     );
     assert!(

@@ -128,6 +128,10 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
     Router::new()
         .route("/dashboard", get(views::overview))
         .route("/dashboard/runs/{id}", get(views::run))
+        .route(
+            "/dashboard/runs/{id}/transcripts/{session}",
+            get(views::transcript),
+        )
         .route("/dashboard/events", get(views::events))
         .route("/dashboard/events/{id}", get(views::event))
         .route("/dashboard/health", get(views::health))

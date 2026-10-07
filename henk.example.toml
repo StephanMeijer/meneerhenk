@@ -10,8 +10,8 @@ public_base_url = "https://henk.example.com"
 github_webhook_secret_env = "HENK_GITHUB_WEBHOOK_SECRET"
 gitlab_webhook_token_env = "HENK_GITLAB_WEBHOOK_TOKEN"
 api_token_env = "HENK_API_TOKEN"
-# Inbound events and what each listener did with them are deleted after
-# this many days. Runs are kept, since their links are posted.
+# Inbound events, what each listener did with them, and session transcripts
+# are deleted after this many days. Runs are kept, since their links are posted.
 keep_events_days = 30
 
 [database]
