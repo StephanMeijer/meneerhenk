@@ -74,6 +74,8 @@ pub(crate) mod testing {
         pub pull_request_calls: Mutex<u32>,
         pub accept_posts: bool,
         pub posts: Mutex<Vec<(String, u32, String)>>,
+        /// Lines `post_finding` refuses even when posts are accepted.
+        pub refuse_lines: Vec<u32>,
         pub updates: Mutex<Vec<(String, String)>>,
         pub resolved: Mutex<Vec<String>>,
         /// What `diff` returns.
@@ -151,7 +153,7 @@ pub(crate) mod testing {
             _: DiffSide,
             body: &str,
         ) -> Result<PostedComment, PlatformError> {
-            if !self.accept_posts {
+            if !self.accept_posts || self.refuse_lines.contains(&line) {
                 return Err(PlatformError::Decode("not in the fake".into()));
             }
             let mut posts = self.posts.lock().unwrap();

@@ -58,7 +58,7 @@ pub async fn write_all(
     book: &DraftBook,
     verdicts: &BTreeMap<DraftId, Verdict>,
 ) {
-    let mut written: BTreeMap<DraftId, String> = BTreeMap::new();
+    let mut outcomes = Outcomes::default();
     for settled in henk_domain::draft::settle(book, verdicts) {
         let Some(draft) = book.get(settled.id()) else {
             continue;
@@ -78,11 +78,9 @@ pub async fn write_all(
                 unchecked,
                 ..
             } => {
-                if let Some(comment) =
-                    write_one(writes, draft, checked_by, unchecked.as_deref(), &reason).await
-                {
-                    written.insert(draft.id, comment);
-                }
+                outcomes
+                    .write(writes, draft, draft.id, checked_by, unchecked, &reason)
+                    .await;
             }
             Settled::Reject { by, reason, .. } => {
                 note(
@@ -112,36 +110,111 @@ pub async fn write_all(
                 .await;
             }
             Settled::Merge { by, into, .. } => {
-                let comment = match &into {
-                    Original::Draft(id) => written.get(id).cloned().unwrap_or_default(),
-                    Original::Comment(comment) => comment.clone(),
-                };
-                note(
-                    writes,
-                    "info",
-                    &format!(
-                        "{}: {} on {}:{} repeats {into} ({by}), merged into it",
-                        draft.lane, draft.id, draft.key.path, draft.key.line
-                    ),
-                )
-                .await;
-                record(writes, draft, &comment, FindingAction::Merged).await;
-                let same_as = match &into {
-                    Original::Draft(id) => id.to_string(),
-                    Original::Comment(comment) => comment.clone(),
-                };
-                decide(
-                    writes,
-                    draft,
-                    DraftVerdict::SameAs,
-                    Some(&by),
-                    &reason,
-                    &same_as,
-                    &comment,
-                )
-                .await;
+                outcomes.merge(writes, draft, &by, &into, &reason).await;
             }
         }
+    }
+}
+
+/// What became of the drafts written so far, for the repeats after them.
+#[derive(Default)]
+struct Outcomes {
+    /// The comment each written draft is on.
+    written: BTreeMap<DraftId, String>,
+    /// Drafts that should have been written but were not, with how they
+    /// were checked: a repeat of one goes out in its place.
+    failed: BTreeMap<DraftId, (Option<ModelId>, Option<String>)>,
+}
+
+impl Outcomes {
+    /// Writes `draft` for `original`, itself or the failed draft it
+    /// stands in for, and remembers the outcome under `original`.
+    async fn write(
+        &mut self,
+        writes: &ReviewWrites,
+        draft: &Draft,
+        original: DraftId,
+        checked_by: Option<ModelId>,
+        unchecked: Option<String>,
+        reason: &str,
+    ) {
+        match write_one(
+            writes,
+            draft,
+            checked_by.clone(),
+            unchecked.as_deref(),
+            reason,
+        )
+        .await
+        {
+            Some(comment) => {
+                self.written.insert(original, comment);
+            }
+            None => {
+                self.failed.insert(original, (checked_by, unchecked));
+            }
+        }
+    }
+
+    /// Merges a repeat into what it repeats. When that is an earlier draft
+    /// that could not be written, the problem is not on the target yet, so
+    /// this draft goes out in its place, checked as the original was.
+    async fn merge(
+        &mut self,
+        writes: &ReviewWrites,
+        draft: &Draft,
+        by: &ModelId,
+        into: &Original,
+        reason: &str,
+    ) {
+        let comment = match into {
+            Original::Draft(id) => {
+                let Some(comment) = self.written.get(id).cloned() else {
+                    let (checked_by, unchecked) = self.failed.remove(id).unwrap_or((
+                        None,
+                        Some(format!("{id}, which it repeats, was not written")),
+                    ));
+                    note(
+                        writes,
+                        "info",
+                        &format!(
+                            "{}: {} on {}:{} repeats {id}, which was not written, so it goes out instead",
+                            draft.lane, draft.id, draft.key.path, draft.key.line
+                        ),
+                    )
+                    .await;
+                    self.write(writes, draft, *id, checked_by, unchecked, reason)
+                        .await;
+                    return;
+                };
+                comment
+            }
+            Original::Comment(comment) => comment.clone(),
+        };
+        note(
+            writes,
+            "info",
+            &format!(
+                "{}: {} on {}:{} repeats {into} ({by}), merged into it",
+                draft.lane, draft.id, draft.key.path, draft.key.line
+            ),
+        )
+        .await;
+        record(writes, draft, &comment, FindingAction::Merged).await;
+        let same_as = match into {
+            Original::Draft(id) => id.to_string(),
+            Original::Comment(comment) => comment.clone(),
+        };
+        decide(
+            writes,
+            draft,
+            DraftVerdict::SameAs,
+            Some(by),
+            reason,
+            &same_as,
+            &comment,
+        )
+        .await;
     }
 }
 
@@ -788,6 +861,73 @@ mod tests {
             decision.reason.contains("not in the fake"),
             "{}",
             decision.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeat_of_a_draft_that_could_not_be_written_goes_out_in_its_place() {
+        let mut s = setup().await;
+        let writer = Arc::new(FakeWriter {
+            accept_posts: true,
+            refuse_lines: vec![2],
+            ..FakeWriter::default()
+        });
+        s.writes.writer = Arc::clone(&writer) as Arc<dyn PlatformWriter>;
+        let first = s.draft("lane-a", finding(), 2, "x is never set.").await;
+        let repeat = s.draft("lane-b", finding(), 4, "x is not set.").await;
+        let again = s.draft("lane-b", finding(), 5, "x stays unset.").await;
+        let verdicts = BTreeMap::from([
+            (
+                first,
+                Verdict::Confirmed {
+                    by: by(),
+                    reason: "Line 2 never assigns x.".into(),
+                },
+            ),
+            (
+                repeat,
+                Verdict::SameAs {
+                    by: by(),
+                    of: Original::Draft(first),
+                    reason: "Same as d1.".into(),
+                },
+            ),
+            (
+                again,
+                Verdict::SameAs {
+                    by: by(),
+                    of: Original::Draft(repeat),
+                    reason: "Same as d2.".into(),
+                },
+            ),
+        ]);
+        write_all(&s.writes, &s.book, &verdicts).await;
+
+        let posts = writer.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "the repeat stands in, once");
+        assert_eq!(posts[0].1, 4);
+        let marker = Marker::parse(&posts[0].2).unwrap();
+        assert_eq!(marker.checked_by.unwrap().as_str(), "opus");
+        let decisions = s.decisions().await;
+        assert_eq!(decisions[0].verdict, DraftVerdict::Failed);
+        assert_eq!(
+            (decisions[1].verdict, decisions[1].comment_id.as_str()),
+            (DraftVerdict::Confirmed, "c1")
+        );
+        assert_eq!(
+            (
+                decisions[2].verdict,
+                decisions[2].same_as.as_str(),
+                decisions[2].comment_id.as_str()
+            ),
+            (DraftVerdict::SameAs, "d1", "c1")
+        );
+        assert_eq!(
+            s.actions().await,
+            [
+                ("posted".to_owned(), "c1".to_owned()),
+                ("merged".to_owned(), "c1".to_owned()),
+            ]
         );
     }
 
