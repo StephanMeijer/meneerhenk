@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::{Form, FromRequest, FromRequestParts, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -19,6 +20,7 @@ use subtle::ConstantTimeEq as _;
 use tracing::warn;
 
 use super::Dashboard;
+use super::api::ApiError;
 use super::session::{SESSION_COOKIE, STATE_COOKIE, Session, cookie_value};
 use crate::pages::page;
 
@@ -76,13 +78,114 @@ pub struct LoginQuery {
 /// list. The list is checked on every request, so taking an id off it ends
 /// its access at once.
 fn signed_in(parts: &Parts, dashboard: &Dashboard) -> Option<Session> {
+    session_of(parts, dashboard).filter(|s| allowed(dashboard, s))
+}
+
+/// The request's session when genuine and current, whether or not its id
+/// is still on the list.
+fn session_of(parts: &Parts, dashboard: &Dashboard) -> Option<Session> {
     parts
         .headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| cookie_value(cookies, SESSION_COOKIE))
         .and_then(|value| dashboard.signer.read_session(value))
-        .filter(|s| dashboard.config.allowed_github_ids.contains(&s.github_id))
+}
+
+fn allowed(dashboard: &Dashboard, session: &Session) -> bool {
+    dashboard
+        .config
+        .allowed_github_ids
+        .contains(&session.github_id)
+}
+
+/// Someone signed in and allowed, for the JSON API (#198). Unlike
+/// [`Viewer`] it never redirects: no session is a 401, a session whose id
+/// is not on the list a 403.
+#[derive(Debug, Clone)]
+pub struct ApiViewer(pub Session);
+
+impl FromRequestParts<Arc<Dashboard>> for ApiViewer {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        dashboard: &Arc<Dashboard>,
+    ) -> Result<Self, Self::Rejection> {
+        api_session(parts, dashboard).map(Self)
+    }
+}
+
+fn api_session(parts: &Parts, dashboard: &Dashboard) -> Result<Session, ApiError> {
+    let session = session_of(parts, dashboard).ok_or_else(ApiError::unauthenticated)?;
+    if allowed(dashboard, &session) {
+        Ok(session)
+    } else {
+        Err(ApiError::forbidden(
+            "This GitHub account may not use Henk's dashboard.",
+        ))
+    }
+}
+
+/// The header an API action carries its session's CSRF token in.
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// Someone signed in doing something through the JSON API (#198): what
+/// [`Act`] checks for a form, for a JSON body. The request comes from the
+/// dashboard's own origin, carries the session's CSRF token in
+/// [`CSRF_HEADER`], and its body is JSON, which a form on another site
+/// cannot send. Any failure is a 403 or a 4xx for the body, and nothing
+/// happens.
+#[derive(Debug)]
+pub struct ApiAct<T> {
+    /// Who acts.
+    pub session: Session,
+    /// The body.
+    pub body: T,
+}
+
+impl<T> FromRequest<Arc<Dashboard>> for ApiAct<T>
+where
+    T: DeserializeOwned + Send,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, dashboard: &Arc<Dashboard>) -> Result<Self, ApiError> {
+        let (parts, body) = request.into_parts();
+        let session = api_session(&parts, dashboard)?;
+        if !from_the_dashboard(
+            &parts.headers,
+            &dashboard.app.settings.server.public_base_url,
+        ) {
+            warn!(
+                github_id = session.github_id,
+                "an API action came from another origin"
+            );
+            return Err(ApiError::forbidden(
+                "This request did not come from Henk's dashboard.",
+            ));
+        }
+        let token = parts
+            .headers
+            .get(CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if !dashboard.signer.csrf_matches(&session, token) {
+            warn!(
+                github_id = session.github_id,
+                "an API action without its session's token"
+            );
+            return Err(ApiError::forbidden(
+                "The CSRF token is missing or not from this session. Reload and try again.",
+            ));
+        }
+        let Json(body) = Json::<T>::from_request(Request::from_parts(parts, body), &())
+            .await
+            .map_err(|rejection| {
+                ApiError::new(rejection.status(), "bad_request", rejection.body_text())
+            })?;
+        Ok(Self { session, body })
+    }
 }
 
 /// A signed-in person doing something: every dashboard POST takes one

@@ -47,7 +47,7 @@ const LINKS: Links<'static> = Links {
     csrf: None,
 };
 
-const KINDS: &[(&str, RunKind)] = &[
+pub(super) const KINDS: &[(&str, RunKind)] = &[
     ("review", RunKind::Review),
     ("plan", RunKind::Plan),
     ("discord_turn", RunKind::DiscordTurn),
@@ -55,17 +55,17 @@ const KINDS: &[(&str, RunKind)] = &[
     ("address", RunKind::Address),
 ];
 
-const STATUSES: &[(&str, RunStatus)] = &[
+pub(super) const STATUSES: &[(&str, RunStatus)] = &[
     ("running", RunStatus::Running),
     ("finished", RunStatus::Finished),
     ("failed", RunStatus::Failed),
     ("cancelled", RunStatus::Cancelled),
 ];
 
-const PLATFORMS: &[(&str, Platform)] =
+pub(super) const PLATFORMS: &[(&str, Platform)] =
     &[("github", Platform::GitHub), ("gitlab", Platform::GitLab)];
 
-fn lookup<T: Copy>(table: &[(&str, T)], value: Option<&String>) -> Option<T> {
+pub(super) fn lookup<T: Copy>(table: &[(&str, T)], value: Option<&String>) -> Option<T> {
     let value = value?;
     table
         .iter()
@@ -89,7 +89,7 @@ fn page_number(query: &HashMap<String, String>) -> u32 {
 }
 
 /// A link to the pull request, merge request or issue a run is about.
-fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
+pub(super) fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
     let issue = run.kind == RunKind::Plan;
     match run.platform {
         Platform::GitHub => {
@@ -221,6 +221,7 @@ pub async fn overview(
         status: lookup(STATUSES, query.get("status")),
         platform: lookup(PLATFORMS, query.get("platform")),
         repo: wanted(&query, "repo"),
+        ..RunFilter::default()
     };
     let number = page_number(&query);
     let runs = match store
@@ -330,6 +331,7 @@ pub async fn events(
         source: wanted(&query, "source"),
         kind: wanted(&query, "kind"),
         repo: wanted(&query, "repo"),
+        before: None,
     };
     let number = page_number(&query);
     let listed = match dashboard
@@ -424,6 +426,26 @@ pub async fn event(
 /// What the service has, from configuration and the store. Nothing here
 /// starts a process or calls a model; that is `henk doctor --probe`.
 pub async fn health(State(dashboard): State<Arc<Dashboard>>, Viewer(viewer): Viewer) -> Response {
+    let rows = health_rows(&dashboard).await;
+    let mut html = String::from(
+        "<h1>Health</h1><p class=\"muted\">From configuration and the database. <code>henk doctor --probe</code> also tries every model and MCP server.</p><table><tr><th>Check</th><th>State</th><th>Detail</th></tr>",
+    );
+    for (name, verdict, text) in &rows {
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape(name),
+            escape(verdict),
+            escape(text)
+        );
+    }
+    html.push_str("</table>");
+    page("Health", &nav(&dashboard.signer.csrf(&viewer)), &html)
+}
+
+/// The health page's rows: what was checked, `ok`, `warn` or `fail`, and
+/// the detail. Shared by the page and the API (#198).
+pub(super) async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
     let settings = &dashboard.app.settings;
     let store = &dashboard.app.store;
     let mut rows: Vec<(String, String, String)> = Vec::new();
@@ -478,20 +500,7 @@ pub async fn health(State(dashboard): State<Arc<Dashboard>>, Viewer(viewer): Vie
         "ok".to_owned(),
         settings.mcp.keys().cloned().collect::<Vec<_>>().join(", "),
     ));
-    let mut html = String::from(
-        "<h1>Health</h1><p class=\"muted\">From configuration and the database. <code>henk doctor --probe</code> also tries every model and MCP server.</p><table><tr><th>Check</th><th>State</th><th>Detail</th></tr>",
-    );
-    for (name, verdict, text) in &rows {
-        let _ = write!(
-            html,
-            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape(name),
-            escape(verdict),
-            escape(text)
-        );
-    }
-    html.push_str("</table>");
-    page("Health", &nav(&dashboard.signer.csrf(&viewer)), &html)
+    rows
 }
 
 /// The newest page of running runs, and how many are running in all: the

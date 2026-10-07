@@ -14,9 +14,9 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, EventFilter, FindingAction, InboundEvent, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunRecord,
-    RunStatus, RunStore, SqliteStore, ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventKey, FindingAction, InboundEvent,
+    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
+    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -82,6 +82,8 @@ macro_rules! for_each_scenario {
             a_duplicate_run_id_is_an_error,
             joining_is_accepted,
             runs_are_listed_newest_first_by_filter_and_page,
+            runs_page_by_keyset_and_filter_by_target_and_time,
+            inbound_events_page_by_keyset_with_ties_on_the_time,
             inbound_events_are_listed_with_their_outcomes,
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
             tool_calls_are_kept_in_order_and_add_up_across_runs,
@@ -787,6 +789,7 @@ async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
         status: Some(RunStatus::Running),
         platform: Some(Platform::GitHub),
         repo: Some("o/r".into()),
+        ..RunFilter::default()
     };
     assert_eq!(
         ids(store
@@ -812,6 +815,124 @@ async fn runs_are_listed_newest_first_by_filter_and_page(store: &dyn RunStore) {
     assert_eq!(store.count_runs(&gitlab).await.unwrap(), 0);
     assert_eq!(Page::new(1000, 0).limit(), Page::MAX, "a page is capped");
     assert_eq!(Page::new(0, 0).limit(), 1);
+}
+
+async fn runs_page_by_keyset_and_filter_by_target_and_time(store: &dyn RunStore) {
+    let on = |id: &str, target: u64| NewRun {
+        target,
+        ..new_run(id)
+    };
+    for run in [
+        on("r-1", 7),
+        on("r-2", 8),
+        on("r-3", 7),
+        on("r-4", 9),
+        on("r-5", 7),
+    ] {
+        store.create_run(&run).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    let ids = |runs: &[RunRecord]| runs.iter().map(|r| r.id.to_string()).collect::<Vec<_>>();
+    let key = |run: &RunRecord| RunKey {
+        started_at: run.started_at.clone(),
+        id: run.id.to_string(),
+    };
+
+    let mut seen = Vec::new();
+    let mut filter = RunFilter::default();
+    loop {
+        let page = store.list_runs(&filter, Page::new(2, 0)).await.unwrap();
+        let Some(last) = page.last() else { break };
+        filter.before = Some(key(last));
+        seen.extend(ids(&page));
+    }
+    assert_eq!(
+        seen,
+        ["r-5", "r-4", "r-3", "r-2", "r-1"],
+        "every run once, in order"
+    );
+
+    // A run started after the first page does not shift the next one.
+    let first = store
+        .list_runs(&RunFilter::default(), Page::new(2, 0))
+        .await
+        .unwrap();
+    store.create_run(&on("r-6", 7)).await.unwrap();
+    let next = RunFilter {
+        before: Some(key(&first[1])),
+        ..RunFilter::default()
+    };
+    assert_eq!(
+        ids(&store.list_runs(&next, Page::new(2, 0)).await.unwrap()),
+        ["r-3", "r-2"]
+    );
+    assert_eq!(
+        store.count_runs(&next).await.unwrap(),
+        3,
+        "the count takes the keyset too"
+    );
+
+    let sevens = RunFilter {
+        target: Some(7),
+        ..RunFilter::default()
+    };
+    assert_eq!(
+        ids(&store.list_runs(&sevens, Page::new(50, 0)).await.unwrap()),
+        ["r-6", "r-5", "r-3", "r-1"]
+    );
+    let all = store
+        .list_runs(&RunFilter::default(), Page::new(50, 0))
+        .await
+        .unwrap();
+    let at = |id: &str| {
+        all.iter()
+            .find(|r| r.id.to_string() == id)
+            .unwrap()
+            .started_at
+            .clone()
+    };
+    let window = RunFilter {
+        since: Some(at("r-2")),
+        until: Some(at("r-4")),
+        ..RunFilter::default()
+    };
+    assert_eq!(
+        ids(&store.list_runs(&window, Page::new(50, 0)).await.unwrap()),
+        ["r-3", "r-2"],
+        "since is inclusive, until is not"
+    );
+    assert_eq!(store.count_runs(&window).await.unwrap(), 2);
+}
+
+async fn inbound_events_page_by_keyset_with_ties_on_the_time(store: &dyn RunStore) {
+    for (id, at) in [
+        ("e-a", "2026-10-03T00:00:01Z"),
+        ("e-b", "2026-10-03T00:00:02Z"),
+        ("e-c", "2026-10-03T00:00:02Z"),
+        ("e-d", "2026-10-03T00:00:02Z"),
+        ("e-e", "2026-10-03T00:00:03Z"),
+    ] {
+        store.record_event(&inbound(id, at)).await.unwrap();
+    }
+    let mut seen = Vec::new();
+    let mut filter = EventFilter::default();
+    loop {
+        let page = store
+            .list_inbound_events(&filter, Page::new(2, 0))
+            .await
+            .unwrap();
+        let Some(last) = page.last() else { break };
+        filter.before = Some(EventKey {
+            received_at: last.event.received_at.clone(),
+            id: last.event.id.to_string(),
+        });
+        seen.extend(page.iter().map(|e| e.event.id.to_string()));
+    }
+    assert_eq!(
+        seen,
+        ["e-e", "e-d", "e-c", "e-b", "e-a"],
+        "a tie on the time is broken by the id, and no event is lost or repeated"
+    );
 }
 
 async fn inbound_events_are_listed_with_their_outcomes(store: &dyn RunStore) {

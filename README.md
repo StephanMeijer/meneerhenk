@@ -614,6 +614,11 @@ access control. After signing in, the browser returns to the page it asked
 for. Without a dashboard these links are not served; `henk runs show <id>`
 reads a run on the server.
 
+The same is JSON at `/dashboard/api/v1`, behind the same sign-in, with
+the session's CSRF token on every action: runs, a run's drafts, tool calls
+and transcripts, events, health, start and cancel. `docs/API.md` lists the
+endpoints.
+
 ## Decisions taken for this version
 
 These answer open questions of the spec provisionally; each becomes a

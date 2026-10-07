@@ -1,9 +1,12 @@
 //! The web dashboard (#36): what Henk is doing and has done, behind a GitHub
 //! sign-in. Someone signed in may also start a review, plan or address run,
 //! and cancel one that is running (#69); every such action is a form with
-//! the session's CSRF token, from the dashboard's own origin.
+//! the session's CSRF token, from the dashboard's own origin. The same,
+//! as JSON, is under `/dashboard/api/v1` ([`api`], #198), where the
+//! session cookie, scoped to `/dashboard`, reaches it.
 
 mod actions;
+mod api;
 mod auth;
 mod session;
 mod views;
@@ -142,7 +145,8 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/dashboard/logout", post(auth::logout))
         .route("/dashboard/start", post(actions::start))
         .route("/dashboard/runs/{id}/cancel", post(actions::cancel))
-        .with_state(dashboard)
+        .with_state(Arc::clone(&dashboard))
+        .nest("/dashboard/api/v1", api::routes(dashboard))
 }
 
 #[cfg(test)]

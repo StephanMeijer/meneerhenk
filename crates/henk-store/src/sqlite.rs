@@ -732,12 +732,12 @@ impl RunStore for SqliteStore {
         let kind = filter.kind.map(kind_str);
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
+        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
+        let (before_at, before_id) = run_key(filter);
         self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs
-                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
-                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
-                 ORDER BY started_at DESC, id DESC LIMIT ?5 OFFSET ?6"
+                "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
+                 ORDER BY started_at DESC, id DESC LIMIT ?10 OFFSET ?11"
             ))?;
             let raw = statement
                 .query_map(
@@ -746,6 +746,11 @@ impl RunStore for SqliteStore {
                         status,
                         platform,
                         filter.repo,
+                        target,
+                        filter.since,
+                        filter.until,
+                        before_at,
+                        before_id,
                         page.limit(),
                         page.offset()
                     ],
@@ -760,12 +765,22 @@ impl RunStore for SqliteStore {
         let kind = filter.kind.map(kind_str);
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
+        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
+        let (before_at, before_id) = run_key(filter);
         self.with(|c| {
             let count: i64 = c.query_row(
-                "SELECT COUNT(*) FROM runs
-                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
-                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)",
-                params![kind, status, platform, filter.repo],
+                &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
+                params![
+                    kind,
+                    status,
+                    platform,
+                    filter.repo,
+                    target,
+                    filter.since,
+                    filter.until,
+                    before_at,
+                    before_id
+                ],
                 |row| row.get(0),
             )?;
             Ok(u64::try_from(count).unwrap_or_default())
@@ -781,11 +796,25 @@ impl RunStore for SqliteStore {
             let mut statement = c.prepare(
                 "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
                  WHERE (?1 IS NULL OR source = ?1) AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR repo = ?3)
-                 ORDER BY received_at DESC, id DESC LIMIT ?4 OFFSET ?5",
+                   AND (?4 IS NULL OR received_at < ?4 OR (received_at = ?4 AND id < ?5))
+                 ORDER BY received_at DESC, id DESC LIMIT ?6 OFFSET ?7",
             )?;
+            let (before_at, before_id) = filter
+                .before
+                .as_ref()
+                .map(|k| (k.received_at.as_str(), k.id.as_str()))
+                .unzip();
             let rows = statement
                 .query_map(
-                    params![filter.source, filter.kind, filter.repo, page.limit(), page.offset()],
+                    params![
+                        filter.source,
+                        filter.kind,
+                        filter.repo,
+                        before_at,
+                        before_id,
+                        page.limit(),
+                        page.offset()
+                    ],
                     raw_inbound,
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -868,6 +897,23 @@ impl RawInbound {
 }
 
 /// The columns [`raw_run`] reads, in order.
+/// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
+/// platform, repo, target, since, until, and the keyset (time, id).
+const RUN_FILTER: &str = "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
+     AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
+     AND (?5 IS NULL OR target = ?5)
+     AND (?6 IS NULL OR started_at >= ?6) AND (?7 IS NULL OR started_at < ?7)
+     AND (?8 IS NULL OR started_at < ?8 OR (started_at = ?8 AND id < ?9))";
+
+/// The keyset of a run listing, as two parameters.
+fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
+    filter
+        .before
+        .as_ref()
+        .map(|k| (k.started_at.as_str(), k.id.as_str()))
+        .unzip()
+}
+
 const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
 
 fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {

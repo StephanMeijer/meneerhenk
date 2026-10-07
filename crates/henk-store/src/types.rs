@@ -80,7 +80,9 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The stored text: `running`, `finished`, `failed` or `cancelled`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Finished => "finished",
@@ -112,7 +114,9 @@ pub enum LaneStatus {
 }
 
 impl LaneStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The stored text: `running`, `finished` or `dropped`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Finished => "finished",
@@ -606,6 +610,32 @@ pub struct RunFilter {
     pub platform: Option<Platform>,
     /// `owner/name`, exactly.
     pub repo: Option<String>,
+    /// The pull request, merge request or issue number.
+    pub target: Option<u64>,
+    /// Started at or after this RFC 3339 time.
+    pub since: Option<String>,
+    /// Started before this RFC 3339 time.
+    pub until: Option<String>,
+    /// Only runs listed after this one: for keyset paging, newest first.
+    pub before: Option<RunKey>,
+}
+
+/// Where a run sits in a newest-first listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunKey {
+    /// The run's `started_at`, as the store returned it.
+    pub started_at: String,
+    /// The run's id, which breaks a tie on the time.
+    pub id: String,
+}
+
+/// Where an inbound event sits in a newest-first listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventKey {
+    /// The event's `received_at`, as the store returned it.
+    pub received_at: String,
+    /// The event's id, which breaks a tie on the time.
+    pub id: String,
 }
 
 /// Which inbound events a listing shows. `None` matches anything.
@@ -617,6 +647,8 @@ pub struct EventFilter {
     pub kind: Option<String>,
     /// `owner/name`, exactly.
     pub repo: Option<String>,
+    /// Only events listed after this one: for keyset paging, newest first.
+    pub before: Option<EventKey>,
 }
 
 /// One page of a listing.
