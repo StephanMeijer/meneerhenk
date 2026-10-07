@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.11...v0.1.12) - 2026-10-07
+
+### Added
+
+- *(workspace)* search shows context around each hit, or the files and counts
+- *(plan,address)* the planner gets a copy of the default branch, the address run a shell
+
+### Fixed
+
+- *(workspace)* the host search stops reading once it has cap matches
+- *(plan)* the planner's copy is one commit, so its texts send history to list_commits
+
+### Other
+
+- Merge branch 'main' into feat/plan-and-address-bash
+
 ## [0.1.11](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.10...v0.1.11) - 2026-10-07
 
 ### Added
