@@ -7,6 +7,7 @@
 
 mod events;
 mod health;
+mod quality;
 mod runs;
 mod stream;
 #[cfg(test)]
@@ -151,6 +152,8 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/runs/{id}/tool-calls", get(runs::tool_calls))
         .route("/runs/{id}/transcripts/{session}", get(runs::transcript))
         .route("/runs/{id}/cancel", post(runs::cancel))
+        .route("/quality", get(quality::rates))
+        .route("/drafts", get(quality::drafts))
         .route("/events", get(events::list))
         .route("/events/{id}", get(events::detail))
         .fallback(not_found)

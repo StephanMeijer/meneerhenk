@@ -583,6 +583,9 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
   conversation; a running run updates as it happens: lanes start and end,
   tool calls, drafts and verdicts appear, without a reload;
 - the inbound events with what each listener did;
+- review quality: what the fact-check made of the lanes' drafts per model,
+  lane, repository or pull request, the rejection rate, and the rejected
+  drafts with the checker's reason;
 - a health page from configuration and the database;
 - a form that starts a review, plan or address run, and a button that
   cancels a running one.

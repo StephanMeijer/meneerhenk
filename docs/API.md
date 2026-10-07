@@ -249,6 +249,53 @@ newest running runs, at most 100, and how many run) on connect and every
 30 seconds, and a `run` message (`RunSummary`) whenever a run of this
 process starts or ends. `RunningMessage` in `types.ts` is the union.
 
+### `GET /quality`
+
+What the fact-check made of the lanes' drafts across runs (#205), one row
+per group, the largest first.
+
+| Query | Meaning |
+|---|---|
+| `group` | `model` (default), `lane`, `repo` or `target` (a pull request) |
+| `since`, `until` | Drafts queued at or after `since`, and before `until` (RFC 3339) |
+| `repo` | `owner/name`, exactly |
+
+Each row has the counts per verdict (`confirmed`, `rejected`, `same_as`,
+`unchecked`, `not_checked`, `cancelled`, `failed`), `waiting` for drafts not
+decided yet, `judged` (confirmed, rejected and repeats: what a checker
+decided) and `rejection_rate`: rejected of judged, from 0 to 1, or `null`
+when nothing was judged. Grouped by `target`, a row also has `repo`,
+`target` and `target_url`.
+
+```json
+[{"key": "mistral-medium-3-5", "repo": null, "target": null, "target_url": null,
+  "drafts": 82, "confirmed": 3, "rejected": 72, "same_as": 4, "unchecked": 1,
+  "not_checked": 0, "cancelled": 0, "failed": 0, "waiting": 2,
+  "judged": 79, "rejection_rate": 0.911}]
+```
+
+### `GET /drafts`
+
+Drafts across runs, newest first, a page at a time: each with its run,
+repository, pull request and what became of it.
+
+| Query | Meaning |
+|---|---|
+| `verdict` | `confirmed`, `rejected`, `same_as`, `unchecked`, `not_checked`, `cancelled`, `failed`, or `waiting` for undecided |
+| `model`, `lane`, `repo` | Exactly |
+| `since`, `until` | As for `/quality` |
+| `limit`, `cursor` | Paging |
+
+```json
+{"items": [{"run_id": "r-...", "repo": "o/r", "target": 70,
+            "target_url": "https://github.com/o/r/pull/70",
+            "draft": {"id": "d3", "lane": "lane-b", "model": "mistral-medium-3-5",
+                      "kind": "finding", "path": "src/a.rs", "line": 91, "body": "...",
+                      "decision": {"verdict": "rejected", "checker": "claude-opus-5-5",
+                                   "reason": "...", "...": "..."}, "...": "..."}}],
+ "next": "..."}
+```
+
 ### `GET /events`
 
 Inbound events newest first, each with what every listener did. Filter by

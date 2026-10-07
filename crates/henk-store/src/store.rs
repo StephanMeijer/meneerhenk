@@ -5,10 +5,10 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    DraftDecision, DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
-    RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary,
+    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
+    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
+    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
+    StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -157,6 +157,31 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError>;
+
+    /// What became of the drafts `filter` matches, per `group`, the
+    /// largest group first (#205). The filter's verdict and keyset do not
+    /// apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a bad time.
+    async fn draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DraftRates>, StoreError>;
+
+    /// Drafts across runs, newest first, by filter and page (#205).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure, a bad time or a
+    /// corrupt row.
+    async fn list_drafts(
+        &self,
+        filter: &DraftFilter,
+        page: Page,
+    ) -> Result<Vec<DraftListing>, StoreError>;
 
     /// Records one tool call of a session (#190). An empty `at` means now.
     ///
