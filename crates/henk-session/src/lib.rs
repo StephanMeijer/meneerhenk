@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use henk_agent::mcp_tools::McpTool;
 use henk_agent::{
-    Agent, AgentConfig, Continuation, RepeatFiring, StopCause, ToolSet, TurnWarning, Verdict,
-    mcp_tools,
+    Agent, AgentConfig, AgentEvent, Continuation, RepeatFiring, StopCause, ToolSet, TurnWarning,
+    Verdict, mcp_tools,
 };
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
@@ -28,7 +28,7 @@ use henk_domain::run::RunId;
 use henk_domain::scope::{self, Scope};
 use henk_llm::{ChatMessage, ModelClient, Usage};
 use henk_mcp::{McpError, McpSession, NameMap};
-use henk_store::{LaneStatus, RunStore};
+use henk_store::{LaneStatus, RunStore, ToolCallRecord, ToolUsage};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -115,7 +115,20 @@ pub async fn run_session(
     if let Some(warning) = spec.turn_warning {
         agent = agent.with_turn_warning(warning);
     }
-    let outcome = agent.run(spec.opening, cancel).await;
+    let (outcome, calls) = run_recorded(
+        agent,
+        spec.opening,
+        cancel,
+        store,
+        run,
+        &spec.name,
+        &model_name,
+        spec.limits.record_argument_bytes,
+    )
+    .await;
+    if !calls.is_empty() {
+        info!(lane = %spec.name, usage = %usage_line(&ToolUsage::from_calls(&calls)), "tool usage");
+    }
     if let Some(dir) = transcript::directory_from_env() {
         match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
             Ok(path) => info!(path = %path.display(), "transcript written"),
@@ -167,8 +180,29 @@ pub async fn run_session(
             .event(run, "warn", &repeat_event(&spec.name, firing))
             .await;
     }
+    end_events(store, run, &spec.name, &outcome, error.is_some()).await;
+    info!(turns = outcome.turns, ?status, "session ended");
+    SessionOutcome {
+        stop: outcome.stop,
+        turns: outcome.turns,
+        usage: outcome.usage,
+        final_text: outcome.final_text,
+        status,
+        error,
+    }
+}
+
+/// The session's last lines on the run's timeline: how it stopped with its
+/// last words, and what prompt caching saved when it saved anything.
+async fn end_events(
+    store: &dyn RunStore,
+    run: &RunId,
+    name: &str,
+    outcome: &henk_agent::AgentOutcome,
+    failed: bool,
+) {
     let last_words: String = outcome.final_text.chars().take(200).collect();
-    let level = if error.is_some() || matches!(outcome.stop, StopCause::Timeout) {
+    let level = if failed || matches!(outcome.stop, StopCause::Timeout) {
         "warn"
     } else {
         "info"
@@ -179,7 +213,7 @@ pub async fn run_session(
             level,
             &format!(
                 "{}: {:?} after {} turns; last words: {last_words}",
-                spec.name, outcome.stop, outcome.turns
+                name, outcome.stop, outcome.turns
             ),
         )
         .await;
@@ -191,7 +225,7 @@ pub async fn run_session(
                 "info",
                 &format!(
                     "{}: cache: {} of {} prompt tokens read from cache, {} written",
-                    spec.name,
+                    name,
                     usage.cache_read_tokens,
                     usage.prompt_tokens(),
                     usage.cache_write_tokens
@@ -199,15 +233,115 @@ pub async fn run_session(
             )
             .await;
     }
-    info!(turns = outcome.turns, ?status, "session ended");
-    SessionOutcome {
-        stop: outcome.stop,
-        turns: outcome.turns,
-        usage: outcome.usage,
-        final_text: outcome.final_text,
-        status,
-        error,
+}
+
+/// Runs `agent` and puts every tool call on the run as it happens (#190),
+/// so the dashboard sees a session's calls while it runs. The recorder ends
+/// when the agent, and with it the sender, is gone. Returns the outcome and
+/// the calls recorded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the session's own inputs, passed through from run_session"
+)]
+async fn run_recorded(
+    agent: Agent,
+    opening: Vec<ChatMessage>,
+    cancel: CancellationToken,
+    store: &dyn RunStore,
+    run: &RunId,
+    session: &str,
+    model: &str,
+    cap: usize,
+) -> (henk_agent::AgentOutcome, Vec<ToolCallRecord>) {
+    let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let agent = agent.with_events(events);
+    let recorder = async {
+        let mut calls = Vec::new();
+        while let Some(event) = received.recv().await {
+            let Some(call) = call_record(session, model, cap, event) else {
+                continue;
+            };
+            if let Err(error) = store.record_tool_call(run, &call).await {
+                tracing::warn!(%error, "could not record a tool call");
+            }
+            calls.push(call);
+        }
+        calls
+    };
+    tokio::join!(
+        async move {
+            let outcome = agent.run(opening, cancel).await;
+            drop(agent);
+            outcome
+        },
+        recorder
+    )
+}
+
+/// The run record of one `ToolCalled` event, its arguments cut to `cap`
+/// bytes on a character boundary; none for any other event.
+fn call_record(
+    session: &str,
+    model: &str,
+    cap: usize,
+    event: AgentEvent,
+) -> Option<ToolCallRecord> {
+    let AgentEvent::ToolCalled {
+        turn,
+        name,
+        origin,
+        arguments,
+        outcome,
+        elapsed,
+        result_chars,
+    } = event
+    else {
+        return None;
+    };
+    let mut end = arguments.len().min(cap);
+    while !arguments.is_char_boundary(end) {
+        end -= 1;
     }
+    Some(ToolCallRecord {
+        at: String::new(),
+        session: session.to_owned(),
+        model: model.to_owned(),
+        turn,
+        tool: name,
+        origin,
+        outcome: outcome.as_str().to_owned(),
+        arguments: arguments.get(..end).unwrap_or_default().to_owned(),
+        arguments_len: u64::try_from(arguments.len()).unwrap_or(u64::MAX),
+        result_chars: u64::try_from(result_chars).unwrap_or(u64::MAX),
+        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+/// One session's tool usage on one log line: `read_file 12 (1 error),
+/// search 3`, in tool order.
+fn usage_line(usage: &[ToolUsage]) -> String {
+    usage
+        .iter()
+        .map(|u| {
+            let t = &u.tally;
+            let mut notes = Vec::new();
+            for (n, what) in [
+                (t.errors, "error"),
+                (t.refusals, "refused"),
+                (t.other, "not run"),
+            ] {
+                if n > 0 {
+                    notes.push(format!("{n} {what}"));
+                }
+            }
+            if notes.is_empty() {
+                format!("{} {}", u.tool, t.calls)
+            } else {
+                format!("{} {} ({})", u.tool, t.calls, notes.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The timeline line for one firing of the repeat guard.
@@ -331,10 +465,186 @@ mod tests {
                 max_conversation_chars: 100_000,
                 keep_recent_turns: 2,
                 max_repeated_calls: 3,
+                record_argument_bytes: 4096,
             },
             continuation: None,
             turn_warning: None,
         }
+    }
+
+    /// A tool that answers `ok`, or fails when `fails`.
+    struct Answer {
+        name: &'static str,
+        fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl henk_agent::Tool for Answer {
+        fn definition(&self) -> henk_llm::ToolDef {
+            henk_llm::ToolDef {
+                name: henk_llm::ToolName::parse(self.name).unwrap(),
+                description: String::new(),
+                input_schema: json!({}),
+            }
+        }
+
+        async fn call(&self, _: serde_json::Value) -> henk_agent::ToolOutput {
+            if self.fails {
+                henk_agent::ToolOutput::error("no")
+            } else {
+                henk_agent::ToolOutput::ok("fine")
+            }
+        }
+    }
+
+    fn calling(calls: &[(&str, &str, serde_json::Value)]) -> Result<Completion, LlmError> {
+        Ok(Completion {
+            message: ChatMessage {
+                role: henk_llm::Role::Assistant,
+                blocks: calls
+                    .iter()
+                    .map(|(id, name, arguments)| {
+                        henk_llm::Block::ToolCall(henk_llm::ToolCall {
+                            id: (*id).into(),
+                            name: (*name).into(),
+                            arguments: henk_llm::ToolArguments::Parsed(arguments.clone()),
+                        })
+                    })
+                    .collect(),
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn every_tool_call_of_a_session_is_on_the_run() {
+        let store = store_with_run().await;
+        let fake = FakeServer::new(
+            vec![FakeServer::tool(
+                "merge_pull_request",
+                "Merges.",
+                &["owner"],
+            )],
+            echo_behaviour(),
+        );
+        let session = Arc::new(fake.connect("github").await);
+        let mut names = NameMap::new();
+        let deny: henk_agent::Guard =
+            Arc::new(|tool: &str, _: &serde_json::Value| Verdict::Deny(format!("{tool} no")));
+        let mut tools = ToolSet::new();
+        for tool in henk_agent::mcp_tools(session, &mut names, |_| true, deny)
+            .await
+            .unwrap()
+        {
+            tools.add(tool);
+        }
+        tools.add(Answer {
+            name: "read",
+            fails: false,
+        });
+        tools.add(Answer {
+            name: "fail",
+            fails: true,
+        });
+        let read = || ("r", "read", json!({"path": "a.rs"}));
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            [
+                calling(&[
+                    read(),
+                    ("f", "fail", json!({})),
+                    ("m", "github__merge_pull_request", json!({"owner": "o"})),
+                ]),
+                calling(&[read()]),
+                calling(&[read()]),
+                text("Done."),
+            ],
+        ));
+        let mut spec = spec(model);
+        spec.tools = tools;
+        spec.limits.max_turns = 6;
+        spec.limits.max_repeated_calls = 1;
+        run_session(&store, &run_id(), spec, CancellationToken::new()).await;
+
+        let calls = store.tool_calls(&run_id()).await.unwrap();
+        let shown: Vec<(u32, &str, &str, &str)> = calls
+            .iter()
+            .map(|c| {
+                (
+                    c.turn,
+                    c.tool.as_str(),
+                    c.origin.as_str(),
+                    c.outcome.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (1, "read", "henk", "ok"),
+                (1, "fail", "henk", "error"),
+                (1, "github__merge_pull_request", "github", "refused_scope"),
+                (2, "read", "henk", "ok"),
+                (3, "read", "henk", "refused_repeat"),
+            ]
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.session == "planner" && c.model == "scripted")
+        );
+        assert_eq!(calls[0].arguments, r#"{"path":"a.rs"}"#);
+        assert_eq!(calls[0].result_chars, 4);
+    }
+
+    #[test]
+    fn arguments_are_cut_on_a_character_and_their_length_kept() {
+        let event = |arguments: &str| AgentEvent::ToolCalled {
+            turn: 2,
+            name: "bash".into(),
+            origin: "workspace".into(),
+            arguments: arguments.into(),
+            outcome: henk_agent::CallOutcome::Ok,
+            elapsed: Duration::from_millis(1500),
+            result_chars: 10,
+        };
+        let cut = call_record("lane-a", "m", 3, event("a\u{e9}b")).unwrap();
+        assert_eq!((cut.arguments.as_str(), cut.arguments_len), ("a\u{e9}", 4));
+        let cut = call_record("lane-a", "m", 2, event("a\u{e9}b")).unwrap();
+        assert_eq!(cut.arguments, "a", "never half a character");
+        let none = call_record("lane-a", "m", 0, event("{}")).unwrap();
+        assert_eq!((none.arguments.as_str(), none.arguments_len), ("", 2));
+        assert_eq!(
+            (none.elapsed_ms, none.turn, none.outcome.as_str()),
+            (1500, 2, "ok")
+        );
+        let other = AgentEvent::RepeatRefused {
+            tool: "x".into(),
+            repeats: 2,
+            ended: false,
+        };
+        assert!(call_record("lane-a", "m", 10, other).is_none());
+    }
+
+    #[test]
+    fn the_usage_line_counts_per_tool_with_what_went_wrong() {
+        let mut read = henk_store::ToolTally::default();
+        read.add("ok", 10, 50);
+        read.add("error", 1, 5);
+        let mut bash = henk_store::ToolTally::default();
+        bash.add("refused_repeat", 2, 0);
+        bash.add("not_run", 1, 0);
+        let row = |tool: &str, tally: henk_store::ToolTally| ToolUsage {
+            session: "lane-a".into(),
+            model: String::new(),
+            tool: tool.into(),
+            tally,
+        };
+        assert_eq!(
+            usage_line(&[row("bash", bash), row("read_file", read)]),
+            "bash 3 (2 refused, 1 not run), read_file 11 (1 error)"
+        );
     }
 
     #[tokio::test]

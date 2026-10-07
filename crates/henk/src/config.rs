@@ -503,12 +503,16 @@ pub struct AgentFileConfig {
     /// refused, and one more in a later turn ends the session as stuck. 0
     /// turns the guard off.
     pub max_repeated_calls: u32,
+    /// Bytes of each tool call's arguments the run record keeps (#190);
+    /// longer ones are cut, with their length kept. 0 keeps none.
+    pub record_argument_bytes: usize,
 }
 
 impl Default for AgentFileConfig {
     fn default() -> Self {
         Self {
             max_repeated_calls: henk_domain::repeat::DEFAULT_LIMIT,
+            record_argument_bytes: 4096,
         }
     }
 }
@@ -1999,6 +2003,14 @@ impl Settings {
             match self.agent.max_repeated_calls {
                 0 => "off".to_owned(),
                 n => format!("{n} identical tool calls in a row, then the next is refused"),
+            }
+        );
+        let _ = writeln!(
+            out,
+            "Tool calls:      every call on the run record, {}",
+            match self.agent.record_argument_bytes {
+                0 => "without its arguments".to_owned(),
+                n => format!("with up to {n} bytes of its arguments"),
             }
         );
         let _ = writeln!(

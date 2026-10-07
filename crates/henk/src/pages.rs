@@ -84,6 +84,8 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
         }
     };
     let lanes = store.lanes(run_id).await.unwrap_or_default();
+    let tools =
+        henk_store::ToolUsage::from_calls(&store.tool_calls(run_id).await.unwrap_or_default());
     let findings = store.findings(run_id).await.unwrap_or_default();
     let events = store.events(run_id).await.unwrap_or_default();
     let inbound = store
@@ -152,6 +154,7 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
         html.push_str("</table>");
     }
     html.push_str(&lanes_table(&lanes));
+    html.push_str(&tools_table(&tools));
     html.push_str(&findings_table(&findings));
     html.push_str(&timeline_table(&events));
     page(&format!("Run {}", run.id), links.nav, &html)
@@ -242,6 +245,32 @@ fn lanes_table(lanes: &[LaneRecord]) -> String {
     html
 }
 
+/// The tool calls of each session: calls, errors, refusals, the rest and
+/// their time. Never their arguments.
+fn tools_table(tools: &[henk_store::ToolUsage]) -> String {
+    let mut html = String::new();
+    if tools.is_empty() {
+        return html;
+    }
+    html.push_str("<h2>Tool calls</h2><table><tr><th>Lane</th><th>Tool</th><th>Calls</th><th>Errors</th><th>Refused</th><th>Not run</th><th>Time (ms)</th></tr>");
+    for usage in tools {
+        let t = &usage.tally;
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape(&usage.session),
+            escape(&usage.tool),
+            t.calls,
+            t.errors,
+            t.refusals,
+            t.other,
+            t.total_ms
+        );
+    }
+    html.push_str("</table>");
+    html
+}
+
 fn findings_table(findings: &[FindingRecord]) -> String {
     let mut html = String::new();
     if findings.is_empty() {
@@ -281,4 +310,32 @@ fn timeline_table(events: &[EventRecord]) -> String {
     }
     html.push_str("</table>");
     html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tool_table_counts_per_lane_and_escapes_names() {
+        let mut tally = henk_store::ToolTally::default();
+        tally.add("ok", 3, 30);
+        tally.add("refused_scope", 1, 0);
+        let usage = henk_store::ToolUsage {
+            session: "lane-<a>".to_owned(),
+            model: String::new(),
+            tool: "read_file".to_owned(),
+            tally,
+        };
+        let html = tools_table(&[usage]);
+        assert!(html.starts_with("<h2>Tool calls</h2>"), "{html}");
+        assert!(
+            html.contains("<tr><td>lane-&lt;a&gt;</td><td>read_file</td><td>4</td><td>0</td><td>1</td><td>0</td><td>30</td></tr>"),
+            "{html}"
+        );
+        assert!(
+            tools_table(&[]).is_empty(),
+            "nothing for a run without calls"
+        );
+    }
 }

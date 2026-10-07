@@ -487,6 +487,7 @@ async fn plan_session(
         max_turns: planning.max_turns,
         timeout: Duration::from_secs(planning.timeout_secs),
         max_repeated_calls: app.settings.agent.max_repeated_calls,
+        record_argument_bytes: app.settings.agent.record_argument_bytes,
         ..AgentConfig::default()
     };
     let opening = ChatMessage::user(format!(

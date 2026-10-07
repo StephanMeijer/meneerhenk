@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use henk_agent::{
-    Agent, AgentConfig, AgentEvent, RepeatFiring, StopCause, Tool, ToolOutput, ToolSet, Verdict,
-    mcp_tools,
+    Agent, AgentConfig, AgentEvent, CallOutcome, RepeatFiring, StopCause, Tool, ToolOutput,
+    ToolSet, Verdict, mcp_tools,
 };
 use henk_llm::testing::ScriptedClient;
 use henk_llm::{
@@ -65,6 +65,7 @@ fn config() -> AgentConfig {
         max_conversation_chars: 100_000,
         keep_recent_turns: 2,
         max_repeated_calls: 3,
+        record_argument_bytes: 4096,
     }
 }
 
@@ -892,4 +893,191 @@ async fn the_guard_fires_as_an_event() {
             ended: false,
         }]
     );
+}
+
+/// A tool that always reports an error.
+struct Failing;
+
+#[async_trait::async_trait]
+impl Tool for Failing {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: ToolName::parse("fail").unwrap(),
+            description: String::new(),
+            input_schema: json!({}),
+        }
+    }
+
+    async fn call(&self, _: Value) -> ToolOutput {
+        ToolOutput::error("it broke")
+    }
+}
+
+/// Every `ToolCalled` event, as (turn, name, origin, arguments, outcome).
+fn calls_of(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+) -> Vec<(u32, String, String, String, CallOutcome)> {
+    let mut calls = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::ToolCalled {
+            turn,
+            name,
+            origin,
+            arguments,
+            outcome,
+            ..
+        } = event
+        {
+            calls.push((turn, name, origin, arguments, outcome));
+        }
+    }
+    calls
+}
+
+/// `read` and `list`, a tool that fails, one that sleeps, and an MCP tool
+/// the guard refuses, with the fake server behind it.
+async fn every_kind_of_tool() -> (ToolSet, FakeServer) {
+    let fake = FakeServer::new(
+        vec![FakeServer::tool(
+            "merge_pull_request",
+            "Merges.",
+            &["owner"],
+        )],
+        echo_behaviour(),
+    );
+    let session = Arc::new(fake.connect("github").await);
+    let mut names = NameMap::new();
+    let guard = Arc::new(|tool: &str, _: &Value| Verdict::Deny(format!("{tool} is not allowed")));
+    let (mut set, _, _) = counted_tools();
+    for tool in mcp_tools(session, &mut names, |_| true, guard)
+        .await
+        .unwrap()
+    {
+        set.add(tool);
+    }
+    set.add(Failing);
+    set.add(Sleeper);
+    (set, fake)
+}
+
+#[tokio::test]
+async fn every_call_is_an_event_with_how_it_ended() {
+    let (set, fake) = every_kind_of_tool().await;
+    let tool_call = |id: &str, name: &str, arguments: ToolArguments| {
+        Block::ToolCall(ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        })
+    };
+    let first = Completion {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                tool_call("a", "read", ToolArguments::Parsed(json!({"path": "a.rs"}))),
+                tool_call("b", "fail", ToolArguments::Parsed(json!({}))),
+                tool_call("c", "nope", ToolArguments::Parsed(json!({}))),
+                tool_call("d", "sleep", ToolArguments::Malformed("{oops".into())),
+                tool_call(
+                    "e",
+                    "github__merge_pull_request",
+                    ToolArguments::Parsed(json!({"owner": "o"})),
+                ),
+            ],
+        },
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    };
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            Ok(first),
+            call("f", "read", json!({"path": "a.rs"})),
+            call("g", "read", json!({"path": "a.rs"})),
+            text("Done."),
+        ],
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let limits = AgentConfig {
+        max_repeated_calls: 1,
+        ..config()
+    };
+    let agent = Agent::new(model, set, "s", limits).with_events(tx);
+    agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    drop(agent);
+    let seen = |turn, name: &str, origin: &str, arguments: &str, outcome| {
+        (
+            turn,
+            name.to_owned(),
+            origin.to_owned(),
+            arguments.to_owned(),
+            outcome,
+        )
+    };
+    assert_eq!(
+        calls_of(&mut rx),
+        [
+            seen(1, "read", "henk", r#"{"path":"a.rs"}"#, CallOutcome::Ok),
+            seen(1, "fail", "henk", "{}", CallOutcome::Error),
+            seen(1, "nope", "", "{}", CallOutcome::UnknownTool),
+            seen(1, "sleep", "henk", "{oops", CallOutcome::MalformedArguments),
+            seen(
+                1,
+                "github__merge_pull_request",
+                "github",
+                r#"{"owner":"o"}"#,
+                CallOutcome::RefusedByScope
+            ),
+            seen(2, "read", "henk", r#"{"path":"a.rs"}"#, CallOutcome::Ok),
+            seen(
+                3,
+                "read",
+                "henk",
+                r#"{"path":"a.rs"}"#,
+                CallOutcome::RefusedAsRepeat
+            ),
+        ]
+    );
+    assert!(
+        fake.calls().is_empty(),
+        "a refused call never reaches the server"
+    );
+}
+
+#[tokio::test]
+async fn a_call_cut_off_by_a_cancel_is_an_event() {
+    let mut set = ToolSet::new();
+    set.add(Sleeper);
+    let sleep = |id: &str| {
+        Block::ToolCall(ToolCall {
+            id: id.into(),
+            name: "sleep".into(),
+            arguments: ToolArguments::Parsed(json!({})),
+        })
+    };
+    // The cancel lands during the first call; the second never starts but
+    // is still on the record.
+    let both = Ok(Completion {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![sleep("s1"), sleep("s2")],
+        },
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new("m", [both]));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let agent = Agent::new(model, set, "s", config()).with_events(tx);
+    let cancel = CancellationToken::new();
+    let stopper = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stopper.cancel();
+    });
+    agent.run(vec![ChatMessage::user("go")], cancel).await;
+    drop(agent);
+    let outcomes: Vec<_> = calls_of(&mut rx).into_iter().map(|c| c.4).collect();
+    assert_eq!(outcomes, [CallOutcome::Cancelled, CallOutcome::NotRun]);
 }

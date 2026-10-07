@@ -807,6 +807,7 @@ fn lane_limits(settings: &crate::config::Settings) -> AgentConfig {
         max_conversation_chars: settings.review.max_conversation_chars,
         keep_recent_turns: settings.review.keep_recent_turns,
         max_repeated_calls: settings.agent.max_repeated_calls,
+        record_argument_bytes: settings.agent.record_argument_bytes,
         ..AgentConfig::default()
     }
 }
@@ -1022,6 +1023,7 @@ async fn build_fact_check(
             max_conversation_chars: app.settings.review.max_conversation_chars,
             keep_recent_turns: app.settings.review.keep_recent_turns,
             max_repeated_calls: app.settings.agent.max_repeated_calls,
+            record_argument_bytes: app.settings.agent.record_argument_bytes,
             ..AgentConfig::default()
         },
         cancel: cancel.clone(),
@@ -2132,6 +2134,21 @@ lanes = [{ name = "lane-a", model = "m" }]
                 .iter()
                 .any(|r| r == "    2|     let x = 1;\n[3 lines; continue with start_line = 3]\n"),
             "{results:?}"
+        );
+        // Every call of the lane is on the run, under the lane's name (#190).
+        let calls = r.f.app.store.tool_calls(&run).await.unwrap();
+        let lane_a: Vec<(&str, &str, &str)> = calls
+            .iter()
+            .filter(|c| c.session == "lane-a")
+            .map(|c| (c.tool.as_str(), c.origin.as_str(), c.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            lane_a,
+            [
+                ("search", "workspace", "ok"),
+                ("read_file", "workspace", "ok")
+            ],
+            "{calls:?}"
         );
         assert_eq!(r.peek.inner.live(), 0);
     }

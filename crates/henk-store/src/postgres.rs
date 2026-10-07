@@ -18,8 +18,8 @@ use crate::store::RunStore;
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, attach_outcomes, kind_str,
-    platform_str, status_str, to_i64, to_u64,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage,
+    attach_outcomes, kind_str, platform_str, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/001_initial.sql"),
     include_str!("../migrations/postgres/002_dashboard.sql"),
     include_str!("../migrations/postgres/003_event_requester.sql"),
+    include_str!("../migrations/postgres/004_tool_calls.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -457,6 +458,95 @@ impl RunStore for PgStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
+        let at = if call.at.is_empty() {
+            now()
+        } else {
+            parse_time("tool_calls.at", &call.at)?
+        };
+        let number = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO tool_calls (run_id, session, model, turn, tool, origin, outcome, arguments, arguments_len, result_chars, elapsed_ms, at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                &[
+                    &run.as_str(),
+                    &call.session,
+                    &call.model,
+                    &i64::from(call.turn),
+                    &call.tool,
+                    &call.origin,
+                    &call.outcome,
+                    &call.arguments,
+                    &number(call.arguments_len),
+                    &number(call.result_chars),
+                    &number(call.elapsed_ms),
+                    &at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn tool_calls(&self, run: &RunId) -> Result<Vec<ToolCallRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT at, session, model, turn, tool, origin, outcome, arguments, arguments_len, result_chars, elapsed_ms FROM tool_calls WHERE run_id = $1 ORDER BY id",
+                &[&run.as_str()],
+            )
+            .await?;
+        let number = |n: i64| u64::try_from(n).unwrap_or_default();
+        rows.iter()
+            .map(|row| {
+                let turn: i64 = row.try_get(3)?;
+                Ok(ToolCallRecord {
+                    at: text(row.try_get(0)?),
+                    session: row.try_get(1)?,
+                    model: row.try_get(2)?,
+                    turn: u32::try_from(turn).map_err(|_| StoreError::Corrupt {
+                        column: "tool_calls.turn",
+                        value: turn.to_string(),
+                    })?,
+                    tool: row.try_get(4)?,
+                    origin: row.try_get(5)?,
+                    outcome: row.try_get(6)?,
+                    arguments: row.try_get(7)?,
+                    arguments_len: number(row.try_get(8)?),
+                    result_chars: number(row.try_get(9)?),
+                    elapsed_ms: number(row.try_get(10)?),
+                })
+            })
+            .collect()
+    }
+
+    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT model, session, tool, outcome, COUNT(*), COALESCE(SUM(elapsed_ms), 0)::BIGINT FROM tool_calls WHERE at >= $1 GROUP BY model, session, tool, outcome",
+                &[&since],
+            )
+            .await?;
+        let number = |n: i64| u64::try_from(n).unwrap_or_default();
+        let rows = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                    number(row.try_get(4)?),
+                    number(row.try_get(5)?),
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(ToolUsage::across_runs(rows))
     }
 
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {

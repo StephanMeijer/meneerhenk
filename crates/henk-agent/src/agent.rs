@@ -36,6 +36,10 @@ pub struct AgentConfig {
     /// [`StopCause::Stuck`]. 0 turns the guard off (see
     /// [`henk_domain::repeat`]).
     pub max_repeated_calls: u32,
+    /// Bytes of a tool call's arguments the run record keeps (#190); longer
+    /// ones are cut, with their length kept. 0 keeps none. The loop itself
+    /// does not use it; the session that records the calls does.
+    pub record_argument_bytes: usize,
 }
 
 impl Default for AgentConfig {
@@ -47,6 +51,7 @@ impl Default for AgentConfig {
             max_conversation_chars: 240_000,
             keep_recent_turns: 2,
             max_repeated_calls: repeat::DEFAULT_LIMIT,
+            record_argument_bytes: 4096,
         }
     }
 }
@@ -63,14 +68,25 @@ pub enum AgentEvent {
         /// Tool calls it asked for.
         tool_calls: usize,
     },
-    /// A tool was called.
+    /// The model called a tool: one event for every call it made, run or
+    /// not, for the run record (#190).
     ToolCalled {
+        /// 1-based turn the call was made in.
+        turn: u32,
         /// Model-facing name.
         name: String,
-        /// Whether it reported an error.
-        is_error: bool,
-        /// How long it took.
+        /// Where the tool comes from ([`crate::Tool::origin`]); empty for
+        /// an unknown name.
+        origin: String,
+        /// The arguments as the model sent them: JSON text, or the
+        /// malformed text itself.
+        arguments: String,
+        /// How the call ended.
+        outcome: CallOutcome,
+        /// How long it ran; zero for a call that never ran.
         elapsed: Duration,
+        /// Characters of the result, before the agent cut it for the model.
+        result_chars: usize,
     },
     /// The repeat guard refused a call that repeated the ones before it.
     RepeatRefused {
@@ -81,6 +97,44 @@ pub enum AgentEvent {
         /// Whether the run ends because of it.
         ended: bool,
     },
+}
+
+/// How one tool call ended, as the run record keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// It ran and succeeded.
+    Ok,
+    /// It ran and reported an error.
+    Error,
+    /// The scope guard refused it before it ran (§8.5).
+    RefusedByScope,
+    /// The repeat guard refused it as one more identical call.
+    RefusedAsRepeat,
+    /// No tool has that name.
+    UnknownTool,
+    /// Its arguments were not JSON.
+    MalformedArguments,
+    /// It was not run because the session was ending.
+    NotRun,
+    /// The session was cancelled while it ran.
+    Cancelled,
+}
+
+impl CallOutcome {
+    /// The name the run record stores.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::RefusedByScope => "refused_scope",
+            Self::RefusedAsRepeat => "refused_repeat",
+            Self::UnknownTool => "unknown_tool",
+            Self::MalformedArguments => "malformed_arguments",
+            Self::NotRun => "not_run",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// One time the repeat guard fired, for the run record (§8.6).
@@ -382,7 +436,9 @@ impl Agent {
     /// Runs the model's tool calls in order, each first past the repeat
     /// guard. A refused call is not dispatched; its result tells the model
     /// to change course. A call the guard calls stuck ends the run, and the
-    /// calls after it in the turn are not run.
+    /// calls after it in the turn are not run. A cancel ends the round the
+    /// same way: the call it cut off is `Cancelled` and the calls after it
+    /// are `NotRun`, so every call of the turn is on the record.
     async fn call_tools(
         &self,
         calls: Vec<henk_llm::ToolCall>,
@@ -393,8 +449,18 @@ impl Agent {
     ) -> ToolRound {
         let mut results = Vec::with_capacity(calls.len());
         let mut stuck: Option<(String, u32)> = None;
+        let mut cancelled = false;
         for call in calls {
+            let origin = self.tools.origin(&call.name).unwrap_or_default();
+            let called = |outcome: CallOutcome, elapsed: Duration, result_chars: usize| {
+                called_event(turn, &call, &origin, outcome, elapsed, result_chars)
+            };
+            if cancelled {
+                self.emit(called(CallOutcome::NotRun, Duration::ZERO, 0));
+                continue;
+            }
             if stuck.is_some() {
+                self.emit(called(CallOutcome::NotRun, Duration::ZERO, 0));
                 results.push(ToolResult {
                     call_id: call.id,
                     content: "Not run: the session is ending.".to_owned(),
@@ -430,6 +496,11 @@ impl Agent {
                 if ended {
                     stuck = Some((call.name.clone(), repeats));
                 }
+                self.emit(called(
+                    CallOutcome::RefusedAsRepeat,
+                    Duration::ZERO,
+                    message.chars().count(),
+                ));
                 results.push(ToolResult {
                     call_id: call.id,
                     content: message,
@@ -440,10 +511,15 @@ impl Agent {
             let started = Instant::now();
             let output = tokio::select! {
                 biased;
-                () = cancel.cancelled() => return ToolRound::Cancelled,
+                () = cancel.cancelled() => {
+                    self.emit(called(CallOutcome::Cancelled, started.elapsed(), 0));
+                    cancelled = true;
+                    continue;
+                }
                 output = self.dispatch(&call.name, &call.arguments) => output,
             };
             let elapsed = started.elapsed();
+            let outcome = outcome_of(&origin, &call.arguments, &output);
             debug!(
                 turn,
                 tool = %call.name,
@@ -453,16 +529,15 @@ impl Agent {
                 elapsed_ms = elapsed.as_millis(),
                 "tool called"
             );
-            self.emit(AgentEvent::ToolCalled {
-                name: call.name.clone(),
-                is_error: output.is_error,
-                elapsed,
-            });
+            self.emit(called(outcome, elapsed, output.content.chars().count()));
             results.push(ToolResult {
                 call_id: call.id,
                 content: self.truncate(output.content),
                 is_error: output.is_error,
             });
+        }
+        if cancelled {
+            return ToolRound::Cancelled;
         }
         // The results, refusals included, now go back to the model.
         guard.end_turn();
@@ -588,6 +663,46 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 /// The arguments as one line of text, for logs.
+/// The run record's event for one call: the arguments as the model sent
+/// them, JSON text or the malformed text itself.
+fn called_event(
+    turn: u32,
+    call: &henk_llm::ToolCall,
+    origin: &str,
+    outcome: CallOutcome,
+    elapsed: Duration,
+    result_chars: usize,
+) -> AgentEvent {
+    AgentEvent::ToolCalled {
+        turn,
+        name: call.name.clone(),
+        origin: origin.to_owned(),
+        arguments: match &call.arguments {
+            ToolArguments::Parsed(value) => value.to_string(),
+            ToolArguments::Malformed(raw) => raw.clone(),
+        },
+        outcome,
+        elapsed,
+        result_chars,
+    }
+}
+
+/// How a dispatched call ended: a name no tool has (no origin), arguments
+/// that were not JSON, a scope refusal, a failure, or success.
+fn outcome_of(origin: &str, arguments: &ToolArguments, output: &ToolOutput) -> CallOutcome {
+    if origin.is_empty() {
+        CallOutcome::UnknownTool
+    } else if matches!(arguments, ToolArguments::Malformed(_)) {
+        CallOutcome::MalformedArguments
+    } else if output.refused {
+        CallOutcome::RefusedByScope
+    } else if output.is_error {
+        CallOutcome::Error
+    } else {
+        CallOutcome::Ok
+    }
+}
+
 fn arguments_text(arguments: &ToolArguments) -> String {
     match arguments {
         ToolArguments::Parsed(value) => value.to_string(),

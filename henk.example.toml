@@ -262,6 +262,10 @@ requester_id = 523456789012345678
 # The default is 3; 0 turns the guard off.
 # [agent]
 # max_repeated_calls = 3
+# Every tool call goes on the run record with up to this many bytes of its
+# arguments (code, paths, commands the model sent; never a credential). 0
+# keeps none.
+# record_argument_bytes = 4096
 
 # External MCP servers. Henk is the client; nothing here is part of Henk.
 # The read session a lane sees: read-only toolsets, no write tool at all.
