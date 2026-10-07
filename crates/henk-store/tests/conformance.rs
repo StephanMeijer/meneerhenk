@@ -116,9 +116,16 @@ fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
 }
 
 async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn RunStore) {
-    for run in ["r-1", "r-2", "r-3"] {
+    for run in ["r-1", "r-3"] {
         store.create_run(&new_run(run)).await.unwrap();
     }
+    store
+        .create_run(&NewRun {
+            kind: RunKind::Plan,
+            ..new_run("r-2")
+        })
+        .await
+        .unwrap();
     // (run, session, model, tool, outcome, minute)
     let calls = [
         ("r-1", "lane-a", "mistral", "read_file", "ok", 1),
@@ -322,6 +329,25 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
     assert_eq!(first[0].repo, "o/r");
     assert_eq!(first[0].target, 7);
     assert_eq!(first[0].call.arguments, "{\"n\":9}");
+    assert_eq!(first[0].kind, RunKind::Review);
+    let planner = store
+        .list_tool_calls(
+            &ToolCallFilter {
+                session_kind: Some("planner".into()),
+                ..ToolCallFilter::default()
+            },
+            Page::new(50, 0),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.run_id, c.kind))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        planner,
+        [("r-2".to_owned(), RunKind::Plan)],
+        "the run's kind"
+    );
 
     let mut seen = Vec::new();
     let mut filter = ToolCallFilter::default();

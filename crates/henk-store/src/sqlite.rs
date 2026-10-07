@@ -18,8 +18,8 @@ use crate::types::{
     LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
     PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
     ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
-    attach_outcomes, draft_verdict, kind_str, now, platform_parse, platform_str, status_str,
-    to_i64, to_u64,
+    attach_outcomes, draft_verdict, kind_parse, kind_str, now, platform_parse, platform_str,
+    status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -667,7 +667,8 @@ impl RunStore for SqliteStore {
                         c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
                         c.result_chars, c.elapsed_ms,
                         EXISTS (SELECT 1 FROM transcripts t
-                                WHERE t.run_id = c.run_id AND t.session = c.session)
+                                WHERE t.run_id = c.run_id AND t.session = c.session),
+                        r.kind
                  FROM tool_calls c JOIN runs r ON r.id = c.run_id
                  WHERE {CALL_FILTER}
                    AND (?6 IS NULL OR (?6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = ?6)
@@ -1215,6 +1216,7 @@ struct CallRow {
     platform: String,
     call: ToolCallRecord,
     transcript_kept: bool,
+    kind: String,
 }
 
 /// Reads the columns `list_tool_calls` selects, in order.
@@ -1240,6 +1242,7 @@ fn call_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CallRow> {
             elapsed_ms: number(row.get(15)?),
         },
         transcript_kept: row.get(16)?,
+        kind: row.get(17)?,
     })
 }
 
@@ -1253,6 +1256,10 @@ impl CallRow {
             platform: platform_parse(&self.platform).ok_or_else(|| StoreError::Corrupt {
                 column: "runs.platform",
                 value: self.platform.clone(),
+            })?,
+            kind: kind_parse(&self.kind).ok_or_else(|| StoreError::Corrupt {
+                column: "runs.kind",
+                value: self.kind.clone(),
             })?,
             call: self.call,
             transcript_kept: self.transcript_kept,

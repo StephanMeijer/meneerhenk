@@ -828,6 +828,9 @@ pub struct ToolCallListing {
     pub target: u64,
     /// The run's platform.
     pub platform: Platform,
+    /// The run's kind: a plan run is about an issue, the others about a
+    /// pull or merge request.
+    pub kind: RunKind,
     /// The call.
     pub call: ToolCallRecord,
     /// Whether the run still keeps the conversation of the call's session.

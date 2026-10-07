@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use henk_domain::run::RunKind;
 use henk_store::{OutcomeFilter, ToolCallFilter, ToolCallKey, ToolUsage};
 use serde::Deserialize;
 
@@ -185,7 +186,7 @@ pub async fn list(
                     listing.platform,
                     &listing.repo,
                     listing.target,
-                    false,
+                    listing.kind == RunKind::Plan,
                 ),
                 call: ToolCall::from(&listing.call),
                 transcript_kept: listing.transcript_kept,

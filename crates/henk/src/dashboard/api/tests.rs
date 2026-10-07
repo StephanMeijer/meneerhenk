@@ -1810,6 +1810,14 @@ async fn the_calls_that_went_wrong_list_across_runs_a_page_at_a_time() {
     let first = &problems["items"][0];
     assert_eq!(first["run_id"], "r-plan");
     assert_eq!(first["call"]["arguments"], "not json");
+    assert!(
+        first["target_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/docspec/app/issues/7"),
+        "a plan run is about an issue: {}",
+        first["target_url"]
+    );
     assert_eq!(first["transcript_kept"], false, "no conversation stored");
     f.dashboard
         .app
@@ -1839,7 +1847,14 @@ async fn the_calls_that_went_wrong_list_across_runs_a_page_at_a_time() {
         error["call"]["arguments"], "{\"path\":\"<script>.rs\"}",
         "as stored"
     );
-    assert!(error["target_url"].as_str().unwrap().ends_with("/pull/7"));
+    assert!(
+        error["target_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/docspec/app/pull/7"),
+        "a review run is about a pull request: {}",
+        error["target_url"]
+    );
 
     let refused = get(
         &f,

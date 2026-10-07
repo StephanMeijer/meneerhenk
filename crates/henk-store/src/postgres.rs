@@ -21,8 +21,8 @@ use crate::types::{
     LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
     PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
     ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
-    attach_outcomes, draft_verdict, kind_str, platform_parse, platform_str, status_str, to_i64,
-    to_u64,
+    attach_outcomes, draft_verdict, kind_parse, kind_str, platform_parse, platform_str, status_str,
+    to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -995,7 +995,8 @@ impl RunStore for PgStore {
                             c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
                             c.result_chars, c.elapsed_ms,
                             EXISTS (SELECT 1 FROM transcripts t
-                                    WHERE t.run_id = c.run_id AND t.session = c.session)
+                                    WHERE t.run_id = c.run_id AND t.session = c.session),
+                            r.kind
                      FROM tool_calls c JOIN runs r ON r.id = c.run_id
                      WHERE {CALL_FILTER}
                        AND ($6::text IS NULL OR ($6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = $6)
@@ -1022,6 +1023,7 @@ impl RunStore for PgStore {
                 let target: i64 = row.try_get(3)?;
                 let platform: String = row.try_get(4)?;
                 let turn: i64 = row.try_get(8)?;
+                let kind: String = row.try_get(17)?;
                 Ok(ToolCallListing {
                     id: row.try_get(0)?,
                     run_id: row.try_get(1)?,
@@ -1030,6 +1032,10 @@ impl RunStore for PgStore {
                     platform: platform_parse(&platform).ok_or_else(|| StoreError::Corrupt {
                         column: "runs.platform",
                         value: platform.clone(),
+                    })?,
+                    kind: kind_parse(&kind).ok_or_else(|| StoreError::Corrupt {
+                        column: "runs.kind",
+                        value: kind.clone(),
                     })?,
                     call: ToolCallRecord {
                         at: text(row.try_get(5)?),
