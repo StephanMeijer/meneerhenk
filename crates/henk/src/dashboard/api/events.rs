@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use henk_domain::run::EventId;
 use henk_store::{EventFilter, EventKey};
 use serde::Deserialize;
 
 use super::types::{EventDetail, EventItem, EventSummary, ListenerOutcome, Page};
-use super::{ApiError, ApiResult, cursor, limit, read_cursor};
+use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor};
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
 
@@ -31,7 +31,7 @@ fn wanted(value: Option<&String>) -> Option<String> {
 pub async fn list(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: ApiViewer,
-    Query(query): Query<EventQuery>,
+    ApiQuery(query): ApiQuery<EventQuery>,
 ) -> ApiResult<Page<EventItem>> {
     let before = query
         .cursor

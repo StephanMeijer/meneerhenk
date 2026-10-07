@@ -2,7 +2,7 @@
 //! and does, as JSON, for the single-page app (#197). Every route needs a
 //! signed-in, allowed viewer ([`ApiViewer`]); every action also its
 //! session's CSRF token, the dashboard's own origin and a JSON body
-//! ([`ApiAct`]). Errors are JSON too, and nothing redirects. Nothing here
+//! ([`ApiAct`](super::auth::ApiAct)). Errors are JSON too, and nothing redirects. Nothing here
 //! returns a secret. `docs/API.md` lists the routes.
 
 mod events;
@@ -13,7 +13,8 @@ pub mod types;
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{FromRequestParts, Query, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -21,6 +22,7 @@ use axum::{Json, Router, middleware};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use henk_store::StoreError;
+use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
@@ -111,6 +113,27 @@ impl IntoResponse for ApiError {
 
 /// What a handler returns.
 type ApiResult<T> = Result<Json<T>, ApiError>;
+
+/// A query string, read like axum's `Query`, but one that does not parse
+/// (`?target=abc`, `?limit=-1`) is the API's JSON `bad_request`, not
+/// axum's plain-text 400.
+#[derive(Debug)]
+pub struct ApiQuery<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for ApiQuery<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
+        let Query(query) = Query::<T>::from_request_parts(parts, state)
+            .await
+            .map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
+        Ok(Self(query))
+    }
+}
 
 /// Every API route, to be nested at `/dashboard/api/v1`, inside the
 /// session cookie's path.

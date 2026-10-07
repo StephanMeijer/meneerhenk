@@ -734,6 +734,7 @@ impl RunStore for SqliteStore {
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
         let (before_at, before_id) = run_key(filter);
+        let (since, until) = run_window(filter)?;
         self.with(|c| {
             let mut statement = c.prepare(&format!(
                 "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
@@ -747,8 +748,8 @@ impl RunStore for SqliteStore {
                         platform,
                         filter.repo,
                         target,
-                        filter.since,
-                        filter.until,
+                        since,
+                        until,
                         before_at,
                         before_id,
                         page.limit(),
@@ -767,6 +768,7 @@ impl RunStore for SqliteStore {
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
         let (before_at, before_id) = run_key(filter);
+        let (since, until) = run_window(filter)?;
         self.with(|c| {
             let count: i64 = c.query_row(
                 &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
@@ -776,8 +778,8 @@ impl RunStore for SqliteStore {
                     platform,
                     filter.repo,
                     target,
-                    filter.since,
-                    filter.until,
+                    since,
+                    until,
                     before_at,
                     before_id
                 ],
@@ -896,14 +898,55 @@ impl RawInbound {
     }
 }
 
-/// The columns [`raw_run`] reads, in order.
 /// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
 /// platform, repo, target, since, until, and the keyset (time, id).
+/// `since` and `until` are [`instant`]s, compared to `started_at` as one
+/// too: as text, "12:00:00.4Z" sorts before "12:00:00Z".
 const RUN_FILTER: &str = "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
      AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
      AND (?5 IS NULL OR target = ?5)
-     AND (?6 IS NULL OR started_at >= ?6) AND (?7 IS NULL OR started_at < ?7)
+     AND (?6 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
+            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) >= ?6)
+     AND (?7 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
+            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) < ?7)
      AND (?8 IS NULL OR started_at < ?8 OR (started_at = ?8 AND id < ?9))";
+
+/// An RFC 3339 time as a fixed-width UTC text that sorts as the time does:
+/// `2026-10-07T12:00:00` and nine digits of nanoseconds. `RUN_FILTER` turns
+/// a stored `started_at` (UTC, from [`now`]) into the same shape.
+fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
+    let at = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| StoreError::Corrupt {
+            column,
+            value: value.to_owned(),
+        })?
+        .to_offset(time::UtcOffset::UTC);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{:09}",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        at.nanosecond()
+    ))
+}
+
+/// The time bounds of a run listing, as [`instant`]s.
+fn run_window(filter: &RunFilter) -> Result<(Option<String>, Option<String>), StoreError> {
+    let since = filter
+        .since
+        .as_deref()
+        .map(|v| instant("since", v))
+        .transpose()?;
+    let until = filter
+        .until
+        .as_deref()
+        .map(|v| instant("until", v))
+        .transpose()?;
+    Ok((since, until))
+}
 
 /// The keyset of a run listing, as two parameters.
 fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
@@ -914,6 +957,7 @@ fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
         .unzip()
 }
 
+/// The columns [`raw_run`] reads, in order.
 const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
 
 fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {

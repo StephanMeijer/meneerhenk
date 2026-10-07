@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use henk_domain::run::RunId;
@@ -17,7 +17,7 @@ use super::types::{
     Cancelled, Draft, EventSummary, Finding, Lane, Page, RunDetail, RunEvent, RunSummary,
     StartRequest, Started, ToolCall, ToolUsageRow, Transcript, TranscriptRef,
 };
-use super::{ApiError, ApiResult, cursor, limit, read_cursor, read_time};
+use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
 use crate::dashboard::actions::{record_cancel, requester};
 use crate::dashboard::auth::{ApiAct, ApiViewer};
@@ -97,7 +97,7 @@ impl RunQuery {
 pub async fn list(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: ApiViewer,
-    Query(query): Query<RunQuery>,
+    ApiQuery(query): ApiQuery<RunQuery>,
 ) -> ApiResult<Page<RunSummary>> {
     let filter = query.filter()?;
     let limit = limit(query.limit);
@@ -197,7 +197,7 @@ pub async fn events(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: ApiViewer,
     Path(id): Path<String>,
-    Query(query): Query<EventsQuery>,
+    ApiQuery(query): ApiQuery<EventsQuery>,
 ) -> ApiResult<Page<RunEvent>> {
     let run = run_of(&dashboard, id).await?;
     let from = match query.cursor.as_deref() {
@@ -233,7 +233,7 @@ pub async fn tool_calls(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: ApiViewer,
     Path(id): Path<String>,
-    Query(query): Query<ToolCallQuery>,
+    ApiQuery(query): ApiQuery<ToolCallQuery>,
 ) -> ApiResult<Vec<ToolCall>> {
     let run = run_of(&dashboard, id).await?;
     let matches = |wanted: Option<&String>, value: &str| wanted.is_none_or(|w| w == value);

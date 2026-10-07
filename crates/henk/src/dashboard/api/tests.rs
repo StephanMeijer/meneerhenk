@@ -410,6 +410,46 @@ async fn runs_list_and_one_run_in_full_with_text_as_stored() {
 }
 
 #[tokio::test]
+async fn a_query_that_does_not_parse_is_a_json_bad_request() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_review_record(&f).await;
+    let (cookie, _) = viewer(&f);
+    for uri in [
+        "/dashboard/api/v1/runs?target=abc",
+        "/dashboard/api/v1/runs?limit=-1",
+        "/dashboard/api/v1/runs?limit=x",
+        "/dashboard/api/v1/runs/r-review/events?limit=x",
+        "/dashboard/api/v1/events?limit=x",
+    ] {
+        let bad = get(&f, uri, &cookie).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(bad.code(), "bad_request", "{uri}");
+        assert!(
+            bad.headers[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json"),
+            "{uri}"
+        );
+        assert!(
+            henk_domain::text::style_violations(bad.json()["error"]["message"].as_str().unwrap())
+                .is_empty(),
+            "{uri}"
+        );
+    }
+    let unsigned = call(
+        &f,
+        Method::GET,
+        "/dashboard/api/v1/runs?target=abc",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(unsigned.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn a_runs_tool_calls_timeline_and_transcript_read_by_filter() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;

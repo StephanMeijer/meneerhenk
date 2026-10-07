@@ -83,6 +83,7 @@ macro_rules! for_each_scenario {
             joining_is_accepted,
             runs_are_listed_newest_first_by_filter_and_page,
             runs_page_by_keyset_and_filter_by_target_and_time,
+            a_whole_second_bound_holds_for_a_run_started_within_that_second,
             inbound_events_page_by_keyset_with_ties_on_the_time,
             inbound_events_are_listed_with_their_outcomes,
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
@@ -902,6 +903,43 @@ async fn runs_page_by_keyset_and_filter_by_target_and_time(store: &dyn RunStore)
         "since is inclusive, until is not"
     );
     assert_eq!(store.count_runs(&window).await.unwrap(), 2);
+}
+
+async fn a_whole_second_bound_holds_for_a_run_started_within_that_second(store: &dyn RunStore) {
+    store.create_run(&new_run("r-1")).await.unwrap();
+    let started_at = store.run(&id("r-1")).await.unwrap().unwrap().started_at;
+    // The second it started in, as the API passes a bound: "...T12:00:00Z".
+    let second = format!("{}Z", started_at.get(..19).unwrap());
+    let listed = |since: Option<String>, until: Option<String>| RunFilter {
+        since,
+        until,
+        ..RunFilter::default()
+    };
+    let since = listed(Some(second.clone()), None);
+    assert_eq!(
+        store
+            .list_runs(&since, Page::new(50, 0))
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "{started_at} is not before since={second}"
+    );
+    assert_eq!(store.count_runs(&since).await.unwrap(), 1);
+    let until = listed(None, Some(second.clone()));
+    assert!(
+        store
+            .list_runs(&until, Page::new(50, 0))
+            .await
+            .unwrap()
+            .is_empty(),
+        "{started_at} is not before until={second}"
+    );
+    assert_eq!(store.count_runs(&until).await.unwrap(), 0);
+    let at = OffsetDateTime::parse(&second, &Rfc3339).unwrap();
+    let next = (at + time::Duration::SECOND).format(&Rfc3339).unwrap();
+    let window = listed(Some(second), Some(next));
+    assert_eq!(store.count_runs(&window).await.unwrap(), 1);
 }
 
 async fn inbound_events_page_by_keyset_with_ties_on_the_time(store: &dyn RunStore) {
