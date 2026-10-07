@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.14...v0.1.15) - 2026-10-07
+
+### Added
+
+- *(dashboard)* review quality: drafts, verdicts and rejection rates across runs
+- *(dashboard)* a running run updates as it happens, over Server-Sent Events
+
+### Fixed
+
+- *(dashboard)* a run stream neither repeats nor loses a change around its snapshot
+
+### Other
+
+- Merge pull request #220 from StephanMeijer/feat/dashboard-live
+
 ## [0.1.14](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.13...v0.1.14) - 2026-10-07
 
 ### Added
