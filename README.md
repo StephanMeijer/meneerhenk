@@ -188,9 +188,22 @@ on one machine, with one lane:
    lane will see.
 6. `RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts henk review <url>`
    on a pull request in an allowlisted repository. The run id is printed
-   first; `henk runs show <id>` prints the run, lanes, findings and
-   timeline afterwards, and `transcripts/<run>/<lane>.json` holds what the
-   model saw and said.
+   first; `henk runs show <id>` prints the run, lanes, tool calls,
+   findings and timeline afterwards, and `transcripts/<run>/<lane>.json`
+   holds what the model saw and said.
+
+Every tool call of every session (review lanes, fact-checks, the planner,
+address runs) is on the run record (#190): the session, model, turn, tool
+and where it comes from, how it ended (`ok`, `error`, refused by the scope
+or the repeat guard, an unknown tool, malformed arguments, not run,
+cancelled), how long it ran, the size of its result, and its arguments as
+the model sent them, cut at `[agent] record_argument_bytes` (4096 by
+default, 0 for none) with their full length kept. Arguments are code, paths
+and commands from the repository, never a credential (§8.4). The calls are
+kept with the run, like its lanes and findings. `henk runs show` and the
+dashboard's run page count them per lane and tool, each session logs one
+`tool usage` line at info, and the `tool_calls` table answers questions
+across runs.
 
 ### Reviewing a pull request from a laptop
 

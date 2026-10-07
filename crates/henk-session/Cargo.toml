@@ -21,6 +21,8 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# A small tool of the tests' own, to record its calls (#190).
+async-trait = { workspace = true }
 henk-llm = { workspace = true, features = ["testing"] }
 henk-mcp = { workspace = true, features = ["testing"] }
 rmcp = { workspace = true, features = ["server"] }

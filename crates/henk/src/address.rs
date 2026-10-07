@@ -629,6 +629,7 @@ impl Session<'_> {
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_secs),
                 max_repeated_calls: self.app.settings.agent.max_repeated_calls,
+                record_argument_bytes: self.app.settings.agent.record_argument_bytes,
                 ..AgentConfig::default()
             },
             continuation: None,

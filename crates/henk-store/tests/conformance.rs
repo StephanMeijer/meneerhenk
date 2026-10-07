@@ -16,6 +16,7 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     EventFilter, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
     Page, PgStore, PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
+    ToolCallRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -83,8 +84,107 @@ macro_rules! for_each_scenario {
             runs_are_listed_newest_first_by_filter_and_page,
             inbound_events_are_listed_with_their_outcomes,
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
+            tool_calls_are_kept_in_order_and_add_up_across_runs,
         );
     };
+}
+
+fn tool_call(session: &str, model: &str, tool: &str, outcome: &str, ms: u64) -> ToolCallRecord {
+    ToolCallRecord {
+        at: String::new(),
+        session: session.into(),
+        model: model.into(),
+        turn: 1,
+        tool: tool.into(),
+        origin: "henk".into(),
+        outcome: outcome.into(),
+        arguments: r#"{"path":"a.rs"}"#.into(),
+        arguments_len: 15,
+        result_chars: 40,
+        elapsed_ms: ms,
+    }
+}
+
+async fn tool_calls_are_kept_in_order_and_add_up_across_runs(store: &dyn RunStore) {
+    let before = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+    let (one, two) = (new_run("r-tools-1"), new_run("r-tools-2"));
+    store.create_run(&one).await.unwrap();
+    store.create_run(&two).await.unwrap();
+    let mut cut = tool_call("lane-a", "opus", "bash", "ok", 120);
+    cut.arguments = "x".repeat(16);
+    cut.arguments_len = 9000;
+    cut.turn = 3;
+    cut.origin = "workspace".into();
+    let calls = [
+        tool_call("lane-a", "opus", "read_file", "ok", 10),
+        tool_call("lane-a", "opus", "read_file", "error", 5),
+        cut.clone(),
+        tool_call(
+            "check-lane-a-1",
+            "sonnet",
+            "github__get_file_contents",
+            "refused_scope",
+            0,
+        ),
+    ];
+    for call in &calls {
+        store.record_tool_call(&one.id, call).await.unwrap();
+    }
+    store
+        .record_tool_call(
+            &two.id,
+            &tool_call("lane-b", "opus", "read_file", "not_run", 0),
+        )
+        .await
+        .unwrap();
+
+    let kept = store.tool_calls(&one.id).await.unwrap();
+    assert_eq!(kept.len(), 4, "only this run's, in order");
+    assert_eq!(
+        kept.iter().map(|c| c.tool.as_str()).collect::<Vec<_>>(),
+        [
+            "read_file",
+            "read_file",
+            "bash",
+            "github__get_file_contents"
+        ]
+    );
+    assert!(!kept[0].at.is_empty(), "an empty time is now");
+    let bash = &kept[2];
+    assert_eq!(
+        (
+            bash.turn,
+            bash.origin.as_str(),
+            bash.arguments.as_str(),
+            bash.arguments_len,
+            bash.elapsed_ms
+        ),
+        (3, "workspace", "x".repeat(16).as_str(), 9000, 120),
+        "the cut arguments and their original length"
+    );
+    assert_eq!(kept[3].outcome, "refused_scope");
+
+    let usage = store.tool_usage_since(before).await.unwrap();
+    let row = |kind: &str, model: &str, tool: &str| {
+        usage
+            .iter()
+            .find(|u| u.session == kind && u.model == model && u.tool == tool)
+            .map(|u| u.tally.clone())
+            .unwrap_or_default()
+    };
+    let read = row("lane", "opus", "read_file");
+    assert_eq!(
+        (read.calls, read.errors, read.other, read.total_ms),
+        (3, 1, 1, 15),
+        "both runs"
+    );
+    assert_eq!(
+        row("check", "sonnet", "github__get_file_contents").refusals,
+        1
+    );
+    assert_eq!(row("lane", "opus", "bash").total_ms, 120);
+    let later = OffsetDateTime::now_utc() + time::Duration::minutes(1);
+    assert!(store.tool_usage_since(later).await.unwrap().is_empty());
 }
 
 async fn old_events_and_their_outcomes_are_pruned(store: &dyn RunStore) {

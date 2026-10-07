@@ -274,6 +274,7 @@ async fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
         runs::render(
             &record,
             &store.lanes(&id).await?,
+            &henk_store::ToolUsage::from_calls(&store.tool_calls(&id).await?),
             &store.findings(&id).await?,
             &store.events(&id).await?
         )

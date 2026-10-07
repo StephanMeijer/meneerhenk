@@ -1352,6 +1352,7 @@ dependencies = [
 name = "henk-session"
 version = "0.1.11"
 dependencies = [
+ "async-trait",
  "henk-agent",
  "henk-domain",
  "henk-llm",

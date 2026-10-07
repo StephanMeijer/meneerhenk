@@ -60,12 +60,16 @@ impl Tool for McpTool {
         self.definition.clone()
     }
 
+    fn origin(&self) -> String {
+        self.session.alias().to_owned()
+    }
+
     async fn call(&self, arguments: Value) -> ToolOutput {
         let arguments = match (self.guard)(&self.server_tool, &arguments) {
             Verdict::Allow(rewritten) => rewritten,
             Verdict::Deny(reason) => {
                 warn!(server = self.session.alias(), tool = %self.server_tool, %reason, "guard refused tool call");
-                return ToolOutput::error(format!("Refused: {reason}"));
+                return ToolOutput::refused(format!("Refused: {reason}"));
             }
         };
         match self.session.call_tool(&self.server_tool, arguments).await {
@@ -74,6 +78,7 @@ impl Tool for McpTool {
                 ToolOutput {
                     content: outcome.text,
                     is_error: outcome.is_error,
+                    refused: false,
                 }
             }
             Err(error) => ToolOutput::error(format!("Tool call failed: {error}")),

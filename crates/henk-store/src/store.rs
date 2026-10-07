@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, StoreError,
+    RunStatus, StoreError, ToolCallRecord, ToolUsage,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -129,6 +129,28 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure.
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError>;
+
+    /// Records one tool call of a session (#190). An empty `at` means now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError>;
+
+    /// The tool calls of a run, in the order they were recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn tool_calls(&self, run: &RunId) -> Result<Vec<ToolCallRecord>, StoreError>;
+
+    /// Tool usage across runs since `since`, per model, kind of session
+    /// ([`crate::session_kind`]) and tool: the data for metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError>;
 
     /// Adds a line to a run's timeline.
     ///

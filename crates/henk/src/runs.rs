@@ -2,13 +2,36 @@
 
 use std::fmt::Write as _;
 
-use henk_store::{EventRecord, FindingRecord, LaneRecord, RunRecord};
+use henk_store::{EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage};
 
-/// Renders one run with its lanes, findings and timeline.
+/// One tool's calls in words: `12 calls, 1 error, 840 ms`.
+#[must_use]
+pub fn tally_text(tally: &ToolTally) -> String {
+    let mut parts = vec![match tally.calls {
+        1 => "1 call".to_owned(),
+        n => format!("{n} calls"),
+    }];
+    for (n, one, many) in [
+        (tally.errors, "error", "errors"),
+        (tally.refusals, "refused", "refused"),
+        (tally.other, "not run", "not run"),
+    ] {
+        match n {
+            0 => {}
+            1 => parts.push(format!("1 {one}")),
+            n => parts.push(format!("{n} {many}")),
+        }
+    }
+    parts.push(format!("{} ms", tally.total_ms));
+    parts.join(", ")
+}
+
+/// Renders one run with its lanes, tool calls, findings and timeline.
 #[must_use]
 pub fn render(
     run: &RunRecord,
     lanes: &[LaneRecord],
+    tools: &[ToolUsage],
     findings: &[FindingRecord],
     events: &[EventRecord],
 ) -> String {
@@ -59,6 +82,19 @@ pub fn render(
                 let _ = writeln!(out, "  {error}");
             }
             None => out.push('\n'),
+        }
+    }
+
+    if !tools.is_empty() {
+        let calls: u64 = tools.iter().map(|t| t.tally.calls).sum();
+        let _ = writeln!(out, "\ntool calls ({calls})");
+        let mut session = "";
+        for usage in tools {
+            if usage.session != session {
+                session = &usage.session;
+                let _ = writeln!(out, "  {session}");
+            }
+            let _ = writeln!(out, "    {:<28} {}", usage.tool, tally_text(&usage.tally));
         }
     }
 
@@ -135,7 +171,7 @@ mod tests {
             level: "warn".into(),
             message: "lane-a: could not post".into(),
         }];
-        let text = render(&run, &lanes, &findings, &events);
+        let text = render(&run, &lanes, &[], &findings, &events);
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
         assert!(text.contains("lanes (1)"));
@@ -207,10 +243,15 @@ mod tests {
         let text = render(
             &store.run(&id).await.unwrap().unwrap(),
             &store.lanes(&id).await.unwrap(),
+            &ToolUsage::from_calls(&store.tool_calls(&id).await.unwrap()),
             &store.findings(&id).await.unwrap(),
             &store.events(&id).await.unwrap(),
         );
         assert!(text.contains("stuck repeating get_file_diff"), "{text}");
+        assert!(
+            text.contains("tool calls (5)\n  lane-a\n    get_file_diff                5 calls, 2 refused, 3 not run, 0 ms\n"),
+            "every call is on the run, even one that never ran: {text}"
+        );
         assert!(
             text.contains(
                 "warn  lane-a: the model called get_file_diff with the same arguments \

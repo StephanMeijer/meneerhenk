@@ -13,6 +13,9 @@ pub struct ToolOutput {
     pub content: String,
     /// Whether the call failed. The model is told either way.
     pub is_error: bool,
+    /// Whether a guard refused the call before it ran (the scope guard,
+    /// §8.5): a failure, kept apart from one the tool itself reported.
+    pub refused: bool,
 }
 
 impl ToolOutput {
@@ -22,6 +25,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            refused: false,
         }
     }
 
@@ -31,6 +35,18 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            refused: false,
+        }
+    }
+
+    /// A call a guard refused before it ran. The text says why; the model
+    /// sees it as an error.
+    #[must_use]
+    pub fn refused(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+            refused: true,
         }
     }
 }
@@ -50,6 +66,13 @@ pub trait Tool: Send + Sync {
     /// first (`crate::compact`).
     fn keep_in_context(&self) -> bool {
         false
+    }
+
+    /// Where the tool comes from, for the run record: `henk` for Henk's
+    /// own, an MCP server's alias for its tools, `workspace` for the code
+    /// tools on a workspace.
+    fn origin(&self) -> String {
+        "henk".to_owned()
     }
 }
 
@@ -111,6 +134,13 @@ impl ToolSet {
     /// The names, in order.
     pub fn names(&self) -> impl Iterator<Item = &str> + '_ {
         self.tools.keys().map(String::as_str)
+    }
+
+    /// Where the tool behind `name` comes from ([`Tool::origin`]); none for
+    /// an unknown name.
+    #[must_use]
+    pub fn origin(&self, name: &str) -> Option<String> {
+        self.tools.get(name).map(|tool| tool.origin())
     }
 
     /// Whether the tool behind `name` keeps its results in context longest

@@ -1,5 +1,7 @@
 //! The records and statuses every backend stores and returns.
 
+use std::collections::BTreeMap;
+
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use time::OffsetDateTime;
@@ -155,6 +157,140 @@ impl FindingAction {
             Self::Unverified => "unverified",
             Self::Withdrawn => "withdrawn",
         }
+    }
+}
+
+/// One tool call of a session, as the run record keeps it (#190).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRecord {
+    /// RFC 3339; empty when recording means now.
+    pub at: String,
+    /// The session: the lane row's name (`lane-a`, `check-lane-b-3`,
+    /// `planner`, `address`).
+    pub session: String,
+    /// The session's model.
+    pub model: String,
+    /// The turn the call was made in, from 1.
+    pub turn: u32,
+    /// The model-facing tool name.
+    pub tool: String,
+    /// Where the tool comes from: `henk`, `workspace` or an MCP alias.
+    pub origin: String,
+    /// How it ended: `ok`, `error`, `refused_scope`, `refused_repeat`,
+    /// `unknown_tool`, `malformed_arguments`, `not_run` or `cancelled`.
+    pub outcome: String,
+    /// The arguments as the model sent them, perhaps cut.
+    pub arguments: String,
+    /// The arguments' length in bytes before any cut.
+    pub arguments_len: u64,
+    /// Characters of the result before it was cut for the model.
+    pub result_chars: u64,
+    /// How long it ran.
+    pub elapsed_ms: u64,
+}
+
+/// What kind of session a session name is: `check` for a fact-check,
+/// `planner`, `address`, and `lane` for a review lane.
+#[must_use]
+pub fn session_kind(session: &str) -> &'static str {
+    if session.starts_with("check-") {
+        "check"
+    } else if session == "planner" {
+        "planner"
+    } else if session == "address" {
+        "address"
+    } else {
+        "lane"
+    }
+}
+
+/// How many calls of one tool ended how, and their time together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolTally {
+    /// Every call.
+    pub calls: u64,
+    /// Calls the tool reported as failed.
+    pub errors: u64,
+    /// Calls a guard refused: the scope guard or the repeat guard.
+    pub refusals: u64,
+    /// Calls that never ran for another reason: an unknown tool, malformed
+    /// arguments, a session that was ending or cancelled.
+    pub other: u64,
+    /// Milliseconds the calls ran, together.
+    pub total_ms: u64,
+}
+
+impl ToolTally {
+    /// Counts `n` calls that ended as `outcome` and ran `ms` together.
+    pub fn add(&mut self, outcome: &str, n: u64, ms: u64) {
+        self.calls += n;
+        self.total_ms += ms;
+        match outcome {
+            "ok" => {}
+            "error" => self.errors += n,
+            "refused_scope" | "refused_repeat" => self.refusals += n,
+            _ => self.other += n,
+        }
+    }
+}
+
+/// One row of tool usage: one tool of one session, or across runs one tool
+/// of one kind of session on one model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUsage {
+    /// A session name for one run; a session kind ([`session_kind`]) across
+    /// runs.
+    pub session: String,
+    /// The model; empty for one run, where the lane says it.
+    pub model: String,
+    /// The tool.
+    pub tool: String,
+    /// What its calls came to.
+    pub tally: ToolTally,
+}
+
+impl ToolUsage {
+    /// The calls of one run, per session and tool, in session and tool
+    /// order.
+    #[must_use]
+    pub fn from_calls(calls: &[ToolCallRecord]) -> Vec<Self> {
+        let mut usage: BTreeMap<(String, String), ToolTally> = BTreeMap::new();
+        for call in calls {
+            usage
+                .entry((call.session.clone(), call.tool.clone()))
+                .or_default()
+                .add(&call.outcome, 1, call.elapsed_ms);
+        }
+        usage
+            .into_iter()
+            .map(|((session, tool), tally)| Self {
+                session,
+                model: String::new(),
+                tool,
+                tally,
+            })
+            .collect()
+    }
+
+    /// Rows grouped by (model, session, tool, outcome) with a count and a
+    /// sum of milliseconds, folded per model, kind of session and tool.
+    pub(crate) fn across_runs(rows: Vec<(String, String, String, String, u64, u64)>) -> Vec<Self> {
+        let mut usage: BTreeMap<(String, &'static str, String), ToolTally> = BTreeMap::new();
+        for (model, session, tool, outcome, n, ms) in rows {
+            usage
+                .entry((model, session_kind(&session), tool))
+                .or_default()
+                .add(&outcome, n, ms);
+        }
+        usage
+            .into_iter()
+            .map(|((model, kind, tool), tally)| Self {
+                session: kind.to_owned(),
+                model,
+                tool,
+                tally,
+            })
+            .collect()
     }
 }
 
@@ -541,5 +677,71 @@ impl RawRun {
             heartbeat_at: self.heartbeat_at,
             check_id: self.check_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(session: &str, tool: &str, outcome: &str, ms: u64) -> ToolCallRecord {
+        ToolCallRecord {
+            at: String::new(),
+            session: session.into(),
+            model: "m".into(),
+            turn: 1,
+            tool: tool.into(),
+            origin: "henk".into(),
+            outcome: outcome.into(),
+            arguments: "{}".into(),
+            arguments_len: 2,
+            result_chars: 0,
+            elapsed_ms: ms,
+        }
+    }
+
+    #[test]
+    fn tool_usage_adds_up_per_session_and_tool() {
+        let calls = [
+            call("lane-a", "read_file", "ok", 10),
+            call("lane-a", "read_file", "error", 5),
+            call("lane-a", "read_file", "refused_repeat", 0),
+            call("lane-a", "bash", "cancelled", 30),
+            call("check-lane-a-1", "read_file", "refused_scope", 0),
+        ];
+        let shown: Vec<(String, String, u64, u64, u64, u64, u64)> = ToolUsage::from_calls(&calls)
+            .into_iter()
+            .map(|u| {
+                (
+                    u.session,
+                    u.tool,
+                    u.tally.calls,
+                    u.tally.errors,
+                    u.tally.refusals,
+                    u.tally.other,
+                    u.tally.total_ms,
+                )
+            })
+            .collect();
+        let row = |session: &str, tool: &str, c, e, r, o, ms| {
+            (session.to_owned(), tool.to_owned(), c, e, r, o, ms)
+        };
+        assert_eq!(
+            shown,
+            [
+                row("check-lane-a-1", "read_file", 1, 0, 1, 0, 0),
+                row("lane-a", "bash", 1, 0, 0, 1, 30),
+                row("lane-a", "read_file", 3, 1, 1, 0, 15),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_name_says_its_kind() {
+        assert_eq!(session_kind("check-lane-b-3"), "check");
+        assert_eq!(session_kind("planner"), "planner");
+        assert_eq!(session_kind("address"), "address");
+        assert_eq!(session_kind("lane-a"), "lane");
+        assert_eq!(session_kind("security"), "lane");
     }
 }

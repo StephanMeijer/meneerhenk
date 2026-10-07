@@ -125,6 +125,10 @@ pub struct Search(pub Arc<dyn Workspace>);
 
 #[async_trait::async_trait]
 impl Tool for ListFiles {
+    fn origin(&self) -> String {
+        "workspace".to_owned()
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("list_files"),
@@ -173,6 +177,10 @@ impl Tool for ListFiles {
 
 #[async_trait::async_trait]
 impl Tool for ReadFile {
+    fn origin(&self) -> String {
+        "workspace".to_owned()
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("read_file"),
@@ -249,6 +257,10 @@ impl Tool for ReadFile {
 
 #[async_trait::async_trait]
 impl Tool for Search {
+    fn origin(&self) -> String {
+        "workspace".to_owned()
+    }
+
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("search"),
@@ -325,6 +337,10 @@ const CUT: &str = "[... cut ...]";
 
 #[async_trait::async_trait]
 impl Tool for Bash {
+    fn origin(&self) -> String {
+        "workspace".to_owned()
+    }
+
     fn definition(&self) -> ToolDef {
         let limit = self.limit.as_secs();
         ToolDef {
