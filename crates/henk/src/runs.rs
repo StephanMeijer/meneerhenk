@@ -201,7 +201,25 @@ pub fn transcript_text(body: &str) -> Result<String, serde_json::Error> {
             };
         }
     }
-    Ok(out)
+    Ok(terminal_safe(&out))
+}
+
+/// Text for a terminal: every control character but newline and tab is
+/// written as its Rust escape, so `ESC` becomes `\u{1b}`. Tool results,
+/// summaries and errors carry other people's words (§8.3), and a raw
+/// escape sequence in them would reach the operator's terminal as a
+/// command: a changed title, hidden lines, a clipboard write. What is
+/// stored is left as it is.
+fn terminal_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn indent(text: &str) -> String {
@@ -368,7 +386,7 @@ pub fn render(
     for event in events {
         let _ = writeln!(out, "  {} {:<5} {}", event.at, event.level, event.message);
     }
-    out
+    terminal_safe(&out)
 }
 
 #[cfg(test)]
@@ -541,6 +559,59 @@ mod tests {
             assert!(text.contains(expected), "{expected:?} in\n{text}");
         }
         assert!(transcript_text("not json").is_err());
+    }
+
+    #[test]
+    fn escape_sequences_do_not_reach_the_terminal() {
+        let stored = r#"{"session":"s","system":"a\u001b[2Jb",
+            "messages":[{"role":"user","blocks":[
+              {"text":"x\u009b31my"},
+              {"tool_result":{"content":"ok\u001b]52;c;aGk=\u0007\r\tend","is_error":false}}]}]}"#;
+        let view = TranscriptView::parse(stored).unwrap();
+        assert!(
+            matches!(&view.messages[0].parts[1], PartView::Result { content, .. } if content.contains('\u{1b}')),
+            "the parsed transcript keeps what was stored"
+        );
+        let text = transcript_text(stored).unwrap();
+        assert!(
+            !text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t'),
+            "{text:?}"
+        );
+        assert!(text.contains("a\\u{1b}[2Jb"), "{text}");
+        assert!(text.contains("x\\u{9b}31my"), "{text}");
+        assert!(text.contains("ok\\u{1b}]52;c;aGk=\\u{7}\\r\tend"), "{text}");
+
+        let events = [EventRecord {
+            at: "t".into(),
+            level: "warn".into(),
+            message: "lane-a: \u{1b}]0;title\u{7}".into(),
+        }];
+        let run = RunRecord {
+            id: RunId::parse("r-1").unwrap(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "o/r".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "cli".into(),
+            status: RunStatus::Failed,
+            started_at: "t0".into(),
+            finished_at: None,
+            link: "l".into(),
+            summary: Some("s\u{1b}[8m".into()),
+            error: Some("e\u{1b}[1A".into()),
+            heartbeat_at: None,
+            check_id: None,
+        };
+        let text = render(&run, &[], &[], &[], &[], &[], &events);
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+        assert!(text.contains("lane-a: \\u{1b}]0;title\\u{7}"), "{text}");
     }
 
     #[test]
