@@ -15,10 +15,11 @@ use crate::store::RunStore;
 use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
-    RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_str, now,
-    platform_parse, platform_str, status_str, to_i64, to_u64,
+    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
+    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
+    attach_outcomes, draft_verdict, kind_str, now, platform_parse, platform_str, status_str,
+    to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -399,7 +400,7 @@ impl RunStore for SqliteStore {
         group: DraftGroup,
         filter: &DraftFilter,
     ) -> Result<Vec<DraftRates>, StoreError> {
-        let (since, until) = draft_window(filter)?;
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
         let (key, columns, by) = match group {
             DraftGroup::Model => ("d.model", "NULL, NULL, NULL", "d.model"),
             DraftGroup::Lane => ("d.lane", "NULL, NULL, NULL", "d.lane"),
@@ -457,7 +458,7 @@ impl RunStore for SqliteStore {
         filter: &DraftFilter,
         page: Page,
     ) -> Result<Vec<DraftListing>, StoreError> {
-        let (since, until) = draft_window(filter)?;
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
         let verdict = VerdictFilter::param(filter.verdict);
         let (before_at, before_id) = filter
             .before
@@ -621,28 +622,75 @@ impl RunStore for SqliteStore {
         })
     }
 
-    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError> {
-        let cutoff = since
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError> {
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
         let rows = self.with(|c| {
-            let mut statement = c.prepare(
-                "SELECT model, session, tool, outcome, COUNT(*), COALESCE(SUM(elapsed_ms), 0) FROM tool_calls WHERE at >= ?1 GROUP BY model, session, tool, outcome",
-            )?;
+            let mut statement = c.prepare(&format!(
+                "SELECT c.model, c.session, c.tool, c.outcome, COUNT(*), COALESCE(SUM(c.elapsed_ms), 0)
+                 FROM tool_calls c WHERE {CALL_FILTER}
+                 GROUP BY c.model, c.session, c.tool, c.outcome"
+            ))?;
             let number = |n: i64| u64::try_from(n).unwrap_or_default();
-            let rows = statement.query_map(params![cutoff], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    number(row.get(4)?),
-                    number(row.get(5)?),
-                ))
-            })?;
+            let rows = statement.query_map(
+                params![filter.tool, filter.model, filter.session_kind, since, until],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        number(row.get(4)?),
+                        number(row.get(5)?),
+                    ))
+                },
+            )?;
             rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
         })?;
         Ok(ToolUsage::across_runs(rows))
+    }
+
+    async fn list_tool_calls(
+        &self,
+        filter: &ToolCallFilter,
+        page: Page,
+    ) -> Result<Vec<ToolCallListing>, StoreError> {
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
+        let outcome = OutcomeFilter::param(filter.outcome.as_ref());
+        let (before_at, before_id) = filter
+            .before
+            .as_ref()
+            .map(|k| (k.at.as_str(), k.id))
+            .unzip();
+        let rows: Vec<CallRow> = self.with(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT c.id, c.run_id, r.repo, r.target, r.platform, c.at, c.session, c.model,
+                        c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
+                        c.result_chars, c.elapsed_ms
+                 FROM tool_calls c JOIN runs r ON r.id = c.run_id
+                 WHERE {CALL_FILTER}
+                   AND (?6 IS NULL OR (?6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = ?6)
+                   AND (?7 IS NULL OR c.at < ?7 OR (c.at = ?7 AND c.id < ?8))
+                 ORDER BY c.at DESC, c.id DESC LIMIT ?9 OFFSET ?10"
+            ))?;
+            let rows = statement.query_map(
+                params![
+                    filter.tool,
+                    filter.model,
+                    filter.session_kind,
+                    since,
+                    until,
+                    outcome,
+                    before_at,
+                    before_id,
+                    page.limit(),
+                    page.offset()
+                ],
+                call_row,
+            )?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
+        })?;
+        rows.into_iter().map(CallRow::into_listing).collect()
     }
 
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
@@ -1129,19 +1177,82 @@ const VERDICT_SUMS: &str = "SUM(CASE WHEN d.verdict = 'confirmed' THEN 1 ELSE 0 
      SUM(CASE WHEN d.verdict = 'failed' THEN 1 ELSE 0 END),
      SUM(CASE WHEN d.verdict IS NULL THEN 1 ELSE 0 END)";
 
-/// The time bounds of a draft count or listing, as [`instant`]s.
-fn draft_window(filter: &DraftFilter) -> Result<(Option<String>, Option<String>), StoreError> {
-    let since = filter
-        .since
-        .as_deref()
-        .map(|v| instant("since", v))
-        .transpose()?;
-    let until = filter
-        .until
-        .as_deref()
-        .map(|v| instant("until", v))
-        .transpose()?;
+/// The time bounds of a draft or tool call count or listing, as
+/// [`instant`]s.
+fn window(
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<(Option<String>, Option<String>), StoreError> {
+    let since = since.map(|v| instant("since", v)).transpose()?;
+    let until = until.map(|v| instant("until", v)).transpose()?;
     Ok((since, until))
+}
+
+/// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
+/// parameters 1 to 5: tool, model, kind of session, since and until, the
+/// last two as [`instant`]s. The kind is the session name's, as
+/// [`crate::session_kind`] reads it.
+const CALL_FILTER: &str = concat!(
+    "(?1 IS NULL OR c.tool = ?1) AND (?2 IS NULL OR c.model = ?2)",
+    " AND (?3 IS NULL OR (?3 = 'check' AND c.session LIKE 'check-%')",
+    " OR (?3 = c.session AND c.session IN ('planner', 'address'))",
+    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address')))",
+    " AND (?4 IS NULL OR ",
+    instant_of!("c.at"),
+    " >= ?4) AND (?5 IS NULL OR ",
+    instant_of!("c.at"),
+    " < ?5)"
+);
+
+/// A row of a tool call listing as read.
+struct CallRow {
+    id: i64,
+    run_id: String,
+    repo: String,
+    target: i64,
+    platform: String,
+    call: ToolCallRecord,
+}
+
+/// Reads the columns `list_tool_calls` selects, in order.
+fn call_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CallRow> {
+    let number = |n: i64| u64::try_from(n).unwrap_or_default();
+    Ok(CallRow {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        repo: row.get(2)?,
+        target: row.get(3)?,
+        platform: row.get(4)?,
+        call: ToolCallRecord {
+            at: row.get(5)?,
+            session: row.get(6)?,
+            model: row.get(7)?,
+            turn: row.get(8)?,
+            tool: row.get(9)?,
+            origin: row.get(10)?,
+            outcome: row.get(11)?,
+            arguments: row.get(12)?,
+            arguments_len: number(row.get(13)?),
+            result_chars: number(row.get(14)?),
+            elapsed_ms: number(row.get(15)?),
+        },
+    })
+}
+
+impl CallRow {
+    fn into_listing(self) -> Result<ToolCallListing, StoreError> {
+        Ok(ToolCallListing {
+            id: self.id,
+            run_id: self.run_id,
+            repo: self.repo,
+            target: to_u64("runs.target", self.target)?,
+            platform: platform_parse(&self.platform).ok_or_else(|| StoreError::Corrupt {
+                column: "runs.platform",
+                value: self.platform.clone(),
+            })?,
+            call: self.call,
+        })
+    }
 }
 
 /// An RFC 3339 time as a fixed-width UTC text that sorts as the time does:

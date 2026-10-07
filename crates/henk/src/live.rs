@@ -18,7 +18,8 @@ use henk_store::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    RunStore, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    RunStore, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::broadcast;
@@ -385,8 +386,16 @@ impl RunStore for Announcing {
         self.inner.tool_calls(run).await
     }
 
-    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError> {
-        self.inner.tool_usage_since(since).await
+    async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError> {
+        self.inner.tool_usage(filter).await
+    }
+
+    async fn list_tool_calls(
+        &self,
+        filter: &ToolCallFilter,
+        page: Page,
+    ) -> Result<Vec<ToolCallListing>, StoreError> {
+        self.inner.list_tool_calls(filter, page).await
     }
 
     async fn record_transcript(

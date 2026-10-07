@@ -8,7 +8,8 @@ use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -203,7 +204,37 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure.
-    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError>;
+    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError> {
+        let filter = ToolCallFilter {
+            since: Some(
+                since
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
+            ),
+            ..ToolCallFilter::default()
+        };
+        self.tool_usage(&filter).await
+    }
+
+    /// Tool usage across runs, per model, kind of session and tool, for the
+    /// calls `filter` matches (#203). Its outcome and keyset do not apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a bad time.
+    async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError>;
+
+    /// Tool calls across runs, newest first, by filter and page (#203).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure, a bad time or a
+    /// corrupt row.
+    async fn list_tool_calls(
+        &self,
+        filter: &ToolCallFilter,
+        page: Page,
+    ) -> Result<Vec<ToolCallListing>, StoreError>;
 
     /// Stores one session's whole conversation (#191). An empty `at` means
     /// now.

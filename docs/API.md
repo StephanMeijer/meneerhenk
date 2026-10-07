@@ -296,6 +296,46 @@ repository, pull request and what became of it.
  "next": "..."}
 ```
 
+### `GET /tool-calls/summary`
+
+How each tool fared across runs (#203): one row per tool, model and kind of
+session (`lane`, `check`, `planner`, `address`), the most calls first.
+
+| Query | Meaning |
+|---|---|
+| `since`, `until` | Calls made at or after `since`, and before `until` (RFC 3339) |
+| `tool`, `model` | Exactly |
+| `session_kind` | `lane`, `check`, `planner` or `address` |
+
+Each row has `calls`, `errors` (the tool failed), `refusals` (the scope
+guard or the repeat guard stopped it), `other` (never ran: an unknown tool,
+malformed arguments, a cancel), `total_ms`, and `error_rate` and
+`refusal_rate`, from 0 to 1.
+
+```json
+[{"tool": "read_file", "model": "mistral-medium-3-5", "session_kind": "lane",
+  "calls": 40, "errors": 4, "refusals": 0, "other": 0, "total_ms": 1600,
+  "error_rate": 0.1, "refusal_rate": 0.0}]
+```
+
+### `GET /tool-calls`
+
+Tool calls across runs, newest first, a page at a time, each with its run,
+repository and pull request.
+
+| Query | Meaning |
+|---|---|
+| `outcome` | `ok`, `error`, `refused_scope`, `refused_repeat`, `unknown_tool`, `malformed_arguments`, `not_run`, `cancelled`, or `problems` for everything but `ok` |
+| `tool`, `model`, `session_kind`, `since`, `until` | As for the summary |
+| `limit`, `cursor` | Paging |
+
+```json
+{"items": [{"run_id": "r-...", "repo": "o/r", "target": 70, "target_url": "...",
+            "call": {"session": "lane-b", "turn": 12, "tool": "github__get_file_contents",
+                     "outcome": "refused_scope", "arguments": "{...}", "...": "..."}}],
+ "next": null}
+```
+
 ### `GET /events`
 
 Inbound events newest first, each with what every listener did. Filter by

@@ -18,8 +18,9 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord, DraftVerdict,
     EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore,
-    SqliteStore, ToolCallRecord, TranscriptRecord, VerdictFilter,
+    OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
+    RunStatus, RunStore, SqliteStore, ToolCallFilter, ToolCallKey, ToolCallRecord,
+    TranscriptRecord, VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -94,6 +95,7 @@ macro_rules! for_each_scenario {
             transcripts_are_kept_whole_listed_and_pruned,
             drafts_are_kept_replaced_and_decided,
             drafts_are_counted_by_group_and_listed_across_runs,
+            tool_calls_are_tallied_and_listed_across_runs_by_filter,
         );
     };
 }
@@ -111,6 +113,232 @@ fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
         body: body.into(),
         decision: None,
     }
+}
+
+async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn RunStore) {
+    for run in ["r-1", "r-2", "r-3"] {
+        store.create_run(&new_run(run)).await.unwrap();
+    }
+    // (run, session, model, tool, outcome, minute)
+    let calls = [
+        ("r-1", "lane-a", "mistral", "read_file", "ok", 1),
+        ("r-1", "lane-a", "mistral", "read_file", "error", 2),
+        (
+            "r-1",
+            "lane-a",
+            "mistral",
+            "github__get_file",
+            "refused_scope",
+            3,
+        ),
+        ("r-1", "check-1", "opus", "read_file", "ok", 4),
+        (
+            "r-2",
+            "lane-b",
+            "deepseek",
+            "read_file",
+            "refused_repeat",
+            5,
+        ),
+        (
+            "r-2",
+            "lane-b",
+            "deepseek",
+            "bash",
+            "malformed_arguments",
+            6,
+        ),
+        ("r-2", "planner", "deepseek", "bash", "ok", 7),
+        ("r-3", "address", "opus", "edit_file", "cancelled", 8),
+        ("r-3", "lane-a", "mistral", "read_file", "ok", 8),
+    ];
+    for (turn, (run, session, model, tool, outcome, minute)) in (1u32..).zip(calls) {
+        store
+            .record_tool_call(
+                &id(run),
+                &ToolCallRecord {
+                    at: format!("2026-10-07T10:{minute:02}:00Z"),
+                    session: session.into(),
+                    model: model.into(),
+                    turn,
+                    tool: tool.into(),
+                    origin: "henk".into(),
+                    outcome: outcome.into(),
+                    arguments: format!("{{\"n\":{turn}}}"),
+                    arguments_len: 7,
+                    result_chars: 10,
+                    elapsed_ms: u64::from(turn),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let tallies = |usage: Vec<henk_store::ToolUsage>| {
+        usage
+            .into_iter()
+            .map(|u| {
+                (
+                    u.model,
+                    u.session,
+                    u.tool,
+                    u.tally.calls,
+                    u.tally.errors,
+                    u.tally.refusals,
+                    u.tally.other,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let all = store.tool_usage(&ToolCallFilter::default()).await.unwrap();
+    let mistral_reads = tallies(all)
+        .into_iter()
+        .find(|t| t.0 == "mistral" && t.2 == "read_file")
+        .unwrap();
+    assert_eq!(
+        mistral_reads,
+        (
+            "mistral".into(),
+            "lane".into(),
+            "read_file".into(),
+            3,
+            1,
+            0,
+            0
+        )
+    );
+    let checks = store
+        .tool_usage(&ToolCallFilter {
+            session_kind: Some("check".into()),
+            ..ToolCallFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tallies(checks),
+        [(
+            "opus".into(),
+            "check".into(),
+            "read_file".into(),
+            1,
+            0,
+            0,
+            0
+        )]
+    );
+    let lanes = store
+        .tool_usage(&ToolCallFilter {
+            session_kind: Some("lane".into()),
+            since: Some("2026-10-07T10:02:00Z".into()),
+            until: Some("2026-10-07T10:06:00Z".into()),
+            ..ToolCallFilter::default()
+        })
+        .await
+        .unwrap();
+    let mut lanes = tallies(lanes);
+    lanes.sort();
+    assert_eq!(
+        lanes,
+        [
+            (
+                "deepseek".into(),
+                "lane".into(),
+                "read_file".into(),
+                1,
+                0,
+                1,
+                0
+            ),
+            (
+                "mistral".into(),
+                "lane".into(),
+                "github__get_file".into(),
+                1,
+                0,
+                1,
+                0
+            ),
+            (
+                "mistral".into(),
+                "lane".into(),
+                "read_file".into(),
+                1,
+                1,
+                0,
+                0
+            ),
+        ],
+        "since is inclusive, until is not; a planner is not a lane"
+    );
+
+    let listed = |filter: ToolCallFilter| async move {
+        store
+            .list_tool_calls(&filter, Page::new(50, 0))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.call.turn, c.call.outcome))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        listed(ToolCallFilter {
+            outcome: Some(OutcomeFilter::Problems),
+            ..ToolCallFilter::default()
+        })
+        .await,
+        [
+            (8, "cancelled".to_owned()),
+            (6, "malformed_arguments".to_owned()),
+            (5, "refused_repeat".to_owned()),
+            (3, "refused_scope".to_owned()),
+            (2, "error".to_owned()),
+        ],
+        "newest first, everything but ok"
+    );
+    assert_eq!(
+        listed(ToolCallFilter {
+            outcome: Some(OutcomeFilter::Is("ok".into())),
+            session_kind: Some("planner".into()),
+            ..ToolCallFilter::default()
+        })
+        .await,
+        [(7, "ok".to_owned())]
+    );
+    assert_eq!(
+        listed(ToolCallFilter {
+            tool: Some("read_file".into()),
+            model: Some("mistral".into()),
+            ..ToolCallFilter::default()
+        })
+        .await
+        .len(),
+        3
+    );
+    let first = store
+        .list_tool_calls(&ToolCallFilter::default(), Page::new(1, 0))
+        .await
+        .unwrap();
+    assert_eq!(first[0].run_id, "r-3");
+    assert_eq!(first[0].repo, "o/r");
+    assert_eq!(first[0].target, 7);
+    assert_eq!(first[0].call.arguments, "{\"n\":9}");
+
+    let mut seen = Vec::new();
+    let mut filter = ToolCallFilter::default();
+    loop {
+        let page = store
+            .list_tool_calls(&filter, Page::new(4, 0))
+            .await
+            .unwrap();
+        let Some(last) = page.last() else { break };
+        filter.before = Some(ToolCallKey {
+            at: last.call.at.clone(),
+            id: last.id,
+        });
+        seen.extend(page.into_iter().map(|c| c.call.turn));
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (1..=9).collect::<Vec<_>>(), "every call once");
 }
 
 async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { about, draftWhat, kindText, lineCount, periodSince, ratePercent, verdictText } from './format';
+import { about, average, draftWhat, kindText, lineCount, outcomeClass, periodSince, ratePercent, verdictText } from './format';
 import { draft } from './testing/fixtures';
 
 describe('format', () => {
@@ -43,5 +43,18 @@ describe('quality helpers', () => {
     expect(periodSince('7d', now)).toBe('2026-09-30T12:00:00.000Z');
     expect(periodSince('all', now)).toBeNull();
     expect(periodSince('nonsense', now)).toBeNull();
+  });
+});
+
+describe('tool helpers', () => {
+  it('sort an outcome into its colour', () => {
+    expect(['ok', 'error', 'refused_scope', 'refused_repeat', 'malformed_arguments', 'cancelled'].map(outcomeClass)).toEqual([
+      'ok', 'error', 'refused', 'refused', 'other', 'other',
+    ]);
+  });
+
+  it('give the time per call', () => {
+    expect(average(100, 3)).toBe('33 ms');
+    expect(average(0, 0)).toBe('-');
   });
 });

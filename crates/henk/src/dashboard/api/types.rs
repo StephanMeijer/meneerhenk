@@ -224,6 +224,48 @@ pub struct DraftItem {
     pub draft: Draft,
 }
 
+/// One tool of one model in one kind of session, across runs (#203).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ToolSummaryRow {
+    /// The tool, as the model named it.
+    pub tool: String,
+    /// The model.
+    pub model: String,
+    /// `lane`, `check`, `planner` or `address`.
+    pub session_kind: String,
+    /// Every call.
+    pub calls: u64,
+    /// Calls the tool reported as failed.
+    pub errors: u64,
+    /// Calls the scope guard or the repeat guard refused.
+    pub refusals: u64,
+    /// Calls that never ran for another reason.
+    pub other: u64,
+    /// Milliseconds the calls ran, together.
+    pub total_ms: u64,
+    /// Errors of calls, from 0 to 1.
+    pub error_rate: f64,
+    /// Refusals of calls, from 0 to 1.
+    pub refusal_rate: f64,
+}
+
+/// A tool call across runs, with the run it belongs to (#203).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ToolCallItem {
+    /// The run.
+    pub run_id: String,
+    /// The run's repository.
+    pub repo: String,
+    /// The run's pull request, merge request or issue.
+    pub target: u64,
+    /// A link to it.
+    pub target_url: Option<String>,
+    /// The call.
+    pub call: ToolCall,
+}
+
 /// One session of a run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -42,6 +42,8 @@ describe('paths', () => {
     expect(runPath('r 1')).toBe('/runs/r%201');
     expect(eventPath('e-1')).toBe('/events/e-1');
     expect(transcriptPath('r-1', 'lane/a')).toBe('/runs/r-1/transcripts/lane%2Fa');
+    expect(transcriptPath('r-1', 'lane-a', 4)).toBe('/runs/r-1/transcripts/lane-a#turn-4');
+    expect(routeOf(`${BASE}/tools`, '?outcome=error')).toMatchObject({ name: 'tools' });
   });
 
   it('leave empty query values out', () => {

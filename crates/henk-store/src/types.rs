@@ -766,6 +766,72 @@ pub struct DraftListing {
     pub draft: DraftRecord,
 }
 
+/// Which tool calls a listing or a tally covers (#203). `None` matches
+/// anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCallFilter {
+    /// How they ended; listings only.
+    pub outcome: Option<OutcomeFilter>,
+    /// The tool, as the model named it.
+    pub tool: Option<String>,
+    /// The session's model.
+    pub model: Option<String>,
+    /// The kind of session ([`session_kind`]): `lane`, `check`, `planner`
+    /// or `address`.
+    pub session_kind: Option<String>,
+    /// Made at or after this RFC 3339 time.
+    pub since: Option<String>,
+    /// Made before this RFC 3339 time.
+    pub until: Option<String>,
+    /// Only calls listed after this one: for keyset paging, newest first.
+    pub before: Option<ToolCallKey>,
+}
+
+/// An outcome to list tool calls by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutcomeFilter {
+    /// Ended this way: `ok`, `error`, `refused_scope`, and so on.
+    Is(String),
+    /// Ended any way but `ok`.
+    Problems,
+}
+
+impl OutcomeFilter {
+    /// The text a query parameter takes.
+    pub(crate) fn param(filter: Option<&Self>) -> Option<&str> {
+        filter.map(|f| match f {
+            Self::Is(outcome) => outcome.as_str(),
+            Self::Problems => "problems",
+        })
+    }
+}
+
+/// Where a tool call sits in a newest-first listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallKey {
+    /// When it was made, as the store returned it.
+    pub at: String,
+    /// Its row id, which breaks a tie on the time.
+    pub id: i64,
+}
+
+/// A tool call in a listing across runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallListing {
+    /// Its row id, for the keyset.
+    pub id: i64,
+    /// The run.
+    pub run_id: String,
+    /// The run's repository.
+    pub repo: String,
+    /// The run's pull request, merge request or issue.
+    pub target: u64,
+    /// The run's platform.
+    pub platform: Platform,
+    /// The call.
+    pub call: ToolCallRecord,
+}
+
 /// One page of a listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Page {

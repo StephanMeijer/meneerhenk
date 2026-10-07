@@ -18,10 +18,11 @@ use crate::store::RunStore;
 use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
-    RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_str, platform_parse,
-    platform_str, status_str, to_i64, to_u64,
+    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
+    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
+    attach_outcomes, draft_verdict, kind_str, platform_parse, platform_str, status_str, to_i64,
+    to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -221,16 +222,24 @@ const VERDICT_SUMS: &str = "COUNT(*) FILTER (WHERE d.verdict = 'confirmed'),
      COUNT(*) FILTER (WHERE d.verdict = 'failed'),
      COUNT(*) FILTER (WHERE d.verdict IS NULL)";
 
-/// The time bounds of a draft count or listing.
-fn draft_window(
-    filter: &DraftFilter,
+/// The time bounds of a draft or tool call count or listing.
+fn window(
+    since: Option<&String>,
+    until: Option<&String>,
 ) -> Result<(Option<OffsetDateTime>, Option<OffsetDateTime>), StoreError> {
     let time = |column, value: Option<&String>| value.map(|v| parse_time(column, v)).transpose();
-    Ok((
-        time("since", filter.since.as_ref())?,
-        time("until", filter.until.as_ref())?,
-    ))
+    Ok((time("since", since)?, time("until", until)?))
 }
+
+/// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
+/// parameters 1 to 5: tool, model, kind of session, since and until. The
+/// kind is the session name's, as [`crate::session_kind`] reads it.
+const CALL_FILTER: &str = "($1::text IS NULL OR c.tool = $1) AND ($2::text IS NULL OR c.model = $2)
+     AND ($3::text IS NULL OR ($3 = 'check' AND c.session LIKE 'check-%')
+          OR ($3 = c.session AND c.session IN ('planner', 'address'))
+          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address')))
+     AND ($4::timestamptz IS NULL OR c.at >= $4)
+     AND ($5::timestamptz IS NULL OR c.at < $5)";
 
 /// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
 /// platform, repo, target, since, until, and the keyset (time, id).
@@ -639,7 +648,7 @@ impl RunStore for PgStore {
         group: DraftGroup,
         filter: &DraftFilter,
     ) -> Result<Vec<DraftRates>, StoreError> {
-        let (since, until) = draft_window(filter)?;
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
         let (key, columns, by) = match group {
             DraftGroup::Model => ("d.model", "NULL::text, NULL::bigint, NULL::text", "d.model"),
             DraftGroup::Lane => ("d.lane", "NULL::text, NULL::bigint, NULL::text", "d.lane"),
@@ -698,7 +707,7 @@ impl RunStore for PgStore {
         filter: &DraftFilter,
         page: Page,
     ) -> Result<Vec<DraftListing>, StoreError> {
-        let (since, until) = draft_window(filter)?;
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
         let verdict = VerdictFilter::param(filter.verdict);
         let before_at = filter
             .before
@@ -926,13 +935,25 @@ impl RunStore for PgStore {
             .collect()
     }
 
-    async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError> {
+    async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
         let rows = self
             .client()
             .await?
             .query(
-                "SELECT model, session, tool, outcome, COUNT(*), COALESCE(SUM(elapsed_ms), 0)::BIGINT FROM tool_calls WHERE at >= $1 GROUP BY model, session, tool, outcome",
-                &[&since],
+                &format!(
+                    "SELECT c.model, c.session, c.tool, c.outcome, COUNT(*),
+                            COALESCE(SUM(c.elapsed_ms), 0)::BIGINT
+                     FROM tool_calls c WHERE {CALL_FILTER}
+                     GROUP BY c.model, c.session, c.tool, c.outcome"
+                ),
+                &[
+                    &filter.tool,
+                    &filter.model,
+                    &filter.session_kind,
+                    &since,
+                    &until,
+                ],
             )
             .await?;
         let number = |n: i64| u64::try_from(n).unwrap_or_default();
@@ -950,6 +971,83 @@ impl RunStore for PgStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(ToolUsage::across_runs(rows))
+    }
+
+    async fn list_tool_calls(
+        &self,
+        filter: &ToolCallFilter,
+        page: Page,
+    ) -> Result<Vec<ToolCallListing>, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let outcome = OutcomeFilter::param(filter.outcome.as_ref());
+        let before_at = filter
+            .before
+            .as_ref()
+            .map(|k| parse_time("at", &k.at))
+            .transpose()?;
+        let before_id = filter.before.as_ref().map(|k| k.id);
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT c.id, c.run_id, r.repo, r.target, r.platform, c.at, c.session, c.model,
+                            c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
+                            c.result_chars, c.elapsed_ms
+                     FROM tool_calls c JOIN runs r ON r.id = c.run_id
+                     WHERE {CALL_FILTER}
+                       AND ($6::text IS NULL OR ($6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = $6)
+                       AND ($7::timestamptz IS NULL OR c.at < $7 OR (c.at = $7 AND c.id < $8::bigint))
+                     ORDER BY c.at DESC, c.id DESC LIMIT $9 OFFSET $10"
+                ),
+                &[
+                    &filter.tool,
+                    &filter.model,
+                    &filter.session_kind,
+                    &since,
+                    &until,
+                    &outcome,
+                    &before_at,
+                    &before_id,
+                    &i64::from(page.limit()),
+                    &i64::from(page.offset()),
+                ],
+            )
+            .await?;
+        let number = |n: i64| u64::try_from(n).unwrap_or_default();
+        rows.iter()
+            .map(|row| {
+                let target: i64 = row.try_get(3)?;
+                let platform: String = row.try_get(4)?;
+                let turn: i64 = row.try_get(8)?;
+                Ok(ToolCallListing {
+                    id: row.try_get(0)?,
+                    run_id: row.try_get(1)?,
+                    repo: row.try_get(2)?,
+                    target: to_u64("runs.target", target)?,
+                    platform: platform_parse(&platform).ok_or_else(|| StoreError::Corrupt {
+                        column: "runs.platform",
+                        value: platform.clone(),
+                    })?,
+                    call: ToolCallRecord {
+                        at: text(row.try_get(5)?),
+                        session: row.try_get(6)?,
+                        model: row.try_get(7)?,
+                        turn: u32::try_from(turn).map_err(|_| StoreError::Corrupt {
+                            column: "tool_calls.turn",
+                            value: turn.to_string(),
+                        })?,
+                        tool: row.try_get(9)?,
+                        origin: row.try_get(10)?,
+                        outcome: row.try_get(11)?,
+                        arguments: row.try_get(12)?,
+                        arguments_len: number(row.try_get(13)?),
+                        result_chars: number(row.try_get(14)?),
+                        elapsed_ms: number(row.try_get(15)?),
+                    },
+                })
+            })
+            .collect()
     }
 
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {

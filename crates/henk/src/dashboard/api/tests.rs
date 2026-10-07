@@ -107,6 +107,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard/api/v1/runs/count"),
     ("GET", "/dashboard/api/v1/quality"),
     ("GET", "/dashboard/api/v1/drafts"),
+    ("GET", "/dashboard/api/v1/tool-calls/summary"),
+    ("GET", "/dashboard/api/v1/tool-calls"),
     ("GET", "/dashboard/api/v1/runs/r-review"),
     ("GET", "/dashboard/api/v1/runs/r-review/events"),
     ("GET", "/dashboard/api/v1/runs/r-review/tool-calls"),
@@ -934,6 +936,8 @@ fn api_types_are_current() {
         types::RunCount::decl(&cfg),
         types::RunUpdate::decl(&cfg),
         types::QualityRow::decl(&cfg),
+        types::ToolSummaryRow::decl(&cfg),
+        types::ToolCallItem::decl(&cfg),
         types::DraftItem::decl(&cfg),
         types::RunningSnapshot::decl(&cfg),
         types::RunMessage::decl(&cfg),
@@ -1605,6 +1609,226 @@ async fn drafts_list_across_runs_by_verdict_model_and_lane_a_page_at_a_time() {
 
     for query in ["verdict=maybe", "cursor=bm9wZQ"] {
         let bad = get(&f, &format!("/dashboard/api/v1/drafts?{query}"), &cookie).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
+/// Tool calls on `r-review` (lanes and a check) and `r-plan` (the
+/// planner), seeded by `seed`: eight calls, four of them gone wrong.
+async fn seed_calls(f: &Fixture) {
+    let store = &f.dashboard.app.store;
+    let calls = [
+        (
+            "r-review",
+            "lane-a",
+            "mistral",
+            "read_file",
+            "ok",
+            "{\"path\":\"a.rs\"}",
+        ),
+        (
+            "r-review",
+            "lane-a",
+            "mistral",
+            "read_file",
+            "ok",
+            "{\"path\":\"b.rs\"}",
+        ),
+        (
+            "r-review",
+            "lane-a",
+            "mistral",
+            "read_file",
+            "error",
+            "{\"path\":\"<script>.rs\"}",
+        ),
+        (
+            "r-review",
+            "lane-a",
+            "mistral",
+            "github__get_file",
+            "refused_scope",
+            "{\"repo\":\"other/repo\"}",
+        ),
+        (
+            "r-review",
+            "lane-b",
+            "deepseek",
+            "read_file",
+            "refused_repeat",
+            "{\"path\":\"a.rs\"}",
+        ),
+        (
+            "r-review",
+            "check-1",
+            "opus",
+            "read_file",
+            "ok",
+            "{\"path\":\"a.rs\"}",
+        ),
+        (
+            "r-plan",
+            "planner",
+            "deepseek",
+            "bash",
+            "ok",
+            "{\"cmd\":\"ls\"}",
+        ),
+        (
+            "r-plan",
+            "planner",
+            "deepseek",
+            "bash",
+            "malformed_arguments",
+            "not json",
+        ),
+    ];
+    for (n, (run, session, model, tool, outcome, arguments)) in (1u32..).zip(calls) {
+        store
+            .record_tool_call(
+                &RunId::parse(run).unwrap(),
+                &ToolCallRecord {
+                    at: format!("2026-10-07T10:{n:02}:00Z"),
+                    session: session.into(),
+                    model: model.into(),
+                    turn: n,
+                    tool: tool.into(),
+                    origin: "henk".into(),
+                    outcome: outcome.into(),
+                    arguments: arguments.into(),
+                    arguments_len: 10,
+                    result_chars: 100,
+                    elapsed_ms: 10,
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn the_tool_summary_counts_per_tool_model_and_kind_with_rates() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_calls(&f).await;
+    let (cookie, _) = viewer(&f);
+
+    let rows = get(&f, "/dashboard/api/v1/tool-calls/summary", &cookie).await;
+    assert_eq!(rows.status, StatusCode::OK, "{}", rows.body);
+    let rows = rows.json();
+    assert_eq!(rows[0]["tool"], "read_file");
+    assert_eq!(rows[0]["model"], "mistral");
+    assert_eq!(rows[0]["session_kind"], "lane");
+    assert_eq!(rows[0]["calls"], 3);
+    assert_eq!(rows[0]["errors"], 1);
+    assert!((rows[0]["error_rate"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
+    assert_eq!(rows[0]["refusal_rate"], 0.0);
+    assert_eq!(rows.as_array().unwrap().len(), 5);
+
+    let planner = get(
+        &f,
+        "/dashboard/api/v1/tool-calls/summary?session_kind=planner",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(planner[0]["tool"], "bash");
+    assert_eq!(planner[0]["calls"], 2);
+    assert_eq!(planner[0]["other"], 1);
+    let early = get(
+        &f,
+        "/dashboard/api/v1/tool-calls/summary?model=mistral&until=2026-10-07T10:02:00Z",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(early[0]["calls"], 1, "until is not inclusive");
+
+    for query in ["session_kind=robot", "since=yesterday"] {
+        let bad = get(
+            &f,
+            &format!("/dashboard/api/v1/tool-calls/summary?{query}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn the_calls_that_went_wrong_list_across_runs_a_page_at_a_time() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_calls(&f).await;
+    let (cookie, _) = viewer(&f);
+    let outcomes = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["call"]["outcome"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let problems = get(&f, "/dashboard/api/v1/tool-calls?outcome=problems", &cookie)
+        .await
+        .json();
+    assert_eq!(
+        outcomes(&problems),
+        [
+            "malformed_arguments",
+            "refused_repeat",
+            "refused_scope",
+            "error"
+        ],
+        "newest first, everything but ok"
+    );
+    let first = &problems["items"][0];
+    assert_eq!(first["run_id"], "r-plan");
+    assert_eq!(first["call"]["arguments"], "not json");
+    let error = &problems["items"][3];
+    assert_eq!(
+        error["call"]["arguments"], "{\"path\":\"<script>.rs\"}",
+        "as stored"
+    );
+    assert!(error["target_url"].as_str().unwrap().ends_with("/pull/7"));
+
+    let refused = get(
+        &f,
+        "/dashboard/api/v1/tool-calls?outcome=refused_scope&tool=github__get_file",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(outcomes(&refused), ["refused_scope"]);
+    let checks = get(
+        &f,
+        "/dashboard/api/v1/tool-calls?session_kind=check",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(checks["items"][0]["call"]["session"], "check-1");
+
+    let mut seen = 0;
+    let mut uri = "/dashboard/api/v1/tool-calls?limit=3".to_owned();
+    loop {
+        let page = get(&f, &uri, &cookie).await.json();
+        seen += page["items"].as_array().unwrap().len();
+        match page["next"].as_str() {
+            Some(next) => uri = format!("/dashboard/api/v1/tool-calls?limit=3&cursor={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen, 8, "every call once");
+
+    for query in ["outcome=meh", "cursor=bm9wZQ"] {
+        let bad = get(
+            &f,
+            &format!("/dashboard/api/v1/tool-calls?{query}"),
+            &cookie,
+        )
+        .await;
         assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
     }
 }

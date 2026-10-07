@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { ApiError, cancelRun, run as loadRun } from '$lib/api/client';
+  import { ApiError, cancelRun, run as loadRun, runToolCalls } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
-  import type { Cancelled, RunDetail, RunMessage } from '$lib/api/types';
+  import type { Cancelled, RunDetail, RunMessage, ToolCall } from '$lib/api/types';
   import { about, draftWhat, kindText, verdictText } from '$lib/format';
   import { applyRun } from '$lib/live';
   import { eventPath, href, link, transcriptPath } from '$lib/router';
+  import CallTimeline from './CallTimeline.svelte';
   import Problem from './Problem.svelte';
 
   /** `load`, `cancel` and `connect` are replaced in the tests. */
@@ -13,12 +14,17 @@
     load = loadRun,
     cancel = cancelRun,
     connect = connectEventSource,
+    loadCalls = runToolCalls,
   }: {
     id: string;
     load?: (id: string) => Promise<RunDetail>;
     cancel?: (id: string) => Promise<Cancelled>;
     connect?: Connect;
+    loadCalls?: (id: string) => Promise<ToolCall[]>;
   } = $props();
+
+  /** Every call of the run, once asked for (#203). */
+  let calls: Promise<ToolCall[]> | null = $state(null);
 
   const KINDS: RunMessage['kind'][] = [
     'snapshot',
@@ -197,6 +203,17 @@
         {/each}
       </tbody>
     </table>
+    {#if calls === null}
+      <p><button type="button" onclick={() => (calls = loadCalls(id))}>Show every call</button></p>
+    {:else}
+      {#await calls}
+        <p class="muted" aria-busy="true">Loading.</p>
+      {:then list}
+        <CallTimeline runId={d.run.id} calls={list} kept={d.transcripts.map((t) => t.session)} />
+      {:catch error}
+        <Problem {error} />
+      {/await}
+    {/if}
   {/if}
 
   {#if d.drafts.length > 0}

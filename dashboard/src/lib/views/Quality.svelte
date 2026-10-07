@@ -150,12 +150,12 @@
             <td>{row.same_as}</td>
             <td>{row.unchecked + row.not_checked}</td>
             <td>{row.waiting}</td>
-            <td class="rate">
+            <td class="rate"><span class="rate-cell">
               <meter min="0" max="1" low="0.25" high="0.5" optimum="0" value={row.rejection_rate ?? 0}
                 title="{row.rejected} of {row.judged} judged"></meter>
               <span>{ratePercent(row.rejection_rate)}</span>
               <span class="muted">of {row.judged}</span>
-            </td>
+            </span></td>
           </tr>
         {/each}
       </tbody>

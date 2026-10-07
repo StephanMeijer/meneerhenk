@@ -134,8 +134,9 @@ td.text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
 }
 
 .rates td { white-space: nowrap; }
-.rates .rate { display: flex; gap: 0.5rem; align-items: center; }
-.rates meter { width: 8rem; height: 0.9rem; }
+.rates .rate-cell { display: inline-flex; gap: 0.5rem; align-items: center; }
+.rates td:first-child { white-space: normal; overflow-wrap: break-word; max-width: 20rem; }
+.rates meter { width: 5.5rem; height: 0.9rem; }
 .chips { gap: 0.3rem 0.8rem; align-items: center; }
 .chips a.chosen { font-weight: 600; text-decoration: none; color: var(--fg); }
 .drafts { list-style: none; padding: 0; margin: 0; }
@@ -147,3 +148,13 @@ p.text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .verdict.rejected { color: var(--fail); }
 .verdict.confirmed { color: var(--ok); }
 .verdict.same_as, .verdict.unchecked, .verdict.not_checked { color: var(--warn); }
+
+.outcome.ok { color: var(--ok); }
+.outcome.error { color: var(--fail); }
+.outcome.refused { color: var(--warn); }
+.outcome.other { color: var(--muted); }
+button.chip { padding: 0.05rem 0.6rem; border-radius: 999px; }
+button.chip.chosen { font-weight: 600; border-color: var(--fg); }
+.timeline td.args code { white-space: pre-wrap; overflow-wrap: anywhere; display: block; max-width: 36rem; max-height: 6rem; overflow: auto; }
+.calls pre { margin: 0.35rem 0 0; max-height: 10rem; }
+.timeline td:nth-child(2), .timeline td:nth-child(6), .timeline td:nth-child(7) { white-space: nowrap; }
