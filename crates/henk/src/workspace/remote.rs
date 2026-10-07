@@ -432,7 +432,8 @@ impl Workspace for RemoteWorkspace {
             return Err(WorkspaceError::Refused(format!("{cwd} is not a directory")));
         }
         let dir = self.inside(&real, cwd)?;
-        let limit = self.budget.next(timeout)?;
+        let held = self.budget.reserve(timeout)?;
+        let limit = held.granted();
         if limit.is_zero() {
             return Ok(self.budget.used_up());
         }
@@ -467,7 +468,7 @@ impl Workspace for RemoteWorkspace {
             output: tail(&text, cap),
             duration,
         };
-        self.budget.spend(result.duration);
+        held.settle(result.duration);
         Ok(result)
     }
 

@@ -298,7 +298,7 @@ sweep)
 probe)
     echo "henk-sandbox $VERSION"
     # What runs: on the PATH the run's commands get.
-    for tool in git tar timeout realpath find grep stat mise; do
+    for tool in bash git tar timeout realpath find grep stat mise; do
         if found=$(PATH=$RUN_PATH command -v "$tool"); then
             echo "$tool $found"
         else

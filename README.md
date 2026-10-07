@@ -372,7 +372,7 @@ else to lose.
 
 To set one up (Debian or alike):
 1. Install the tools the script uses:
-   `apt-get install openssh-server git tar procps findutils grep passwd util-linux`
+   `apt-get install openssh-server bash git tar procps findutils grep passwd util-linux`
    (`runuser`, `useradd`/`userdel`, `pkill`, and GNU `grep` with `-P` on a
    PCRE2 with Unicode support, which the `search` tool uses; any version
    does, 3.8 and later are checked).
@@ -436,8 +436,12 @@ could not be opened or set up reviews through the platform as before, with
 the reason on the run's timeline. In its workspace a lane, and the
 fact-checker, list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
-(`read_file`), the same code tools an address run has; `bash` follows in
-#85. Without a workspace a lane reads through the platform as before.
+(`read_file`), the same code tools an address run has, and run a command
+of their own (`bash`, #85): one test, a build or a grep, as the
+workspace's user, with the repository's toolchain and the profile's time
+and output limits. Each command is on the run's timeline with the lane
+that ran it, so `henk runs show <id>` lists what a review ran. Without a
+workspace a lane reads through the platform as before.
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
 
