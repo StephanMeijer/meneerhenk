@@ -7,23 +7,23 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use henk_domain::run::RunId;
+use henk_domain::allowlist::Platform;
+use henk_domain::run::{RunId, RunKind};
 use henk_events::EventSource;
-use henk_store::{RunFilter, RunKey, RunRecord, ToolUsage};
+use henk_store::{InboundEvent, OutcomeRecord, RunFilter, RunKey, RunRecord, RunStatus, ToolUsage};
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::types::{
-    Cancelled, Draft, EventSummary, Finding, Lane, Page, RunDetail, RunEvent, RunSummary,
+    Cancelled, Draft, EventSummary, Finding, Lane, Page, RunCount, RunDetail, RunEvent, RunSummary,
     StartRequest, Started, ToolCall, ToolUsageRow, Transcript, TranscriptRef,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
-use crate::dashboard::actions::{record_cancel, requester};
 use crate::dashboard::auth::{ApiAct, ApiViewer};
-use crate::dashboard::views::{KINDS, PLATFORMS, STATUSES};
-use crate::hooks::publish;
 use crate::hooks::requests::{Start, start_event};
+use crate::hooks::{now_rfc3339, publish};
+use crate::ids::new_event_id;
 use crate::runs::TranscriptView;
 
 /// What `GET /runs` takes. Every filter is optional.
@@ -117,6 +117,18 @@ pub async fn list(
             .collect(),
         next,
     }))
+}
+
+/// `GET /runs/count`: how many runs the filters of `GET /runs` match, over
+/// every page. A cursor narrows it like a page.
+pub async fn count(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+    ApiQuery(query): ApiQuery<RunQuery>,
+) -> ApiResult<RunCount> {
+    let filter = query.filter()?;
+    let count = dashboard.app.store.count_runs(&filter).await?;
+    Ok(Json(RunCount { count }))
 }
 
 /// The run a path names, or a 400 or 404.
@@ -335,5 +347,63 @@ pub async fn cancel(
             "conflict",
             "That run is not running here: it ended, or another Henk process runs it.",
         ))
+    }
+}
+
+const KINDS: &[(&str, RunKind)] = &[
+    ("review", RunKind::Review),
+    ("plan", RunKind::Plan),
+    ("discord_turn", RunKind::DiscordTurn),
+    ("mail_reply", RunKind::MailReply),
+    ("address", RunKind::Address),
+];
+
+const STATUSES: &[(&str, RunStatus)] = &[
+    ("running", RunStatus::Running),
+    ("finished", RunStatus::Finished),
+    ("failed", RunStatus::Failed),
+    ("cancelled", RunStatus::Cancelled),
+];
+
+const PLATFORMS: &[(&str, Platform)] =
+    &[("github", Platform::GitHub), ("gitlab", Platform::GitLab)];
+
+/// Who acts, as a stable id: never the login, which is a display name (§2).
+fn requester(github_id: u64) -> String {
+    format!("github:{github_id}")
+}
+
+/// Records a cancel request and what came of it. A failure is logged; the
+/// cancel itself stands.
+async fn record_cancel(dashboard: &Dashboard, run: &RunId, who: &str, cancelled: bool) {
+    let store = &dashboard.app.store;
+    let event = InboundEvent {
+        id: new_event_id(),
+        received_at: now_rfc3339(),
+        source: "dashboard".to_owned(),
+        kind: "cancel_requested".to_owned(),
+        repo: None,
+        target: None,
+        payload: None,
+        requester: Some(who.to_owned()),
+    };
+    let outcome = OutcomeRecord {
+        event_id: event.id.clone(),
+        listener: "dashboard".to_owned(),
+        outcome: if cancelled { "cancelled" } else { "ignored" }.to_owned(),
+        detail: if cancelled {
+            format!("cancel sent to {run}")
+        } else {
+            format!("{run} is not running here")
+        },
+        run_id: Some(run.as_str().to_owned()),
+        at: String::new(),
+    };
+    let recorded = match store.record_event(&event).await {
+        Ok(()) => store.record_outcome(&outcome).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = recorded {
+        warn!(%error, run = %run, "could not record a cancel request");
     }
 }

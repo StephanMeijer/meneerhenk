@@ -23,7 +23,9 @@ use tower::ServiceExt as _;
 use super::types;
 use crate::dashboard::auth::CSRF_HEADER;
 use crate::dashboard::session::Session;
-use crate::dashboard::tests::{ALLOWED, Fixture, fixture, outcomes_of, seed, signed_in_as};
+use crate::dashboard::tests::{
+    ALLOWED, Fixture, fixture, fixture_with, outcomes_of, seed, signed_in_as,
+};
 
 const ORIGIN: &str = "https://henk.example";
 
@@ -101,6 +103,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard/api/v1/me"),
     ("GET", "/dashboard/api/v1/health"),
     ("GET", "/dashboard/api/v1/runs"),
+    ("GET", "/dashboard/api/v1/runs/count"),
     ("GET", "/dashboard/api/v1/runs/r-review"),
     ("GET", "/dashboard/api/v1/runs/r-review/events"),
     ("GET", "/dashboard/api/v1/runs/r-review/tool-calls"),
@@ -236,7 +239,7 @@ async fn me_says_who_is_signed_in_with_their_token_and_nothing_is_cached() {
     assert_eq!(me.status, StatusCode::OK);
     assert_eq!(
         me.json(),
-        json!({"github_id": ALLOWED, "login": "alice", "csrf": csrf})
+        json!({"github_id": ALLOWED, "login": "alice", "csrf": csrf, "startable": ["review", "plan"]})
     );
     assert_eq!(me.headers[header::CACHE_CONTROL], "no-store");
     assert_eq!(me.headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
@@ -925,6 +928,7 @@ fn api_types_are_current() {
         types::Me::decl(&cfg),
         types::Page::<types::RunSummary>::decl(&cfg),
         types::RunSummary::decl(&cfg),
+        types::RunCount::decl(&cfg),
         types::RunDetail::decl(&cfg),
         types::Lane::decl(&cfg),
         types::Finding::decl(&cfg),
@@ -971,4 +975,41 @@ fn api_types_are_current() {
         "{} is out of date with the API's types; run this test with HENK_BLESS=1",
         path.display()
     );
+}
+
+#[tokio::test]
+async fn an_address_run_is_startable_only_where_address_runs_are_configured() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.address = Some(toml::from_str("model = \"m\"\nrequester_id = 3").unwrap());
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
+    assert_eq!(me["startable"], json!(["review", "plan", "address"]));
+}
+
+#[tokio::test]
+async fn the_count_spans_every_page_and_takes_the_filters() {
+    let f = fixture("https://127.0.0.1:9");
+    many_runs(&f, 120).await;
+    let (cookie, _) = viewer(&f);
+    let count = |query: &'static str| {
+        let f = &f;
+        let cookie = cookie.clone();
+        async move {
+            let answer = get(f, &format!("/dashboard/api/v1/runs/count{query}"), &cookie).await;
+            assert_eq!(answer.status, StatusCode::OK, "{query}: {}", answer.body);
+            answer.json()["count"].as_u64().unwrap()
+        }
+    };
+    assert_eq!(count("").await, 120, "beyond one page of 100");
+    assert_eq!(count("?status=running").await, 120);
+    assert_eq!(count("?kind=plan").await, 12);
+    assert_eq!(count("?target=42").await, 1);
+    assert_eq!(count("?repo=docspec/other").await, 0);
+    let bad = get(&f, "/dashboard/api/v1/runs/count?kind=lunch", &cookie).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
 }

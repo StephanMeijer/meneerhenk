@@ -1,7 +1,8 @@
-//! The dashboard app (#199): the single-page app in `dashboard/`, built by
-//! Vite and embedded at compile time by `build.rs`. It is served at
-//! `/dashboard/app/` behind the same sign-in as the pages, and talks to
-//! Henk only through `/dashboard/api/v1`. Its files come from a table in
+//! The dashboard app (#199, #201): the single-page app in `dashboard/`,
+//! built by Vite and embedded at compile time by `build.rs`. It is the
+//! dashboard: served at `/dashboard` behind the sign-in, every path under
+//! it that is not the API or the sign-in is the app, and it talks to Henk
+//! only through `/dashboard/api/v1`. Its files come from a table in
 //! memory, never from the disk, and every response forbids inline script
 //! and style, framing and sniffing.
 
@@ -12,10 +13,10 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use super::Dashboard;
-use super::auth::{Viewer, redirect};
+use super::auth::Viewer;
 
-/// Where the app is served. #201 moves it to `/dashboard`.
-pub const BASE: &str = "/dashboard/app";
+/// Where the app is served.
+pub const BASE: &str = "/dashboard";
 
 /// The app's files: a path under [`BASE`] and its bytes.
 #[derive(Debug, Clone, Copy)]
@@ -37,22 +38,18 @@ impl Assets {
     }
 }
 
-/// The policy every app response carries. Stricter than the pages': the
-/// app has no inline style either.
+/// The policy every app response carries: no inline script or style, no
+/// other origin, no framing.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
-/// `/dashboard/app`: the app's root has a slash, so relative paths resolve.
-pub async fn root(_viewer: Viewer) -> Response {
-    with_headers(redirect(&format!("{BASE}/"), None))
-}
-
-/// `/dashboard/app/`: the app.
+/// `/dashboard` and `/dashboard/`: the app. Its asset paths are absolute,
+/// so both work.
 pub async fn index(State(dashboard): State<Arc<Dashboard>>, _viewer: Viewer) -> Response {
     serve(dashboard.assets, "")
 }
 
-/// `/dashboard/app/{*path}`: a file of the app, or the app itself for a
-/// path it routes in the browser.
+/// `/dashboard/{*path}`: a file of the app, or the app itself for a path
+/// it routes in the browser, such as `/dashboard/runs/r-1`.
 pub async fn file(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: Viewer,
@@ -87,8 +84,10 @@ fn serve(assets: Assets, path: &str) -> Response {
         };
         return file_response(bytes, content_type(path), cache);
     }
-    let last = path.rsplit('/').next().unwrap_or_default();
-    if path.starts_with("assets/") || last.contains('.') {
+    // Under assets/ only a file Vite built exists. Anything else is a route
+    // of the app, which shows its own not-found view; a route may hold a
+    // dot, such as a session named lane.a.
+    if path.starts_with("assets/") {
         return not_found();
     }
     match assets.get("index.html") {
@@ -153,7 +152,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{Method, Request, StatusCode, header};
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
@@ -165,6 +164,7 @@ mod tests {
     const ASSETS: Assets = Assets(&[
         ("assets/app-abc.css", b"body{}"),
         ("assets/app-abc.js", b"console.log(1)"),
+        ("favicon.svg", b"<svg/>"),
         ("index.html", INDEX),
     ]);
 
@@ -174,8 +174,8 @@ mod tests {
         body: Vec<u8>,
     }
 
-    async fn get(f: &Fixture, uri: &str, cookie: Option<&str>) -> Answer {
-        let mut request = Request::get(uri);
+    async fn call(f: &Fixture, method: Method, uri: &str, cookie: Option<&str>) -> Answer {
+        let mut request = Request::builder().method(method).uri(uri);
         if let Some(cookie) = cookie {
             request = request.header(header::COOKIE, cookie);
         }
@@ -199,6 +199,10 @@ mod tests {
             headers,
             body,
         }
+    }
+
+    async fn get(f: &Fixture, uri: &str, cookie: Option<&str>) -> Answer {
+        call(f, Method::GET, uri, cookie).await
     }
 
     fn viewer(f: &Fixture) -> String {
@@ -225,22 +229,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signed_out_the_app_leads_through_sign_in_back_to_the_same_place() {
+    async fn signed_out_the_dashboard_leads_through_sign_in_back_to_the_same_place() {
         let f = fixture_with_assets("https://127.0.0.1:9", ASSETS);
-        let answer = get(&f, "/dashboard/app/runs/r-1?tab=drafts", None).await;
+        let answer = get(&f, "/dashboard/runs/r-1?tab=drafts", None).await;
         assert_eq!(answer.status, StatusCode::SEE_OTHER);
         assert_eq!(
             answer.headers[header::LOCATION],
-            "/dashboard/login?next=%2Fdashboard%2Fapp%2Fruns%2Fr-1%3Ftab%3Ddrafts"
+            "/dashboard/login?next=%2Fdashboard%2Fruns%2Fr-1%3Ftab%3Ddrafts"
         );
-        let asset = get(&f, "/dashboard/app/assets/app-abc.js", None).await;
+        let home = get(&f, "/dashboard", None).await;
+        assert_eq!(home.status, StatusCode::SEE_OTHER);
+        assert_eq!(home.headers[header::LOCATION], "/dashboard/login");
+        let asset = get(&f, "/dashboard/assets/app-abc.js", None).await;
         assert_eq!(
             asset.status,
             StatusCode::SEE_OTHER,
             "files need sign-in too"
         );
         let outsider = signed_in_as(&f, &Session::fresh(999, "mallory".to_owned()).unwrap()).0;
-        let refused = get(&f, "/dashboard/app/", Some(&outsider)).await;
+        let refused = get(&f, "/dashboard/", Some(&outsider)).await;
         assert_eq!(
             refused.status,
             StatusCode::SEE_OTHER,
@@ -250,14 +257,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_app_its_files_and_its_routes_are_served_with_their_headers() {
+    async fn every_dashboard_page_is_the_app_and_its_files_are_served_with_their_headers() {
         let f = fixture_with_assets("https://127.0.0.1:9", ASSETS);
         let cookie = viewer(&f);
 
         for uri in [
-            "/dashboard/app/",
-            "/dashboard/app/runs/r-1",
-            "/dashboard/app/health/",
+            "/dashboard",
+            "/dashboard/",
+            "/dashboard/runs/r-1",
+            "/dashboard/runs/r-1/transcripts/lane.a",
+            "/dashboard/events",
+            "/dashboard/events/e-1",
+            "/dashboard/health/",
+            "/dashboard/no/such/page",
         ] {
             let page = get(&f, uri, Some(&cookie)).await;
             assert_eq!(page.status, StatusCode::OK, "{uri}");
@@ -270,7 +282,7 @@ mod tests {
             assert_guarded(&page, uri);
         }
 
-        let script = get(&f, "/dashboard/app/assets/app-abc.js", Some(&cookie)).await;
+        let script = get(&f, "/dashboard/assets/app-abc.js", Some(&cookie)).await;
         assert_eq!(script.status, StatusCode::OK);
         assert_eq!(script.body, b"console.log(1)");
         assert_eq!(
@@ -282,16 +294,14 @@ mod tests {
             "public, max-age=31536000, immutable"
         );
         assert_guarded(&script, "script");
-        let style = get(&f, "/dashboard/app/assets/app-abc.css", Some(&cookie)).await;
+        let style = get(&f, "/dashboard/assets/app-abc.css", Some(&cookie)).await;
         assert_eq!(
             style.headers[header::CONTENT_TYPE],
             "text/css; charset=utf-8"
         );
-
-        let root = get(&f, "/dashboard/app", Some(&cookie)).await;
-        assert_eq!(root.status, StatusCode::SEE_OTHER);
-        assert_eq!(root.headers[header::LOCATION], "/dashboard/app/");
-        assert_guarded(&root, "root");
+        let icon = get(&f, "/dashboard/favicon.svg", Some(&cookie)).await;
+        assert_eq!(icon.headers[header::CONTENT_TYPE], "image/svg+xml");
+        assert_eq!(icon.headers[header::CACHE_CONTROL], "no-cache");
     }
 
     #[tokio::test]
@@ -299,20 +309,26 @@ mod tests {
         let f = fixture_with_assets("https://127.0.0.1:9", ASSETS);
         let cookie = viewer(&f);
         for uri in [
-            "/dashboard/app/assets/missing.js",
-            "/dashboard/app/assets/deeper/route",
-            "/dashboard/app/favicon.png",
-            "/dashboard/app/runs/..%2F..%2Fetc%2Fpasswd",
-            "/dashboard/app/..%2Findex.html",
-            "/dashboard/app/a%5Cb",
-            "/dashboard/app//etc/passwd",
-            "/dashboard/app/./index.html",
+            "/dashboard/assets/missing.js",
+            "/dashboard/assets/deeper/route",
+            "/dashboard/runs/..%2F..%2Fetc%2Fpasswd",
+            "/dashboard/..%2Findex.html",
+            "/dashboard/a%5Cb",
+            "/dashboard//etc/passwd",
+            "/dashboard/./index.html",
         ] {
             let answer = get(&f, uri, Some(&cookie)).await;
             assert_eq!(answer.status, StatusCode::NOT_FOUND, "{uri}");
             assert_ne!(answer.body, INDEX, "{uri}");
             assert_guarded(&answer, uri);
         }
+    }
+
+    #[tokio::test]
+    async fn the_api_and_sign_in_keep_their_routes_and_the_old_pages_actions_are_gone() {
+        let f = fixture_with_assets("https://127.0.0.1:9", ASSETS);
+        let cookie = viewer(&f);
+
         let api = get(&f, "/dashboard/api/v1/nope", Some(&cookie)).await;
         assert_eq!(api.status, StatusCode::NOT_FOUND);
         let api: serde_json::Value = serde_json::from_slice(&api.body).unwrap();
@@ -320,13 +336,45 @@ mod tests {
             api["error"]["code"], "not_found",
             "the API keeps its JSON 404"
         );
+        let me = get(&f, "/dashboard/api/v1/me", Some(&cookie)).await;
+        assert_eq!(me.status, StatusCode::OK);
+        assert_ne!(me.body, INDEX);
+
+        let login = get(&f, "/dashboard/login", None).await;
+        assert_eq!(
+            login.status,
+            StatusCode::SEE_OTHER,
+            "sign-in goes to GitHub"
+        );
+        assert!(
+            login.headers[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .contains("/login/oauth/authorize")
+        );
+
+        for uri in ["/dashboard/start", "/dashboard/runs/r-1/cancel"] {
+            let posted = call(&f, Method::POST, uri, Some(&cookie)).await;
+            assert_eq!(
+                posted.status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{uri}: actions are the API's now"
+            );
+        }
+        for uri in ["/dashboard/running.json", "/dashboard/app.js"] {
+            let gone = get(&f, uri, Some(&cookie)).await;
+            assert_eq!(
+                gone.body, INDEX,
+                "{uri} is no longer served: the app answers"
+            );
+        }
     }
 
     #[tokio::test]
     async fn without_a_built_app_henk_says_how_to_build_it() {
         let f = fixture_with_assets("https://127.0.0.1:9", Assets(&[]));
         let cookie = viewer(&f);
-        let answer = get(&f, "/dashboard/app/", Some(&cookie)).await;
+        let answer = get(&f, "/dashboard/", Some(&cookie)).await;
         assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(String::from_utf8_lossy(&answer.body).contains("npm run build"));
         assert_guarded(&answer, "unbuilt");

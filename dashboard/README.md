@@ -1,9 +1,9 @@
 # Dashboard app
 
-Meneer Henk's dashboard as a single-page app (#197). It reads and acts only
+Meneer Henk's dashboard, a single-page app (#197). It reads and acts only
 through the JSON API at `/dashboard/api/v1` (`docs/API.md`). `npm run build`
 writes `dist/`; `crates/henk/build.rs` embeds that in the henk binary, which
-serves it at `/dashboard/app/` behind the dashboard's sign-in.
+serves it at `/dashboard` behind the dashboard's sign-in.
 
 ## Layout
 
@@ -12,9 +12,17 @@ serves it at `/dashboard/app/` behind the dashboard's sign-in.
   `HENK_BLESS=1 cargo test -p henk api_types_are_current`.
 - `src/lib/api/client.ts`: the only way to Henk. Reads carry the session
   cookie, actions also the CSRF token from `/me`; a 401 goes to sign-in.
-- `src/lib/router.ts`: routes on the History API under `/dashboard/app`.
-- `src/lib/views/`: one component per page.
+- `src/lib/router.ts`: routes on the History API under `/dashboard`: the
+  overview (`/`), `/runs/{id}`, `/runs/{id}/transcripts/{session}`,
+  `/events`, `/events/{id}` and `/health`, the paths the server-rendered
+  pages had.
+- `src/lib/format.ts`: small text helpers the views share.
+- `src/lib/views/`: one component per page, and the parts they share. A
+  view takes its loaders as props with the client's as defaults, so tests
+  give it fixtures.
+- `src/lib/testing/`: rendering into jsdom and fixtures, for the tests.
 - `src/App.svelte`: the shell: navigation, who is signed in, sign-out.
+- `public/`: files copied as they are, such as the favicon.
 
 ## Rules
 

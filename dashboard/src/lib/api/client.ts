@@ -1,7 +1,21 @@
 // The dashboard's only way to Henk: /dashboard/api/v1 (docs/API.md). Reads
 // carry the session cookie; actions also the session's CSRF token, which
 // /me gives. A 401 sends the browser to sign in and back.
-import type { ErrorBody, Health, Me } from './types';
+import type {
+  Cancelled,
+  ErrorBody,
+  EventDetail,
+  EventItem,
+  Health,
+  Me,
+  Page,
+  RunCount,
+  RunDetail,
+  RunSummary,
+  StartRequest,
+  Started,
+  Transcript,
+} from './types';
 
 export const API = '/dashboard/api/v1';
 
@@ -91,6 +105,48 @@ export async function me(): Promise<Me> {
 /** What the service has. */
 export function health(): Promise<Health> {
   return getJson<Health>('/health');
+}
+
+/** Runs, newest first; `query` is the `GET /runs` query. */
+export function runs(query = ''): Promise<Page<RunSummary>> {
+  return getJson<Page<RunSummary>>(`/runs${query === '' ? '' : `?${query}`}`);
+}
+
+/** How many runs `query` matches, over every page. */
+export function runCount(query = ''): Promise<RunCount> {
+  return getJson<RunCount>(`/runs/count${query === '' ? '' : `?${query}`}`);
+}
+
+/** One run in full. */
+export function run(id: string): Promise<RunDetail> {
+  return getJson<RunDetail>(`/runs/${encodeURIComponent(id)}`);
+}
+
+/** One session's conversation. */
+export function transcript(id: string, session: string): Promise<Transcript> {
+  return getJson<Transcript>(
+    `/runs/${encodeURIComponent(id)}/transcripts/${encodeURIComponent(session)}`,
+  );
+}
+
+/** Inbound events, newest first; `query` is the `GET /events` query. */
+export function events(query = ''): Promise<Page<EventItem>> {
+  return getJson<Page<EventItem>>(`/events${query === '' ? '' : `?${query}`}`);
+}
+
+/** One inbound event with its payload and outcomes. */
+export function event(id: string): Promise<EventDetail> {
+  return getJson<EventDetail>(`/events/${encodeURIComponent(id)}`);
+}
+
+/** Starts a review, plan or address run. */
+export function startRun(request: StartRequest): Promise<Started> {
+  return postJson<Started>('/runs', request);
+}
+
+/** Cancels a running run. */
+export function cancelRun(id: string): Promise<Cancelled> {
+  return postJson<Cancelled>(`/runs/${encodeURIComponent(id)}/cancel`, {});
 }
 
 /** Forgets the CSRF token; for the tests. */

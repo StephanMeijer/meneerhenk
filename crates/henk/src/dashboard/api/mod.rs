@@ -6,6 +6,7 @@
 //! returns a secret. `docs/API.md` lists the routes.
 
 mod events;
+mod health;
 mod runs;
 #[cfg(test)]
 mod tests;
@@ -29,8 +30,7 @@ use tracing::warn;
 
 use super::Dashboard;
 use super::auth::ApiViewer;
-use super::views::health_rows;
-use types::{ErrorBody, ErrorDetail, Health, HealthCheck, Me};
+use types::{ErrorBody, ErrorDetail, Me};
 
 /// Rows per page when a listing does not say.
 const DEFAULT_LIMIT: u32 = 50;
@@ -140,8 +140,9 @@ where
 pub fn routes(dashboard: Arc<Dashboard>) -> Router {
     Router::new()
         .route("/me", get(me))
-        .route("/health", get(health))
+        .route("/health", get(health::health))
         .route("/runs", get(runs::list).post(runs::start))
+        .route("/runs/count", get(runs::count))
         .route("/runs/{id}", get(runs::detail))
         .route("/runs/{id}/events", get(runs::events))
         .route("/runs/{id}/tool-calls", get(runs::tool_calls))
@@ -165,31 +166,23 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
-async fn not_found() -> ApiError {
+/// The API's answer for a path it has no route for.
+pub async fn not_found() -> ApiError {
     ApiError::not_found("No such API route.")
 }
 
-/// Who is signed in, and their CSRF token.
+/// Who is signed in, their CSRF token, and what they can start here.
 async fn me(State(dashboard): State<Arc<Dashboard>>, ApiViewer(viewer): ApiViewer) -> Json<Me> {
+    let mut startable = vec!["review".to_owned(), "plan".to_owned()];
+    if dashboard.app.settings.address.is_some() {
+        startable.push("address".to_owned());
+    }
     Json(Me {
         github_id: viewer.github_id,
         csrf: dashboard.signer.csrf(&viewer),
         login: viewer.login,
+        startable,
     })
-}
-
-/// What `/dashboard/health` shows.
-async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: ApiViewer) -> Json<Health> {
-    let checks = health_rows(&dashboard)
-        .await
-        .into_iter()
-        .map(|(name, state, detail)| HealthCheck {
-            name,
-            state,
-            detail,
-        })
-        .collect();
-    Json(Health { checks })
 }
 
 /// A page size from `?limit=`: the default when absent, at most

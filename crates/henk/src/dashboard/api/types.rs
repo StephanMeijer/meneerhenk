@@ -6,6 +6,7 @@
 //! The SPA's TypeScript types are generated from these in a test
 //! (`api_types_are_current`), so a change here shows up there.
 
+use henk_domain::allowlist::Platform;
 use henk_domain::run::RunKind;
 use henk_store::{
     DraftRecord, EventRecord, EventWithOutcomes, FindingRecord, InboundEvent, LaneRecord,
@@ -14,7 +15,6 @@ use henk_store::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::Settings;
-use crate::dashboard::views::target_url;
 use crate::runs::{MessageView, PartView, TranscriptView};
 
 /// Who is signed in, and the token their actions carry.
@@ -27,6 +27,9 @@ pub struct Me {
     pub login: String,
     /// The CSRF token every action sends in `X-CSRF-Token`.
     pub csrf: String,
+    /// What `POST /runs` can start here: `review`, `plan`, and `address`
+    /// when address runs are configured.
+    pub startable: Vec<String>,
 }
 
 /// One page of a listing, newest first.
@@ -67,6 +70,14 @@ pub struct RunSummary {
     pub started_at: String,
     /// RFC 3339, once ended.
     pub finished_at: Option<String>,
+}
+
+/// How many runs a filter matches, over every page.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunCount {
+    /// The number.
+    pub count: u64,
 }
 
 /// One run with everything the run record holds about it.
@@ -472,8 +483,8 @@ impl RunSummary {
             id: run.id.as_str().to_owned(),
             kind: kind_name(run.kind).to_owned(),
             platform: match run.platform {
-                henk_domain::allowlist::Platform::GitHub => "github",
-                henk_domain::allowlist::Platform::GitLab => "gitlab",
+                Platform::GitHub => "github",
+                Platform::GitLab => "gitlab",
             }
             .to_owned(),
             repo: run.repo.clone(),
@@ -660,6 +671,34 @@ impl From<&EventWithOutcomes> for EventItem {
         Self {
             event: EventSummary::from(&item.event),
             outcomes: item.outcomes.iter().map(ListenerOutcome::from).collect(),
+        }
+    }
+}
+
+/// A link to the pull request, merge request or issue a run is about.
+fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
+    let issue = run.kind == RunKind::Plan;
+    match run.platform {
+        Platform::GitHub => {
+            let api = settings
+                .github
+                .as_ref()
+                .map_or("https://api.github.com", |g| g.api_base.as_str());
+            let web = if api.trim_end_matches('/') == "https://api.github.com" {
+                "https://github.com".to_owned()
+            } else {
+                api.trim_end_matches('/')
+                    .trim_end_matches("/api/v3")
+                    .to_owned()
+            };
+            let what = if issue { "issues" } else { "pull" };
+            Some(format!("{web}/{}/{what}/{}", run.repo, run.target))
+        }
+        Platform::GitLab => {
+            let api = settings.gitlab.as_ref()?.api_url.trim_end_matches('/');
+            let web = api.trim_end_matches("/api/v4");
+            let what = if issue { "issues" } else { "merge_requests" };
+            Some(format!("{web}/{}/-/{what}/{}", run.repo, run.target))
         }
     }
 }

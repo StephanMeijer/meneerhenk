@@ -1,22 +1,20 @@
 //! The web dashboard (#36): what Henk is doing and has done, behind a GitHub
 //! sign-in. Someone signed in may also start a review, plan or address run,
-//! and cancel one that is running (#69); every such action is a form with
-//! the session's CSRF token, from the dashboard's own origin. The same,
-//! as JSON, is under `/dashboard/api/v1` ([`api`], #198), where the
-//! session cookie, scoped to `/dashboard`, reaches it. The app that reads
-//! it, built from `dashboard/`, is at `/dashboard/app/` ([`app`], #199).
+//! and cancel one that is running (#69). The dashboard is a single-page app
+//! built from `dashboard/` and served at `/dashboard` ([`app`], #199, #201);
+//! it reads and acts only through the JSON API at `/dashboard/api/v1`
+//! ([`api`], #198), where the session cookie, scoped to `/dashboard`, reaches
+//! it. Sign-in, its callback and sign-out are the only other routes.
 
-mod actions;
 mod api;
 mod app;
 mod auth;
 mod session;
-mod views;
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use secrecy::SecretString;
 
 use crate::app::{App, env_var};
@@ -134,25 +132,15 @@ impl Dashboard {
 /// Every dashboard route.
 pub fn routes(dashboard: Arc<Dashboard>) -> Router {
     Router::new()
-        .route("/dashboard", get(views::overview))
-        .route("/dashboard/runs/{id}", get(views::run))
-        .route(
-            "/dashboard/runs/{id}/transcripts/{session}",
-            get(views::transcript),
-        )
-        .route("/dashboard/events", get(views::events))
-        .route("/dashboard/events/{id}", get(views::event))
-        .route("/dashboard/health", get(views::health))
-        .route("/dashboard/running.json", get(views::running_json))
-        .route("/dashboard/app.js", get(views::app_js))
         .route("/dashboard/login", get(auth::login))
         .route("/dashboard/auth/callback", get(auth::callback))
         .route("/dashboard/logout", post(auth::logout))
-        .route("/dashboard/start", post(actions::start))
-        .route("/dashboard/runs/{id}/cancel", post(actions::cancel))
-        .route(app::BASE, get(app::root))
-        .route("/dashboard/app/", get(app::index))
-        .route("/dashboard/app/{*path}", get(app::file))
+        .route(app::BASE, get(app::index))
+        .route("/dashboard/", get(app::index))
+        .route("/dashboard/{*path}", get(app::file))
+        // An API path no API route has is the API's JSON 404, not the app.
+        .route("/dashboard/api", any(api::not_found))
+        .route("/dashboard/api/{*rest}", any(api::not_found))
         .with_state(Arc::clone(&dashboard))
         .nest("/dashboard/api/v1", api::routes(dashboard))
 }

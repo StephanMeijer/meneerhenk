@@ -1,6 +1,5 @@
 // Builds the dashboard into dist/, which crates/henk/build.rs embeds in
-// the henk binary. Served at /dashboard/app/ until #201 moves it to
-// /dashboard.
+// the henk binary, served at /dashboard.
 import { fileURLToPath } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { ProxyOptions } from 'vite';
@@ -19,7 +18,7 @@ const toHenk: ProxyOptions = {
 };
 
 export default defineConfig(({ mode }) => ({
-  base: '/dashboard/app/',
+  base: '/dashboard/',
   plugins: [svelte()],
   resolve: {
     alias: { $lib: fileURLToPath(new URL('./src/lib', import.meta.url)) },

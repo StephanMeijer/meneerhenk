@@ -574,10 +574,13 @@ manifests, load the image, and set `HENK_TEST_KUBE_NAMESPACE`,
 ### Dashboard
 
 With a `[dashboard]` table and its three secrets set, `henk serve` also
-serves `/dashboard`:
+serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
+`dashboard/`) built into the binary:
 - the runs, with what is running now updating itself, filters by kind,
   status, platform and repository, and paging;
-- each run with its lanes, findings, timeline and the events that led to it;
+- each run with its lanes, tool calls, drafts and their verdicts, findings,
+  timeline and the events that led to it, and each lane's whole
+  conversation;
 - the inbound events with what each listener did;
 - a health page from configuration and the database;
 - a form that starts a review, plan or address run, and a button that
@@ -589,9 +592,13 @@ refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
 `cancelled`, with a neutral check for a review and one comment saying which
 GitHub account cancelled it; an address run cancelled before its push
-pushes nothing. Every action is a form carrying the session's CSRF token
-and must come from `public_base_url` (its `Origin`, or else its `Referer`);
-anything else is refused.
+pushes nothing.
+
+The app reads and acts only through the JSON API at `/dashboard/api/v1`,
+behind the same sign-in; every action carries the session's CSRF token in a
+header, comes from `public_base_url` (its `Origin`, or else its `Referer`)
+and has a JSON body, and anything else is refused. `docs/API.md` lists the
+endpoints, for scripts too.
 
 People sign in with GitHub, and only the GitHub user ids in
 `allowed_github_ids` get in. The id is checked on every request, so taking an
@@ -603,36 +610,29 @@ id off the list ends that access at once. To set it up:
 
 GitHub's token is used once, to read who signed in, and is not kept. The
 session is a signed `HttpOnly` cookie scoped to `/dashboard`, and `Secure`
-when the public URL is https. The pages escape everything they show, since
-the text in them is other people's words. They allow scripts only from Henk
-himself, and cannot be framed. Without the table there is no `/dashboard`;
-with a secret missing, the server starts and logs why the dashboard is off.
-The run links Henk posts, `/runs/{id}`, and `/events/{id}` lead to the
-same pages on the dashboard, behind sign-in: they show findings, plans and
-webhook payloads of private repositories, and an unguessable id is not
-access control. After signing in, the browser returns to the page it asked
-for. Without a dashboard these links are not served; `henk runs show <id>`
-reads a run on the server.
+when the public URL is https. The app shows everything as text, since the
+text in it is other people's words; its pages allow no inline script or
+style and nothing from another origin, and cannot be framed. Without the
+table there is no `/dashboard`; with a secret missing, the server starts
+and logs why the dashboard is off. The run links Henk posts, `/runs/{id}`,
+and `/events/{id}` lead to the same pages on the dashboard, behind sign-in:
+they show findings, plans and webhook payloads of private repositories, and
+an unguessable id is not access control. After signing in, the browser
+returns to the page it asked for. Without a dashboard these links are not
+served; `henk runs show <id>` reads a run on the server.
 
-The same is JSON at `/dashboard/api/v1`, behind the same sign-in, with
-the session's CSRF token on every action: runs, a run's drafts, tool calls
-and transcripts, events, health, start and cancel. `docs/API.md` lists the
-endpoints.
-
-The new dashboard, a single-page app in `dashboard/` (Svelte, Vite and
-TypeScript), is at `/dashboard/app/` while its views are built (#197); it
-reads only that API. The release binary and the container image embed it.
-To build it into a binary of your own, with the Node of
-`dashboard/.node-version`:
+The release binary and the container image embed the app. To build it into
+a binary of your own, with the Node of `dashboard/.node-version`:
 
 ```sh
 cd dashboard && npm ci --ignore-scripts && npm run build && cd ..
 cargo build --release   # build.rs embeds dashboard/dist
 ```
 
-To work on it, run Henk, sign in on Henk's own `/dashboard/login`, and
-start Vite's dev server on the same host: it forwards the API and sign-in
-to `HENK_URL` (default `http://127.0.0.1:8080`).
+A binary built without it serves a page at `/dashboard` saying so. To work
+on the app, run Henk, sign in on Henk's own `/dashboard/login`, and start
+Vite's dev server on the same host: it forwards the API and sign-in to
+`HENK_URL` (default `http://127.0.0.1:8080`).
 
 ```sh
 cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
