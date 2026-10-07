@@ -90,3 +90,15 @@ export function applyRunning(state: Running, message: RunningMessage): Running {
     ? { runs: state.runs.filter((r) => r.id !== run.id), count: Math.max(0, state.count - 1) }
     : state;
 }
+
+/** A running run's stream as the page shows it (#224): `connecting` until
+ * it first opens, `live` while open, `reconnecting` when it dropped, and
+ * `ended` once the run ended or the page opened on a finished run. */
+export type Connection = 'connecting' | 'live' | 'reconnecting' | 'ended';
+
+/** The connection after the stream opened (`true`) or dropped (`false`). */
+export function connectionAfter(connection: Connection, open: boolean): Connection {
+  if (connection === 'ended') return 'ended';
+  if (open) return 'live';
+  return connection === 'connecting' ? 'connecting' : 'reconnecting';
+}

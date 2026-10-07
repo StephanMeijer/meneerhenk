@@ -96,7 +96,7 @@ describe('Tools', () => {
     expect(loadSummary).toHaveBeenCalledWith('model=opus&session_kind=check');
     expect(loadCalls).toHaveBeenCalledWith('tool=bash&model=opus&session_kind=check&cursor=C');
     expect(document.body.textContent).toContain('No tool calls in this period.');
-    expect(document.querySelector('h2')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Every call with bash by opus');
+    expect(document.querySelector('.list-head h2')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Every call with bash by opus');
   });
 
   it('falls back to the defaults for values it does not know', async () => {

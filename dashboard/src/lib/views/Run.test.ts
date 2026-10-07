@@ -13,7 +13,7 @@ const cancelButton = (): HTMLButtonElement | undefined =>
 
 const section = (title: string): string[][] => {
   const heading = [...document.querySelectorAll('h2')].find((h) => h.textContent === title);
-  const table = heading?.nextElementSibling;
+  const table = heading?.closest('section')?.querySelector('table');
   if (!(table instanceof HTMLTableElement)) throw new Error(`no table under ${title}`);
   return [...table.querySelectorAll('tbody tr')].map((row) =>
     [...row.querySelectorAll('td')].map((td) => (td.textContent ?? '').trim()),
@@ -35,9 +35,9 @@ describe('Run', () => {
       ['d2', 'lane-b', 'src/a.rs:4', 'The loop never ends.', 'same as d1', 'opus', 'c-77', 'The same.'],
       ['d3', 'lane-a', 'src/a.rs:4', 'withdrawal of c-12: It was wrong.', 'waiting', '', '', ''],
     ]);
-    expect(section('Timeline')[0]).toEqual(['2026-10-07T10:03:00Z', 'info', '<script>alert(1)</script>']);
+    expect(section('Timeline')[0]).toEqual(['10:03:00 UTC', 'info', '<script>alert(1)</script>']);
     expect(section('Tool calls')[0]).toEqual(['lane-a', 'read_file', '2', '0', '1', '0', '9']);
-    expect(section('Findings')[0]).toEqual(['2026-10-07T10:02:00Z', 'lane-a', 'src/a.rs:4', 'c-77', 'posted']);
+    expect(section('Findings')[0]).toEqual(['10:02:00 UTC', 'lane-a', 'src/a.rs:4', 'c-77', 'posted']);
     const lanes = section('Lanes');
     expect(lanes.map((row) => row[0])).toEqual(['lane-a', 'lane-b']);
     const transcriptLink = document.querySelector<HTMLAnchorElement>('a[title="The whole conversation"]');

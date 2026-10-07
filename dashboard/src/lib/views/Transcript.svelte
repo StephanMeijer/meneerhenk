@@ -1,9 +1,10 @@
 <script lang="ts">
   import { transcript as loadTranscript } from '$lib/api/client';
   import type { Transcript } from '$lib/api/types';
-  import { FOLD_LINES, lineCount } from '$lib/format';
+  import { FOLD_LINES, count, lineCount } from '$lib/format';
   import { href, link, runPath } from '$lib/router';
-  import Problem from './Problem.svelte';
+  import Loading from '$lib/ui/Loading.svelte';
+  import Problem from '$lib/ui/Problem.svelte';
 
   let {
     id,
@@ -34,40 +35,61 @@
 </script>
 
 {#await conversation}
-  <p class="muted" aria-busy="true">Loading.</p>
+  <Loading />
 {:then t}
-  <h1>Transcript of {t.session}</h1>
-  <p>
-    Run <a href={href(runPath(id))} use:link>{id}</a><br>
-    Model {t.model}, stopped {t.stop}, {t.turns} turns, tokens in {t.prompt_tokens} out {t.output_tokens}
-  </p>
-  <h2>System prompt</h2>
-  <pre>{t.system}</pre>
+  <div class="page-head">
+    <span class="crumbs">
+      <a href={href('/')} use:link>Runs</a> / <a class="mono" href={href(runPath(id))} use:link>{id}</a> / <code>{t.session}</code>
+    </span>
+    <h1>Transcript of <span class="mono">{t.session}</span></h1>
+    <p class="intro">
+      Model <span class="mono">{t.model}</span>, stopped {t.stop}, {count(t.turns)} turns, tokens in
+      {count(t.prompt_tokens)} out {count(t.output_tokens)}. What the model saw and said, shown as data.
+    </p>
+  </div>
+  <section class="panel message">
+    <div class="panel-head"><h2>System prompt</h2></div>
+    <div class="panel-body"><pre>{t.system}</pre></div>
+  </section>
   {#each t.messages as message, index (index)}
-    <h2 id={opensTurn(t, index) ? `turn-${message.turn}` : undefined}>
-      {message.role} <span class="muted">turn {message.turn}</span>
-    </h2>
-    {#each message.parts as part, at (at)}
-      {#if part.type === 'text'}
-        <pre>{part.text}</pre>
-      {:else if part.type === 'call'}
-        <p>Call <code>{part.name}</code></p>
-        <pre>{part.arguments}</pre>
-      {:else if part.type === 'result'}
-        {#if lineCount(part.content) > FOLD_LINES}
-          <details>
-            <summary>{part.error ? 'Result: error' : 'Result'}, {lineCount(part.content)} lines</summary>
-            <pre>{part.content}</pre>
-          </details>
-        {:else}
-          <p>{part.error ? 'Result: error' : 'Result'}</p>
-          <pre>{part.content}</pre>
-        {/if}
-      {:else}
-        <p class="muted">Provider content, not shown.</p>
-      {/if}
-    {/each}
+    <section class="panel message {message.role}">
+      <div class="panel-head">
+        <h2 id={opensTurn(t, index) ? `turn-${message.turn}` : undefined}>
+          {message.role} <span class="muted">turn {message.turn}</span>
+        </h2>
+      </div>
+      <div class="panel-body parts">
+        {#each message.parts as part, at (at)}
+          {#if part.type === 'text'}
+            <pre>{part.text}</pre>
+          {:else if part.type === 'call'}
+            <p>Call <code>{part.name}</code></p>
+            <pre>{part.arguments}</pre>
+          {:else if part.type === 'result'}
+            {#if lineCount(part.content) > FOLD_LINES}
+              <details>
+                <summary>{part.error ? 'Result: error' : 'Result'}, {lineCount(part.content)} lines</summary>
+                <pre>{part.content}</pre>
+              </details>
+            {:else}
+              <p class:fail={part.error}>{part.error ? 'Result: error' : 'Result'}</p>
+              <pre>{part.content}</pre>
+            {/if}
+          {:else}
+            <p class="muted">Provider content, not shown.</p>
+          {/if}
+        {/each}
+      </div>
+    </section>
   {/each}
 {:catch error}
   <Problem {error} />
 {/await}
+
+<style>
+  .parts { display: flex; flex-direction: column; gap: var(--space-2); }
+  .parts p { margin: 0; }
+  .message.assistant { border-left: 3px solid var(--accent); }
+  .fail { color: var(--fail); }
+  h2[id] { scroll-margin-top: var(--space-4); }
+</style>

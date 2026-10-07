@@ -88,7 +88,7 @@ describe('Quality', () => {
     expect(loadRates).toHaveBeenCalledWith('group=lane&repo=o%2Fr');
     expect(loadDrafts).toHaveBeenCalledWith('model=mistral&repo=o%2Fr&cursor=C');
     expect(document.body.textContent).toContain('No drafts in this period.');
-    expect(document.querySelector('h2')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Every draft by mistral');
+    expect(document.querySelector('.list-head h2')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Every draft by mistral');
     const chosen = document.querySelector('.chips a.chosen');
     expect(chosen?.textContent).toBe('all');
     expect(document.querySelector<HTMLSelectElement>('select[name=group]')?.value).toBe('lane');
