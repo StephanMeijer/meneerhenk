@@ -50,6 +50,11 @@ pub struct Interrupted;
 /// Turns left when a lane is told to wrap up (#12).
 const LANE_TURN_WARNING_AT: u32 = 3;
 
+/// Appended to the fact-checker's prompt when it has a workspace: one copy
+/// serves every check session of the review in turn, and nothing resets it
+/// between them.
+const SHARED_COPY: &str = "Your copy is shared with the checks of this review that run after you, and they judge their drafts against it: run what you need, but do not change files in it. A file you write goes outside it, at a fresh path from `mktemp`.";
+
 /// What a lane is told then. Lanes that run into the turn limit otherwise
 /// end mid-review, with what they were sure of never posted.
 const LANE_TURN_WARNING: &str = "3 turns left. Draft each finding you are sure of with post_finding now, one call per finding, then end your turn.";
@@ -1034,7 +1039,7 @@ async fn build_fact_check(
         ],
     );
     if workspace.is_some() {
-        system = format!("{system}\n\n{}", prompts::REVIEW_WORKSPACE);
+        system = format!("{system}\n\n{}\n\n{SHARED_COPY}", prompts::REVIEW_WORKSPACE);
     }
     Ok(Some(FactChecker {
         store: Arc::clone(&app.store),
@@ -2853,6 +2858,11 @@ lanes = [{ name = "lane-a", model = "m" }]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_copy_note_is_in_style() {
+        assert!(henk_domain::text::is_in_style(SHARED_COPY));
+    }
 
     #[test]
     fn the_lane_turn_warning_is_in_style_and_says_what_to_do() {
