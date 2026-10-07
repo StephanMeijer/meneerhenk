@@ -133,6 +133,42 @@ fn walk(root: &Path, dir: &Path, only: Option<&PathFilter>, cap: usize, out: &mu
     }
 }
 
+/// The lines matching `pattern` in `files`, with `context` around each,
+/// cut to `cap` matches as [`super::keep_matches`] does. `files` are taken
+/// in path order, the order the other backends sort their hits in (the
+/// walk's order puts `a/b` before `a-c`), so the search can stop reading
+/// once it has `cap` matches. `text` reads one file, or gives `None` for a
+/// file to skip.
+fn search_files(
+    mut files: Vec<String>,
+    pattern: &Pattern,
+    context: usize,
+    cap: usize,
+    mut text: impl FnMut(&str) -> Option<String>,
+) -> Vec<Hit> {
+    files.sort();
+    let mut hits = Vec::new();
+    let mut found = 0;
+    for file in files {
+        if found >= cap {
+            break;
+        }
+        let Some(text) = text(&file) else {
+            continue;
+        };
+        let lines: Vec<&str> = super::lines(&text).collect();
+        let matched: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| pattern.is_match(line))
+            .map(|(at, _)| at)
+            .collect();
+        found += matched.len();
+        hits.extend(super::with_context(&file, &lines, &matched, context));
+    }
+    super::keep_matches(hits, cap, context)
+}
+
 /// `real`, which must be inside `root`, as a workspace path: a symbolic
 /// link that leads out of the tree or into `.git` is refused here.
 fn inside(root: &Path, real: &Path, shown: &WorkspacePath) -> Result<(), WorkspaceError> {
@@ -407,6 +443,7 @@ impl Workspace for HostWorkspace {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
@@ -414,29 +451,13 @@ impl Workspace for HostWorkspace {
         let start = self.existing(dir)?;
         let mut files = Vec::new();
         walk(&root, &start, only, usize::MAX, &mut files);
-        let mut hits = Vec::new();
-        for file in files {
-            let full = root.join(&file);
+        Ok(search_files(files, pattern, context, cap, |file| {
+            let full = root.join(file);
             if full.metadata().is_ok_and(|m| m.len() > max_file_bytes) {
-                continue;
+                return None;
             }
-            let Ok(text) = std::fs::read_to_string(&full) else {
-                continue;
-            };
-            for (index, line) in super::lines(&text).enumerate() {
-                if pattern.is_match(line) {
-                    hits.push(Hit {
-                        path: file.clone(),
-                        line: index + 1,
-                        text: line.trim().to_owned(),
-                    });
-                    if hits.len() >= cap {
-                        return Ok(hits);
-                    }
-                }
-            }
-        }
-        Ok(hits)
+            std::fs::read_to_string(&full).ok()
+        }))
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
@@ -603,7 +624,7 @@ mod tests {
             .await
             .unwrap();
         let hits = ws
-            .search(&WorkspacePath::root(), &find("let x"), None, 50, 10)
+            .search(&WorkspacePath::root(), &find("let x"), None, 0, 50, 10)
             .await
             .unwrap();
         assert_eq!(
@@ -611,18 +632,48 @@ mod tests {
             [Hit {
                 path: "src/a.rs".to_owned(),
                 line: 2,
-                text: "let x = 1;".to_owned()
+                text: "    let x = 1;".to_owned(),
+                matched: true,
             }]
         );
         let capped = ws
-            .search(&p("src"), &find("let x"), None, 1 << 20, 3)
+            .search(&p("src"), &find("let x"), None, 0, 1 << 20, 3)
             .await
             .unwrap();
         assert_eq!(capped.len(), 3);
         assert!(
-            ws.search(&p("nope"), &find("x"), None, 10, 10)
+            ws.search(&p("nope"), &find("x"), None, 0, 10, 10)
                 .await
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_capped_search_stops_reading_once_it_has_its_matches() {
+        let pattern = crate::workspace::Pattern::parse("hit").unwrap();
+        // Out of path order on purpose, as the walk can give them.
+        let files: Vec<String> = ["c", "a-b", "a/b", "b", "d"]
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect();
+        let mut read = Vec::new();
+        let hits = search_files(files, &pattern, 1, 3, |file| {
+            read.push(file.to_owned());
+            Some("hit\nhit\nmiss\n".to_owned())
+        });
+        assert_eq!(read, ["a-b", "a/b"], "reads stop at the cap, in path order");
+        let shown: Vec<(&str, usize, bool)> = hits
+            .iter()
+            .map(|h| (h.path.as_str(), h.line, h.matched))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("a-b", 1, true),
+                ("a-b", 2, true),
+                ("a-b", 3, false),
+                ("a/b", 1, true),
+            ]
         );
     }
 

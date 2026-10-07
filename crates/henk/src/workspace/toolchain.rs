@@ -97,11 +97,12 @@ impl Workspace for Mise {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
         self.inner
-            .search(dir, pattern, only, max_file_bytes, cap)
+            .search(dir, pattern, only, context, max_file_bytes, cap)
             .await
     }
 

@@ -265,8 +265,9 @@ const SEARCHED: &str =
     r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \)"#;
 
 /// Lines matching `$3`, a [`Pattern`] read by PCRE (`grep -P`), as
-/// `path NUL line:text`, in the text files under `$1` of fewer than `$2`
-/// bytes, or with `$1` `-` in the NUL-separated files on stdin, so a glob
+/// `path NUL line:text`, with `$4` lines of context around each as
+/// `path NUL line-text` and `--` between blocks, in the text files under `$1`
+/// of fewer than `$2` bytes, or with `$1` `-` in the NUL-separated files on stdin, so a glob
 /// keeps the others from grep altogether. Files the run's user cannot read
 /// are left out first, so a grep that says 2 failed on the pattern itself:
 /// no `-P`, a pattern PCRE refuses or its backtracking limit. Each grep's
@@ -275,12 +276,13 @@ const SEARCHED: &str =
 const SEARCH: &str = r#"if [ "$1" = - ]; then cat; else
 find -P "$1" \( -iname .git -prune \) -o \( -type f -size -"$2"c -print0 \); fi |
 xargs -0 -r sh -c 'p=$1
-shift
+c=$2
+shift 2
 for f; do
     shift
     if [ -r "$f" ]; then set -- "$@" "$f"; fi
 done
-[ "$#" -eq 0 ] || grep -HIPn --null -e "$p" -- "$@" || [ "$?" -eq 1 ] || exit 255' sh "$3""#;
+[ "$#" -eq 0 ] || grep -HIPn --null -C "$c" -e "$p" -- "$@" || [ "$?" -eq 1 ] || exit 255' sh "$3" "$4""#;
 
 /// `limit` in seconds for the runner's `timeout`, to the millisecond as the
 /// host backend's limit is, rounded up: `timeout` reads 0 as no limit at all,
@@ -544,6 +546,7 @@ impl Workspace for RemoteWorkspace {
         dir: &WorkspacePath,
         pattern: &Pattern,
         only: Option<&PathFilter>,
+        context: usize,
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
@@ -573,13 +576,24 @@ impl Workspace for RemoteWorkspace {
         }
         let from = if only.is_some() { "-" } else { real.as_str() };
         let reply = self
-            .script(SEARCH, &[from, &under, pattern.pcre()], &files)
+            .script(
+                SEARCH,
+                &[from, &under, pattern.pcre(), &context.to_string()],
+                &files,
+            )
             .await?
             .ok("searching")?;
         let mut hits = Vec::new();
-        // `path NUL line:text NL`, repeated.
+        // `path NUL line:text NL` for a match and `path NUL line-text NL`
+        // for context, repeated, with `--` lines between blocks.
         let mut rest = reply.stdout.as_slice();
-        while let Some(at) = rest.iter().position(|b| *b == 0) {
+        loop {
+            while let Some(after) = rest.strip_prefix(b"--\n") {
+                rest = after;
+            }
+            let Some(at) = rest.iter().position(|b| *b == 0) else {
+                break;
+            };
             let (file, after) = rest.split_at(at);
             let after = after.get(1..).unwrap_or_default();
             let end = after
@@ -592,23 +606,28 @@ impl Workspace for RemoteWorkspace {
             else {
                 continue;
             };
-            let (Some(path), Some((number, text))) = (self.relative(file), line.split_once(':'))
-            else {
+            let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+            let (Some(path), Some(number), Some(mark), Some(text)) = (
+                self.relative(file),
+                line.get(..digits).and_then(|n| n.parse().ok()),
+                line.get(digits..=digits),
+                line.get(digits + 1..),
+            ) else {
                 continue;
             };
-            let Ok(number) = number.parse() else { continue };
             if only.is_some_and(|o| !o.matches(&path)) {
                 continue;
             }
             hits.push(Hit {
                 path,
                 line: number,
-                text: text.trim().to_owned(),
+                text: text.strip_suffix('\r').unwrap_or(text).to_owned(),
+                matched: mark == ":",
             });
         }
         hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
-        hits.truncate(cap);
-        Ok(hits)
+        hits.dedup_by(|a, b| a.path == b.path && a.line == b.line);
+        Ok(super::keep_matches(hits, cap, context))
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {

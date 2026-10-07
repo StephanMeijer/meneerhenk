@@ -247,20 +247,99 @@ impl Tool for ReadFile {
     }
 }
 
+/// Lines of context `search` shows at most around each hit.
+const MAX_CONTEXT: usize = 5;
+/// Matching lines `search` counts at most for `files` and `count`.
+const COUNT_CAP: usize = 5000;
+
+/// What `search` shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// The matching lines, with context when asked.
+    Lines,
+    /// Each matching file once.
+    Files,
+    /// Each matching file with its number of matching lines.
+    Count,
+}
+
+/// The `context` and `output` arguments, checked.
+fn shape(args: &Value) -> Result<(usize, Output), String> {
+    let context = match args.get("context") {
+        None | Some(Value::Null) => 0,
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n <= MAX_CONTEXT)
+            .ok_or_else(|| format!("context is a number of lines from 0 to {MAX_CONTEXT}"))?,
+    };
+    let output = match arg_str(args, "output").unwrap_or("lines") {
+        "lines" => Output::Lines,
+        "files" => Output::Files,
+        "count" => Output::Count,
+        other => {
+            return Err(format!("output is lines, files or count, not {other:?}"));
+        }
+    };
+    if context > 0 && output != Output::Lines {
+        return Err("context only goes with output = lines".to_owned());
+    }
+    Ok((context, output))
+}
+
+/// Hits as one line each: `path:line: text`, trimmed and cut.
+fn plain(hits: &[crate::workspace::Hit]) -> String {
+    let mut out = String::new();
+    for hit in hits {
+        let _ = writeln!(out, "{}:{}: {}", hit.path, hit.line, cut(hit.text.trim()));
+    }
+    out
+}
+
+/// Hits with their context as grep shows them: the file's path, then
+/// `line:text` for a match and `line-text` for context, indentation kept,
+/// `--` between blocks. At most `cap` lines; the second value says whether
+/// that cut anything.
+fn grouped(hits: &[crate::workspace::Hit], cap: usize) -> (String, bool) {
+    let mut out = String::new();
+    let mut previous: Option<(&str, usize)> = None;
+    for (shown, hit) in hits.iter().enumerate() {
+        if shown >= cap {
+            return (out, true);
+        }
+        match previous {
+            Some((path, line)) if path == hit.path && line + 1 == hit.line => {}
+            Some((path, _)) if path == hit.path => out.push_str("--\n"),
+            Some(_) => {
+                let _ = writeln!(out, "--\n{}", hit.path);
+            }
+            None => {
+                let _ = writeln!(out, "{}", hit.path);
+            }
+        }
+        let mark = if hit.matched { ':' } else { '-' };
+        let _ = writeln!(out, "{}{mark}{}", hit.line, cut(hit.text.trim_end()));
+        previous = Some((hit.path.as_str(), hit.line));
+    }
+    (out, false)
+}
+
 #[async_trait::async_trait]
 impl Tool for Search {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("search"),
             description: format!(
-                "Finds lines matching a regular expression in the text files of the repository, as path:line: text, at most {SEARCH_CAP}. The syntax is the common one: classes, \\b, \\d, \\w, (?i) for any case, alternation with |. `glob` keeps only matching files, `dir` a directory."
+                "Finds lines matching a regular expression in the text files of the repository, as path:line: text, at most {SEARCH_CAP}. The syntax is the common one: classes, \\b, \\d, \\w, (?i) for any case, alternation with |. `glob` keeps only matching files, `dir` a directory. `context` (0 to {MAX_CONTEXT}) adds lines around each hit, grouped per file as grep shows them, so you need not read the file for a first look. `output` = files lists each matching file once, and count gives the number of matching lines per file."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regular expression, matched per line"},
                     "glob": {"type": "string", "description": "Only files matching this glob, such as *.rs"},
-                    "dir": {"type": "string", "description": "Directory in the repository"}
+                    "dir": {"type": "string", "description": "Directory in the repository"},
+                    "context": {"type": "integer", "description": format!("Lines before and after each hit, 0 to {MAX_CONTEXT} (default 0)")},
+                    "output": {"type": "string", "enum": ["lines", "files", "count"], "description": "lines (default), files, or count"}
                 },
                 "required": ["pattern"]
             }),
@@ -276,37 +355,87 @@ impl Tool for Search {
             (Ok(dir), Ok(only)) => (dir, only),
             (Err(error), _) | (_, Err(error)) => return ToolOutput::error(error),
         };
-        let mut hits = match self
+        let (context, output) = match shape(&args) {
+            Ok(shape) => shape,
+            Err(error) => return ToolOutput::error(error),
+        };
+        let cap = if output == Output::Lines {
+            SEARCH_CAP + 1
+        } else {
+            COUNT_CAP + 1
+        };
+        let hits = match self
             .0
-            .search(
-                &dir,
-                &pattern,
-                only.as_ref(),
-                MAX_FILE_BYTES,
-                SEARCH_CAP + 1,
-            )
+            .search(&dir, &pattern, only.as_ref(), context, MAX_FILE_BYTES, cap)
             .await
         {
             Ok(hits) => hits,
             Err(error) => return ToolOutput::error(error.to_string()),
         };
-        let more = hits.len() > SEARCH_CAP;
-        hits.truncate(SEARCH_CAP);
-        let mut out = String::new();
-        for hit in &hits {
-            let _ = writeln!(out, "{}:{}: {}", hit.path, hit.line, cut(&hit.text));
+        let found = hits.iter().filter(|h| h.matched).count();
+        if found == 0 {
+            return ToolOutput::ok("No matches.");
         }
-        if more {
-            let _ = writeln!(
-                out,
-                "[more than {SEARCH_CAP} matches; narrow the pattern or the glob]"
-            );
-        }
-        ToolOutput::ok(if out.is_empty() {
-            "No matches.".to_owned()
-        } else {
-            out
-        })
+        let out = match output {
+            Output::Lines if context == 0 => {
+                let mut out = plain(hits.get(..SEARCH_CAP.min(hits.len())).unwrap_or(&hits));
+                if found > SEARCH_CAP {
+                    let _ = writeln!(
+                        out,
+                        "[more than {SEARCH_CAP} matches; narrow the pattern or the glob]"
+                    );
+                }
+                out
+            }
+            Output::Lines => {
+                let (mut out, cut_short) = grouped(&hits, SEARCH_CAP);
+                if cut_short || found > SEARCH_CAP {
+                    let _ = writeln!(
+                        out,
+                        "[more than {SEARCH_CAP} lines with their context; ask for less context, a narrower pattern or a glob]"
+                    );
+                }
+                out
+            }
+            Output::Files | Output::Count => {
+                let more = found > COUNT_CAP;
+                let mut counts: std::collections::BTreeMap<&str, usize> =
+                    std::collections::BTreeMap::new();
+                for hit in hits.iter().filter(|h| h.matched).take(COUNT_CAP) {
+                    *counts.entry(hit.path.as_str()).or_default() += 1;
+                }
+                let mut out = String::new();
+                if output == Output::Files {
+                    for path in counts.keys().take(LIST_CAP) {
+                        let _ = writeln!(out, "{path}");
+                    }
+                    if counts.len() > LIST_CAP {
+                        let _ = writeln!(
+                            out,
+                            "[more than {LIST_CAP} files; narrow the pattern or the glob]"
+                        );
+                    }
+                } else {
+                    for (path, n) in &counts {
+                        let _ = writeln!(out, "{path}: {n}");
+                    }
+                    let total: usize = counts.values().sum();
+                    let files = match counts.len() {
+                        1 => "1 file".to_owned(),
+                        n => format!("{n} files"),
+                    };
+                    let _ = writeln!(out, "total: {total} in {files}");
+                }
+                if more {
+                    let _ = writeln!(
+                        out,
+                        "[counted the first {COUNT_CAP} matching lines; there are more, so these are at least]"
+                    );
+                }
+                out
+            }
+        };
+        ToolOutput::ok(out)
     }
 }
 
@@ -534,6 +663,87 @@ mod tests {
                 .await
                 .is_error
         );
+    }
+
+    #[tokio::test]
+    async fn search_shows_context_as_grep_does_and_counts_files() {
+        let (ws, _dir) = tools("henk-code-search-context").await;
+        let search = Search(Arc::clone(&ws));
+        let ask = |args: Value| {
+            let search = &search;
+            async move { search.call(args).await }
+        };
+        assert_eq!(
+            ask(json!({"pattern": "(?i)parse", "glob": "*.rs", "context": 1}))
+                .await
+                .content,
+            "src/a.rs\n2-    let x = 1;\n3:    Parse(x);\n4-}\n--\nsrc/deep/b.rs\n1:fn parse_all() {}\n",
+            "grouped per file, indentation kept"
+        );
+        assert_eq!(
+            ask(json!({"pattern": "^line (2|9)$", "context": 1}))
+                .await
+                .content,
+            "long.txt\n1-line 1\n2:line 2\n3-line 3\n--\n8-line 8\n9:line 9\n10-line 10\n",
+            "blocks apart in one file"
+        );
+        let many = ask(json!({"pattern": "^line", "context": 5})).await.content;
+        assert!(
+            many.ends_with("[more than 200 lines with their context; ask for less context, a narrower pattern or a glob]\n"),
+            "{many}"
+        );
+        assert_eq!(
+            many.lines().count(),
+            SEARCH_CAP + 2,
+            "the path line, 200 lines, the note"
+        );
+        assert_eq!(
+            ask(json!({"pattern": "(?i)parse", "output": "files"}))
+                .await
+                .content,
+            "docs/notes.md\nsrc/a.rs\nsrc/deep/b.rs\n"
+        );
+        assert_eq!(
+            ask(json!({"pattern": "(?i)parse", "output": "count"}))
+                .await
+                .content,
+            "docs/notes.md: 1\nsrc/a.rs: 1\nsrc/deep/b.rs: 1\ntotal: 3 in 3 files\n"
+        );
+        assert_eq!(
+            ask(json!({"pattern": "^line", "output": "count"}))
+                .await
+                .content,
+            "long.txt: 450\ntotal: 450 in 1 file\n"
+        );
+        ws.write(
+            &WorkspacePath::parse("many.txt").unwrap(),
+            "m\n".repeat(COUNT_CAP + 1).as_bytes(),
+        )
+        .await
+        .unwrap();
+        let counted = ask(json!({"pattern": "^m$", "output": "count"}))
+            .await
+            .content;
+        assert!(
+            counted.starts_with(&format!("many.txt: {COUNT_CAP}\n")),
+            "{counted}"
+        );
+        assert!(counted.contains("these are at least"), "{counted}");
+        assert_eq!(
+            ask(json!({"pattern": "nowhere", "context": 2}))
+                .await
+                .content,
+            "No matches."
+        );
+        for bad in [
+            json!({"pattern": "x", "context": 6}),
+            json!({"pattern": "x", "context": -1}),
+            json!({"pattern": "x", "output": "json"}),
+            json!({"pattern": "x", "output": "files", "context": 2}),
+        ] {
+            let out = ask(bad.clone()).await;
+            assert!(out.is_error, "{bad}: {}", out.content);
+        }
     }
 
     #[tokio::test]

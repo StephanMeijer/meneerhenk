@@ -383,7 +383,7 @@ pub(crate) mod tests {
         // Linear in Rust's regex, past PCRE's backtracking limit in grep -P.
         let pattern = Pattern::parse("(a+)+$").unwrap();
         let searched = ws
-            .search(&WorkspacePath::root(), &pattern, None, 1 << 20, 10)
+            .search(&WorkspacePath::root(), &pattern, None, 0, 1 << 20, 10)
             .await;
         assert!(
             matches!(&searched, Err(WorkspaceError::Backend(m)) if m.contains("searching failed")),
