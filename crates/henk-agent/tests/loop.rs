@@ -1050,7 +1050,24 @@ async fn every_call_is_an_event_with_how_it_ended() {
 async fn a_call_cut_off_by_a_cancel_is_an_event() {
     let mut set = ToolSet::new();
     set.add(Sleeper);
-    let model = Arc::new(ScriptedClient::new("m", [call("s", "sleep", json!({}))]));
+    let sleep = |id: &str| {
+        Block::ToolCall(ToolCall {
+            id: id.into(),
+            name: "sleep".into(),
+            arguments: ToolArguments::Parsed(json!({})),
+        })
+    };
+    // The cancel lands during the first call; the second never starts but
+    // is still on the record.
+    let both = Ok(Completion {
+        message: ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![sleep("s1"), sleep("s2")],
+        },
+        stop: StopReason::ToolUse,
+        usage: Usage::default(),
+    });
+    let model = Arc::new(ScriptedClient::new("m", [both]));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = Agent::new(model, set, "s", config()).with_events(tx);
     let cancel = CancellationToken::new();
@@ -1061,7 +1078,6 @@ async fn a_call_cut_off_by_a_cancel_is_an_event() {
     });
     agent.run(vec![ChatMessage::user("go")], cancel).await;
     drop(agent);
-    let calls = calls_of(&mut rx);
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].4, CallOutcome::Cancelled);
+    let outcomes: Vec<_> = calls_of(&mut rx).into_iter().map(|c| c.4).collect();
+    assert_eq!(outcomes, [CallOutcome::Cancelled, CallOutcome::NotRun]);
 }

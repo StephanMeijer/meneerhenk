@@ -436,7 +436,9 @@ impl Agent {
     /// Runs the model's tool calls in order, each first past the repeat
     /// guard. A refused call is not dispatched; its result tells the model
     /// to change course. A call the guard calls stuck ends the run, and the
-    /// calls after it in the turn are not run.
+    /// calls after it in the turn are not run. A cancel ends the round the
+    /// same way: the call it cut off is `Cancelled` and the calls after it
+    /// are `NotRun`, so every call of the turn is on the record.
     async fn call_tools(
         &self,
         calls: Vec<henk_llm::ToolCall>,
@@ -447,11 +449,16 @@ impl Agent {
     ) -> ToolRound {
         let mut results = Vec::with_capacity(calls.len());
         let mut stuck: Option<(String, u32)> = None;
+        let mut cancelled = false;
         for call in calls {
             let origin = self.tools.origin(&call.name).unwrap_or_default();
             let called = |outcome: CallOutcome, elapsed: Duration, result_chars: usize| {
                 called_event(turn, &call, &origin, outcome, elapsed, result_chars)
             };
+            if cancelled {
+                self.emit(called(CallOutcome::NotRun, Duration::ZERO, 0));
+                continue;
+            }
             if stuck.is_some() {
                 self.emit(called(CallOutcome::NotRun, Duration::ZERO, 0));
                 results.push(ToolResult {
@@ -506,7 +513,8 @@ impl Agent {
                 biased;
                 () = cancel.cancelled() => {
                     self.emit(called(CallOutcome::Cancelled, started.elapsed(), 0));
-                    return ToolRound::Cancelled;
+                    cancelled = true;
+                    continue;
                 }
                 output = self.dispatch(&call.name, &call.arguments) => output,
             };
@@ -527,6 +535,9 @@ impl Agent {
                 content: self.truncate(output.content),
                 is_error: output.is_error,
             });
+        }
+        if cancelled {
+            return ToolRound::Cancelled;
         }
         // The results, refusals included, now go back to the model.
         guard.end_turn();
