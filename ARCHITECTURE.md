@@ -614,8 +614,12 @@ The app reads and acts only through the JSON API, `/dashboard/api/v1`
 token in a header, the dashboard's own origin and a JSON body. Starting
 work publishes the same event as the API on the same bus, so the listeners
 decide as they do for any request; cancelling fires one run's token
-through the coordinator, and the run ends `cancelled`. The app shows every
-value as text. The run and event links posted in comments, `/runs/{id}`
+through the coordinator, and the run ends `cancelled`. The run store Henk
+writes to is wrapped in `live::Announcing`, which announces every write
+the dashboard shows on this process's `live::Feed`; the API's streams
+(`dashboard/api/stream`) follow the feed as Server-Sent Events, with a
+replay for a reconnect and a snapshot when the replay no longer reaches
+back. The app shows every value as text. The run and event links posted in comments, `/runs/{id}`
 and `/events/{id}`, redirect to the dashboard's pages and so need sign-in
 too; without a dashboard they are not served.
 

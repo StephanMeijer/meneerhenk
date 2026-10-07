@@ -37,6 +37,9 @@ pub struct Dashboard {
     http: reqwest::Client,
     /// The dashboard app's files (#199).
     assets: app::Assets,
+    /// How often a stream reads a run another process works on again
+    /// (#202); the overview's stream reads what runs six times as seldom.
+    refresh: std::time::Duration,
 }
 
 impl std::fmt::Debug for Dashboard {
@@ -113,6 +116,7 @@ impl Dashboard {
             config,
             http,
             assets: app::Assets::built(),
+            refresh: std::time::Duration::from_secs(5),
         })
     }
 

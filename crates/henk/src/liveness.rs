@@ -56,7 +56,8 @@ impl LiveRuns {
             .remove(run);
     }
 
-    fn contains(&self, run: &RunId) -> bool {
+    /// Whether this process is working on `run`.
+    pub(crate) fn contains(&self, run: &RunId) -> bool {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

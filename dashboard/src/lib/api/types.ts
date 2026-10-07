@@ -86,6 +86,122 @@ export type RunCount = {
  */
 count: number, };
 
+export type RunUpdate = { 
+/**
+ * The run.
+ */
+run: RunSummary, 
+/**
+ * The summary text, once there is one.
+ */
+summary: string | null, 
+/**
+ * The error, when it failed.
+ */
+error: string | null, 
+/**
+ * The platform's id for the review's check.
+ */
+check_id: string | null, };
+
+export type QualityRow = { 
+/**
+ * The model, lane or repository; `owner/name #7` for a pull request.
+ */
+key: string, 
+/**
+ * The repository, when grouped by pull request.
+ */
+repo: string | null, 
+/**
+ * The number, when grouped by pull request.
+ */
+target: number | null, 
+/**
+ * A link to that pull request, merge request or issue.
+ */
+target_url: string | null, 
+/**
+ * Every draft.
+ */
+drafts: number, 
+/**
+ * Confirmed and written.
+ */
+confirmed: number, 
+/**
+ * Rejected by the check.
+ */
+rejected: number, 
+/**
+ * Repeats, merged into another draft or finding.
+ */
+same_as: number, 
+/**
+ * No model could check them.
+ */
+unchecked: number, 
+/**
+ * No check was configured.
+ */
+not_checked: number, 
+/**
+ * The review ended first.
+ */
+cancelled: number, 
+/**
+ * The write failed.
+ */
+failed: number, 
+/**
+ * Not decided yet.
+ */
+waiting: number, 
+/**
+ * Drafts a checker decided: confirmed, rejected and repeats.
+ */
+judged: number, 
+/**
+ * Rejected of judged, from 0 to 1; none when nothing was judged.
+ */
+rejection_rate: number | null, };
+
+export type DraftItem = { 
+/**
+ * The run.
+ */
+run_id: string, 
+/**
+ * The run's repository.
+ */
+repo: string, 
+/**
+ * The run's pull request, merge request or issue.
+ */
+target: number, 
+/**
+ * A link to it.
+ */
+target_url: string | null, 
+/**
+ * The draft and what became of it.
+ */
+draft: Draft, };
+
+export type RunningSnapshot = { 
+/**
+ * The newest running runs, at most 100.
+ */
+runs: Array<RunSummary>, 
+/**
+ * How many run, beyond those too.
+ */
+count: number, };
+
+export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "end" };
+
+export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary };
+
 export type RunDetail = { 
 /**
  * The run.
@@ -164,7 +280,12 @@ output_tokens: number,
 /**
  * Why it was dropped.
  */
-error: string | null, };
+error: string | null, 
+/**
+ * The turn of its latest tool call: how far a running lane has come,
+ * since turns and tokens are stored when it ends.
+ */
+last_call_turn: number | null, };
 
 export type Finding = { 
 /**

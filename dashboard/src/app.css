@@ -122,3 +122,28 @@ td.text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
 .level.error { color: var(--fail); }
 .pager { display: flex; gap: 1rem; }
 .note { color: var(--muted); }
+.badge {
+  font-size: 0.75rem;
+  font-weight: 500;
+  vertical-align: middle;
+  color: var(--bg);
+  background: var(--ok);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  margin-left: 0.4rem;
+}
+
+.rates td { white-space: nowrap; }
+.rates .rate { display: flex; gap: 0.5rem; align-items: center; }
+.rates meter { width: 8rem; height: 0.9rem; }
+.chips { gap: 0.3rem 0.8rem; align-items: center; }
+.chips a.chosen { font-weight: 600; text-decoration: none; color: var(--fg); }
+.drafts { list-style: none; padding: 0; margin: 0; }
+.drafts li { border-bottom: 1px solid var(--line); padding: 0.6rem 0; }
+.drafts .meta { display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; align-items: baseline; font-size: 0.9rem; }
+.drafts p { margin: 0.35rem 0 0; }
+p.text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.reason { color: var(--muted); }
+.verdict.rejected { color: var(--fail); }
+.verdict.confirmed { color: var(--ok); }
+.verdict.same_as, .verdict.unchecked, .verdict.not_checked { color: var(--warn); }

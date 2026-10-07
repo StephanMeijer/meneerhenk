@@ -3,12 +3,14 @@
 // /me gives. A 401 sends the browser to sign in and back.
 import type {
   Cancelled,
+  DraftItem,
   ErrorBody,
   EventDetail,
   EventItem,
   Health,
   Me,
   Page,
+  QualityRow,
   RunCount,
   RunDetail,
   RunSummary,
@@ -147,6 +149,16 @@ export function startRun(request: StartRequest): Promise<Started> {
 /** Cancels a running run. */
 export function cancelRun(id: string): Promise<Cancelled> {
   return postJson<Cancelled>(`/runs/${encodeURIComponent(id)}/cancel`, {});
+}
+
+/** What became of the drafts per group; `query` is the `GET /quality` query. */
+export function quality(query = ''): Promise<QualityRow[]> {
+  return getJson<QualityRow[]>(`/quality${query === '' ? '' : `?${query}`}`);
+}
+
+/** Drafts across runs, newest first; `query` is the `GET /drafts` query. */
+export function drafts(query = ''): Promise<Page<DraftItem>> {
+  return getJson<Page<DraftItem>>(`/drafts${query === '' ? '' : `?${query}`}`);
 }
 
 /** Forgets the CSRF token; for the tests. */

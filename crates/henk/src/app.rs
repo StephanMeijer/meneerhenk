@@ -39,6 +39,9 @@ pub struct App {
     pub shutdown: CancellationToken,
     /// The runs this process is working on, which the reaper leaves alone.
     pub live_runs: LiveRuns,
+    /// What changes in the store, as it happens; the dashboard's streams
+    /// follow it (#202).
+    pub feed: crate::live::Feed,
     /// The runs a person may cancel from the dashboard, and who did (#69).
     pub cancels: crate::cancel::Cancels,
     /// Opens the workspaces address runs work in (§3.5), on the backend
@@ -109,6 +112,8 @@ impl App {
             ),
             None => open_store(&settings.database).await?,
         };
+        let feed = crate::live::Feed::default();
+        let store: Arc<dyn RunStore> = Arc::new(crate::live::Announcing::new(store, feed.clone()));
 
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
         for (id, model) in &settings.models {
@@ -181,6 +186,7 @@ impl App {
             gitlab,
             shutdown: CancellationToken::new(),
             live_runs: LiveRuns::default(),
+            feed,
             cancels: crate::cancel::Cancels::default(),
             workspace_provider: Arc::new(Backends::new(ssh, kubernetes)),
             #[cfg(test)]

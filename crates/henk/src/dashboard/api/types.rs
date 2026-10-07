@@ -110,6 +110,120 @@ pub struct RunDetail {
     pub requests: Vec<EventSummary>,
 }
 
+/// A run's own fields after it changed: started, ended, got its check.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunUpdate {
+    /// The run.
+    pub run: RunSummary,
+    /// The summary text, once there is one.
+    pub summary: Option<String>,
+    /// The error, when it failed.
+    pub error: Option<String>,
+    /// The platform's id for the review's check.
+    pub check_id: Option<String>,
+}
+
+/// What runs now: the start of `/runs/stream`, and again now and then.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunningSnapshot {
+    /// The newest running runs, at most 100.
+    pub runs: Vec<RunSummary>,
+    /// How many run, beyond those too.
+    pub count: u64,
+}
+
+/// One message of `/runs/{id}/stream`: its SSE event name is `kind`, its
+/// data is `data`. The TypeScript side reads them as this union.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RunMessage {
+    /// The whole run: the first message, and after a gap.
+    Snapshot(Box<RunDetail>),
+    /// The run started, ended or got its check.
+    Run(RunUpdate),
+    /// A lane started or ended: every lane of the run.
+    Lanes(Vec<Lane>),
+    /// A session called a tool.
+    ToolCall(ToolCall),
+    /// A lane queued a draft, or the check decided one.
+    Draft(Draft),
+    /// Something was done with a finding.
+    Finding(Finding),
+    /// A line on the run's timeline.
+    Event(RunEvent),
+    /// A session's conversation was kept.
+    Transcript(TranscriptRef),
+    /// The run has ended; the stream closes.
+    End,
+}
+
+/// One message of `/runs/stream`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RunningMessage {
+    /// What runs now.
+    Snapshot(RunningSnapshot),
+    /// A run started or ended.
+    Run(Box<RunSummary>),
+}
+
+/// What became of the drafts of one group: a model, a lane, a repository
+/// or a pull request (#205).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct QualityRow {
+    /// The model, lane or repository; `owner/name #7` for a pull request.
+    pub key: String,
+    /// The repository, when grouped by pull request.
+    pub repo: Option<String>,
+    /// The number, when grouped by pull request.
+    pub target: Option<u64>,
+    /// A link to that pull request, merge request or issue.
+    pub target_url: Option<String>,
+    /// Every draft.
+    pub drafts: u64,
+    /// Confirmed and written.
+    pub confirmed: u64,
+    /// Rejected by the check.
+    pub rejected: u64,
+    /// Repeats, merged into another draft or finding.
+    pub same_as: u64,
+    /// No model could check them.
+    pub unchecked: u64,
+    /// No check was configured.
+    pub not_checked: u64,
+    /// The review ended first.
+    pub cancelled: u64,
+    /// The write failed.
+    pub failed: u64,
+    /// Not decided yet.
+    pub waiting: u64,
+    /// Drafts a checker decided: confirmed, rejected and repeats.
+    pub judged: u64,
+    /// Rejected of judged, from 0 to 1; none when nothing was judged.
+    pub rejection_rate: Option<f64>,
+}
+
+/// A draft across runs, with the run it belongs to (#205).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DraftItem {
+    /// The run.
+    pub run_id: String,
+    /// The run's repository.
+    pub repo: String,
+    /// The run's pull request, merge request or issue.
+    pub target: u64,
+    /// A link to it.
+    pub target_url: Option<String>,
+    /// The draft and what became of it.
+    pub draft: Draft,
+}
+
 /// One session of a run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -128,6 +242,9 @@ pub struct Lane {
     pub output_tokens: u64,
     /// Why it was dropped.
     pub error: Option<String>,
+    /// The turn of its latest tool call: how far a running lane has come,
+    /// since turns and tokens are stored when it ends.
+    pub last_call_turn: Option<u32>,
 }
 
 /// One thing done with a finding on the platform.
@@ -510,6 +627,7 @@ impl From<&LaneRecord> for Lane {
             input_tokens: lane.input_tokens,
             output_tokens: lane.output_tokens,
             error: lane.error.clone(),
+            last_call_turn: None,
         }
     }
 }
@@ -678,7 +796,18 @@ impl From<&EventWithOutcomes> for EventItem {
 /// A link to the pull request, merge request or issue a run is about.
 fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
     let issue = run.kind == RunKind::Plan;
-    match run.platform {
+    link_to(settings, run.platform, &run.repo, run.target, issue)
+}
+
+/// A link to pull request, merge request or issue `target` of `repo`.
+pub(super) fn link_to(
+    settings: &Settings,
+    platform: Platform,
+    repo: &str,
+    target: u64,
+    issue: bool,
+) -> Option<String> {
+    match platform {
         Platform::GitHub => {
             let api = settings
                 .github
@@ -692,13 +821,13 @@ fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
                     .to_owned()
             };
             let what = if issue { "issues" } else { "pull" };
-            Some(format!("{web}/{}/{what}/{}", run.repo, run.target))
+            Some(format!("{web}/{repo}/{what}/{target}"))
         }
         Platform::GitLab => {
             let api = settings.gitlab.as_ref()?.api_url.trim_end_matches('/');
             let web = api.trim_end_matches("/api/v4");
             let what = if issue { "issues" } else { "merge_requests" };
-            Some(format!("{web}/{}/-/{what}/{}", run.repo, run.target))
+            Some(format!("{web}/{repo}/-/{what}/{target}"))
         }
     }
 }

@@ -12,6 +12,7 @@ export type Route =
   | { name: 'events'; query: URLSearchParams }
   | { name: 'event'; id: string }
   | { name: 'health' }
+  | { name: 'quality'; query: URLSearchParams }
   | { name: 'not_found'; path: string };
 
 /** Paths under BASE that are the server's, not the app's. */
@@ -38,6 +39,7 @@ export function routeOf(pathname: string, search = ''): Route {
   if (path === '/') return { name: 'overview', query };
   if (path === '/health') return { name: 'health' };
   if (path === '/events') return { name: 'events', query };
+  if (path === '/quality') return { name: 'quality', query };
   if (parts.length === 2 && first === 'events' && second) return { name: 'event', id: second };
   if (parts.length === 2 && first === 'runs' && second) return { name: 'run', id: second };
   if (parts.length === 4 && first === 'runs' && second && third === 'transcripts' && fourth) {

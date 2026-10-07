@@ -6,7 +6,9 @@
     clippy::panic,
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    clippy::type_complexity
 )]
 
 use std::sync::Arc;
@@ -14,9 +16,10 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventKey, FindingAction, InboundEvent,
-    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
-    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord, DraftVerdict,
+    EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
+    OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore,
+    SqliteStore, ToolCallRecord, TranscriptRecord, VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -90,6 +93,7 @@ macro_rules! for_each_scenario {
             tool_calls_are_kept_in_order_and_add_up_across_runs,
             transcripts_are_kept_whole_listed_and_pruned,
             drafts_are_kept_replaced_and_decided,
+            drafts_are_counted_by_group_and_listed_across_runs,
         );
     };
 }
@@ -107,6 +111,250 @@ fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
         body: body.into(),
         decision: None,
     }
+}
+
+async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore) {
+    let on = |run: &str, repo: &str, target: u64| NewRun {
+        repo: repo.into(),
+        target,
+        ..new_run(run)
+    };
+    for run in [
+        on("r-1", "o/a", 1),
+        on("r-2", "o/a", 2),
+        on("r-3", "o/b", 3),
+    ] {
+        store.create_run(&run).await.unwrap();
+    }
+    // (run, draft, lane, model, minute, verdict)
+    let drafts: [(&str, &str, &str, &str, u32, Option<DraftVerdict>); 9] = [
+        (
+            "r-1",
+            "d1",
+            "lane-a",
+            "mistral",
+            1,
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-1",
+            "d2",
+            "lane-a",
+            "mistral",
+            2,
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-1",
+            "d3",
+            "lane-b",
+            "deepseek",
+            3,
+            Some(DraftVerdict::Confirmed),
+        ),
+        (
+            "r-2",
+            "d1",
+            "lane-a",
+            "mistral",
+            4,
+            Some(DraftVerdict::SameAs),
+        ),
+        (
+            "r-2",
+            "d2",
+            "lane-b",
+            "deepseek",
+            5,
+            Some(DraftVerdict::Unchecked),
+        ),
+        ("r-2", "d3", "lane-b", "deepseek", 6, None),
+        (
+            "r-3",
+            "d1",
+            "lane-a",
+            "mistral",
+            7,
+            Some(DraftVerdict::Confirmed),
+        ),
+        (
+            "r-3",
+            "d2",
+            "lane-a",
+            "mistral",
+            7,
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-3",
+            "d3",
+            "lane-b",
+            "deepseek",
+            8,
+            Some(DraftVerdict::NotChecked),
+        ),
+    ];
+    for (run, draft, lane, model, minute, verdict) in drafts {
+        let at = format!("2026-10-07T10:{minute:02}:00Z");
+        store
+            .record_draft(
+                &id(run),
+                &DraftRecord {
+                    at: at.clone(),
+                    draft: draft.into(),
+                    lane: lane.into(),
+                    model: model.into(),
+                    kind: "finding".into(),
+                    path: "a.rs".into(),
+                    line: 4,
+                    target: String::new(),
+                    body: format!("{run} {draft}"),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(verdict) = verdict {
+            store
+                .decide_draft(
+                    &id(run),
+                    draft,
+                    &DraftDecision {
+                        at,
+                        verdict,
+                        checker: "opus".into(),
+                        reason: "Why.".into(),
+                        same_as: String::new(),
+                        comment_id: String::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let all = DraftFilter::default();
+    let by_model = store.draft_rates(DraftGroup::Model, &all).await.unwrap();
+    assert_eq!(
+        by_model,
+        [
+            DraftRates {
+                key: "mistral".into(),
+                drafts: 5,
+                confirmed: 1,
+                rejected: 3,
+                same_as: 1,
+                ..DraftRates::default()
+            },
+            DraftRates {
+                key: "deepseek".into(),
+                drafts: 4,
+                confirmed: 1,
+                unchecked: 1,
+                not_checked: 1,
+                waiting: 1,
+                ..DraftRates::default()
+            },
+        ],
+        "the largest group first"
+    );
+    let by_target = store.draft_rates(DraftGroup::Target, &all).await.unwrap();
+    let keys: Vec<_> = by_target
+        .iter()
+        .map(|r| (r.key.clone(), r.repo.clone(), r.target, r.drafts))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("o/a #1".to_owned(), Some("o/a".to_owned()), Some(1), 3),
+            ("o/a #2".to_owned(), Some("o/a".to_owned()), Some(2), 3),
+            ("o/b #3".to_owned(), Some("o/b".to_owned()), Some(3), 3),
+        ]
+    );
+    let by_repo = store.draft_rates(DraftGroup::Repo, &all).await.unwrap();
+    assert_eq!(
+        by_repo
+            .iter()
+            .map(|r| (r.key.as_str(), r.drafts))
+            .collect::<Vec<_>>(),
+        [("o/a", 6), ("o/b", 3)]
+    );
+    let window = DraftFilter {
+        since: Some("2026-10-07T10:02:00Z".into()),
+        until: Some("2026-10-07T10:07:00Z".into()),
+        repo: Some("o/a".into()),
+        ..DraftFilter::default()
+    };
+    let by_lane = store.draft_rates(DraftGroup::Lane, &window).await.unwrap();
+    assert_eq!(
+        by_lane
+            .iter()
+            .map(|r| (r.key.as_str(), r.drafts))
+            .collect::<Vec<_>>(),
+        [("lane-b", 3), ("lane-a", 2)],
+        "since is inclusive, until is not"
+    );
+
+    let listed = |filter: DraftFilter| async move {
+        store
+            .list_drafts(&filter, Page::new(50, 0))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.draft.body)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        listed(DraftFilter {
+            verdict: Some(VerdictFilter::Is(DraftVerdict::Rejected)),
+            ..DraftFilter::default()
+        })
+        .await,
+        ["r-3 d2", "r-1 d2", "r-1 d1"],
+        "newest first, a tie on the time by row"
+    );
+    assert_eq!(
+        listed(DraftFilter {
+            verdict: Some(VerdictFilter::Waiting),
+            ..DraftFilter::default()
+        })
+        .await,
+        ["r-2 d3"]
+    );
+    assert_eq!(
+        listed(DraftFilter {
+            model: Some("deepseek".into()),
+            repo: Some("o/b".into()),
+            ..DraftFilter::default()
+        })
+        .await,
+        ["r-3 d3"]
+    );
+    let first = store.list_drafts(&all, Page::new(50, 0)).await.unwrap();
+    assert_eq!(first[0].repo, "o/b");
+    assert_eq!(first[0].target, 3);
+    assert_eq!(first[0].run_id, "r-3");
+    assert_eq!(
+        first[0].draft.decision.as_ref().unwrap().verdict,
+        DraftVerdict::NotChecked
+    );
+
+    let mut seen = Vec::new();
+    let mut filter = DraftFilter::default();
+    loop {
+        let page = store.list_drafts(&filter, Page::new(4, 0)).await.unwrap();
+        let Some(last) = page.last() else { break };
+        filter.before = Some(DraftKey {
+            created_at: last.draft.at.clone(),
+            id: last.id,
+        });
+        seen.extend(page.into_iter().map(|d| d.draft.body));
+    }
+    assert_eq!(seen.len(), 9, "every draft once: {seen:?}");
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 9);
 }
 
 async fn drafts_are_kept_replaced_and_decided(store: &dyn RunStore) {

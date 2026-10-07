@@ -23,6 +23,7 @@ mod hooks;
 mod ids;
 mod lane_workspace;
 mod listeners;
+mod live;
 mod liveness;
 mod pages;
 mod plan;

@@ -155,7 +155,9 @@ pub enum FindingAction {
 }
 
 impl FindingAction {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The stored text: `posted`, `improved`, `refused`, and so on.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Posted => "posted",
             Self::Improved => "improved",
@@ -649,6 +651,119 @@ pub struct EventFilter {
     pub repo: Option<String>,
     /// Only events listed after this one: for keyset paging, newest first.
     pub before: Option<EventKey>,
+}
+
+/// Which drafts a listing or a count covers (#205). `None` matches
+/// anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftFilter {
+    /// What became of them; listings only.
+    pub verdict: Option<VerdictFilter>,
+    /// The lane's model.
+    pub model: Option<String>,
+    /// The lane.
+    pub lane: Option<String>,
+    /// The run's `owner/name`, exactly.
+    pub repo: Option<String>,
+    /// Queued at or after this RFC 3339 time.
+    pub since: Option<String>,
+    /// Queued before this RFC 3339 time.
+    pub until: Option<String>,
+    /// Only drafts listed after this one: for keyset paging, newest first.
+    pub before: Option<DraftKey>,
+}
+
+/// A verdict to list drafts by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictFilter {
+    /// Decided this way.
+    Is(DraftVerdict),
+    /// Not decided yet.
+    Waiting,
+}
+
+impl VerdictFilter {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Is(verdict) => verdict.as_str(),
+            Self::Waiting => "waiting",
+        }
+    }
+
+    /// The text a query parameter takes.
+    pub(crate) fn param(filter: Option<Self>) -> Option<&'static str> {
+        filter.map(Self::as_str)
+    }
+}
+
+/// Where a draft sits in a newest-first listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftKey {
+    /// When it was queued, as the store returned it.
+    pub created_at: String,
+    /// Its row id, which breaks a tie on the time.
+    pub id: i64,
+}
+
+/// What drafts are counted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftGroup {
+    /// The lane's model.
+    Model,
+    /// The lane.
+    Lane,
+    /// The run's repository.
+    Repo,
+    /// The run's pull request, merge request or issue.
+    Target,
+}
+
+/// What became of the drafts of one group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftRates {
+    /// The model, lane or repository; `owner/name #7` for a target.
+    pub key: String,
+    /// The repository, when grouped by target.
+    pub repo: Option<String>,
+    /// The number, when grouped by target.
+    pub target: Option<u64>,
+    /// The platform, when grouped by target.
+    pub platform: Option<Platform>,
+    /// Every draft.
+    pub drafts: u64,
+    /// Confirmed and written.
+    pub confirmed: u64,
+    /// Rejected by the check.
+    pub rejected: u64,
+    /// A repeat, merged into another.
+    pub same_as: u64,
+    /// No model could check it.
+    pub unchecked: u64,
+    /// No check configured.
+    pub not_checked: u64,
+    /// The review ended first.
+    pub cancelled: u64,
+    /// The write failed.
+    pub failed: u64,
+    /// Not decided yet.
+    pub waiting: u64,
+}
+
+/// A draft in a listing across runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftListing {
+    /// Its row id, for the keyset.
+    pub id: i64,
+    /// The run.
+    pub run_id: String,
+    /// The run's repository.
+    pub repo: String,
+    /// The run's pull request, merge request or issue.
+    pub target: u64,
+    /// The run's platform.
+    pub platform: Platform,
+    /// The draft and what became of it.
+    pub draft: DraftRecord,
 }
 
 /// One page of a listing.
