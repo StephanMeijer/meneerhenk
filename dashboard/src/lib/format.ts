@@ -33,3 +33,22 @@ export function lineCount(text: string): number {
 export function kindText(kind: string): string {
   return kind.replaceAll('_', ' ');
 }
+
+/** A rate from 0 to 1 as a whole percentage; a dash when there is none. */
+export function ratePercent(rate: number | null): string {
+  return rate === null ? '-' : `${Math.round(rate * 100)}%`;
+}
+
+/** The periods the quality page offers, by query value. */
+export const PERIODS: Record<string, { label: string; days: number | null }> = {
+  '7d': { label: 'last 7 days', days: 7 },
+  '30d': { label: 'last 30 days', days: 30 },
+  all: { label: 'all time', days: null },
+};
+
+/** The start of a period ending `now`, as RFC 3339; none for all time. */
+export function periodSince(period: string, now: Date = new Date()): string | null {
+  const days = PERIODS[period]?.days ?? null;
+  if (days === null) return null;
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+}

@@ -105,6 +105,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard/api/v1/health"),
     ("GET", "/dashboard/api/v1/runs"),
     ("GET", "/dashboard/api/v1/runs/count"),
+    ("GET", "/dashboard/api/v1/quality"),
+    ("GET", "/dashboard/api/v1/drafts"),
     ("GET", "/dashboard/api/v1/runs/r-review"),
     ("GET", "/dashboard/api/v1/runs/r-review/events"),
     ("GET", "/dashboard/api/v1/runs/r-review/tool-calls"),
@@ -931,6 +933,8 @@ fn api_types_are_current() {
         types::RunSummary::decl(&cfg),
         types::RunCount::decl(&cfg),
         types::RunUpdate::decl(&cfg),
+        types::QualityRow::decl(&cfg),
+        types::DraftItem::decl(&cfg),
         types::RunningSnapshot::decl(&cfg),
         types::RunMessage::decl(&cfg),
         types::RunningMessage::decl(&cfg),
@@ -1384,4 +1388,223 @@ async fn no_stream_without_a_session() {
     let (cookie, _) = viewer(&f);
     let missing = get(&f, "/dashboard/api/v1/runs/r-none/stream", &cookie).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+/// Drafts on `r-review` and `r-plan` (seeded by `seed`): mistral rejected
+/// three times and confirmed once on r-review, deepseek confirmed once,
+/// repeated once and is waiting once on r-plan.
+async fn seed_drafts(f: &Fixture) {
+    let store = &f.dashboard.app.store;
+    let drafts: [(&str, &str, &str, &str, Option<DraftVerdict>); 7] = [
+        (
+            "r-review",
+            "d1",
+            "lane-a",
+            "mistral",
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-review",
+            "d2",
+            "lane-a",
+            "mistral",
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-review",
+            "d3",
+            "lane-a",
+            "mistral",
+            Some(DraftVerdict::Rejected),
+        ),
+        (
+            "r-review",
+            "d4",
+            "lane-a",
+            "mistral",
+            Some(DraftVerdict::Confirmed),
+        ),
+        (
+            "r-plan",
+            "d1",
+            "lane-b",
+            "deepseek",
+            Some(DraftVerdict::Confirmed),
+        ),
+        (
+            "r-plan",
+            "d2",
+            "lane-b",
+            "deepseek",
+            Some(DraftVerdict::SameAs),
+        ),
+        ("r-plan", "d3", "lane-b", "deepseek", None),
+    ];
+    for (minute, (run, draft, lane, model, verdict)) in (0u32..).zip(drafts) {
+        let run = RunId::parse(run).unwrap();
+        let at = format!("2026-10-07T10:{minute:02}:00Z");
+        store
+            .record_draft(
+                &run,
+                &DraftRecord {
+                    at: at.clone(),
+                    draft: draft.into(),
+                    lane: lane.into(),
+                    model: model.into(),
+                    kind: "finding".into(),
+                    path: "src/a.rs".into(),
+                    line: 4,
+                    target: String::new(),
+                    body: format!("{model} says <b>{draft}</b>"),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(verdict) = verdict {
+            store
+                .decide_draft(
+                    &run,
+                    draft,
+                    &DraftDecision {
+                        at,
+                        verdict,
+                        checker: "opus".into(),
+                        reason: "src/a.rs:4 says otherwise.".into(),
+                        same_as: String::new(),
+                        comment_id: String::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn quality_counts_drafts_per_group_with_the_rejection_rate() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_drafts(&f).await;
+    let (cookie, _) = viewer(&f);
+
+    let by_model = get(&f, "/dashboard/api/v1/quality", &cookie).await;
+    assert_eq!(by_model.status, StatusCode::OK, "{}", by_model.body);
+    let by_model = by_model.json();
+    assert_eq!(by_model[0]["key"], "mistral");
+    assert_eq!(by_model[0]["drafts"], 4);
+    assert_eq!(by_model[0]["rejected"], 3);
+    assert_eq!(by_model[0]["judged"], 4);
+    assert_eq!(by_model[0]["rejection_rate"], 0.75);
+    assert_eq!(by_model[1]["key"], "deepseek");
+    assert_eq!(by_model[1]["same_as"], 1);
+    assert_eq!(by_model[1]["waiting"], 1);
+    assert_eq!(by_model[1]["rejection_rate"], 0.0);
+
+    let by_target = get(&f, "/dashboard/api/v1/quality?group=target", &cookie)
+        .await
+        .json();
+    assert_eq!(by_target[0]["key"], "docspec/app #7");
+    assert_eq!(by_target[0]["drafts"], 7);
+    assert!(
+        by_target[0]["target_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/docspec/app/pull/7")
+    );
+
+    let none = get(
+        &f,
+        "/dashboard/api/v1/quality?group=lane&since=2030-01-01T00:00:00Z",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(none, json!([]));
+    let waiting_only = get(
+        &f,
+        "/dashboard/api/v1/quality?group=lane&since=2026-10-07T10:06:00Z",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(waiting_only[0]["judged"], 0);
+    assert_eq!(
+        waiting_only[0]["rejection_rate"],
+        Value::Null,
+        "nothing judged"
+    );
+
+    for query in ["group=colour", "since=yesterday"] {
+        let bad = get(&f, &format!("/dashboard/api/v1/quality?{query}"), &cookie).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(bad.code(), "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn drafts_list_across_runs_by_verdict_model_and_lane_a_page_at_a_time() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_drafts(&f).await;
+    let (cookie, _) = viewer(&f);
+    let bodies = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["draft"]["body"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let rejected = get(&f, "/dashboard/api/v1/drafts?verdict=rejected", &cookie)
+        .await
+        .json();
+    assert_eq!(
+        bodies(&rejected),
+        [
+            "mistral says <b>d3</b>",
+            "mistral says <b>d2</b>",
+            "mistral says <b>d1</b>"
+        ],
+        "newest first, text as stored"
+    );
+    let first = &rejected["items"][0];
+    assert_eq!(first["run_id"], "r-review");
+    assert_eq!(first["repo"], "docspec/app");
+    assert_eq!(
+        first["draft"]["decision"]["reason"],
+        "src/a.rs:4 says otherwise."
+    );
+    assert!(first["target_url"].as_str().unwrap().ends_with("/pull/7"));
+
+    let waiting = get(&f, "/dashboard/api/v1/drafts?verdict=waiting", &cookie)
+        .await
+        .json();
+    assert_eq!(bodies(&waiting), ["deepseek says <b>d3</b>"]);
+    let lane_b = get(
+        &f,
+        "/dashboard/api/v1/drafts?lane=lane-b&model=deepseek",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(bodies(&lane_b).len(), 3);
+
+    let mut seen = Vec::new();
+    let mut uri = "/dashboard/api/v1/drafts?limit=3".to_owned();
+    loop {
+        let page = get(&f, &uri, &cookie).await.json();
+        seen.extend(bodies(&page));
+        match page["next"].as_str() {
+            Some(next) => uri = format!("/dashboard/api/v1/drafts?limit=3&cursor={next}"),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 7, "every draft once: {seen:?}");
+
+    for query in ["verdict=maybe", "cursor=bm9wZQ"] {
+        let bad = get(&f, &format!("/dashboard/api/v1/drafts?{query}"), &cookie).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
+    }
 }

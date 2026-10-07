@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
 use henk_store::{
-    DraftDecision, DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
-    RunFilter, RunRecord, RunStatus, RunStore, StoreError, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary,
+    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
+    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
+    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
+    RunStore, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::broadcast;
@@ -351,6 +351,22 @@ impl RunStore for Announcing {
 
     async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError> {
         self.inner.drafts(run).await
+    }
+
+    async fn draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DraftRates>, StoreError> {
+        self.inner.draft_rates(group, filter).await
+    }
+
+    async fn list_drafts(
+        &self,
+        filter: &DraftFilter,
+        page: Page,
+    ) -> Result<Vec<DraftListing>, StoreError> {
+        self.inner.list_drafts(filter, page).await
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {

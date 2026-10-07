@@ -171,6 +171,59 @@ pub enum RunningMessage {
     Run(Box<RunSummary>),
 }
 
+/// What became of the drafts of one group: a model, a lane, a repository
+/// or a pull request (#205).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct QualityRow {
+    /// The model, lane or repository; `owner/name #7` for a pull request.
+    pub key: String,
+    /// The repository, when grouped by pull request.
+    pub repo: Option<String>,
+    /// The number, when grouped by pull request.
+    pub target: Option<u64>,
+    /// A link to that pull request, merge request or issue.
+    pub target_url: Option<String>,
+    /// Every draft.
+    pub drafts: u64,
+    /// Confirmed and written.
+    pub confirmed: u64,
+    /// Rejected by the check.
+    pub rejected: u64,
+    /// Repeats, merged into another draft or finding.
+    pub same_as: u64,
+    /// No model could check them.
+    pub unchecked: u64,
+    /// No check was configured.
+    pub not_checked: u64,
+    /// The review ended first.
+    pub cancelled: u64,
+    /// The write failed.
+    pub failed: u64,
+    /// Not decided yet.
+    pub waiting: u64,
+    /// Drafts a checker decided: confirmed, rejected and repeats.
+    pub judged: u64,
+    /// Rejected of judged, from 0 to 1; none when nothing was judged.
+    pub rejection_rate: Option<f64>,
+}
+
+/// A draft across runs, with the run it belongs to (#205).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DraftItem {
+    /// The run.
+    pub run_id: String,
+    /// The run's repository.
+    pub repo: String,
+    /// The run's pull request, merge request or issue.
+    pub target: u64,
+    /// A link to it.
+    pub target_url: Option<String>,
+    /// The draft and what became of it.
+    pub draft: Draft,
+}
+
 /// One session of a run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -743,7 +796,18 @@ impl From<&EventWithOutcomes> for EventItem {
 /// A link to the pull request, merge request or issue a run is about.
 fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
     let issue = run.kind == RunKind::Plan;
-    match run.platform {
+    link_to(settings, run.platform, &run.repo, run.target, issue)
+}
+
+/// A link to pull request, merge request or issue `target` of `repo`.
+pub(super) fn link_to(
+    settings: &Settings,
+    platform: Platform,
+    repo: &str,
+    target: u64,
+    issue: bool,
+) -> Option<String> {
+    match platform {
         Platform::GitHub => {
             let api = settings
                 .github
@@ -757,13 +821,13 @@ fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
                     .to_owned()
             };
             let what = if issue { "issues" } else { "pull" };
-            Some(format!("{web}/{}/{what}/{}", run.repo, run.target))
+            Some(format!("{web}/{repo}/{what}/{target}"))
         }
         Platform::GitLab => {
             let api = settings.gitlab.as_ref()?.api_url.trim_end_matches('/');
             let web = api.trim_end_matches("/api/v4");
             let what = if issue { "issues" } else { "merge_requests" };
-            Some(format!("{web}/{}/-/{what}/{}", run.repo, run.target))
+            Some(format!("{web}/{repo}/-/{what}/{target}"))
         }
     }
 }

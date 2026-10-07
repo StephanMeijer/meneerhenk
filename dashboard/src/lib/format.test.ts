@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { about, draftWhat, kindText, lineCount, verdictText } from './format';
+import { about, draftWhat, kindText, lineCount, periodSince, ratePercent, verdictText } from './format';
 import { draft } from './testing/fixtures';
 
 describe('format', () => {
@@ -28,5 +28,20 @@ describe('format', () => {
     expect(lineCount('')).toBe(0);
     expect(lineCount('a\nb\nc')).toBe(3);
     expect(kindText('discord_turn')).toBe('discord turn');
+  });
+});
+
+describe('quality helpers', () => {
+  it('put a rate as a whole percentage', () => {
+    expect(ratePercent(72 / 79)).toBe('91%');
+    expect(ratePercent(0)).toBe('0%');
+    expect(ratePercent(null)).toBe('-');
+  });
+
+  it('turn a period into its start', () => {
+    const now = new Date('2026-10-07T12:00:00Z');
+    expect(periodSince('7d', now)).toBe('2026-09-30T12:00:00.000Z');
+    expect(periodSince('all', now)).toBeNull();
+    expect(periodSince('nonsense', now)).toBeNull();
   });
 });
