@@ -697,6 +697,9 @@ pub struct WorkspaceConfig {
     pub toolchain: Option<Toolchain>,
     /// Whether reviews get workspaces too (#170), one per lane.
     pub review: bool,
+    /// Whether the planner gets a workspace too (#172), at the default
+    /// branch.
+    pub plan: bool,
     /// Named profiles; what they leave out comes from the default.
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
@@ -895,6 +898,7 @@ impl Default for WorkspaceConfig {
             setup: profile.setup,
             toolchain: profile.toolchain,
             review: profile.review,
+            plan: profile.plan,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
@@ -932,6 +936,8 @@ pub struct ProfileConfig {
     pub toolchain: Option<Toolchain>,
     /// Whether reviews get workspaces; the default's when not given.
     pub review: Option<bool>,
+    /// Whether the planner gets a workspace; the default's when not given.
+    pub plan: Option<bool>,
 }
 
 /// The workspace settings, checked.
@@ -983,6 +989,7 @@ impl WorkspaceConfig {
             setup: self.setup,
             toolchain: self.toolchain,
             review: self.review,
+            plan: self.plan,
         };
         let profiles = self
             .profiles
@@ -1004,6 +1011,7 @@ impl WorkspaceConfig {
                     setup: p.setup.unwrap_or_else(|| base.setup.clone()),
                     toolchain: p.toolchain.or(base.toolchain),
                     review: p.review.unwrap_or(base.review),
+                    plan: p.plan.unwrap_or(base.plan),
                 };
                 (name, profile)
             })
@@ -1781,6 +1789,9 @@ impl Settings {
             }
             if profile.review {
                 out.push_str(", reviews in a workspace");
+            }
+            if profile.plan {
+                out.push_str(", plans in a workspace");
             }
             for (what, value, unit) in [
                 ("memory", limits.memory_mib, " MiB"),
@@ -2631,6 +2642,31 @@ github_owners = ["docspec"]
                 "{bad}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn the_planner_gets_a_workspace_where_a_profile_on_a_sandbox_says_so() {
+        let ssh = format!(
+            "[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            host_key_line()
+        );
+        let settings = database(&format!(
+            "[workspace.profiles.planned]\nbackend = \"ssh\"\nplan = true\n[workspace.profiles.inherits]\nbackend = \"ssh\"\n{ssh}"
+        ))
+        .unwrap();
+        let policy = &settings.workspace;
+        assert!(!policy.default.plan, "off by default");
+        assert!(policy.profiles.get("planned").unwrap().plan);
+        assert!(!policy.profiles.get("inherits").unwrap().plan);
+        let text = settings.describe();
+        assert!(text.contains(", plans in a workspace"), "{text}");
+        let refused = database("[workspace]\nplan = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("plan = true needs a backend apart from Henk"),
+            "{refused}"
+        );
     }
 
     #[test]

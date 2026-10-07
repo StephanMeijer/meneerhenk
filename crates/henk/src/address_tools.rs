@@ -32,6 +32,9 @@ pub struct AddressContext {
     pub check_timeout: Duration,
     /// Files one run may change.
     pub max_changed_files: usize,
+    /// Whether the model may run commands of its own (`bash`, #172): only
+    /// on a backend apart from Henk.
+    pub bash: bool,
     /// What the model decided so far.
     pub state: Mutex<AddressState>,
 }
@@ -332,6 +335,14 @@ impl Tool for SettleThread {
 pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
     let mut set = ToolSet::new();
     code_tools::add(&mut set, &ctx.workspace);
+    if ctx.bash {
+        code_tools::add_bash(
+            &mut set,
+            &ctx.workspace,
+            ctx.check_timeout,
+            code_tools::BashUse::Address,
+        );
+    }
     set.add(EditFile(Arc::clone(ctx)))
         .add(WriteFile(Arc::clone(ctx)))
         .add(RunChecks(Arc::clone(ctx)))
@@ -401,6 +412,7 @@ mod tests {
             check_commands: vec![vec!["true".to_owned()]],
             check_timeout: Duration::from_secs(5),
             max_changed_files: 2,
+            bash: false,
             state: Mutex::default(),
         });
         (provider, ctx)

@@ -20,6 +20,7 @@ use tracing::{error, info, instrument, warn};
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::ids::new_run_id;
+use crate::lane_workspace::{PlanWorkspace, open_for_plan};
 use crate::liveness::KeepAlive;
 use crate::plan_tools::{
     AddLabels, AskQuestions, CreateSubIssue, LinkIssue, PlanContext, PlanState, SetDescription,
@@ -338,6 +339,7 @@ async fn planner_tools(
     platform: henk_domain::allowlist::Platform,
     scope: &Scope,
     context: Arc<PlanContext>,
+    workspace: Option<&PlanWorkspace>,
 ) -> anyhow::Result<ToolSet> {
     let tools = platform_tools(session, platform, scope.clone(), &[])
         .await
@@ -345,6 +347,18 @@ async fn planner_tools(
     let mut set = ToolSet::new();
     for tool in tools {
         set.add(tool);
+    }
+    // With a copy of the default branch (#172), the code tools and `bash`
+    // read and run there; the platform's tools stay for issues, pull
+    // requests and history.
+    if let Some(workspace) = workspace {
+        crate::code_tools::add(&mut set, &workspace.workspace);
+        crate::code_tools::add_bash(
+            &mut set,
+            &workspace.workspace,
+            Duration::from_secs(workspace.limits.command_secs),
+            crate::code_tools::BashUse::Plan,
+        );
     }
     set.add(WebFetch::new()?);
     set.add(SetTitle(Arc::clone(&context)));
@@ -369,6 +383,40 @@ async fn plan_body(
     model: Arc<dyn henk_llm::ModelClient>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    // The planner's own copy of the default branch, when the profile says
+    // so; closed on every path out of here.
+    let workspace = open_for_plan(app, &request.target.repo, &context.run, &cancel).await;
+    let result = plan_session(
+        app,
+        request,
+        body,
+        title,
+        context,
+        model,
+        cancel,
+        workspace.as_ref(),
+    )
+    .await;
+    if let Some(workspace) = workspace {
+        workspace.workspace.close().await;
+    }
+    result
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "plan_body's inputs and the planner's workspace, passed through"
+)]
+async fn plan_session(
+    app: &App,
+    request: &PlanRequest,
+    body: &str,
+    title: &str,
+    context: Arc<PlanContext>,
+    model: Arc<dyn henk_llm::ModelClient>,
+    cancel: CancellationToken,
+    workspace: Option<&PlanWorkspace>,
+) -> anyhow::Result<()> {
     let planning = app
         .settings
         .planning
@@ -380,9 +428,14 @@ async fn plan_body(
         repo: request.target.repo.clone(),
         issue: request.target.number,
     };
-
-    let mut set =
-        planner_tools(Arc::clone(&session), platform, &scope, Arc::clone(&context)).await?;
+    let mut set = planner_tools(
+        Arc::clone(&session),
+        platform,
+        &scope,
+        Arc::clone(&context),
+        workspace,
+    )
+    .await?;
 
     let previous = extract_plan(body)
         .map(|s| s.plan)
@@ -413,6 +466,18 @@ async fn plan_body(
             ],
         )
     );
+    if let Some(workspace) = workspace {
+        system = format!(
+            "{system}\n\n{}",
+            prompts::render(
+                prompts::PLAN_WORKSPACE,
+                &[
+                    ("branch", &workspace.branch),
+                    ("commit", workspace.commit.as_str()),
+                ],
+            )
+        );
+    }
     crate::skill_tools::equip(
         &mut system,
         &mut set,
@@ -538,7 +603,26 @@ requester_id = 3
     }
 
     async fn fixture(tracker: FakeIssueWriter, script: Vec<Completion>) -> Fixture {
-        let settings = Config::parse(CONFIG)
+        fixture_on(
+            tracker,
+            script,
+            CONFIG,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await
+    }
+
+    /// [`fixture`] with its own configuration, workspace backend and way to
+    /// the repository's source (#172).
+    async fn fixture_on(
+        tracker: FakeIssueWriter,
+        script: Vec<Completion>,
+        config: &str,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+        source: Option<Arc<dyn henk_platform::address::AddressWriter>>,
+    ) -> Fixture {
+        let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         let server = FakeServer::new(
@@ -560,10 +644,10 @@ requester_id = 3
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
                 cancels: crate::cancel::Cancels::default(),
-                workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
+                workspace_provider: provider,
                 test_writer: None,
                 test_session: Some(session),
-                test_address_writer: None,
+                test_address_writer: source,
                 test_issue_writer: Some(Arc::clone(&tracker) as Arc<dyn IssueWriter>),
             },
             tracker,
@@ -582,6 +666,373 @@ requester_id = 3
             run: Some(RunId::parse(run).unwrap()),
             requester: None,
         }
+    }
+
+    /// The repository as a planner's way in sees it (#172): its default
+    /// branch's head and where to fetch it, no credential. Nothing else is
+    /// asked of it.
+    struct Head(henk_platform::address::RepoHead);
+
+    fn unused() -> henk_platform::PlatformError {
+        henk_platform::PlatformError::Decode("not used by a planner".to_owned())
+    }
+
+    #[async_trait::async_trait]
+    impl henk_platform::address::AddressWriter for Head {
+        async fn pull_facts(
+            &self,
+            _: &henk_platform::ReviewTarget,
+        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn repo_head(
+            &self,
+            _: &RepoRef,
+        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+            Ok(self.0.clone())
+        }
+        async fn open_threads(
+            &self,
+            _: &henk_platform::ReviewTarget,
+        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn git_credential(
+            &self,
+        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        {
+            Ok(None)
+        }
+        async fn commit_identity(
+            &self,
+        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn commit_url(&self, _: &henk_platform::ReviewTarget, _: &str) -> String {
+            String::new()
+        }
+        async fn reply_in_thread(
+            &self,
+            _: &henk_platform::ReviewTarget,
+            _: &henk_platform::address::OpenThread,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn resolve_thread(
+            &self,
+            _: &henk_platform::ReviewTarget,
+            _: &str,
+        ) -> Result<(), henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn post_comment(
+            &self,
+            _: &henk_platform::ReviewTarget,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+    }
+
+    fn call(name: &str, arguments: serde_json::Value) -> Completion {
+        Completion {
+            message: ChatMessage {
+                role: Role::Assistant,
+                blocks: vec![Block::ToolCall(ToolCall {
+                    id: format!("call-{name}"),
+                    name: name.to_owned(),
+                    arguments: ToolArguments::Parsed(arguments),
+                })],
+            },
+            stop: StopReason::ToolUse,
+            usage: Usage::default(),
+        }
+    }
+
+    /// Planning on the ssh backend with `extra` in its profile.
+    fn planning_config(extra: &str) -> String {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let host_key = key.public_key().to_openssh().unwrap();
+        format!(
+            "{CONFIG}[workspace]\nbackend = \"ssh\"\nsetup = [[\"make\", \"deps\"]]\n{extra}[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{host_key}\"\n"
+        )
+    }
+
+    struct Planned {
+        f: Fixture,
+        provider: crate::workspace::fake::FakeProvider,
+        _remote: crate::git::ScratchDir,
+    }
+
+    /// A plan of a repository whose default branch moved after Henk read
+    /// its head, on the fake backend where `make deps` exits `setup_code`.
+    async fn planned(name: &str, extra: &str, script: Vec<Completion>, setup_code: i32) -> Planned {
+        let mut provider = crate::workspace::fake::FakeProvider::default();
+        provider.script.insert(
+            "make deps".to_owned(),
+            crate::workspace::fake::Scripted {
+                code: setup_code,
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        provider.script.insert(
+            "bash -c git log -1 --format=%s".to_owned(),
+            crate::workspace::fake::Scripted {
+                output: "Seed\n".to_owned(),
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let (f, remote) = planned_on(
+            name,
+            &planning_config(extra),
+            script,
+            Arc::new(provider.clone()),
+        )
+        .await;
+        Planned {
+            f,
+            provider,
+            _remote: remote,
+        }
+    }
+
+    /// [`planned`] on any backend; the remote is returned to be kept.
+    async fn planned_on(
+        name: &str,
+        config: &str,
+        script: Vec<Completion>,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (Fixture, crate::git::ScratchDir) {
+        let (remote, head) = crate::git::tests::bare_remote(name).await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let later = crate::git::Checkout::clone_at(
+            crate::git::ScratchDir::new(&format!("{name}-later")).unwrap(),
+            &url,
+            "feature",
+            &head,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(later.path().join("src/a.rs"), "moved on\n").unwrap();
+        later
+            .commit(
+                &henk_platform::address::CommitIdentity {
+                    name: "Later".to_owned(),
+                    email: "later@example.com".to_owned(),
+                },
+                "Later\n",
+            )
+            .await
+            .unwrap();
+        later.push("feature").await.unwrap();
+
+        let source = Head(henk_platform::address::RepoHead {
+            default_branch: "feature".to_owned(),
+            head,
+            remote: url,
+        });
+        let f = fixture_on(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs as CSV."),
+            script,
+            config,
+            provider,
+            Some(Arc::new(source)),
+        )
+        .await;
+        (f, remote)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
+    async fn live_a_planner_runs_bash_in_its_copy_on_a_real_sandbox_host() {
+        let provider =
+            crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
+        let config =
+            planning_config("plan = true\n").replace("[[\"make\", \"deps\"]]", "[[\"true\"]]");
+        let (f, remote) = planned_on(
+            "henk-plan-live",
+            &config,
+            vec![
+                call("bash", json!({"command": "git log -1 --format=%H"})),
+                write_plan("## Goal\n\nExport runs."),
+                done(),
+            ],
+            Arc::new(provider),
+        )
+        .await;
+        let report = run_plan(&f.app, request("r-plan-live"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.planned);
+        let moved = crate::git::tests::remote_log(remote.path(), "%H").await;
+        let (_, results, _) = seen(&f.model);
+        // Every request carries the conversation so far, so a result shows
+        // up once per later request.
+        let shas: std::collections::BTreeSet<&str> = results
+            .iter()
+            .filter(|r| r.starts_with("exit 0 in "))
+            .filter_map(|r| r.lines().nth(1))
+            .collect();
+        let shas: Vec<&str> = shas.into_iter().collect();
+        assert_eq!(shas.len(), 1, "{results:?}");
+        assert_ne!(
+            shas[0],
+            moved.trim(),
+            "the head Henk read, not the branch that moved on"
+        );
+        assert_eq!(shas[0].len(), 40, "{results:?}");
+    }
+
+    /// The tool names of the first request, every tool result, and the
+    /// system prompt.
+    fn seen(model: &ScriptedClient) -> (Vec<String>, Vec<String>, String) {
+        let requests = model.requests();
+        let first = requests.first().unwrap();
+        let names = first.tools.iter().map(|t| t.name.to_string()).collect();
+        let results = requests
+            .iter()
+            .flat_map(|r| r.messages.iter())
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                Block::ToolResult(r) => Some(r.content.clone()),
+                _ => None,
+            })
+            .collect();
+        (names, results, first.system.clone().unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn a_planner_with_a_workspace_reads_and_runs_the_default_branch() {
+        let p = planned(
+            "henk-plan-ws",
+            "plan = true\n",
+            vec![
+                call(
+                    "read_file",
+                    json!({"path": "src/a.rs", "start_line": 2, "end_line": 2}),
+                ),
+                call("bash", json!({"command": "git log -1 --format=%s"})),
+                write_plan("## Goal\n\nExport runs."),
+                done(),
+            ],
+            0,
+        )
+        .await;
+        let report = run_plan(&p.f.app, request("r-plan-ws"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.planned);
+        let (names, results, system) = seen(&p.f.model);
+        for tool in ["list_files", "read_file", "search", "bash", "write_plan"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        assert!(
+            system.contains("at its default branch, feature at "),
+            "{system}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.starts_with("    2|     let x = 1;")),
+            "the head Henk read, not the branch that moved on: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.starts_with("exit 0 in ") && r.ends_with("\nSeed\n")),
+            "{results:?}"
+        );
+        let events =
+            p.f.app
+                .store
+                .events(&RunId::parse("r-plan-ws").unwrap())
+                .await
+                .unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "info"
+                && e.message
+                    .starts_with("planner workspace: ready on ssh at feature ")),
+            "{events:?}"
+        );
+        for line in [
+            "planner: exec make deps exit 0",
+            "planner: exec bash -c git log -1 --format=%s exit 0",
+        ] {
+            assert!(
+                events.iter().any(|e| e.message.starts_with(line)),
+                "{line}: {events:?}"
+            );
+        }
+        assert_eq!(p.provider.opened(), 1);
+        assert_eq!(p.provider.live(), 0, "closed after the session");
+        assert_eq!(p.provider.unclosed(), 0, "closed, not just dropped");
+    }
+
+    #[tokio::test]
+    async fn without_plan_in_the_profile_the_planner_keeps_its_tools() {
+        let p = planned(
+            "henk-plan-nows",
+            "",
+            vec![write_plan("## Goal\n\nExport runs."), done()],
+            0,
+        )
+        .await;
+        run_plan(&p.f.app, request("r-plan-nows"), CancellationToken::new())
+            .await
+            .unwrap();
+        let (names, _, system) = seen(&p.f.model);
+        assert!(
+            !names
+                .iter()
+                .any(|n| n == "bash" || n == "list_files" || n == "search"),
+            "{names:?}"
+        );
+        assert!(!system.contains("Your copy of the repository"), "{system}");
+        assert_eq!(p.provider.opened(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_setup_leaves_the_planner_without_a_workspace_but_planning() {
+        let p = planned(
+            "henk-plan-badsetup",
+            "plan = true\n",
+            vec![write_plan("## Goal\n\nExport runs."), done()],
+            2,
+        )
+        .await;
+        let report = run_plan(
+            &p.f.app,
+            request("r-plan-badsetup"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(report.planned, "the plan is still written");
+        let (names, _, _) = seen(&p.f.model);
+        assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+        let events =
+            p.f.app
+                .store
+                .events(&RunId::parse("r-plan-badsetup").unwrap())
+                .await
+                .unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "warn"
+                && e.message.contains("planner workspace: none")
+                && e.message.contains("setup step `make deps` exited with 2")),
+            "{events:?}"
+        );
+        assert_eq!(p.provider.live(), 0);
     }
 
     #[tokio::test]

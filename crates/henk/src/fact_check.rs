@@ -162,7 +162,7 @@ impl SessionFactCheck {
                     &mut tools,
                     &workspace,
                     std::time::Duration::from_secs(self.check_limits.command_secs),
-                    crate::code_tools::Sharing::Shared,
+                    crate::code_tools::BashUse::FactCheck,
                 );
             }
             (None, Some(inner)) => {

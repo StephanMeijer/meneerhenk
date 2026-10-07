@@ -493,6 +493,33 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
 }
 
 #[tokio::test]
+async fn a_planner_fetches_the_default_branch_at_its_head() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"default_branch": "trunk"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/branches/trunk"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"name": "trunk", "commit": {"sha": SHA}})),
+        )
+        .mount(&server)
+        .await;
+    let head = address_writer(&server)
+        .repo_head(&target().repo)
+        .await
+        .unwrap();
+    assert_eq!(head.default_branch, "trunk");
+    assert_eq!(head.head.as_str(), SHA);
+    assert_eq!(head.remote, format!("{}/docspec/app.git", server.uri()));
+}
+
+#[tokio::test]
 async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
     use henk_platform::address::{AddressWriter as _, OpenThread, ThreadNote};
 

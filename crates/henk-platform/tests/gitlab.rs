@@ -721,6 +721,27 @@ async fn address_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
 }
 
 #[tokio::test]
+async fn a_planner_fetches_the_default_branch_at_its_head() {
+    use henk_platform::address::AddressWriter as _;
+
+    let server = gitlab_rest(mr("opened", 11), None, None).await;
+    Mock::given(method("GET"))
+        .and(path(format!("{PROJECT}/repository/branches/main")))
+        .and(header("PRIVATE-TOKEN", TOKEN))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"name": "main", "commit": {"id": SHA}})),
+        )
+        .mount(&server)
+        .await;
+    let (_fake, writer) = address_writer(&server).await;
+    let head = writer.repo_head(&target().repo).await.unwrap();
+    assert_eq!(head.default_branch, "main");
+    assert_eq!(head.head.as_str(), SHA);
+    assert_eq!(head.remote, "https://gitlab.example/9xxlab/tools/cli.git");
+}
+
+#[tokio::test]
 async fn open_discussions_parse_into_threads_known_by_author_id() {
     use henk_platform::address::AddressWriter as _;
 

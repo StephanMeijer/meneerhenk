@@ -365,6 +365,13 @@ impl Session<'_> {
             check_commands: config.check_commands.clone(),
             check_timeout: self.command_limit(),
             max_changed_files: config.max_changed_files,
+            bash: self
+                .app
+                .settings
+                .workspace
+                .profile_for(&self.request.target.repo.path())
+                .backend
+                .runs_model_commands(),
             state: Mutex::new(AddressState::default()),
         });
         self.session(&context, cancel).await?;
@@ -592,7 +599,7 @@ impl Session<'_> {
             .as_deref()
             .map_or(String::new(), |n| format!("Their note: {n}"));
         let reference = format!("#{}", target.number);
-        let system = format!(
+        let mut system = format!(
             "{}\n\n{}",
             prompts::PERSONA,
             prompts::render(
@@ -605,6 +612,9 @@ impl Session<'_> {
                 ],
             )
         );
+        if context.bash {
+            system = format!("{system}\n\n{}", prompts::ADDRESS_BASH);
+        }
         let opening = ChatMessage::user(format!(
             "The open review threads on {reference}, as data:\n\n{}",
             context.threads_text()
@@ -831,6 +841,14 @@ check_commands = [["true"]]
         }
         async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
             Ok(None)
+        }
+        async fn repo_head(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+        ) -> Result<henk_platform::address::RepoHead, PlatformError> {
+            Err(PlatformError::Decode(
+                "not used by an address run".to_owned(),
+            ))
         }
         async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {
             Ok(CommitIdentity {
@@ -1414,6 +1432,123 @@ check_commands = [["true"]]
             fix_is_pushed(Arc::new(provider.clone()), "ssh-live", platform).await;
             no_change_no_push(Arc::new(provider.clone()), "ssh-live", platform).await;
         }
+    }
+
+    /// The address model's tool names and system prompt, from its first
+    /// request.
+    fn offered(model: &ScriptedClient) -> (Vec<String>, String) {
+        let requests = model.requests();
+        let first = requests.first().unwrap();
+        (
+            first.tools.iter().map(|t| t.name.to_string()).collect(),
+            first.system.clone().unwrap_or_default(),
+        )
+    }
+
+    /// Settles both threads after `first`, then ends.
+    fn settling(first: Completion) -> Vec<Completion> {
+        vec![
+            first,
+            call(
+                "settle_thread",
+                json!({"thread_id": "T1", "outcome": "fixed", "reply": "Set x to 2."}),
+            ),
+            call(
+                "settle_thread",
+                json!({"thread_id": "T2", "outcome": "declined", "reply": "One value is enough here."}),
+            ),
+            done(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn on_a_sandbox_the_address_model_runs_its_own_commands_and_their_change_is_pushed() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-bash").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let command = "sed -i 's/x = 1/x = 2/' src/a.rs";
+        let mut provider = FakeProvider::default();
+        provider
+            .script
+            .insert("true".to_owned(), Scripted::default());
+        provider.script.insert(
+            format!("bash -c {command}"),
+            Scripted {
+                writes: vec![(
+                    "src/a.rs".to_owned(),
+                    b"fn main() {\n    let x = 2;\n}\n".to_vec(),
+                )],
+                ..Scripted::default()
+            },
+        );
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let config = format!(
+            "{CONFIG}{PEOPLE}[workspace]\nbackend = \"ssh\"\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            key.public_key().to_openssh().unwrap()
+        );
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(call("bash", json!({"command": command})))
+                .into_iter()
+                .map(Ok),
+        ));
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(provider),
+            &config,
+        );
+        let report = run_address(
+            &app,
+            request(platform, "r-addr-bash"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            report.commit.is_some(),
+            "a change made through bash is pushed"
+        );
+        let (changed, content) = remote_change(remote.path(), head.as_str(), "src/a.rs").await;
+        assert_eq!(changed, ["src/a.rs"]);
+        assert_eq!(content, "fn main() {\n    let x = 2;\n}\n");
+        let (names, system) = offered(&model);
+        assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(
+            system.contains("commands of your own in the checkout with `bash`"),
+            "{system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_the_host_the_address_model_gets_no_shell() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-nobash").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(fix_x()).into_iter().map(Ok),
+        ));
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(HostProvider),
+            &format!("{CONFIG}{PEOPLE}"),
+        );
+        run_address(
+            &app,
+            request(platform, "r-addr-nobash"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (names, system) = offered(&model);
+        assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!system.contains("`bash`"), "{system}");
     }
 
     #[tokio::test]

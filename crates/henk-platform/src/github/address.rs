@@ -4,8 +4,10 @@ use henk_domain::address::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::Value;
 
+use henk_domain::allowlist::RepoRef;
+
 use crate::address::{
-    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, ThreadNote,
+    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, RepoHead, ThreadNote,
 };
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
@@ -109,6 +111,34 @@ impl AddressWriter for GitHubWriter {
 
     async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
         Ok(Some(GitCredential::github(self.api().git_token().await?)))
+    }
+
+    async fn repo_head(&self, repo: &RepoRef) -> Result<RepoHead, PlatformError> {
+        let path = repo.path();
+        let info = self.api().get(&format!("/repos/{path}")).await?;
+        let default_branch = text(&info, "/default_branch");
+        if default_branch.is_empty() {
+            return Err(PlatformError::Decode(
+                "repository without a default branch".to_owned(),
+            ));
+        }
+        let branch = self
+            .api()
+            .get(&format!(
+                "/repos/{path}/branches/{}",
+                path_segment(&default_branch)
+            ))
+            .await?;
+        let head = branch
+            .pointer("/commit/sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| CommitSha::parse(sha).ok())
+            .ok_or_else(|| PlatformError::Decode("branch without a head commit".to_owned()))?;
+        Ok(RepoHead {
+            default_branch,
+            head,
+            remote: self.api().git_remote(&path),
+        })
     }
 
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {

@@ -1,4 +1,8 @@
-//! Workspaces for a review (#170): when the repository's profile says
+//! Workspaces for the lanes that only read and try: a review's lanes and
+//! fact-checker (#170) and the planner (#172), each opened from a commit
+//! fetched by its sha, set up as the profile says and never exported.
+//!
+//! Reviews (#170): when the repository's profile says
 //! `review = true`, every lane and the fact-checker get a workspace of their
 //! own, holding the reviewed commit and prepared by the setup stage before
 //! the lanes start. A lane may change files in its copy, so copies are never
@@ -14,10 +18,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use henk_domain::allowlist::RepoRef;
 use henk_domain::review::{CommitSha, LaneName};
 use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Limits, Profile};
 use henk_platform::ReviewTarget;
+use henk_platform::address::AddressWriter;
 use henk_store::RunStore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +36,8 @@ use crate::workspace::{Workspace, WorkspaceProvider, for_lane, setup};
 
 /// The name the fact-checker's workspace goes by on the run record.
 const FACT_CHECK: &str = "fact-check";
+/// The name the planner's workspace goes by on the run record.
+const PLANNER: &str = "planner";
 
 /// The workspaces of one review, by lane, and the fact-checker's.
 #[derive(Default)]
@@ -98,6 +106,7 @@ impl ReviewWorkspaces {
                 profile,
                 run.clone(),
                 name.clone(),
+                EnvLane::Review,
             ));
         }
         let mut workspaces = Self {
@@ -195,18 +204,115 @@ async fn source(
         .pull_facts(target)
         .await
         .context("reading the pull request")?;
+    fetched(writer.as_ref(), &facts.remote, commit, run).await
+}
+
+/// `commit` of `remote`, fetched by its sha with the platform's git
+/// credential, which stays in git's environment on Henk's side and never
+/// reaches a workspace (§8.4).
+async fn fetched(
+    writer: &dyn AddressWriter,
+    remote: &str,
+    commit: &CommitSha,
+    run: &RunId,
+) -> anyhow::Result<Checkout> {
     let credential = writer
         .git_credential()
         .await
         .context("getting a credential for git")?;
     let dir =
-        ScratchDir::new(&format!("henk-review-{run}")).context("making the checkout directory")?;
-    Ok(Checkout::fetch_at(dir, &facts.remote, commit, credential).await?)
+        ScratchDir::new(&format!("henk-lane-{run}")).context("making the checkout directory")?;
+    Ok(Checkout::fetch_at(dir, remote, commit, credential).await?)
 }
 
-/// One workspace: opened from the checkout, recorded on the run, set up as
-/// the profile says and wrapped as a review's. A workspace whose setup
-/// failed is closed again.
+/// The planner's workspace (#172), when the repository's profile says
+/// `plan = true`: the repository at its default branch, set up as the
+/// profile says, never exported, with the profile's limits for `bash`, and
+/// which branch and commit it holds. Whatever fails is a warning on the run
+/// and the planner works without it; a cancelled plan stops waiting at once.
+pub async fn open_for_plan(
+    app: &App,
+    repo: &RepoRef,
+    run: &RunId,
+    cancel: &CancellationToken,
+) -> Option<PlanWorkspace> {
+    let profile = app.settings.workspace.profile_for(&repo.path());
+    if !profile.serves(EnvLane::Plan) {
+        return None;
+    }
+    let opening = async {
+        let writer = app.address_writer(repo.platform())?;
+        let head = writer
+            .repo_head(repo)
+            .await
+            .context("reading the repository's default branch")?;
+        let checkout = fetched(writer.as_ref(), &head.remote, &head.head, run).await?;
+        let (_, workspace) = open_one(
+            Arc::clone(&app.workspace_provider),
+            Arc::clone(&app.store),
+            checkout.path().to_path_buf(),
+            profile.clone(),
+            run.clone(),
+            PLANNER.to_owned(),
+            EnvLane::Plan,
+        )
+        .await;
+        anyhow::Ok((workspace?, head))
+    };
+    let opened = tokio::select! {
+        opened = opening => opened,
+        () = cancel.cancelled() => return None,
+    };
+    match opened {
+        Ok((workspace, head)) => {
+            note(
+                app,
+                run,
+                "info",
+                &format!(
+                    "planner workspace: ready on {} at {} {}",
+                    profile.backend,
+                    head.default_branch,
+                    head.head.short()
+                ),
+            )
+            .await;
+            Some(PlanWorkspace {
+                workspace,
+                limits: profile.limits.clone(),
+                branch: head.default_branch,
+                commit: head.head,
+            })
+        }
+        Err(error) => {
+            note(
+                app,
+                run,
+                "warn",
+                &format!("planner workspace: none, {error:#}"),
+            )
+            .await;
+            None
+        }
+    }
+}
+
+/// The planner's workspace and what it holds.
+pub struct PlanWorkspace {
+    /// The workspace, never exported.
+    pub workspace: Arc<dyn Workspace>,
+    /// The profile's limits, for `bash`.
+    pub limits: Limits,
+    /// The default branch it holds.
+    pub branch: String,
+    /// The commit it holds.
+    pub commit: CommitSha,
+}
+
+/// One workspace: opened from the checkout, recorded on the run under
+/// `name`, set up as the profile says and wrapped for `lane`, which for a
+/// review or a planner refuses export. A workspace whose setup failed is
+/// closed again.
 async fn open_one(
     provider: Arc<dyn WorkspaceProvider>,
     store: Arc<dyn RunStore>,
@@ -214,6 +320,7 @@ async fn open_one(
     profile: Profile,
     run: RunId,
     name: String,
+    lane: EnvLane,
 ) -> (String, anyhow::Result<Arc<dyn Workspace>>) {
     let opened = match provider.open(&source, &profile).await {
         Ok(opened) => opened,
@@ -227,7 +334,7 @@ async fn open_one(
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
     match setup::prepare(&traced, &profile).await {
-        Ok(ready) => (name, Ok(for_lane(ready, EnvLane::Review))),
+        Ok(ready) => (name, Ok(for_lane(ready, lane))),
         Err(error) => {
             traced.close().await;
             (name, Err(error))
@@ -237,6 +344,6 @@ async fn open_one(
 
 async fn note(app: &App, run: &RunId, level: &str, text: &str) {
     if let Err(error) = app.store.event(run, level, text).await {
-        warn!(%error, "could not record the review workspaces");
+        warn!(%error, "could not record a lane's workspace");
     }
 }

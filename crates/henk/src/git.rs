@@ -630,6 +630,46 @@ pub(crate) mod tests {
         assert!(missing.is_err());
     }
 
+    /// A fetched commit comes alone, without its history: the planner's
+    /// `bash` and `plan_workspace.md` say so and send the model to the
+    /// platform's commit tools for history (#183).
+    #[tokio::test]
+    async fn a_fetched_commit_comes_without_its_history() {
+        let (remote, seed) = bare_remote("henk-git-shallow").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let pusher = Checkout::clone_at(
+            ScratchDir::new("henk-git-shallow-push").unwrap(),
+            &url,
+            "feature",
+            &seed,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(pusher.path().join("src/a.rs"), "later\n").unwrap();
+        pusher.commit(&identity(), "Later\n").await.unwrap();
+        pusher.push("feature").await.unwrap();
+        let later = CommitSha::parse(&pusher.head().await.unwrap()).unwrap();
+        let count = |dir: std::path::PathBuf| async move {
+            run(&dir, &["rev-list", "--count", "HEAD"], None, None)
+                .await
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        assert_eq!(count(pusher.path().to_owned()).await, "2");
+
+        let at = Checkout::fetch_at(
+            ScratchDir::new("henk-git-shallow-at").unwrap(),
+            &url,
+            &later,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(at.path().to_owned()).await, "1", "no history");
+    }
+
     #[tokio::test]
     async fn a_branch_that_moved_is_never_overwritten() {
         let (remote, head) = bare_remote("henk-git-moved").await;

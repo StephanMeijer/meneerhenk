@@ -455,7 +455,10 @@ refuses `export` for every run but an address run
 (`henk_domain::workspace::EnvLane::exports`), so nothing a lane does in one
 can become a commit. The code tools on a workspace (`list_files`,
 `read_file`, `search`) are written once in `code_tools.rs` and shared by
-the address run, the review lanes and the fact-checker. A `search`
+the address run, the review lanes, the fact-checker and the planner
+(`lane_workspace.rs` opens the read-only lanes' workspaces), with `bash`
+for every lane on a backend where the model may run commands
+(`BackendKind::runs_model_commands`: not the host). A `search`
 pattern is checked in Henk (`workspace::Pattern`) in the syntax Rust's
 regex and PCRE read alike, since the host backend matches with the one and
 the `ssh` backend with `grep -P`.

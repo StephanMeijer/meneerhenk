@@ -442,6 +442,18 @@ workspace's user, with the repository's toolchain and the profile's time
 and output limits. Each command is on the run's timeline with the lane
 that ran it, so `henk runs show <id>` lists what a review ran. Without a
 workspace a lane reads through the platform as before.
+
+With `plan = true` on a profile, the planner gets a workspace too (#172):
+one copy of the repository at its default branch, fetched by the sha Henk
+read, set up as above and never exported, with the same code tools and
+`bash` and a prompt that asks it to ground the plan in what it read. The
+platform's tools stay for issues, pull requests and history. An address
+run gets `bash` beside `run_checks` on any backend apart from Henk: one
+test or build of its own choosing while it works, where every file it
+changes is part of the commit and the checks still decide. Neither is
+available on the `host` backend, where those commands would run as Henk's
+own user: `plan = true` is refused there, and an address run there keeps
+`run_checks` only.
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
 
