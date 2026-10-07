@@ -1380,18 +1380,18 @@ check_commands = [["true"]]
     fn ssh_backend(
         name: &str,
     ) -> (
-        Arc<crate::workspace::ssh::tests::LocalRunner>,
+        Arc<crate::workspace::remote::tests::LocalRunner>,
         Arc<dyn WorkspaceProvider>,
     ) {
-        use crate::workspace::ssh::tests::LocalRunner;
+        use crate::workspace::remote::tests::LocalRunner;
         let runner = LocalRunner::new(name);
         let provider = crate::workspace::ssh::SshProvider::with_runner(
-            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
         );
         (runner, Arc::new(provider))
     }
 
-    fn left_on_the_host(runner: &crate::workspace::ssh::tests::LocalRunner) -> usize {
+    fn left_on_the_host(runner: &crate::workspace::remote::tests::LocalRunner) -> usize {
         std::fs::read_dir(runner.base()).unwrap().count()
     }
 
@@ -1414,6 +1414,19 @@ check_commands = [["true"]]
             fix_is_pushed(Arc::new(provider.clone()), "ssh-live", platform).await;
             no_change_no_push(Arc::new(provider.clone()), "ssh-live", platform).await;
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_an_address_run_in_a_pod_pushes_its_fix() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        for platform in PLATFORMS {
+            fix_is_pushed(Arc::new(provider.clone()), "kube-live", platform).await;
+            no_change_no_push(Arc::new(provider.clone()), "kube-live", platform).await;
+        }
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
     }
 
     #[tokio::test]

@@ -22,6 +22,10 @@ pub enum BackendKind {
     /// A throwaway user per run on a sandbox host, over SSH (#84). Apart
     /// from Henk, but runs share that host's kernel, `/tmp` and network.
     Ssh,
+    /// A Pod per workspace in a sandbox namespace of a Kubernetes cluster
+    /// (#89): its own filesystem, processes and limits, no token for the
+    /// cluster, and whatever network the namespace's policy allows.
+    Kubernetes,
 }
 
 impl BackendKind {
@@ -31,6 +35,7 @@ impl BackendKind {
     pub fn is_isolated(self) -> bool {
         match self {
             Self::Host | Self::Ssh => false,
+            Self::Kubernetes => true,
         }
     }
 }
@@ -40,6 +45,7 @@ impl fmt::Display for BackendKind {
         f.write_str(match self {
             Self::Host => "host",
             Self::Ssh => "ssh",
+            Self::Kubernetes => "kubernetes",
         })
     }
 }
@@ -84,6 +90,9 @@ impl Limits {
     pub fn unenforced_on(backend: BackendKind) -> Vec<&'static str> {
         match backend {
             BackendKind::Host | BackendKind::Ssh => vec!["memory", "cpu", "pids", "disk"],
+            // A Pod's spec bounds memory, cpu and its scratch disk; the
+            // number of processes is the node's setting (podPidsLimit).
+            BackendKind::Kubernetes => vec!["pids"],
         }
     }
 
@@ -186,7 +195,7 @@ impl Profile {
                 "workspace profile {name}: {limit} must be above zero"
             ));
         }
-        if self.image.is_some() {
+        if self.image.is_some() && self.backend != BackendKind::Kubernetes {
             return Some(format!(
                 "workspace profile {name}: the {} backend has no image",
                 self.backend
@@ -560,6 +569,22 @@ mod tests {
             Limits::unenforced_on(BackendKind::Ssh),
             ["memory", "cpu", "pids", "disk"]
         );
+    }
+
+    #[test]
+    fn a_pod_is_isolated_bounds_all_but_processes_and_has_an_image() {
+        assert!(BackendKind::Kubernetes.is_isolated());
+        assert_eq!(BackendKind::Kubernetes.to_string(), "kubernetes");
+        assert_eq!(Limits::unenforced_on(BackendKind::Kubernetes), ["pids"]);
+        let mut policy = WorkspacePolicy::default();
+        policy.default.image = Some("sandbox:1".to_owned());
+        assert!(policy.validate().is_err(), "the host has no image");
+        policy.default.backend = BackendKind::Kubernetes;
+        policy.default.review = true;
+        assert_eq!(policy.validate(), Ok(()));
+        assert!(policy.default.serves(EnvLane::Review));
+        policy.default.image = Some(" ".to_owned());
+        assert!(policy.validate().is_err(), "an empty image");
     }
 
     #[test]
