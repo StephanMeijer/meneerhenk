@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.10...v0.1.11) - 2026-10-07
+
+### Added
+
+- *(workspace)* kubernetes backend, a Pod per workspace in a sandbox namespace
+
+### Fixed
+
+- *(workspace)* a sandbox Pod's first process reaps what a run orphans
+
+### Other
+
+- Merge branch 'main' into feat/workspace-kubernetes
+- *(workspace)* the script workspace is shared, ssh keeps only its connection
+
 ## [0.1.10](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.9...v0.1.10) - 2026-10-06
 
 ### Added
