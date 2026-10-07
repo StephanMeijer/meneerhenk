@@ -131,7 +131,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,views}`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,views,api}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -611,7 +611,10 @@ any request; cancelling fires one run's token through the coordinator, and
 the run ends `cancelled`. Every action is a POST with the session's CSRF
 token from the dashboard's own origin. Every value it shows is escaped. The run and event links posted in comments, `/runs/{id}` and
 `/events/{id}`, redirect to the dashboard's pages and so need sign-in too;
-without a dashboard they are not served.
+without a dashboard they are not served. The dashboard's JSON API, `/dashboard/api/v1` (`dashboard/api`,
+`docs/API.md`), reads the same store behind the same sign-in, and its
+actions need the session's CSRF token in a header, the dashboard's own
+origin and a JSON body.
 
 ## 10. GitHub and GitLab differences
 

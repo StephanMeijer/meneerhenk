@@ -25,7 +25,7 @@ use super::session::{SESSION_COOKIE, STATE_COOKIE, Session, cookie_value};
 use super::*;
 use crate::config::Config;
 
-const ALLOWED: u64 = 1234;
+pub(super) const ALLOWED: u64 = 1234;
 
 fn config(github: &str) -> String {
     format!(
@@ -48,12 +48,12 @@ github_api_base = "{github}"
     )
 }
 
-struct Fixture {
-    router: Router,
-    dashboard: Arc<Dashboard>,
+pub(super) struct Fixture {
+    pub(super) router: Router,
+    pub(super) dashboard: Arc<Dashboard>,
 }
 
-fn fixture(github: &str) -> Fixture {
+pub(super) fn fixture(github: &str) -> Fixture {
     let settings = Config::parse(&config(github))
         .and_then(Config::into_settings)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -109,7 +109,7 @@ fn signed_in(f: &Fixture, github_id: u64) -> String {
 }
 
 /// The session cookie and the CSRF token of `session`.
-fn signed_in_as(f: &Fixture, session: &Session) -> (String, String) {
+pub(super) fn signed_in_as(f: &Fixture, session: &Session) -> (String, String) {
     (
         format!(
             "{SESSION_COOKIE}={}",
@@ -164,7 +164,7 @@ fn set_cookies(answer: &Answer) -> Vec<String> {
         .collect()
 }
 
-async fn seed(f: &Fixture) {
+pub(super) async fn seed(f: &Fixture) {
     let store = &f.dashboard.app.store;
     let run = |id: &str, kind: RunKind, trigger: &str| NewRun {
         id: RunId::parse(id).unwrap(),
@@ -878,7 +878,11 @@ async fn post(
 }
 
 /// The outcomes of `event` once every listener has answered.
-async fn outcomes_of(f: &Fixture, event: &EventId, listeners: usize) -> Vec<OutcomeRecord> {
+pub(super) async fn outcomes_of(
+    f: &Fixture,
+    event: &EventId,
+    listeners: usize,
+) -> Vec<OutcomeRecord> {
     for _ in 0..200 {
         let outcomes = f.dashboard.app.store.outcomes(event).await.unwrap();
         if outcomes.len() >= listeners {

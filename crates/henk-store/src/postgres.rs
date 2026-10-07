@@ -202,6 +202,44 @@ fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, Store
 }
 
 /// The columns [`raw_run`] reads, in order.
+/// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
+/// platform, repo, target, since, until, and the keyset (time, id).
+const RUN_FILTER: &str = "($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
+     AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)
+     AND ($5::bigint IS NULL OR target = $5)
+     AND ($6::timestamptz IS NULL OR started_at >= $6)
+     AND ($7::timestamptz IS NULL OR started_at < $7)
+     AND ($8::timestamptz IS NULL OR started_at < $8 OR (started_at = $8 AND id < $9::text))";
+
+/// A run filter as query parameters.
+struct RunParams<'a> {
+    kind: Option<&'static str>,
+    status: Option<&'static str>,
+    platform: Option<&'static str>,
+    target: Option<i64>,
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+    before_at: Option<OffsetDateTime>,
+    before_id: Option<&'a str>,
+}
+
+impl<'a> RunParams<'a> {
+    fn of(filter: &'a RunFilter) -> Result<Self, StoreError> {
+        let time =
+            |column, value: Option<&String>| value.map(|v| parse_time(column, v)).transpose();
+        Ok(Self {
+            kind: filter.kind.map(kind_str),
+            status: filter.status.map(status_str),
+            platform: filter.platform.map(platform_str),
+            target: filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
+            since: time("since", filter.since.as_ref())?,
+            until: time("until", filter.until.as_ref())?,
+            before_at: time("started_at", filter.before.as_ref().map(|k| &k.started_at))?,
+            before_id: filter.before.as_ref().map(|k| k.id.as_str()),
+        })
+    }
+}
+
 const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
 
 fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
@@ -936,23 +974,24 @@ impl RunStore for PgStore {
         filter: &RunFilter,
         page: Page,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(status_str);
-        let platform = filter.platform.map(platform_str);
+        let p = RunParams::of(filter)?;
         self.client()
             .await?
             .query(
                 &format!(
-                    "SELECT {RUN_COLUMNS} FROM runs
-                     WHERE ($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
-                       AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)
-                     ORDER BY started_at DESC, id DESC LIMIT $5 OFFSET $6"
+                    "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
+                     ORDER BY started_at DESC, id DESC LIMIT $10 OFFSET $11"
                 ),
                 &[
-                    &kind,
-                    &status,
-                    &platform,
+                    &p.kind,
+                    &p.status,
+                    &p.platform,
                     &filter.repo,
+                    &p.target,
+                    &p.since,
+                    &p.until,
+                    &p.before_at,
+                    &p.before_id,
                     &i64::from(page.limit()),
                     &i64::from(page.offset()),
                 ],
@@ -964,17 +1003,23 @@ impl RunStore for PgStore {
     }
 
     async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
-        let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(status_str);
-        let platform = filter.platform.map(platform_str);
+        let p = RunParams::of(filter)?;
         let count: i64 = self
             .client()
             .await?
             .query_one(
-                "SELECT COUNT(*) FROM runs
-                 WHERE ($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
-                   AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)",
-                &[&kind, &status, &platform, &filter.repo],
+                &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
+                &[
+                    &p.kind,
+                    &p.status,
+                    &p.platform,
+                    &filter.repo,
+                    &p.target,
+                    &p.since,
+                    &p.until,
+                    &p.before_at,
+                    &p.before_id,
+                ],
             )
             .await?
             .try_get(0)?;
@@ -986,17 +1031,27 @@ impl RunStore for PgStore {
         filter: &EventFilter,
         page: Page,
     ) -> Result<Vec<EventWithOutcomes>, StoreError> {
+        let before_at = filter
+            .before
+            .as_ref()
+            .map(|k| parse_time("received_at", &k.received_at))
+            .transpose()?;
+        let before_id = filter.before.as_ref().map(|k| k.id.as_str());
         let client = self.client().await?;
         let events = client
             .query(
                 "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
                  WHERE ($1::text IS NULL OR source = $1) AND ($2::text IS NULL OR kind = $2)
                    AND ($3::text IS NULL OR repo = $3)
-                 ORDER BY received_at DESC, id DESC LIMIT $4 OFFSET $5",
+                   AND ($4::timestamptz IS NULL OR received_at < $4
+                        OR (received_at = $4 AND id < $5::text))
+                 ORDER BY received_at DESC, id DESC LIMIT $6 OFFSET $7",
                 &[
                     &filter.source,
                     &filter.kind,
                     &filter.repo,
+                    &before_at,
+                    &before_id,
                     &i64::from(page.limit()),
                     &i64::from(page.offset()),
                 ],

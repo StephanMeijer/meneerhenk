@@ -30,7 +30,7 @@ pub struct StartForm {
 }
 
 /// Who acts, as a stable id: never the login, which is a display name (§2).
-fn requester(github_id: u64) -> String {
+pub(super) fn requester(github_id: u64) -> String {
     format!("github:{github_id}")
 }
 
@@ -106,7 +106,7 @@ pub async fn cancel(
 
 /// Records a cancel request and what came of it. A failure is logged; the
 /// cancel itself stands.
-async fn record_cancel(dashboard: &Dashboard, run: &RunId, who: &str, cancelled: bool) {
+pub(super) async fn record_cancel(dashboard: &Dashboard, run: &RunId, who: &str, cancelled: bool) {
     let store = &dashboard.app.store;
     let event = InboundEvent {
         id: new_event_id(),

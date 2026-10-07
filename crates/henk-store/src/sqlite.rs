@@ -732,12 +732,13 @@ impl RunStore for SqliteStore {
         let kind = filter.kind.map(kind_str);
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
+        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
+        let (before_at, before_id) = run_key(filter);
+        let (since, until) = run_window(filter)?;
         self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs
-                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
-                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
-                 ORDER BY started_at DESC, id DESC LIMIT ?5 OFFSET ?6"
+                "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
+                 ORDER BY started_at DESC, id DESC LIMIT ?10 OFFSET ?11"
             ))?;
             let raw = statement
                 .query_map(
@@ -746,6 +747,11 @@ impl RunStore for SqliteStore {
                         status,
                         platform,
                         filter.repo,
+                        target,
+                        since,
+                        until,
+                        before_at,
+                        before_id,
                         page.limit(),
                         page.offset()
                     ],
@@ -760,12 +766,23 @@ impl RunStore for SqliteStore {
         let kind = filter.kind.map(kind_str);
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
+        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
+        let (before_at, before_id) = run_key(filter);
+        let (since, until) = run_window(filter)?;
         self.with(|c| {
             let count: i64 = c.query_row(
-                "SELECT COUNT(*) FROM runs
-                 WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
-                   AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)",
-                params![kind, status, platform, filter.repo],
+                &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
+                params![
+                    kind,
+                    status,
+                    platform,
+                    filter.repo,
+                    target,
+                    since,
+                    until,
+                    before_at,
+                    before_id
+                ],
                 |row| row.get(0),
             )?;
             Ok(u64::try_from(count).unwrap_or_default())
@@ -781,11 +798,25 @@ impl RunStore for SqliteStore {
             let mut statement = c.prepare(
                 "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
                  WHERE (?1 IS NULL OR source = ?1) AND (?2 IS NULL OR kind = ?2) AND (?3 IS NULL OR repo = ?3)
-                 ORDER BY received_at DESC, id DESC LIMIT ?4 OFFSET ?5",
+                   AND (?4 IS NULL OR received_at < ?4 OR (received_at = ?4 AND id < ?5))
+                 ORDER BY received_at DESC, id DESC LIMIT ?6 OFFSET ?7",
             )?;
+            let (before_at, before_id) = filter
+                .before
+                .as_ref()
+                .map(|k| (k.received_at.as_str(), k.id.as_str()))
+                .unzip();
             let rows = statement
                 .query_map(
-                    params![filter.source, filter.kind, filter.repo, page.limit(), page.offset()],
+                    params![
+                        filter.source,
+                        filter.kind,
+                        filter.repo,
+                        before_at,
+                        before_id,
+                        page.limit(),
+                        page.offset()
+                    ],
                     raw_inbound,
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -865,6 +896,65 @@ impl RawInbound {
             requester: self.requester,
         })
     }
+}
+
+/// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
+/// platform, repo, target, since, until, and the keyset (time, id).
+/// `since` and `until` are [`instant`]s, compared to `started_at` as one
+/// too: as text, "12:00:00.4Z" sorts before "12:00:00Z".
+const RUN_FILTER: &str = "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
+     AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
+     AND (?5 IS NULL OR target = ?5)
+     AND (?6 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
+            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) >= ?6)
+     AND (?7 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
+            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) < ?7)
+     AND (?8 IS NULL OR started_at < ?8 OR (started_at = ?8 AND id < ?9))";
+
+/// An RFC 3339 time as a fixed-width UTC text that sorts as the time does:
+/// `2026-10-07T12:00:00` and nine digits of nanoseconds. `RUN_FILTER` turns
+/// a stored `started_at` (UTC, from [`now`]) into the same shape.
+fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
+    let at = OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| StoreError::Corrupt {
+            column,
+            value: value.to_owned(),
+        })?
+        .to_offset(time::UtcOffset::UTC);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{:09}",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        at.nanosecond()
+    ))
+}
+
+/// The time bounds of a run listing, as [`instant`]s.
+fn run_window(filter: &RunFilter) -> Result<(Option<String>, Option<String>), StoreError> {
+    let since = filter
+        .since
+        .as_deref()
+        .map(|v| instant("since", v))
+        .transpose()?;
+    let until = filter
+        .until
+        .as_deref()
+        .map(|v| instant("until", v))
+        .transpose()?;
+    Ok((since, until))
+}
+
+/// The keyset of a run listing, as two parameters.
+fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
+    filter
+        .before
+        .as_ref()
+        .map(|k| (k.started_at.as_str(), k.id.as_str()))
+        .unzip()
 }
 
 /// The columns [`raw_run`] reads, in order.
