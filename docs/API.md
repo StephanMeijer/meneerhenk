@@ -133,6 +133,8 @@ How many runs the filters of `GET /runs` match, over every page.
 
 ### `GET /runs/{id}`
 
+Each lane also has `last_call_turn`: the turn of its latest tool call.
+
 One run with everything the run record holds about it:
 
 - `run`: the summary above;
@@ -202,6 +204,50 @@ One session's whole conversation. Each message has `parts` tagged by
   ]
 }
 ```
+
+### `GET /runs/{id}/stream`
+
+One run as it happens (#202), as Server-Sent Events (`text/event-stream`).
+Each message's event name is its `kind` and its data is JSON in the types
+above; `RunMessage` in `types.ts` is the union.
+
+| Event | Data | When |
+|---|---|---|
+| `snapshot` | `RunDetail` | First, and whenever the stream cannot replay what was missed |
+| `run` | `RunUpdate`: the run, summary, error, check id | The run started, ended or got its check |
+| `lanes` | `Lane[]`, every lane | A lane started or ended |
+| `tool_call` | `ToolCall` | A session called a tool |
+| `draft` | `Draft` | A lane queued it, or the check decided it |
+| `finding` | `Finding` | Something was done with a finding |
+| `event` | `RunEvent` | A line on the timeline |
+| `transcript` | `TranscriptRef` | A session's conversation was kept |
+| `end` | `{}` | The run has ended; the stream closes |
+
+- Message ids are `<feed>-<seq>`, with the feed named per Henk process. A
+  client that reconnects with `Last-Event-ID` (or `?last=`) gets exactly
+  the messages of this run it missed, while this process still holds them
+  (the last 2048 changes); otherwise it gets a new `snapshot`. Browsers
+  send `Last-Event-ID` by themselves.
+- A run that has ended gets its `snapshot` and `end` at once.
+- A run another Henk process works on (two replicas on one PostgreSQL) is
+  not on this process's feed: its stream sends a fresh `snapshot` every 5
+  seconds until the run ends.
+- Turns and tokens of a lane are stored when it ends. While it runs,
+  `last_call_turn` on the lane (from its latest tool call) says how far it
+  has come.
+- A client that falls far behind is dropped and reconnects; it never holds
+  up a run. A comment line every 15 seconds keeps the connection open.
+
+```sh
+curl -N -H "Cookie: henk_session=..." https://henk.example/dashboard/api/v1/runs/r-1/stream
+```
+
+### `GET /runs/stream`
+
+What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the
+newest running runs, at most 100, and how many run) on connect and every
+30 seconds, and a `run` message (`RunSummary`) whenever a run of this
+process starts or ends. `RunningMessage` in `types.ts` is the union.
 
 ### `GET /events`
 

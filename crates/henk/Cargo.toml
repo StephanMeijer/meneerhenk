@@ -46,6 +46,9 @@ thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+# The Stream the dashboard's Server-Sent Events take (#202); already in the
+# tree through axum.
+futures-util = { version = "0.3", default-features = false }
 toml = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }

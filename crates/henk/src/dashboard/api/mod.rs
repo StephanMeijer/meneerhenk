@@ -8,6 +8,7 @@
 mod events;
 mod health;
 mod runs;
+mod stream;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -143,6 +144,8 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/health", get(health::health))
         .route("/runs", get(runs::list).post(runs::start))
         .route("/runs/count", get(runs::count))
+        .route("/runs/stream", get(stream::running_stream))
+        .route("/runs/{id}/stream", get(stream::run_stream))
         .route("/runs/{id}", get(runs::detail))
         .route("/runs/{id}/events", get(runs::events))
         .route("/runs/{id}/tool-calls", get(runs::tool_calls))

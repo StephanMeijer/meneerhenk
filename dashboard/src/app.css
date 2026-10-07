@@ -122,3 +122,13 @@ td.text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
 .level.error { color: var(--fail); }
 .pager { display: flex; gap: 1rem; }
 .note { color: var(--muted); }
+.badge {
+  font-size: 0.75rem;
+  font-weight: 500;
+  vertical-align: middle;
+  color: var(--bg);
+  background: var(--ok);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  margin-left: 0.4rem;
+}

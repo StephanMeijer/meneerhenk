@@ -1,28 +1,75 @@
 <script lang="ts">
   import { ApiError, cancelRun, run as loadRun } from '$lib/api/client';
-  import type { Cancelled, RunDetail } from '$lib/api/types';
+  import { connectEventSource, follow, type Connect } from '$lib/api/stream';
+  import type { Cancelled, RunDetail, RunMessage } from '$lib/api/types';
   import { about, draftWhat, kindText, verdictText } from '$lib/format';
+  import { applyRun } from '$lib/live';
   import { eventPath, href, link, transcriptPath } from '$lib/router';
   import Problem from './Problem.svelte';
 
-  /** `load` and `cancel` are replaced in the tests. */
+  /** `load`, `cancel` and `connect` are replaced in the tests. */
   let {
     id,
     load = loadRun,
     cancel = cancelRun,
+    connect = connectEventSource,
   }: {
     id: string;
     load?: (id: string) => Promise<RunDetail>;
     cancel?: (id: string) => Promise<Cancelled>;
+    connect?: Connect;
   } = $props();
 
-  let version = $state(0);
-  let detail = $derived.by(() => {
-    void version;
-    return load(id);
-  });
+  const KINDS: RunMessage['kind'][] = [
+    'snapshot',
+    'run',
+    'lanes',
+    'tool_call',
+    'draft',
+    'finding',
+    'event',
+    'transcript',
+    'end',
+  ];
+
+  let d: RunDetail | null = $state(null);
+  let problem: unknown = $state(null);
+  let live = $state(false);
   let cancelling = $state(false);
   let cancelNote: string | null = $state(null);
+
+  // Loads the run; while it runs, follows its stream until it ends.
+  $effect(() => {
+    const wanted = id;
+    let following: { close(): void } | null = null;
+    let gone = false;
+    d = null;
+    problem = null;
+    live = false;
+    load(wanted)
+      .then((detail) => {
+        if (gone) return;
+        d = detail;
+        if (detail.run.status === 'running') {
+          following = follow<RunMessage>(
+            `/runs/${encodeURIComponent(wanted)}/stream`,
+            KINDS,
+            (message) => {
+              if (d !== null) d = applyRun(d, message);
+            },
+            (on) => (live = on),
+            connect,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        if (!gone) problem = error;
+      });
+    return () => {
+      gone = true;
+      following?.close();
+    };
+  });
 
   async function stop(): Promise<void> {
     cancelling = true;
@@ -30,7 +77,6 @@
     try {
       await cancel(id);
       cancelNote = 'Cancel sent. The run ends as cancelled.';
-      version += 1;
     } catch (error) {
       cancelNote = error instanceof ApiError ? error.message : 'The cancel did not go through.';
     } finally {
@@ -39,10 +85,12 @@
   }
 </script>
 
-{#await detail}
+{#if problem !== null}
+  <Problem error={problem} />
+{:else if d === null}
   <p class="muted" aria-busy="true">Loading.</p>
-{:then d}
-  <h1>{kindText(d.run.kind)} {d.run.id}</h1>
+{:else}
+  <h1>{kindText(d.run.kind)} {d.run.id}{#if live && d.run.status === 'running'}<span class="badge" title="Updates as it happens">live</span>{/if}</h1>
   <dl class="facts">
     <dt>About</dt>
     <dd>
@@ -113,7 +161,13 @@
             </td>
             <td>{lane.model}</td>
             <td>{lane.status}</td>
-            <td>{lane.turns}</td>
+            <td>
+              {#if lane.status === 'running' && lane.last_call_turn !== null}
+                turn {lane.last_call_turn}
+              {:else}
+                {lane.turns}
+              {/if}
+            </td>
             <td>{lane.input_tokens}</td>
             <td>{lane.output_tokens}</td>
             <td>{lane.error ?? ''}</td>
@@ -201,6 +255,4 @@
       </tbody>
     </table>
   {/if}
-{:catch error}
-  <Problem {error} />
-{/await}
+{/if}

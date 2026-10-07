@@ -132,7 +132,7 @@ pub async fn count(
 }
 
 /// The run a path names, or a 400 or 404.
-async fn run_of(dashboard: &Dashboard, id: String) -> Result<RunRecord, ApiError> {
+pub(super) async fn run_of(dashboard: &Dashboard, id: String) -> Result<RunRecord, ApiError> {
     let id = RunId::parse(id).map_err(|_| ApiError::bad_request("That is not a run id."))?;
     dashboard
         .app
@@ -150,14 +150,37 @@ pub async fn detail(
     Path(id): Path<String>,
 ) -> ApiResult<RunDetail> {
     let run = run_of(&dashboard, id).await?;
+    Ok(Json(run_detail(&dashboard, &run).await?))
+}
+
+/// Everything the run record holds about `run`: `GET /runs/{id}`, and the
+/// snapshot a run's stream starts with.
+pub(super) async fn run_detail(
+    dashboard: &Dashboard,
+    run: &RunRecord,
+) -> Result<RunDetail, ApiError> {
     let store = &dashboard.app.store;
     let calls = store.tool_calls(&run.id).await?;
-    Ok(Json(RunDetail {
+    let lanes = store
+        .lanes(&run.id)
+        .await?
+        .iter()
+        .map(|lane| {
+            let mut lane = Lane::from(lane);
+            lane.last_call_turn = calls
+                .iter()
+                .filter(|c| c.session == lane.name)
+                .map(|c| c.turn)
+                .max();
+            lane
+        })
+        .collect();
+    Ok(RunDetail {
         summary: run.summary.clone(),
         error: run.error.clone(),
         check_id: run.check_id.clone(),
         heartbeat_at: run.heartbeat_at.clone(),
-        lanes: store.lanes(&run.id).await?.iter().map(Lane::from).collect(),
+        lanes,
         findings: store
             .findings(&run.id)
             .await?
@@ -192,8 +215,8 @@ pub async fn detail(
             .iter()
             .map(EventSummary::from)
             .collect(),
-        run: RunSummary::from_record(&dashboard.app.settings, &run),
-    }))
+        run: RunSummary::from_record(&dashboard.app.settings, run),
+    })
 }
 
 /// What `GET /runs/{id}/events` takes.

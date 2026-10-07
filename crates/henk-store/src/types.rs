@@ -155,7 +155,9 @@ pub enum FindingAction {
 }
 
 impl FindingAction {
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The stored text: `posted`, `improved`, `refused`, and so on.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Posted => "posted",
             Self::Improved => "improved",

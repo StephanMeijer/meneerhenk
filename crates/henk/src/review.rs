@@ -1193,15 +1193,21 @@ lanes = [{ name = "lane-a", model = "m" }]
         let mut models: std::collections::BTreeMap<String, Arc<dyn ModelClient>> =
             std::collections::BTreeMap::new();
         models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
+        // The store announces its writes, as Henk's own does (#202).
+        let feed = crate::live::Feed::default();
         Fixture {
             app: App {
                 settings,
-                store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+                store: Arc::new(crate::live::Announcing::new(
+                    Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+                    feed.clone(),
+                )),
                 models,
                 github: None,
                 gitlab: None,
                 shutdown: CancellationToken::new(),
                 live_runs: crate::liveness::LiveRuns::default(),
+                feed,
                 cancels: crate::cancel::Cancels::default(),
                 workspace_provider: provider,
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
@@ -2221,6 +2227,96 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// #189: two lanes on different models report one problem. Nothing is
     /// posted while they work; afterwards each draft is checked by the
     /// other lane's model, one session each, and the repeat is merged.
+    #[tokio::test]
+    async fn a_review_is_announced_as_it_happens_for_the_live_view() {
+        let aa = ScriptedClient::new(
+            "aa",
+            [
+                draft(2, "x changes from 1 to 2 and no test covers it."),
+                done(),
+                done(),
+                verdict("d2", "same_as", Some("d1")),
+                done(),
+            ],
+        );
+        let bb = ScriptedClient::new(
+            "bb",
+            [
+                draft(3, "The new value of x is untested."),
+                done(),
+                done(),
+                verdict("d1", "confirmed", None),
+                done(),
+            ],
+        )
+        .with_delay(Duration::from_millis(100));
+        let (f, _bb) = two_lane_review(
+            "[review.fact_check]\nmodel = \"m\"\nbackup_model = \"m2\"\n",
+            aa,
+            bb,
+        )
+        .await;
+        let run = RunId::parse("r-live").unwrap();
+        let mut changes = f.app.feed.subscribe();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let mut seen = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            assert_eq!(change.run, run);
+            seen.push(change);
+        }
+        let first = seen.first().unwrap();
+        assert!(
+            matches!(&first.kind, crate::live::ChangeKind::Run(r) if r.status == henk_store::RunStatus::Running),
+            "the run's start comes first"
+        );
+        let last = seen.last().unwrap();
+        assert!(
+            matches!(&last.kind, crate::live::ChangeKind::Run(r) if r.status == henk_store::RunStatus::Finished),
+            "its end comes last"
+        );
+        let drafts: Vec<(String, Option<String>)> = seen
+            .iter()
+            .filter_map(|c| match &c.kind {
+                crate::live::ChangeKind::Draft(d) => Some((
+                    d.draft.clone(),
+                    d.decision.as_ref().map(|x| x.verdict.as_str().to_owned()),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drafts,
+            [
+                ("d1".to_owned(), None),
+                ("d2".to_owned(), None),
+                ("d1".to_owned(), Some("confirmed".to_owned())),
+                ("d2".to_owned(), Some("same_as".to_owned())),
+            ],
+            "queued while the lanes ran, decided after"
+        );
+        let started = seen
+            .iter()
+            .position(|c| matches!(&c.kind, crate::live::ChangeKind::Lanes(l) if l.iter().any(|l| l.name == "lane-a")))
+            .unwrap();
+        let first_draft = seen
+            .iter()
+            .position(|c| matches!(c.kind, crate::live::ChangeKind::Draft(_)))
+            .unwrap();
+        assert!(started < first_draft, "the lanes start before they draft");
+        assert!(
+            seen.iter()
+                .any(|c| matches!(c.kind, crate::live::ChangeKind::ToolCall(_))),
+            "tool calls are announced"
+        );
+        assert!(
+            seen.windows(2).all(|w| w[0].seq < w[1].seq),
+            "in feed order"
+        );
+    }
+
     #[tokio::test]
     async fn drafts_are_checked_by_another_model_after_the_lanes_and_a_repeat_is_merged() {
         let aa = ScriptedClient::new(

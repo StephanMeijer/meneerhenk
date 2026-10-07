@@ -74,14 +74,20 @@ pub(super) fn fixture_with(
         .unwrap_or_else(|e| panic!("{e}"));
     edit(&mut settings);
     let dashboard_config = settings.dashboard.clone().unwrap();
+    // The store announces its writes, as Henk's own does (#202).
+    let feed = crate::live::Feed::default();
     let app = Arc::new(App {
         settings,
-        store: Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+        store: Arc::new(crate::live::Announcing::new(
+            Arc::new(henk_store::SqliteStore::in_memory().unwrap()),
+            feed.clone(),
+        )),
         models: BTreeMap::new(),
         github: None,
         gitlab: None,
         shutdown: tokio_util::sync::CancellationToken::new(),
         live_runs: crate::liveness::LiveRuns::default(),
+        feed,
         cancels: crate::cancel::Cancels::default(),
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: None,
@@ -114,6 +120,7 @@ pub(super) fn fixture_with(
     };
     let mut dashboard = Dashboard::new(app, coordinator, bus, dashboard_config, &secrets).unwrap();
     dashboard.assets = assets;
+    dashboard.refresh = Duration::from_millis(50);
     let dashboard = Arc::new(dashboard);
     Fixture {
         router: routes(Arc::clone(&dashboard)),

@@ -12,6 +12,9 @@ serves it at `/dashboard` behind the dashboard's sign-in.
   `HENK_BLESS=1 cargo test -p henk api_types_are_current`.
 - `src/lib/api/client.ts`: the only way to Henk. Reads carry the session
   cookie, actions also the CSRF token from `/me`; a 401 goes to sign-in.
+- `src/lib/api/stream.ts`: following a stream of the API through
+  `EventSource`, which reconnects by itself and gets what it missed.
+- `src/lib/live.ts`: applying stream messages to a page's state, pure.
 - `src/lib/router.ts`: routes on the History API under `/dashboard`: the
   overview (`/`), `/runs/{id}`, `/runs/{id}/transcripts/{session}`,
   `/events`, `/events/{id}` and `/health`, the paths the server-rendered

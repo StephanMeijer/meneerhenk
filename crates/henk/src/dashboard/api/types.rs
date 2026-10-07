@@ -110,6 +110,67 @@ pub struct RunDetail {
     pub requests: Vec<EventSummary>,
 }
 
+/// A run's own fields after it changed: started, ended, got its check.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunUpdate {
+    /// The run.
+    pub run: RunSummary,
+    /// The summary text, once there is one.
+    pub summary: Option<String>,
+    /// The error, when it failed.
+    pub error: Option<String>,
+    /// The platform's id for the review's check.
+    pub check_id: Option<String>,
+}
+
+/// What runs now: the start of `/runs/stream`, and again now and then.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunningSnapshot {
+    /// The newest running runs, at most 100.
+    pub runs: Vec<RunSummary>,
+    /// How many run, beyond those too.
+    pub count: u64,
+}
+
+/// One message of `/runs/{id}/stream`: its SSE event name is `kind`, its
+/// data is `data`. The TypeScript side reads them as this union.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RunMessage {
+    /// The whole run: the first message, and after a gap.
+    Snapshot(Box<RunDetail>),
+    /// The run started, ended or got its check.
+    Run(RunUpdate),
+    /// A lane started or ended: every lane of the run.
+    Lanes(Vec<Lane>),
+    /// A session called a tool.
+    ToolCall(ToolCall),
+    /// A lane queued a draft, or the check decided one.
+    Draft(Draft),
+    /// Something was done with a finding.
+    Finding(Finding),
+    /// A line on the run's timeline.
+    Event(RunEvent),
+    /// A session's conversation was kept.
+    Transcript(TranscriptRef),
+    /// The run has ended; the stream closes.
+    End,
+}
+
+/// One message of `/runs/stream`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RunningMessage {
+    /// What runs now.
+    Snapshot(RunningSnapshot),
+    /// A run started or ended.
+    Run(Box<RunSummary>),
+}
+
 /// One session of a run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -128,6 +189,9 @@ pub struct Lane {
     pub output_tokens: u64,
     /// Why it was dropped.
     pub error: Option<String>,
+    /// The turn of its latest tool call: how far a running lane has come,
+    /// since turns and tokens are stored when it ends.
+    pub last_call_turn: Option<u32>,
 }
 
 /// One thing done with a finding on the platform.
@@ -510,6 +574,7 @@ impl From<&LaneRecord> for Lane {
             input_tokens: lane.input_tokens,
             output_tokens: lane.output_tokens,
             error: lane.error.clone(),
+            last_call_turn: None,
         }
     }
 }

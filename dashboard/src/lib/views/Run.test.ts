@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
-import { runDetail } from '$lib/testing/fixtures';
+import { draft, runDetail } from '$lib/testing/fixtures';
+import { fakeConnect, firstOf } from '$lib/testing/source';
 import Run from './Run.svelte';
 
 afterEach(cleanup);
@@ -44,23 +45,60 @@ describe('Run', () => {
 
   it('offers a cancel only while the run is running, and posts it', async () => {
     const cancel = vi.fn(() => Promise.resolve({ run_id: 'r-1' }));
-    const load = vi.fn(() => Promise.resolve(runDetail('running')));
-    render(Run, { id: 'r-1', load, cancel });
+    const { connect } = fakeConnect();
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect });
     await settle();
     const button = document.querySelector('button');
     expect(button?.textContent).toBe('Cancel this run');
     button?.click();
     await settle();
     expect(cancel).toHaveBeenCalledWith('r-1');
-    expect(load).toHaveBeenCalledTimes(2);
     expect(document.querySelector('[role=status]')?.textContent).toContain('Cancel sent');
+  });
+
+  it('follows a running run as it happens, and stops when it ends', async () => {
+    const { connect, sources } = fakeConnect();
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel: vi.fn(), connect });
+    await settle();
+    expect(sources.map((s) => s.url)).toEqual(['/dashboard/api/v1/runs/r-1/stream']);
+    const source = firstOf(sources);
+    source.open();
+    await settle(1);
+    expect(document.querySelector('.badge')?.textContent).toBe('live');
+
+    source.push('tool_call', {
+      at: '', session: 'lane-a', model: 'model-x', turn: 9, tool: 'read_file', origin: 'henk',
+      outcome: 'ok', arguments: '{}', arguments_len: 2, result_chars: 1, elapsed_ms: 1,
+    });
+    const lanes = runDetail('running').lanes.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running' } : l));
+    source.push('lanes', lanes);
+    source.push('draft', draft('d4', { body: 'A new one.' }));
+    await settle(1);
+    expect(section('Lanes')[0]?.[3]).toBe('turn 9');
+    expect(section('Drafts').at(-1)?.slice(0, 5)).toEqual(['d4', 'lane-a', 'src/a.rs:4', 'A new one.', 'waiting']);
+
+    source.push('run', { run: { ...runDetail().run }, summary: 'Not bad.', error: null, check_id: '4711' });
+    source.push('end');
+    await settle(1);
+    expect(source.closed).toBe(true);
+    expect(document.querySelector('.status')?.textContent).toBe('finished');
+    expect(document.querySelector('.badge')).toBeNull();
+    expect(document.querySelector('main button, button')).toBeNull();
+    expect(sources).toHaveLength(1);
+  });
+
+  it('does not follow a run that has ended', async () => {
+    const { connect, sources } = fakeConnect();
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('finished')), cancel: vi.fn(), connect });
+    await settle();
+    expect(sources).toHaveLength(0);
   });
 
   it('says why a cancel was refused', async () => {
     const cancel = vi.fn(() =>
       Promise.reject(new ApiError(409, 'conflict', 'That run is not running here.')),
     );
-    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel });
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect: fakeConnect().connect });
     await settle();
     document.querySelector('button')?.click();
     await settle();

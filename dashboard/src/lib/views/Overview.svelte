@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { runCount, runs as listRuns } from '$lib/api/client';
-  import type { Me, Page, RunCount, RunSummary } from '$lib/api/types';
+  import { runs as listRuns } from '$lib/api/client';
+  import { connectEventSource, follow, type Connect } from '$lib/api/stream';
+  import type { Me, Page, RunningMessage, RunSummary } from '$lib/api/types';
+  import { applyRunning, type Running } from '$lib/live';
   import { navigate, withQuery } from '$lib/router';
   import Pager from './Pager.svelte';
   import Problem from './Problem.svelte';
@@ -12,14 +14,12 @@
     me,
     query,
     loadRuns = listRuns,
-    countRuns = runCount,
-    every = 5000,
+    connect = connectEventSource,
   }: {
     me: Me;
     query: URLSearchParams;
     loadRuns?: (query: string) => Promise<Page<RunSummary>>;
-    countRuns?: (query: string) => Promise<RunCount>;
-    every?: number;
+    connect?: Connect;
   } = $props();
 
   const KINDS = ['review', 'plan', 'address', 'discord_turn', 'mail_reply'];
@@ -33,30 +33,19 @@
   );
   let page = $derived(loadRuns(listQuery));
 
-  let running: RunSummary[] = $state([]);
-  let runningTotal = $state(0);
-  let runningProblem: unknown = $state(null);
-
-  async function refresh(): Promise<void> {
-    try {
-      const [shown, total] = await Promise.all([
-        loadRuns('status=running&limit=100'),
-        countRuns('status=running'),
-      ]);
-      running = shown.items;
-      runningTotal = Math.max(total.count, shown.items.length);
-      runningProblem = null;
-    } catch (error) {
-      runningProblem = error;
-    }
-  }
+  // What runs now, as /runs/stream says it: no polling (#202).
+  let running: Running = $state({ runs: [], count: 0 });
 
   onMount(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), every);
-    return () => clearInterval(timer);
+    const following = follow<RunningMessage>(
+      '/runs/stream',
+      ['snapshot', 'run'],
+      (message) => (running = applyRunning(running, message)),
+      () => {},
+      connect,
+    );
+    return () => following.close();
   });
-
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -78,13 +67,10 @@
 <h2>Start</h2>
 <StartForm startable={me.startable} />
 
-<h2>Running now ({runningTotal})</h2>
-{#if runningProblem !== null}
-  <Problem error={runningProblem} />
-{/if}
-<RunsTable runs={running} />
-{#if runningTotal > running.length}
-  <p class="muted">And {runningTotal - running.length} more not shown.</p>
+<h2>Running now ({running.count})</h2>
+<RunsTable runs={running.runs} />
+{#if running.count > running.runs.length}
+  <p class="muted">And {running.count - running.runs.length} more not shown.</p>
 {/if}
 
 <h2>Runs</h2>

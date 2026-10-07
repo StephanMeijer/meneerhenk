@@ -1024,6 +1024,7 @@ check_commands = [["true"]]
             gitlab: None,
             shutdown: CancellationToken::new(),
             live_runs: crate::liveness::LiveRuns::default(),
+            feed: crate::live::Feed::default(),
             cancels: crate::cancel::Cancels::default(),
             workspace_provider: provider,
             test_writer: None,

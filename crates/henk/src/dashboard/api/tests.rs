@@ -6,6 +6,7 @@
     clippy::too_many_lines
 )]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -929,6 +930,10 @@ fn api_types_are_current() {
         types::Page::<types::RunSummary>::decl(&cfg),
         types::RunSummary::decl(&cfg),
         types::RunCount::decl(&cfg),
+        types::RunUpdate::decl(&cfg),
+        types::RunningSnapshot::decl(&cfg),
+        types::RunMessage::decl(&cfg),
+        types::RunningMessage::decl(&cfg),
         types::RunDetail::decl(&cfg),
         types::Lane::decl(&cfg),
         types::Finding::decl(&cfg),
@@ -1012,4 +1017,371 @@ async fn the_count_spans_every_page_and_takes_the_filters() {
     assert_eq!(count("?repo=docspec/other").await, 0);
     let bad = get(&f, "/dashboard/api/v1/runs/count?kind=lunch", &cookie).await;
     assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+}
+
+/// One Server-Sent Event as a test reads it.
+#[derive(Debug)]
+struct Message {
+    event: String,
+    data: Value,
+    id: Option<String>,
+}
+
+/// Reads a stream's events one by one.
+struct EventStream {
+    body: Body,
+    buffer: String,
+}
+
+impl EventStream {
+    /// The next event; `None` when the stream has closed. Keep-alive
+    /// comments are skipped. Fails the test after two seconds of nothing.
+    async fn next(&mut self) -> Option<Message> {
+        loop {
+            if let Some(end) = self.buffer.find("\n\n") {
+                let block: String = self.buffer.drain(..end + 2).collect();
+                let (mut event, mut data, mut id) = (String::from("message"), String::new(), None);
+                for line in block.lines() {
+                    if let Some(v) = line.strip_prefix("event:") {
+                        event = v.trim().to_owned();
+                    } else if let Some(v) = line.strip_prefix("data:") {
+                        data.push_str(v.trim_start());
+                    } else if let Some(v) = line.strip_prefix("id:") {
+                        id = Some(v.trim().to_owned());
+                    }
+                }
+                if data.is_empty() {
+                    continue;
+                }
+                return Some(Message {
+                    event,
+                    data: serde_json::from_str(&data).unwrap(),
+                    id,
+                });
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(2), self.body.frame())
+                .await
+                .expect("the stream said nothing for two seconds");
+            match frame {
+                Some(frame) => {
+                    if let Ok(bytes) = frame.unwrap().into_data() {
+                        self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                }
+                None => return None,
+            }
+        }
+    }
+
+    /// The events up to and including `end`, by name.
+    async fn names_until_end(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        while let Some(message) = self.next().await {
+            names.push(message.event.clone());
+            if message.event == "end" {
+                break;
+            }
+        }
+        names
+    }
+}
+
+async fn stream(f: &Fixture, uri: &str, cookie: &str, last: Option<&str>) -> EventStream {
+    let mut request = Request::get(uri).header("cookie", cookie);
+    if let Some(last) = last {
+        request = request.header("last-event-id", last);
+    }
+    let response = f
+        .router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    EventStream {
+        body: response.into_body(),
+        buffer: String::new(),
+    }
+}
+
+/// A running review on this process, as the coordinator would start one.
+async fn live_run(f: &Fixture, run: &str) -> (RunId, crate::liveness::KeepAlive) {
+    let id = RunId::parse(run).unwrap();
+    f.dashboard
+        .app
+        .store
+        .create_run(&NewRun {
+            id: id.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: Some("abc".into()),
+            requester: None,
+            trigger: "opened".into(),
+            link: String::new(),
+        })
+        .await
+        .unwrap();
+    let alive = crate::liveness::KeepAlive::start(
+        Arc::clone(&f.dashboard.app.store),
+        &f.dashboard.app.live_runs,
+        id.clone(),
+    );
+    (id, alive)
+}
+
+fn tool_call(turn: u32) -> ToolCallRecord {
+    ToolCallRecord {
+        at: String::new(),
+        session: "lane-a".into(),
+        model: "model-x".into(),
+        turn,
+        tool: "read_file".into(),
+        origin: "henk".into(),
+        outcome: "ok".into(),
+        arguments: "{}".into(),
+        arguments_len: 2,
+        result_chars: 10,
+        elapsed_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn a_running_run_streams_what_happens_in_order_and_ends() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let (run, _alive) = live_run(&f, "r-live").await;
+    let store = Arc::clone(&f.dashboard.app.store);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/r-live/stream", &cookie, None).await;
+
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    assert_eq!(snapshot.data["run"]["status"], "running");
+    assert!(
+        snapshot
+            .id
+            .unwrap()
+            .starts_with(f.dashboard.app.feed.epoch())
+    );
+
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    store.record_tool_call(&run, &tool_call(4)).await.unwrap();
+    store
+        .record_draft(
+            &run,
+            &DraftRecord {
+                at: String::new(),
+                draft: "d1".into(),
+                lane: "lane-a".into(),
+                model: "model-x".into(),
+                kind: "finding".into(),
+                path: "src/a.rs".into(),
+                line: 4,
+                target: String::new(),
+                body: "<b>Wrong</b>.".into(),
+                decision: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .decide_draft(
+            &run,
+            "d1",
+            &DraftDecision {
+                at: String::new(),
+                verdict: DraftVerdict::Rejected,
+                checker: "model-y".into(),
+                reason: "It is right.".into(),
+                same_as: String::new(),
+                comment_id: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .finish_lane(
+            &run,
+            "lane-a",
+            henk_store::LaneStatus::Finished,
+            4,
+            100,
+            9,
+            None,
+        )
+        .await
+        .unwrap();
+    store.event(&run, "info", "lane-a: EndTurn").await.unwrap();
+    store
+        .finish_run(&run, RunStatus::Finished, Some("Not bad."), None)
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    while let Some(message) = events.next().await {
+        seen.push(message);
+    }
+    let names: Vec<&str> = seen.iter().map(|m| m.event.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "lanes",
+            "tool_call",
+            "draft",
+            "draft",
+            "lanes",
+            "event",
+            "run",
+            "end"
+        ],
+        "in order, and the stream closes after end"
+    );
+    assert_eq!(seen[0].data[0]["name"], "lane-a");
+    assert_eq!(seen[1].data["turn"], 4);
+    assert_eq!(seen[2].data["body"], "<b>Wrong</b>.", "text as stored");
+    assert_eq!(seen[3].data["decision"]["verdict"], "rejected");
+    assert_eq!(seen[4].data[0]["turns"], 4);
+    assert_eq!(seen[6].data["run"]["status"], "finished");
+    assert_eq!(seen[6].data["summary"], "Not bad.");
+    let ids: Vec<u64> = seen[..7]
+        .iter()
+        .map(|m| {
+            m.id.as_deref()
+                .unwrap()
+                .rsplit_once('-')
+                .unwrap()
+                .1
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
+}
+
+#[tokio::test]
+async fn a_reconnect_gets_exactly_what_it_missed_or_a_snapshot() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let (run, _alive) = live_run(&f, "r-live").await;
+    let store = Arc::clone(&f.dashboard.app.store);
+    let uri = "/dashboard/api/v1/runs/r-live/stream";
+
+    let mut first = stream(&f, uri, &cookie, None).await;
+    first.next().await.unwrap();
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    let seen = first.next().await.unwrap();
+    assert_eq!(seen.event, "lanes");
+    drop(first);
+
+    store.record_tool_call(&run, &tool_call(1)).await.unwrap();
+    store.event(&run, "info", "missed").await.unwrap();
+    let other = live_run(&f, "r-other").await;
+    store.event(&other.0, "info", "another run").await.unwrap();
+
+    let mut again = stream(&f, uri, &cookie, seen.id.as_deref()).await;
+    let replayed = [again.next().await.unwrap(), again.next().await.unwrap()];
+    assert_eq!(replayed[0].event, "tool_call");
+    assert_eq!(replayed[1].event, "event");
+    assert_eq!(replayed[1].data["message"], "missed");
+
+    let mut fresh = stream(&f, uri, &cookie, Some("0123456789ab-3")).await;
+    let snapshot = fresh.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot", "another process's id");
+    assert_eq!(snapshot.data["lanes"][0]["last_call_turn"], 1);
+    assert_eq!(snapshot.data["events"][0]["message"], "missed");
+}
+
+#[tokio::test]
+async fn an_ended_run_streams_its_snapshot_and_ends() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/r-plan/stream", &cookie, None).await;
+    assert_eq!(events.names_until_end().await, ["snapshot", "end"]);
+    assert!(events.next().await.is_none());
+}
+
+#[tokio::test]
+async fn a_run_of_another_process_is_read_again_until_it_ends() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let run = RunId::parse("r-review").unwrap();
+    assert!(!f.dashboard.app.live_runs.contains(&run));
+    let mut events = stream(&f, "/dashboard/api/v1/runs/r-review/stream", &cookie, None).await;
+    assert_eq!(events.next().await.unwrap().event, "snapshot");
+    let again = events.next().await.unwrap();
+    assert_eq!(again.event, "snapshot", "read again from the store");
+    assert_eq!(again.data["run"]["status"], "running");
+    f.dashboard
+        .app
+        .store
+        .finish_run(&run, RunStatus::Failed, None, Some("boom"))
+        .await
+        .unwrap();
+    let mut last = None;
+    while let Some(message) = events.next().await {
+        if message.event == "end" {
+            break;
+        }
+        last = Some(message);
+    }
+    let last = last.unwrap();
+    assert_eq!(last.data["run"]["status"], "failed");
+    assert_eq!(last.data["error"], "boom");
+}
+
+#[tokio::test]
+async fn the_running_stream_says_what_runs_and_what_starts_and_ends() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    assert_eq!(snapshot.data["count"], 1);
+    assert_eq!(snapshot.data["runs"][0]["id"], "r-review");
+
+    let (run, _alive) = live_run(&f, "r-new").await;
+    let mut started = events.next().await.unwrap();
+    while started.event == "snapshot" {
+        started = events.next().await.unwrap();
+    }
+    assert_eq!(started.event, "run");
+    assert_eq!(started.data["id"], "r-new");
+    assert_eq!(started.data["status"], "running");
+    f.dashboard
+        .app
+        .store
+        .finish_run(&run, RunStatus::Finished, None, None)
+        .await
+        .unwrap();
+    let mut ended = events.next().await.unwrap();
+    while ended.event == "snapshot" {
+        ended = events.next().await.unwrap();
+    }
+    assert_eq!(ended.data["id"], "r-new");
+    assert_eq!(ended.data["status"], "finished");
+}
+
+#[tokio::test]
+async fn no_stream_without_a_session() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    for uri in [
+        "/dashboard/api/v1/runs/stream",
+        "/dashboard/api/v1/runs/r-review/stream",
+    ] {
+        let answer = call(&f, Method::GET, uri, &[], None).await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{uri}");
+    }
+    let (cookie, _) = viewer(&f);
+    let missing = get(&f, "/dashboard/api/v1/runs/r-none/stream", &cookie).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }

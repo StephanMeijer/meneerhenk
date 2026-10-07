@@ -86,6 +86,38 @@ export type RunCount = {
  */
 count: number, };
 
+export type RunUpdate = { 
+/**
+ * The run.
+ */
+run: RunSummary, 
+/**
+ * The summary text, once there is one.
+ */
+summary: string | null, 
+/**
+ * The error, when it failed.
+ */
+error: string | null, 
+/**
+ * The platform's id for the review's check.
+ */
+check_id: string | null, };
+
+export type RunningSnapshot = { 
+/**
+ * The newest running runs, at most 100.
+ */
+runs: Array<RunSummary>, 
+/**
+ * How many run, beyond those too.
+ */
+count: number, };
+
+export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "end" };
+
+export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary };
+
 export type RunDetail = { 
 /**
  * The run.
@@ -164,7 +196,12 @@ output_tokens: number,
 /**
  * Why it was dropped.
  */
-error: string | null, };
+error: string | null, 
+/**
+ * The turn of its latest tool call: how far a running lane has come,
+ * since turns and tokens are stored when it ends.
+ */
+last_call_turn: number | null, };
 
 export type Finding = { 
 /**
