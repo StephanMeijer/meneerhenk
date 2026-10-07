@@ -9,3 +9,5 @@ henk.db*
 transcripts/
 scripts/henk-env.sh
 .henk-bao
+dashboard/node_modules/
+dashboard/dist/

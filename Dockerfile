@@ -5,6 +5,17 @@
 # starts as child processes ship in the same image: github-mcp-server from
 # its official image, @zereight/mcp-gitlab installed with npm. See README.
 
+# The dashboard app (#199): static files, so built once on the build platform
+# for every target. build.rs embeds dashboard/dist in henk. Keep the Node
+# major in step with dashboard/.node-version.
+FROM --platform=$BUILDPLATFORM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS spa
+WORKDIR /src/dashboard
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts --no-audit --no-fund
+COPY dashboard ./
+RUN npm run build
+
 FROM --platform=$BUILDPLATFORM docker.io/library/rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
 ARG BUILDARCH
 ARG TARGETARCH
@@ -28,6 +39,7 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
 COPY Cargo.toml Cargo.lock henk.example.toml ./
 COPY crates ./crates
+COPY --from=spa /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     case "$TARGETARCH" in \

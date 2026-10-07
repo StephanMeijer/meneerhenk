@@ -3,10 +3,12 @@
 //! and cancel one that is running (#69); every such action is a form with
 //! the session's CSRF token, from the dashboard's own origin. The same,
 //! as JSON, is under `/dashboard/api/v1` ([`api`], #198), where the
-//! session cookie, scoped to `/dashboard`, reaches it.
+//! session cookie, scoped to `/dashboard`, reaches it. The app that reads
+//! it, built from `dashboard/`, is at `/dashboard/app/` ([`app`], #199).
 
 mod actions;
 mod api;
+mod app;
 mod auth;
 mod session;
 mod views;
@@ -35,6 +37,8 @@ pub struct Dashboard {
     client_secret: SecretString,
     signer: Signer,
     http: reqwest::Client,
+    /// The dashboard app's files (#199).
+    assets: app::Assets,
 }
 
 impl std::fmt::Debug for Dashboard {
@@ -110,6 +114,7 @@ impl Dashboard {
             bus,
             config,
             http,
+            assets: app::Assets::built(),
         })
     }
 
@@ -145,6 +150,9 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/dashboard/logout", post(auth::logout))
         .route("/dashboard/start", post(actions::start))
         .route("/dashboard/runs/{id}/cancel", post(actions::cancel))
+        .route(app::BASE, get(app::root))
+        .route("/dashboard/app/", get(app::index))
+        .route("/dashboard/app/{*path}", get(app::file))
         .with_state(Arc::clone(&dashboard))
         .nest("/dashboard/api/v1", api::routes(dashboard))
 }
