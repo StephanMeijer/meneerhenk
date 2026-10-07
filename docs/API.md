@@ -1,7 +1,7 @@
 # Dashboard API
 
 What the dashboard shows and does, as JSON, at `/dashboard/api/v1` (#198).
-The single-page dashboard (#197) is its client. It exists only when the
+The dashboard app at `/dashboard` (#197) is its client. It exists only when the
 `[dashboard]` table is configured, as the dashboard does.
 
 The older `POST /review`, `/plan` and `/address` endpoints with one shared
@@ -78,10 +78,12 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 
 ### `GET /me`
 
-Who is signed in, and the CSRF token their actions send.
+Who is signed in, the CSRF token their actions send, and the kinds of run
+`POST /runs` can start here (`address` only where address runs are
+configured).
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx..."}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "address"]}
 ```
 
 ### `GET /health`
@@ -119,6 +121,14 @@ Runs, newest first. Every filter is optional:
   }],
   "next": "MjAyNi0xMC0wNlQwODoyNzoxMS42Mjk4NjA4NDJafHItMjAyNjEwMDYtMWEyYjNjNGQ"
 }
+```
+
+### `GET /runs/count`
+
+How many runs the filters of `GET /runs` match, over every page.
+
+```json
+{"count": 3}
 ```
 
 ### `GET /runs/{id}`

@@ -13,7 +13,12 @@ login: string,
 /**
  * The CSRF token every action sends in `X-CSRF-Token`.
  */
-csrf: string, };
+csrf: string, 
+/**
+ * What `POST /runs` can start here: `review`, `plan`, and `address`
+ * when address runs are configured.
+ */
+startable: Array<string>, };
 
 export type Page<T> = { 
 /**
@@ -74,6 +79,12 @@ started_at: string,
  * RFC 3339, once ended.
  */
 finished_at: string | null, };
+
+export type RunCount = { 
+/**
+ * The number.
+ */
+count: number, };
 
 export type RunDetail = { 
 /**

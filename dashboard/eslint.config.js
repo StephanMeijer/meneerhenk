@@ -31,6 +31,9 @@ export default ts.config(
     rules: {
       ...noMarkup,
       'svelte/no-at-html-tags': 'error',
+      // TypeScript and svelte-check know the browser's globals; ESLint's
+      // own list does not (typescript-eslint advises this).
+      'no-undef': 'off',
     },
   },
 );

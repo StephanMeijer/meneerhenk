@@ -14,9 +14,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
-use henk_store::{FindingAction, InboundEvent, LaneStatus, NewRun, OutcomeRecord, Page, RunStatus};
+use henk_store::{FindingAction, InboundEvent, LaneStatus, NewRun, OutcomeRecord, RunStatus};
 use http_body_util::BodyExt as _;
-use serde_json::{Value, json};
+use serde_json::json;
 use tower::ServiceExt as _;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -59,9 +59,20 @@ pub(super) fn fixture(github: &str) -> Fixture {
 
 /// A fixture whose dashboard app is `assets`.
 pub(super) fn fixture_with_assets(github: &str, assets: app::Assets) -> Fixture {
-    let settings = Config::parse(&config(github))
+    fixture_with(github, assets, |_| {})
+}
+
+/// A fixture whose dashboard app is `assets`, with `edit` applied to the
+/// settings.
+pub(super) fn fixture_with(
+    github: &str,
+    assets: app::Assets,
+    edit: impl FnOnce(&mut crate::config::Settings),
+) -> Fixture {
+    let mut settings = Config::parse(&config(github))
         .and_then(Config::into_settings)
         .unwrap_or_else(|e| panic!("{e}"));
+    edit(&mut settings);
     let dashboard_config = settings.dashboard.clone().unwrap();
     let app = Arc::new(App {
         settings,
@@ -269,10 +280,6 @@ async fn nothing_shows_without_a_session() {
         assert_eq!(answer.status, StatusCode::SEE_OTHER, "{uri}");
         assert_eq!(answer.headers[header::LOCATION], login, "{uri}");
     }
-    assert_eq!(
-        get(&f, "/dashboard/running.json", None).await.status,
-        StatusCode::UNAUTHORIZED
-    );
     let forged = format!("{SESSION_COOKIE}=bm90LXNpZ25lZA.AAAA");
     assert_eq!(
         get(&f, "/dashboard", Some(&forged)).await.status,
@@ -410,369 +417,6 @@ async fn signing_in_through_github_lets_only_listed_ids_in() {
     );
 }
 
-#[tokio::test]
-async fn the_overview_lists_runs_by_filter_and_escapes_what_it_shows() {
-    let f = fixture("https://127.0.0.1:9");
-    seed(&f).await;
-    let me = signed_in(&f, ALLOWED);
-
-    let all = get(&f, "/dashboard", Some(&me)).await;
-    assert_eq!(all.status, StatusCode::OK);
-    assert!(all.body.contains("Signed in as alice."));
-    assert!(
-        all.body
-            .contains("<a href=\"/dashboard/runs/r-review\">r-review</a>"),
-        "{}",
-        all.body
-    );
-    assert!(
-        all.body
-            .contains("<a href=\"https://github.com/docspec/app/pull/7\">"),
-        "{}",
-        all.body
-    );
-    assert!(
-        all.body
-            .contains("<a href=\"https://github.com/docspec/app/issues/7\">"),
-        "a plan links its issue"
-    );
-    assert!(all.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-    assert!(
-        !all.body.contains("<script>alert"),
-        "stored text never becomes markup"
-    );
-    assert!(
-        all.body
-            .contains("Running now (<span id=\"running-count\">1</span>)")
-    );
-    assert!(
-        all.body
-            .contains("<p class=\"muted\" id=\"running-more\" hidden></p>"),
-        "nothing is cut off, so no \"more\" line"
-    );
-    assert!(
-        henk_domain::text::is_in_style(&all.body),
-        "page text is in style"
-    );
-    let csp = all.headers[header::CONTENT_SECURITY_POLICY]
-        .to_str()
-        .unwrap();
-    assert!(csp.contains("script-src 'self'"), "{csp}");
-    assert_eq!(all.headers[header::X_FRAME_OPTIONS], "DENY");
-
-    let plans = get(&f, "/dashboard?kind=plan", Some(&me)).await;
-    let runs_section = plans.body.split("<h2>Runs</h2>").nth(1).unwrap();
-    assert!(runs_section.contains("r-plan"));
-    assert!(!runs_section.contains("r-review"));
-    assert!(plans.body.contains("<option selected>plan</option>"));
-    let hostile = get(&f, "/dashboard?repo=%22%3E%3Cscript%3E", Some(&me)).await;
-    assert!(
-        hostile.body.contains("value=\"&quot;&gt;&lt;script&gt;\""),
-        "a filter value is escaped"
-    );
-}
-
-#[tokio::test]
-async fn paging_keeps_the_filters() {
-    let f = fixture("https://127.0.0.1:9");
-    for n in 0..51 {
-        f.dashboard
-            .app
-            .store
-            .create_run(&NewRun {
-                id: RunId::parse(format!("r-{n:03}")).unwrap(),
-                kind: RunKind::Review,
-                platform: Platform::GitHub,
-                repo: "docspec/app".into(),
-                target: n,
-                commit: None,
-                requester: None,
-                trigger: "opened".into(),
-                link: String::new(),
-            })
-            .await
-            .unwrap();
-    }
-    let me = signed_in(&f, ALLOWED);
-    let first = get(&f, "/dashboard?kind=review", Some(&me)).await;
-    assert!(
-        first
-            .body
-            .contains("<a href=\"/dashboard?kind=review&page=1\">Older</a>"),
-        "{}",
-        first.body
-    );
-    assert!(!first.body.contains("Newer"));
-    let second = get(&f, "/dashboard?kind=review&page=1", Some(&me)).await;
-    let runs_section = second.body.split("<h2>Runs</h2>").nth(1).unwrap();
-    assert_eq!(
-        runs_section
-            .matches("<tr><td><a href=\"/dashboard/runs/")
-            .count(),
-        1
-    );
-    assert!(second.body.contains("Newer"));
-    assert!(!second.body.contains("Older"));
-}
-
-#[tokio::test]
-async fn running_now_counts_every_running_run_beyond_one_page() {
-    let f = fixture("https://127.0.0.1:9");
-    let running = u64::from(Page::MAX) + 2;
-    for n in 0..running {
-        f.dashboard
-            .app
-            .store
-            .create_run(&NewRun {
-                id: RunId::parse(format!("r-{n:03}")).unwrap(),
-                kind: RunKind::Plan,
-                platform: Platform::GitHub,
-                repo: "docspec/app".into(),
-                target: n,
-                commit: None,
-                requester: None,
-                trigger: "asked".into(),
-                link: String::new(),
-            })
-            .await
-            .unwrap();
-    }
-    let me = signed_in(&f, ALLOWED);
-
-    let overview = get(&f, "/dashboard", Some(&me)).await;
-    assert!(
-        overview.body.contains(&format!(
-            "Running now (<span id=\"running-count\">{running}</span>)"
-        )),
-        "the badge is the real count, not the page size"
-    );
-    assert!(
-        overview
-            .body
-            .contains("<p class=\"muted\" id=\"running-more\">And 2 more not shown.</p>"),
-        "{}",
-        overview.body
-    );
-    let shown = overview
-        .body
-        .split("<h2>Runs</h2>")
-        .next()
-        .unwrap()
-        .matches("<tr><td><a href=\"/dashboard/runs/")
-        .count();
-    assert_eq!(shown, usize::try_from(Page::MAX).unwrap());
-
-    let json = get(&f, "/dashboard/running.json", Some(&me)).await;
-    let json: Value = serde_json::from_str(&json.body).unwrap();
-    assert_eq!(json["total"], running);
-    assert_eq!(
-        json["runs"].as_array().unwrap().len(),
-        usize::try_from(Page::MAX).unwrap()
-    );
-
-    let script = get(&f, "/dashboard/app.js", Some(&me)).await;
-    assert!(script.body.contains("running.total"));
-    assert!(script.body.contains("more not shown."));
-}
-
-#[tokio::test]
-async fn a_sessions_transcript_reads_behind_sign_in_and_escaped() {
-    let f = fixture("https://127.0.0.1:9");
-    seed(&f).await;
-    let store = &f.dashboard.app.store;
-    let review = RunId::parse("r-review").unwrap();
-    store
-        .start_lane(&review, "check lane/a?", "model-x")
-        .await
-        .unwrap();
-    let long: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
-    let body = json!({
-        "session": "lane-a", "model": "model-x", "stop": "EndTurn", "turns": 1,
-        "usage": {"input_tokens": 7, "output_tokens": 2},
-        "system": "You review <b>this</b>.",
-        "messages": [
-            {"role": "user", "blocks": [{"text": "<script>alert(1)</script>"}]},
-            {"role": "assistant", "blocks": [{"tool_call": {"id": "c", "name": "read_file", "arguments": {"parsed": {"path": "a.rs"}}}}]},
-            {"role": "user", "blocks": [{"tool_result": {"call_id": "c", "content": long.join("\n"), "is_error": false}}]}
-        ]
-    })
-    .to_string();
-    for session in ["lane-a", "check lane/a?"] {
-        store
-            .record_transcript(
-                &review,
-                &henk_store::TranscriptRecord {
-                    at: String::new(),
-                    session: session.into(),
-                    model: "model-x".into(),
-                    stop: "EndTurn".into(),
-                    turns: 1,
-                    bytes: body.len() as u64,
-                    body: body.clone(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    let unsigned = get(&f, "/dashboard/runs/r-review/transcripts/lane-a", None).await;
-    assert_eq!(unsigned.status, StatusCode::SEE_OTHER);
-    assert!(!unsigned.body.contains("alert"));
-
-    let me = signed_in(&f, ALLOWED);
-    let run = get(&f, "/dashboard/runs/r-review", Some(&me)).await;
-    assert!(
-        run.body
-            .contains("<a href=\"/dashboard/runs/r-review/transcripts/lane-a\""),
-        "{}",
-        run.body
-    );
-    assert!(
-        run.body
-            .contains("<a href=\"/dashboard/runs/r-review/transcripts/check%20lane%2Fa%3F\""),
-        "a session name stays in its path segment: {}",
-        run.body
-    );
-
-    let page = get(&f, "/dashboard/runs/r-review/transcripts/lane-a", Some(&me)).await;
-    assert_eq!(page.status, StatusCode::OK);
-    for expected in [
-        "<h1>Transcript of lane-a</h1>",
-        "You review &lt;b&gt;this&lt;/b&gt;.",
-        "&lt;script&gt;alert(1)&lt;/script&gt;",
-        "Call <code>read_file</code>",
-        "<details><summary>Result, 40 lines</summary>",
-        "<a href=\"/dashboard/runs/r-review\">r-review</a>",
-    ] {
-        assert!(page.body.contains(expected), "{expected} in {}", page.body);
-    }
-    assert!(!page.body.contains("<script>alert"));
-    let escaped = get(
-        &f,
-        "/dashboard/runs/r-review/transcripts/check%20lane%2Fa%3F",
-        Some(&me),
-    )
-    .await;
-    assert_eq!(escaped.status, StatusCode::OK);
-    assert_eq!(
-        get(&f, "/dashboard/runs/r-review/transcripts/lane-b", Some(&me))
-            .await
-            .status,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        get(&f, "/dashboard/runs/r-plan/transcripts/lane-a", Some(&me))
-            .await
-            .status,
-        StatusCode::NOT_FOUND,
-        "a transcript belongs to its own run"
-    );
-}
-
-#[tokio::test]
-async fn run_detail_events_health_and_the_poller_answer() {
-    let f = fixture("https://127.0.0.1:9");
-    seed(&f).await;
-    let me = signed_in(&f, ALLOWED);
-    let review = RunId::parse("r-review").unwrap();
-    f.dashboard
-        .app
-        .store
-        .record_draft(
-            &review,
-            &henk_store::DraftRecord {
-                at: String::new(),
-                draft: "d1".into(),
-                lane: "lane-a".into(),
-                model: "model-x".into(),
-                kind: "finding".into(),
-                path: "src/a.rs".into(),
-                line: 4,
-                target: String::new(),
-                body: "<b>x</b> is never set.".into(),
-                decision: None,
-            },
-        )
-        .await
-        .unwrap();
-    f.dashboard
-        .app
-        .store
-        .decide_draft(
-            &review,
-            "d1",
-            &henk_store::DraftDecision {
-                at: String::new(),
-                verdict: henk_store::DraftVerdict::SameAs,
-                checker: "model-y".into(),
-                reason: "Same as c-77.".into(),
-                same_as: "c-77".into(),
-                comment_id: "c-77".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let run = get(&f, "/dashboard/runs/r-review", Some(&me)).await;
-    assert_eq!(run.status, StatusCode::OK);
-    assert!(
-        run.body.contains("<h2>Drafts</h2>")
-            && run.body.contains("<td>d1</td><td>lane-a</td><td><code>src/a.rs:4</code></td><td>&lt;b&gt;x&lt;/b&gt; is never set.</td><td>same as c-77</td><td>model-y</td><td>c-77</td><td>Same as c-77.</td>"),
-        "{}",
-        run.body
-    );
-    assert!(run.body.contains("<h2>Lanes</h2>") && run.body.contains("model-x"));
-    assert!(run.body.contains("<h2>Findings</h2>") && run.body.contains("<code>src/a.rs:4</code>"));
-    assert!(
-        run.body.contains("<a href=\"/dashboard/events/e-1\">"),
-        "links stay in the dashboard"
-    );
-    assert!(run.body.contains("<nav>"));
-
-    let events = get(&f, "/dashboard/events?source=github_webhook", Some(&me)).await;
-    assert!(
-        events.body.contains("<b>review</b>: started"),
-        "{}",
-        events.body
-    );
-    assert!(
-        events
-            .body
-            .contains("<a href=\"/dashboard/runs/r-review\">r-review</a>")
-    );
-    let event = get(&f, "/dashboard/events/e-1", Some(&me)).await;
-    assert!(
-        event.body.contains("&lt;img src=x onerror=alert(1)&gt;"),
-        "the payload is escaped"
-    );
-    assert!(!event.body.contains("<img"));
-    let none = get(&f, "/dashboard/events?source=api", Some(&me)).await;
-    assert!(none.body.contains("None."));
-
-    let health = get(&f, "/dashboard/health", Some(&me)).await;
-    assert_eq!(health.status, StatusCode::OK);
-    assert!(
-        health.body.contains("<td>database</td><td>ok</td>"),
-        "{}",
-        health.body
-    );
-    assert!(health.body.contains("review, plan"));
-
-    let running = get(&f, "/dashboard/running.json", Some(&me)).await;
-    let running: Value = serde_json::from_str(&running.body).unwrap();
-    assert_eq!(running["total"], 1);
-    let rows = &running["runs"];
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["id"], "r-review");
-    assert_eq!(
-        rows[0]["about_url"],
-        "https://github.com/docspec/app/pull/7"
-    );
-    let script = get(&f, "/dashboard/app.js", Some(&me)).await;
-    assert!(script.body.contains("textContent"));
-    assert!(!script.body.contains("innerHTML"));
-}
-
 /// Signs in through the mocked GitHub, starting at `login`, and returns
 /// where the callback sends the browser.
 async fn sign_in_from(f: &Fixture, login: &str) -> String {
@@ -900,99 +544,14 @@ pub(super) async fn outcomes_of(
 }
 
 #[tokio::test]
-async fn a_start_from_the_dashboard_is_an_event_like_the_api_with_who_asked() {
-    let f = fixture("https://127.0.0.1:9");
-    let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
-    let (cookie, csrf) = signed_in_as(&f, &session);
-    let origin = [("origin", ORIGIN)];
-
-    let started = post(
-        &f,
-        "/dashboard/start",
-        &cookie,
-        &origin,
-        &format!("csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3&commit=&note=split+it"),
-    )
-    .await;
-    assert_eq!(started.status, StatusCode::SEE_OTHER, "{}", started.body);
-    let to = started.headers[header::LOCATION]
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let event = EventId::parse(to.strip_prefix("/dashboard/events/").unwrap()).unwrap();
-    // Published like an API request: recorded and handled in the background.
-    let outcomes = outcomes_of(&f, &event, 3).await;
-    let recorded = f
-        .dashboard
-        .app
-        .store
-        .inbound_event(&event)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(recorded.source, "dashboard");
-    assert_eq!(recorded.kind, "plan_requested");
-    assert_eq!(recorded.requester.as_deref(), Some("github:1234"));
-    let plan = outcomes.into_iter().find(|o| o.listener == "plan").unwrap();
-    assert_eq!(plan.outcome, "started", "{}", plan.detail);
-    let page = get(&f, &to, Some(&cookie)).await;
-    assert!(page.body.contains("Asked by: github:1234"), "{}", page.body);
-
-    let elsewhere = post(
-        &f,
-        "/dashboard/start",
-        &cookie,
-        &origin,
-        &format!("csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fother%2Fapp%2Fissues%2F3"),
-    )
-    .await;
-    assert_eq!(elsewhere.status, StatusCode::SEE_OTHER);
-    let to = elsewhere.headers[header::LOCATION]
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let event = EventId::parse(to.strip_prefix("/dashboard/events/").unwrap()).unwrap();
-    let refused = outcomes_of(&f, &event, 3)
-        .await
-        .into_iter()
-        .find(|o| o.listener == "plan")
-        .unwrap();
-    assert_eq!(refused.outcome, "ignored");
-    assert!(
-        refused.detail.contains("not on the allowlist"),
-        "{}",
-        refused.detail
-    );
-
-    for form in [
-        format!("csrf={csrf}&kind=plan&url=not-a-url"),
-        format!(
-            "csrf={csrf}&kind=review&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fpull%2F7&commit=xyz"
-        ),
-        format!(
-            "csrf={csrf}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3&commit=0123456789abcdef0123456789abcdef01234567"
-        ),
-        format!(
-            "csrf={csrf}&kind=deploy&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3"
-        ),
-    ] {
-        let answer = post(&f, "/dashboard/start", &cookie, &origin, &form).await;
-        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{form}");
-    }
-}
-
-#[tokio::test]
-async fn an_action_without_its_token_or_from_elsewhere_is_refused_and_does_nothing() {
+async fn signing_out_needs_the_token_and_the_dashboards_own_origin() {
     let f = fixture("https://127.0.0.1:9");
     let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
     let (cookie, csrf) = signed_in_as(&f, &session);
     let (_, other_csrf) = signed_in_as(&f, &Session::fresh(ALLOWED, "alice".to_owned()).unwrap());
-    let form = |token: &str| {
-        format!("csrf={token}&kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3")
-    };
-    let no_token = "kind=plan&url=https%3A%2F%2Fgithub.com%2Fdocspec%2Fapp%2Fissues%2F3".to_owned();
+    let form = |token: &str| format!("csrf={token}");
     let cases: Vec<Case> = vec![
-        ("no token", vec![("origin", ORIGIN)], no_token),
+        ("no token", vec![("origin", ORIGIN)], String::new()),
         (
             "another session's token",
             vec![("origin", ORIGIN)],
@@ -1023,18 +582,19 @@ async fn an_action_without_its_token_or_from_elsewhere_is_refused_and_does_nothi
         ("neither origin nor referer", vec![], form(&csrf)),
     ];
     for (what, headers, body) in cases {
-        let answer = post(&f, "/dashboard/start", &cookie, &headers, &body).await;
+        let answer = post(&f, "/dashboard/logout", &cookie, &headers, &body).await;
         assert_eq!(
             answer.status,
             StatusCode::FORBIDDEN,
             "{what}: {}",
             answer.body
         );
+        assert!(set_cookies(&answer).is_empty(), "{what}: still signed in");
     }
     let removed = signed_in(&f, 999);
     let answer = post(
         &f,
-        "/dashboard/start",
+        "/dashboard/logout",
         &removed,
         &[("origin", ORIGIN)],
         &form(&csrf),
@@ -1045,138 +605,25 @@ async fn an_action_without_its_token_or_from_elsewhere_is_refused_and_does_nothi
         StatusCode::FORBIDDEN,
         "an id not on the list"
     );
-    let none = f
-        .dashboard
-        .app
-        .store
-        .list_inbound_events(&henk_store::EventFilter::default(), Page::new(10, 0))
-        .await
-        .unwrap();
-    assert!(none.is_empty(), "nothing refused was published");
 
     let by_referer = post(
         &f,
-        "/dashboard/start",
+        "/dashboard/logout",
         &cookie,
-        &[("referer", "https://henk.example/dashboard")],
+        &[("referer", "https://henk.example/dashboard/runs/r-1")],
         &form(&csrf),
     )
     .await;
     assert_eq!(
         by_referer.status,
-        StatusCode::SEE_OTHER,
+        StatusCode::OK,
         "the dashboard's own referer"
     );
-
-    let logout = post(&f, "/dashboard/logout", &cookie, &[("origin", ORIGIN)], "").await;
-    assert_eq!(
-        logout.status,
-        StatusCode::FORBIDDEN,
-        "signing out needs the token too"
-    );
-    let logout = post(
-        &f,
-        "/dashboard/logout",
-        &cookie,
-        &[("origin", ORIGIN)],
-        &format!("csrf={csrf}"),
-    )
-    .await;
-    assert_eq!(logout.status, StatusCode::OK);
-}
-
-#[tokio::test]
-async fn cancelling_fires_the_runs_token_and_records_who_asked() {
-    let f = fixture("https://127.0.0.1:9");
-    let store = Arc::clone(&f.dashboard.app.store);
-    seed(&f).await;
-    let session = Session::fresh(ALLOWED, "alice".to_owned()).unwrap();
-    let (cookie, csrf) = signed_in_as(&f, &session);
-    let origin = [("origin", ORIGIN)];
-    let running = RunId::parse("r-review").unwrap();
-    assert_eq!(
-        store.run(&running).await.unwrap().unwrap().status,
-        RunStatus::Running
-    );
-
-    let page = get(&f, "/dashboard/runs/r-review", Some(&cookie)).await;
+    let cleared = set_cookies(&by_referer);
     assert!(
-        page.body
-            .contains("action=\"/dashboard/runs/r-review/cancel\""),
-        "{}",
-        page.body
-    );
-    assert!(page.body.contains(&csrf));
-    let finished = get(&f, "/dashboard/runs/r-plan", Some(&cookie)).await;
-    assert!(
-        !finished.body.contains("Cancel this run"),
-        "only a running run"
-    );
-    let finished = get(&f, "/dashboard/runs/r-plan", Some(&cookie)).await;
-    assert!(
-        !finished.body.contains("Cancel this run"),
-        "only a running run"
-    );
-
-    let not_here = post(
-        &f,
-        "/dashboard/runs/r-review/cancel",
-        &cookie,
-        &origin,
-        &format!("csrf={csrf}"),
-    )
-    .await;
-    assert_eq!(
-        not_here.status,
-        StatusCode::CONFLICT,
-        "nothing here runs it"
-    );
-
-    let token = tokio_util::sync::CancellationToken::new();
-    let _cancellable = f
-        .dashboard
-        .app
-        .cancels
-        .register(running.clone(), token.clone());
-    let cancelled = post(
-        &f,
-        "/dashboard/runs/r-review/cancel",
-        &cookie,
-        &origin,
-        &format!("csrf={csrf}"),
-    )
-    .await;
-    assert_eq!(cancelled.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        cancelled.headers[header::LOCATION],
-        "/dashboard/runs/r-review"
-    );
-    assert!(token.is_cancelled());
-    assert_eq!(
-        f.dashboard.app.cancels.cancelled_by(&running).as_deref(),
-        Some("github:1234")
-    );
-    let requests: Vec<_> = store
-        .inbound_events_for_run(&running)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|e| e.kind == "cancel_requested")
-        .collect();
-    assert_eq!(requests.len(), 2, "both requests are recorded");
-    assert!(
-        requests
+        cleared
             .iter()
-            .all(|e| e.source == "dashboard" && e.requester.as_deref() == Some("github:1234"))
+            .any(|c| c.starts_with(&format!("{SESSION_COOKIE}=;")) && c.contains("Max-Age=0")),
+        "{cleared:?}"
     );
-
-    let forged = post(
-        &f,
-        "/dashboard/runs/r-review/cancel",
-        &cookie,
-        &origin,
-        "csrf=AAAA",
-    )
-    .await;
-    assert_eq!(forged.status, StatusCode::FORBIDDEN);
 }

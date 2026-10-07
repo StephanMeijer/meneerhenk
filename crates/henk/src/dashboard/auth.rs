@@ -24,9 +24,10 @@ use super::api::ApiError;
 use super::session::{SESSION_COOKIE, STATE_COOKIE, Session, cookie_value};
 use crate::pages::page;
 
-/// Someone signed in and allowed. Every dashboard page takes one.
-#[derive(Debug, Clone)]
-pub struct Viewer(pub Session);
+/// Someone signed in and allowed. Every page of the dashboard app takes
+/// one; without it the browser goes to sign-in and back.
+#[derive(Debug, Clone, Copy)]
+pub struct Viewer;
 
 impl FromRequestParts<Arc<Dashboard>> for Viewer {
     type Rejection = Response;
@@ -35,25 +36,20 @@ impl FromRequestParts<Arc<Dashboard>> for Viewer {
         parts: &mut Parts,
         dashboard: &Arc<Dashboard>,
     ) -> Result<Self, Self::Rejection> {
-        match signed_in(parts, dashboard) {
-            Some(session) => Ok(Self(session)),
-            None if parts.uri.path() == "/dashboard/running.json" => {
-                Err((StatusCode::UNAUTHORIZED, "sign in first").into_response())
-            }
-            None => {
-                // Back to this page after sign-in, so a run link posted on
-                // a pull request lands on that run (#69).
-                let here = parts
-                    .uri
-                    .path_and_query()
-                    .map_or("/dashboard", |p| p.as_str());
-                let to = match safe_next(here).filter(|next| *next != "/dashboard") {
-                    Some(next) => format!("/dashboard/login?next={}", encode(next)),
-                    None => "/dashboard/login".to_owned(),
-                };
-                Err(redirect(&to, None))
-            }
+        if signed_in(parts, dashboard).is_some() {
+            return Ok(Self);
         }
+        // Back to this page after sign-in, so a run link posted on a pull
+        // request lands on that run (#69).
+        let here = parts
+            .uri
+            .path_and_query()
+            .map_or("/dashboard", |p| p.as_str());
+        let to = match safe_next(here).filter(|next| *next != "/dashboard") {
+            Some(next) => format!("/dashboard/login?next={}", encode(next)),
+            None => "/dashboard/login".to_owned(),
+        };
+        Err(redirect(&to, None))
     }
 }
 
@@ -188,37 +184,23 @@ where
     }
 }
 
-/// A signed-in person doing something: every dashboard POST takes one
-/// (#69). Every allowed id may act. Besides the session, the request must
+/// A signed-in person posting a form of the dashboard: since the app acts
+/// through the API ([`ApiAct`]), only sign-out (#69). The request must
 /// come from the dashboard itself: its `Origin` (or, without one, its
 /// `Referer`) is `server.public_base_url`, and its form carries the
 /// session's CSRF token. `SameSite=Lax` alone does not stop a form posted
 /// from another site in every browser. Any failure is a 403, never a
 /// redirect, so nothing happens by accident.
-#[derive(Debug)]
-pub struct Act<T> {
-    /// Who acts.
-    pub session: Session,
-    /// The form, without its token.
-    pub form: T,
-}
+#[derive(Debug, Clone, Copy)]
+pub struct Act;
 
-/// A form with its CSRF token.
+/// A form with nothing but its CSRF token.
 #[derive(Debug, Deserialize)]
-struct WithToken<T> {
+struct TokenOnly {
     csrf: Option<String>,
-    #[serde(flatten)]
-    form: T,
 }
 
-/// A form with nothing but the token.
-#[derive(Debug, Deserialize)]
-pub struct NoFields {}
-
-impl<T> FromRequest<Arc<Dashboard>> for Act<T>
-where
-    T: DeserializeOwned + Send,
-{
+impl FromRequest<Arc<Dashboard>> for Act {
     type Rejection = Response;
 
     async fn from_request(request: Request, dashboard: &Arc<Dashboard>) -> Result<Self, Response> {
@@ -232,11 +214,11 @@ where
         ) {
             warn!(
                 github_id = session.github_id,
-                "a dashboard action came from another origin"
+                "a dashboard form came from another origin"
             );
             return Err(refused("This request did not come from Henk's dashboard."));
         }
-        let Form(with) = Form::<WithToken<T>>::from_request(Request::from_parts(parts, body), &())
+        let Form(form) = Form::<TokenOnly>::from_request(Request::from_parts(parts, body), &())
             .await
             .map_err(|rejection| {
                 notice(
@@ -245,20 +227,17 @@ where
                     &rejection.body_text(),
                 )
             })?;
-        let token = with.csrf.unwrap_or_default();
+        let token = form.csrf.unwrap_or_default();
         if !dashboard.signer.csrf_matches(&session, &token) {
             warn!(
                 github_id = session.github_id,
-                "a dashboard action without its session's token"
+                "a dashboard form without its session's token"
             );
             return Err(refused(
                 "This form is out of date or not from your session. Reload the page and try again.",
             ));
         }
-        Ok(Self {
-            session,
-            form: with.form,
-        })
+        Ok(Self)
     }
 }
 
@@ -494,7 +473,7 @@ async fn github_user(dashboard: &Dashboard, code: &str) -> anyhow::Result<Sessio
 
 /// Signs out. A form like every other action, so another site cannot sign
 /// someone out.
-pub async fn logout(State(dashboard): State<Arc<Dashboard>>, _act: Act<NoFields>) -> Response {
+pub async fn logout(State(dashboard): State<Arc<Dashboard>>, _act: Act) -> Response {
     let mut response = notice(
         StatusCode::OK,
         "Signed out",

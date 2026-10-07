@@ -2,11 +2,15 @@
   import { onMount } from 'svelte';
   import { me } from '$lib/api/client';
   import type { Me } from '$lib/api/types';
-  import { link, route, start } from '$lib/router';
+  import { href, link, route, start } from '$lib/router';
+  import Event from '$lib/views/Event.svelte';
+  import Events from '$lib/views/Events.svelte';
   import Health from '$lib/views/Health.svelte';
-  import Home from '$lib/views/Home.svelte';
   import NotFound from '$lib/views/NotFound.svelte';
+  import Overview from '$lib/views/Overview.svelte';
   import Problem from '$lib/views/Problem.svelte';
+  import Run from '$lib/views/Run.svelte';
+  import Transcript from '$lib/views/Transcript.svelte';
 
   let who: Promise<Me> = $state(new Promise(() => {}));
 
@@ -18,10 +22,10 @@
 
 <header>
   <nav>
-    <a href="/dashboard/app/" use:link class="brand">Meneer Henk</a>
-    <a href="/dashboard">Runs</a>
-    <a href="/dashboard/events">Events</a>
-    <a href="/dashboard/app/health" use:link>Health</a>
+    <a href={href('/')} use:link class="brand">Meneer Henk</a>
+    <a href={href('/')} use:link>Runs</a>
+    <a href={href('/events')} use:link>Events</a>
+    <a href={href('/health')} use:link>Health</a>
   </nav>
   {#await who then viewer}
     <form class="signout" method="post" action="/dashboard/logout">
@@ -35,9 +39,19 @@
 <main>
   {#await who}
     <p class="muted" aria-busy="true">Loading.</p>
-  {:then}
-    {#if $route.name === 'home'}
-      <Home />
+  {:then viewer}
+    {#if $route.name === 'overview'}
+      <Overview me={viewer} query={$route.query} />
+    {:else if $route.name === 'run'}
+      {#key $route.id}
+        <Run id={$route.id} />
+      {/key}
+    {:else if $route.name === 'transcript'}
+      <Transcript id={$route.id} session={$route.session} />
+    {:else if $route.name === 'events'}
+      <Events query={$route.query} />
+    {:else if $route.name === 'event'}
+      <Event id={$route.id} />
     {:else if $route.name === 'health'}
       <Health />
     {:else}
