@@ -80,8 +80,10 @@ fn serve(assets: Assets, path: &str) -> Response {
     }
     if let Some(bytes) = (!path.is_empty()).then(|| assets.get(path)).flatten() {
         let cache = if path.starts_with("assets/") {
-            // Vite puts a hash of the content in these names.
-            "public, max-age=31536000, immutable"
+            // Vite puts a hash of the content in these names. `private`:
+            // the files are behind sign-in, so a shared cache in front of
+            // Henk must not keep them for someone without a session.
+            "private, max-age=31536000, immutable"
         } else {
             "no-cache"
         };
@@ -279,7 +281,8 @@ mod tests {
         );
         assert_eq!(
             script.headers[header::CACHE_CONTROL],
-            "public, max-age=31536000, immutable"
+            "private, max-age=31536000, immutable",
+            "only the browser keeps a file behind sign-in"
         );
         assert_guarded(&script, "script");
         let style = get(&f, "/dashboard/app/assets/app-abc.css", Some(&cookie)).await;
