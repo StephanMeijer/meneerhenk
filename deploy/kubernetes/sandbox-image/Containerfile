@@ -1,14 +1,15 @@
 # A default image for the kubernetes workspace backend (#89): what Henk's
 # sandbox script needs (sh, coreutils, findutils, GNU grep with PCRE2, tar),
 # bash for the `bash` tool, git for the record of changes and the run's own
-# commands, and mise for profiles with toolchain = "mise". Nothing of Henk's
+# commands, catatonit as the Pod's first process, which reaps what a run
+# leaves behind, and mise for profiles with toolchain = "mise". Nothing of Henk's
 # is in it: the script comes with every request. Build your own from this,
 # with the toolchains your repositories need, and pin it by digest:
 #   docker build -f deploy/kubernetes/sandbox-image/Containerfile \
 #     -t registry.example/henk-sandbox:1 deploy/kubernetes/sandbox-image
 FROM docker.io/library/debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bash coreutils findutils grep tar git ca-certificates curl xz-utils \
+ && apt-get install -y --no-install-recommends bash coreutils findutils grep tar git catatonit ca-certificates curl xz-utils \
  && rm -rf /var/lib/apt/lists/*
 # A fixed mise release, checked against the SHA256 kept here, so every
 # build installs the same binary. To update it, take the new release's

@@ -126,8 +126,8 @@ stop() {
             for proc in /proc/[0-9]*; do
                 pid=${proc#/proc/}
                 case $pid in 1 | "$$") continue ;; esac
-                # A killed process stays a zombie under the Pod's first
-                # process, which reaps nothing: it is dead, not running.
+                # A killed process is a zombie until the Pod's first
+                # process reaps it: it is dead, not running.
                 # The State line is the kernel's; a process's own name
                 # cannot fake it.
                 zombie=0

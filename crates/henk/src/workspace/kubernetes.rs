@@ -3,7 +3,8 @@
 //!
 //! Henk talks to the API server himself, with his own service account (or a
 //! kubeconfig outside the cluster), and needs nothing but Pods and
-//! `pods/exec` in that one namespace. Each Pod runs one idle process; every
+//! `pods/exec` in that one namespace. Each Pod's first process is
+//! [`INIT`], which idles and reaps what a run leaves behind; every
 //! request is a `pods/exec` of Henk's sandbox script in its single-user
 //! mode, the same script and the same workspace (`remote.rs`) as the ssh
 //! backend. Within the Pod everything, the record of changes included, is
@@ -47,6 +48,13 @@ const MANAGED_BY: (&str, &str) = ("app.kubernetes.io/managed-by", "meneer-henk")
 const WORKSPACE: &str = "henk.workspace";
 /// The one container of a sandbox Pod.
 const CONTAINER: &str = "work";
+/// The Pod's first process: catatonit in pause mode, which idles and
+/// reaps every process a run orphans. A first process that never waits,
+/// such as `sleep`, would keep each one as a zombie holding a PID until
+/// the Pod ends, and the number of processes is the node's limit, not
+/// the profile's. It runs no child, so `stop` in the sandbox script, which
+/// spares the first process, ends everything else.
+const INIT: [&str; 2] = ["catatonit", "-P"];
 /// Where the workspaces live in the Pod, a scratch volume.
 const SANDBOX: &str = "/sandbox";
 /// How long a Pod may take to start: scheduling and pulling the image.
@@ -123,7 +131,7 @@ pub fn pod(settings: &PodSettings, id: &str, image: &str, limits: &Limits) -> Po
             containers: vec![Container {
                 name: CONTAINER.to_owned(),
                 image: Some(image.to_owned()),
-                command: Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
+                command: Some(INIT.iter().map(|&a| a.to_owned()).collect()),
                 working_dir: Some(SANDBOX.to_owned()),
                 env: Some(vec![
                     env("HENK_SANDBOX_BASE", SANDBOX),
@@ -688,6 +696,11 @@ pub(crate) mod tests {
             panic!("one container")
         };
         assert_eq!(container.image.as_deref(), Some("sandbox:2"));
+        assert_eq!(
+            container.command.as_deref(),
+            Some(["catatonit".to_owned(), "-P".to_owned()].as_slice()),
+            "the first process reaps what a run orphans"
+        );
         let security = container.security_context.as_ref().unwrap();
         assert_eq!(security.allow_privilege_escalation, Some(false));
         assert_eq!(security.read_only_root_filesystem, Some(true));
@@ -868,6 +881,45 @@ pub(crate) mod tests {
             others.output.trim(),
             "0",
             "export stopped what the run left behind"
+        );
+        ws.close().await;
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_what_a_run_orphans_is_reaped() {
+        use henk_domain::address::WorkspacePath;
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        let source = crate::workspace::contract::source("henk-kube-live-reap-src");
+        let ws = provider
+            .open(source.path(), &Profile::default())
+            .await
+            .unwrap();
+        let sh = |script: &str| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()];
+        // Children whose parent ends first, as `cmd &` in a command leaves.
+        let orphaned = ws
+            .exec(
+                &sh("for i in 1 2 3 4 5; do (sleep 0.2 &); done; sleep 1"),
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(orphaned.code, Some(0), "{}", orphaned.output);
+        let zombies = ws
+            .exec(
+                &sh("cat /proc/1/comm; grep -l '^State:.*Z' /proc/[0-9]*/status 2>/dev/null | wc -l"),
+                &WorkspacePath::root(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            zombies.output.split_whitespace().collect::<Vec<_>>(),
+            ["catatonit", "0"],
+            "the Pod's first process reaped them"
         );
         ws.close().await;
         assert_eq!(pods_left(&provider).await, Vec::<String>::new());

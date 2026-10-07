@@ -498,7 +498,9 @@ To set it up, apply `deploy/kubernetes/`:
    the Pods reach DNS and the internet but not the cluster: fill in your
    Pod, Service and node ranges. It needs a CNI that enforces policies.
 4. An image with `sh`, coreutils, findutils, GNU `grep` with PCRE2, `tar`,
-   `git` and `bash`, and `mise` for profiles with `toolchain = "mise"`:
+   `git`, `bash` and `catatonit` (the Pod's first process, which reaps
+   what a run leaves running), and `mise` for profiles with
+   `toolchain = "mise"`:
    `deploy/kubernetes/sandbox-image/Containerfile` is a start. Pin it by
    digest. A profile may name its own with `image`, so each repository can
    start from the toolchains it needs.
