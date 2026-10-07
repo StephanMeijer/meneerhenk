@@ -264,6 +264,9 @@ pub struct ToolCallItem {
     pub target_url: Option<String>,
     /// The call.
     pub call: ToolCall,
+    /// Whether the run still keeps the conversation of the call's session,
+    /// so whether a link to its turn leads anywhere.
+    pub transcript_kept: bool,
 }
 
 /// One session of a run.

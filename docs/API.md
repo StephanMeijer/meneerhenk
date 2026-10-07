@@ -324,7 +324,8 @@ malformed arguments, a cancel), `total_ms`, and `error_rate` and
 ### `GET /tool-calls`
 
 Tool calls across runs, newest first, a page at a time, each with its run,
-repository and pull request.
+repository and pull request. `transcript_kept` says whether the run still
+keeps that session's conversation; transcripts are pruned on their own.
 
 | Query | Meaning |
 |---|---|
@@ -335,7 +336,8 @@ repository and pull request.
 ```json
 {"items": [{"run_id": "r-...", "repo": "o/r", "target": 70, "target_url": "...",
             "call": {"session": "lane-b", "turn": 12, "tool": "github__get_file_contents",
-                     "outcome": "refused_scope", "arguments": "{...}", "...": "..."}}],
+                     "outcome": "refused_scope", "arguments": "{...}", "...": "..."},
+            "transcript_kept": true}],
  "next": null}
 ```
 

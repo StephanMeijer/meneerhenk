@@ -194,7 +194,9 @@
             <strong>{item.call.model}</strong>
             <span class="muted">{item.call.session}, turn {item.call.turn}</span>
             <a href={href(runPath(item.run_id))} use:link>{item.run_id}</a>
-            <a href={href(transcriptPath(item.run_id, item.call.session, item.call.turn))} use:link title="That turn of the conversation">turn {item.call.turn}</a>
+            {#if item.transcript_kept}
+              <a href={href(transcriptPath(item.run_id, item.call.session, item.call.turn))} use:link title="That turn of the conversation">turn {item.call.turn}</a>
+            {/if}
             {#if item.target_url}
               <a href={item.target_url} rel="noreferrer">{about(item.repo, item.target)}</a>
             {/if}

@@ -665,7 +665,9 @@ impl RunStore for SqliteStore {
             let mut statement = c.prepare(&format!(
                 "SELECT c.id, c.run_id, r.repo, r.target, r.platform, c.at, c.session, c.model,
                         c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
-                        c.result_chars, c.elapsed_ms
+                        c.result_chars, c.elapsed_ms,
+                        EXISTS (SELECT 1 FROM transcripts t
+                                WHERE t.run_id = c.run_id AND t.session = c.session)
                  FROM tool_calls c JOIN runs r ON r.id = c.run_id
                  WHERE {CALL_FILTER}
                    AND (?6 IS NULL OR (?6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = ?6)
@@ -1212,6 +1214,7 @@ struct CallRow {
     target: i64,
     platform: String,
     call: ToolCallRecord,
+    transcript_kept: bool,
 }
 
 /// Reads the columns `list_tool_calls` selects, in order.
@@ -1236,6 +1239,7 @@ fn call_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CallRow> {
             result_chars: number(row.get(14)?),
             elapsed_ms: number(row.get(15)?),
         },
+        transcript_kept: row.get(16)?,
     })
 }
 
@@ -1251,6 +1255,7 @@ impl CallRow {
                 value: self.platform.clone(),
             })?,
             call: self.call,
+            transcript_kept: self.transcript_kept,
         })
     }
 }

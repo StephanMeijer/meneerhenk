@@ -830,6 +830,10 @@ pub struct ToolCallListing {
     pub platform: Platform,
     /// The call.
     pub call: ToolCallRecord,
+    /// Whether the run still keeps the conversation of the call's session.
+    /// Transcripts are stored per session and pruned on their own, so a
+    /// call can outlive its conversation.
+    pub transcript_kept: bool,
 }
 
 /// One page of a listing.

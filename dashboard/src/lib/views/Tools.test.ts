@@ -38,6 +38,7 @@ const item: ToolCallItem = {
     result_chars: 90,
     elapsed_ms: 1,
   },
+  transcript_kept: true,
 };
 
 describe('Tools', () => {
@@ -67,6 +68,19 @@ describe('Tools', () => {
     expect(call?.querySelector('a[title="That turn of the conversation"]')?.getAttribute('href')).toBe(
       '/dashboard/runs/r-70/transcripts/lane-b#turn-12',
     );
+  });
+
+  it('links a turn only when the run still keeps that conversation', async () => {
+    const pruned: ToolCallItem = { ...item, transcript_kept: false };
+    const loadSummary = vi.fn(() => Promise.resolve([]));
+    const loadCalls = vi.fn((): Promise<Page<ToolCallItem>> => Promise.resolve({ items: [pruned], next: null }));
+    render(Tools, { query: new URLSearchParams(), loadSummary, loadCalls, now: () => NOW });
+    await settle();
+    const call = document.querySelector('ul.calls li');
+    expect(call?.querySelector('a[title="That turn of the conversation"]')).toBeNull();
+    expect(call?.querySelector('a[href*="/transcripts/"]')).toBeNull();
+    expect(call?.querySelector('.meta .muted')?.textContent).toBe('lane-b, turn 12');
+    expect(call?.querySelector('a')?.getAttribute('href')).toBe('/dashboard/runs/r-70');
   });
 
   it('asks for the period, kind, model, tool and outcome the query names', async () => {

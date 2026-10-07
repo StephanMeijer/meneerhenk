@@ -188,6 +188,7 @@ pub async fn list(
                     false,
                 ),
                 call: ToolCall::from(&listing.call),
+                transcript_kept: listing.transcript_kept,
             })
             .collect(),
         next,

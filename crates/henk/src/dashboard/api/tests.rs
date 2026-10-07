@@ -1810,6 +1810,30 @@ async fn the_calls_that_went_wrong_list_across_runs_a_page_at_a_time() {
     let first = &problems["items"][0];
     assert_eq!(first["run_id"], "r-plan");
     assert_eq!(first["call"]["arguments"], "not json");
+    assert_eq!(first["transcript_kept"], false, "no conversation stored");
+    f.dashboard
+        .app
+        .store
+        .record_transcript(
+            &RunId::parse("r-plan").unwrap(),
+            &TranscriptRecord {
+                at: String::new(),
+                session: "planner".into(),
+                model: "deepseek".into(),
+                stop: "EndTurn".into(),
+                turns: 1,
+                bytes: 2,
+                body: "{}".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let kept = get(&f, "/dashboard/api/v1/tool-calls?outcome=problems", &cookie)
+        .await
+        .json();
+    assert_eq!(kept["items"][0]["transcript_kept"], true);
+    assert_eq!(kept["items"][1]["transcript_kept"], false, "another run");
+    assert_eq!(kept["items"][1]["run_id"], "r-review");
     let error = &problems["items"][3];
     assert_eq!(
         error["call"]["arguments"], "{\"path\":\"<script>.rs\"}",

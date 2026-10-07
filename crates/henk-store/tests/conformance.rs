@@ -339,6 +339,25 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
     }
     seen.sort_unstable();
     assert_eq!(seen, (1..=9).collect::<Vec<_>>(), "every call once");
+
+    // A call says whether its run still keeps its session's conversation.
+    store
+        .record_transcript(&id("r-3"), &transcript("lane-a", "", "{}"))
+        .await
+        .unwrap();
+    let kept = store
+        .list_tool_calls(&ToolCallFilter::default(), Page::new(50, 0))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.transcript_kept)
+        .map(|c| (c.run_id, c.call.session))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kept,
+        [("r-3".to_owned(), "lane-a".to_owned())],
+        "only that run's session: not r-3's other session, not lane-a of r-1"
+    );
 }
 
 async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore) {

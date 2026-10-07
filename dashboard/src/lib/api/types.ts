@@ -228,7 +228,12 @@ target_url: string | null,
 /**
  * The call.
  */
-call: ToolCall, };
+call: ToolCall, 
+/**
+ * Whether the run still keeps the conversation of the call's session,
+ * so whether a link to its turn leads anywhere.
+ */
+transcript_kept: boolean, };
 
 export type DraftItem = { 
 /**

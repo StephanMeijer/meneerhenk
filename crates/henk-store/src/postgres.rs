@@ -993,7 +993,9 @@ impl RunStore for PgStore {
                 &format!(
                     "SELECT c.id, c.run_id, r.repo, r.target, r.platform, c.at, c.session, c.model,
                             c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
-                            c.result_chars, c.elapsed_ms
+                            c.result_chars, c.elapsed_ms,
+                            EXISTS (SELECT 1 FROM transcripts t
+                                    WHERE t.run_id = c.run_id AND t.session = c.session)
                      FROM tool_calls c JOIN runs r ON r.id = c.run_id
                      WHERE {CALL_FILTER}
                        AND ($6::text IS NULL OR ($6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = $6)
@@ -1045,6 +1047,7 @@ impl RunStore for PgStore {
                         result_chars: number(row.try_get(14)?),
                         elapsed_ms: number(row.try_get(15)?),
                     },
+                    transcript_kept: row.try_get(16)?,
                 })
             })
             .collect()
