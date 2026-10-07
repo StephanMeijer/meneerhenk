@@ -52,3 +52,15 @@ export function periodSince(period: string, now: Date = new Date()): string | nu
   if (days === null) return null;
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
+
+/** How a tool call ended, for its colour: `ok`, `error`, `refused` or `other`. */
+export function outcomeClass(outcome: string): 'ok' | 'error' | 'refused' | 'other' {
+  if (outcome === 'ok' || outcome === 'error') return outcome;
+  if (outcome === 'refused_scope' || outcome === 'refused_repeat') return 'refused';
+  return 'other';
+}
+
+/** Milliseconds per call, rounded; a dash without calls. */
+export function average(totalMs: number, calls: number): string {
+  return calls === 0 ? '-' : `${Math.round(totalMs / calls)} ms`;
+}

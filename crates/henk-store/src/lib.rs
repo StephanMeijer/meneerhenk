@@ -15,7 +15,8 @@ pub use store::RunStore;
 pub use types::{
     DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftListing, DraftRates, DraftRecord,
     DraftVerdict, EventFilter, EventKey, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
-    Page, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, StoreError, ToolCallRecord,
-    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, session_kind,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
+    OutcomeRecord, Page, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, StoreError,
+    ToolCallFilter, ToolCallKey, ToolCallListing, ToolCallRecord, ToolTally, ToolUsage,
+    TranscriptRecord, TranscriptSummary, VerdictFilter, session_kind,
 };

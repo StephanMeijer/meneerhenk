@@ -13,6 +13,7 @@ export type Route =
   | { name: 'event'; id: string }
   | { name: 'health' }
   | { name: 'quality'; query: URLSearchParams }
+  | { name: 'tools'; query: URLSearchParams }
   | { name: 'not_found'; path: string };
 
 /** Paths under BASE that are the server's, not the app's. */
@@ -40,6 +41,7 @@ export function routeOf(pathname: string, search = ''): Route {
   if (path === '/health') return { name: 'health' };
   if (path === '/events') return { name: 'events', query };
   if (path === '/quality') return { name: 'quality', query };
+  if (path === '/tools') return { name: 'tools', query };
   if (parts.length === 2 && first === 'events' && second) return { name: 'event', id: second };
   if (parts.length === 2 && first === 'runs' && second) return { name: 'run', id: second };
   if (parts.length === 4 && first === 'runs' && second && third === 'transcripts' && fourth) {
@@ -56,8 +58,8 @@ export function href(path: string): string {
 
 export const runPath = (id: string): string => `/runs/${encodeURIComponent(id)}`;
 export const eventPath = (id: string): string => `/events/${encodeURIComponent(id)}`;
-export const transcriptPath = (id: string, session: string): string =>
-  `${runPath(id)}/transcripts/${encodeURIComponent(session)}`;
+export const transcriptPath = (id: string, session: string, turn?: number): string =>
+  `${runPath(id)}/transcripts/${encodeURIComponent(session)}${turn === undefined ? '' : `#turn-${turn}`}`;
 
 /** A path with its query, leaving out empty values. */
 export function withQuery(path: string, query: Record<string, string | null | undefined>): string {
@@ -104,7 +106,7 @@ export function link(node: HTMLAnchorElement): { destroy: () => void } {
       event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
     if (!plain || url.origin !== window.location.origin || !isApp(url.pathname)) return;
     event.preventDefault();
-    window.history.pushState({}, '', url.pathname + url.search);
+    window.history.pushState({}, '', url.pathname + url.search + url.hash);
     route.set(here());
     window.scrollTo?.(0, 0);
   };

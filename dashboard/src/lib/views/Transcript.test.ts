@@ -36,5 +36,8 @@ describe('Transcript', () => {
     expect(document.body.textContent).toContain('Result: error');
     expect(document.body.textContent).toContain('Provider content, not shown.');
     expect([...document.querySelectorAll('pre')].map((p) => p.textContent)).toContain('Review <this>.');
+    const anchors = [...document.querySelectorAll('h2[id]')].map((h) => h.id);
+    // One anchor per turn, on its first message.
+    expect(anchors).toEqual(['turn-0', 'turn-1']);
   });
 });

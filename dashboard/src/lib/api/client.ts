@@ -16,6 +16,9 @@ import type {
   RunSummary,
   StartRequest,
   Started,
+  ToolCall,
+  ToolCallItem,
+  ToolSummaryRow,
   Transcript,
 } from './types';
 
@@ -159,6 +162,21 @@ export function quality(query = ''): Promise<QualityRow[]> {
 /** Drafts across runs, newest first; `query` is the `GET /drafts` query. */
 export function drafts(query = ''): Promise<Page<DraftItem>> {
   return getJson<Page<DraftItem>>(`/drafts${query === '' ? '' : `?${query}`}`);
+}
+
+/** Tool calls per tool, model and kind of session; `query` is the `GET /tool-calls/summary` query. */
+export function toolSummary(query = ''): Promise<ToolSummaryRow[]> {
+  return getJson<ToolSummaryRow[]>(`/tool-calls/summary${query === '' ? '' : `?${query}`}`);
+}
+
+/** Tool calls across runs, newest first; `query` is the `GET /tool-calls` query. */
+export function toolCalls(query = ''): Promise<Page<ToolCallItem>> {
+  return getJson<Page<ToolCallItem>>(`/tool-calls${query === '' ? '' : `?${query}`}`);
+}
+
+/** One run's tool calls, in order. */
+export function runToolCalls(id: string): Promise<ToolCall[]> {
+  return getJson<ToolCall[]>(`/runs/${encodeURIComponent(id)}/tool-calls`);
 }
 
 /** Forgets the CSRF token; for the tests. */

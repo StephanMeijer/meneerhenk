@@ -166,6 +166,75 @@ judged: number,
  */
 rejection_rate: number | null, };
 
+export type ToolSummaryRow = { 
+/**
+ * The tool, as the model named it.
+ */
+tool: string, 
+/**
+ * The model.
+ */
+model: string, 
+/**
+ * `lane`, `check`, `planner` or `address`.
+ */
+session_kind: string, 
+/**
+ * Every call.
+ */
+calls: number, 
+/**
+ * Calls the tool reported as failed.
+ */
+errors: number, 
+/**
+ * Calls the scope guard or the repeat guard refused.
+ */
+refusals: number, 
+/**
+ * Calls that never ran for another reason.
+ */
+other: number, 
+/**
+ * Milliseconds the calls ran, together.
+ */
+total_ms: number, 
+/**
+ * Errors of calls, from 0 to 1.
+ */
+error_rate: number, 
+/**
+ * Refusals of calls, from 0 to 1.
+ */
+refusal_rate: number, };
+
+export type ToolCallItem = { 
+/**
+ * The run.
+ */
+run_id: string, 
+/**
+ * The run's repository.
+ */
+repo: string, 
+/**
+ * The run's pull request, merge request or issue.
+ */
+target: number, 
+/**
+ * A link to it.
+ */
+target_url: string | null, 
+/**
+ * The call.
+ */
+call: ToolCall, 
+/**
+ * Whether the run still keeps the conversation of the call's session,
+ * so whether a link to its turn leads anywhere.
+ */
+transcript_kept: boolean, };
+
 export type DraftItem = { 
 /**
  * The run.

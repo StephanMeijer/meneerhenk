@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
 import { draft, runDetail } from '$lib/testing/fixtures';
+import type { ToolCall } from '$lib/api/types';
 import { fakeConnect, firstOf } from '$lib/testing/source';
 import Run from './Run.svelte';
 
 afterEach(cleanup);
+
+const cancelButton = (): HTMLButtonElement | undefined =>
+  [...document.querySelectorAll('button')].find((b) => b.textContent === 'Cancel this run');
 
 const section = (title: string): string[][] => {
   const heading = [...document.querySelectorAll('h2')].find((h) => h.textContent === title);
@@ -40,7 +44,7 @@ describe('Run', () => {
     expect(transcriptLink?.getAttribute('href')).toBe('/dashboard/runs/r-1/transcripts/lane-a');
     expect(document.querySelectorAll('a[title="The whole conversation"]')).toHaveLength(1);
     expect(section('Events')[0]?.[0]).toBe('e-1');
-    expect(document.querySelector('button')).toBeNull();
+    expect(cancelButton()).toBeUndefined();
   });
 
   it('offers a cancel only while the run is running, and posts it', async () => {
@@ -48,8 +52,8 @@ describe('Run', () => {
     const { connect } = fakeConnect();
     render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect });
     await settle();
-    const button = document.querySelector('button');
-    expect(button?.textContent).toBe('Cancel this run');
+    const button = cancelButton();
+    expect(button).toBeDefined();
     button?.click();
     await settle();
     expect(cancel).toHaveBeenCalledWith('r-1');
@@ -83,7 +87,7 @@ describe('Run', () => {
     expect(source.closed).toBe(true);
     expect(document.querySelector('.status')?.textContent).toBe('finished');
     expect(document.querySelector('.badge')).toBeNull();
-    expect(document.querySelector('main button, button')).toBeNull();
+    expect(cancelButton()).toBeUndefined();
     expect(sources).toHaveLength(1);
   });
 
@@ -100,7 +104,7 @@ describe('Run', () => {
     );
     render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect: fakeConnect().connect });
     await settle();
-    document.querySelector('button')?.click();
+    cancelButton()?.click();
     await settle();
     expect(document.querySelector('[role=status]')?.textContent).toBe('That run is not running here.');
   });
@@ -114,5 +118,46 @@ describe('Run', () => {
     await settle();
     expect(document.querySelector('[role=alert]')?.textContent).toContain('No such run.');
     expect(rows()).toEqual([]);
+  });
+});
+
+describe('every call of a run', () => {
+  const call = (session: string, turn: number, outcome: string): ToolCall => ({
+    at: '', session, model: 'm', turn, tool: 'read_file', origin: 'henk', outcome,
+    arguments: '{"path":"<b>a.rs</b>"}', arguments_len: 20, result_chars: 5, elapsed_ms: 3,
+  });
+
+  it('loads once on asking, filters by outcome, and links a call to its turn when the run kept that conversation', async () => {
+    const loadCalls = vi.fn(() =>
+      Promise.resolve([call('lane-a', 1, 'ok'), call('lane-a', 2, 'error'), call('lane-b', 1, 'refused_scope')]),
+    );
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail()), cancel: vi.fn(), loadCalls });
+    await settle();
+    expect(loadCalls).not.toHaveBeenCalled();
+    const ask = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Show every call');
+    ask?.click();
+    await settle();
+    expect(loadCalls).toHaveBeenCalledTimes(1);
+    const timeline = () => rows('table.timeline tbody tr');
+    expect(timeline().map((r) => [r[0], r[1], r[3]])).toEqual([
+      ['lane-a', '1', 'ok'],
+      ['lane-a', '2', 'error'],
+      ['lane-b', '1', 'refused scope'],
+    ]);
+    expect(timeline()[0]?.[4]).toBe('{"path":"<b>a.rs</b>"}');
+    expect(document.querySelector('table.timeline b')).toBeNull();
+    const turnLinks = [...document.querySelectorAll('table.timeline a')].map((a) => a.getAttribute('href'));
+    expect(turnLinks).toEqual([
+      '/dashboard/runs/r-1/transcripts/lane-a#turn-1',
+      '/dashboard/runs/r-1/transcripts/lane-a#turn-2',
+    ]);
+
+    [...document.querySelectorAll<HTMLButtonElement>('button.chip')].find((b) => b.textContent === 'problems')?.click();
+    await settle(1);
+    expect(timeline().map((r) => r[3])).toEqual(['error', 'refused scope']);
+    [...document.querySelectorAll<HTMLButtonElement>('button.chip')].find((b) => b.textContent === 'refused')?.click();
+    await settle(1);
+    expect(timeline().map((r) => r[3])).toEqual(['refused scope']);
+    expect(document.querySelector('.chips .muted')?.textContent).toBe('1 of 3');
   });
 });
