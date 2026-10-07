@@ -145,6 +145,9 @@ pub enum FindingAction {
     Unverified,
     /// A finding was withdrawn as wrong: its text replaced, its thread resolved.
     Withdrawn,
+    /// The fact-check found it repeats another draft or an existing finding;
+    /// nothing was written for it (#189).
+    Merged,
 }
 
 impl FindingAction {
@@ -156,7 +159,111 @@ impl FindingAction {
             Self::Rejected => "rejected",
             Self::Unverified => "unverified",
             Self::Withdrawn => "withdrawn",
+            Self::Merged => "merged",
         }
+    }
+}
+
+/// A review lane's draft as it was queued (#189), with its decision once
+/// the fact-check has settled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftRecord {
+    /// RFC 3339; empty when recording means now.
+    pub at: String,
+    /// Its number in the review: `d3`.
+    pub draft: String,
+    /// The lane that wrote it.
+    pub lane: String,
+    /// The lane's model.
+    pub model: String,
+    /// `finding`, `rewrite` or `withdrawal`.
+    pub kind: String,
+    /// The file.
+    pub path: String,
+    /// The line.
+    pub line: u32,
+    /// The existing comment a rewrite or withdrawal is about; empty for a
+    /// new finding.
+    pub target: String,
+    /// The finding, the new text, or why to withdraw.
+    pub body: String,
+    /// What became of it; none while it waits.
+    pub decision: Option<DraftDecision>,
+}
+
+/// What became of a draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftDecision {
+    /// RFC 3339; empty when recording means now.
+    pub at: String,
+    /// The verdict.
+    pub verdict: DraftVerdict,
+    /// The model that gave it; empty when none did.
+    pub checker: String,
+    /// Why, in the checker's words, or why it went unchecked.
+    pub reason: String,
+    /// What it repeats (`d2` or a comment id), for a merge.
+    pub same_as: String,
+    /// The comment written for it, or the one it was merged into.
+    pub comment_id: String,
+}
+
+/// The verdict on a draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftVerdict {
+    /// Confirmed and written.
+    Confirmed,
+    /// Rejected; nothing written.
+    Rejected,
+    /// A repeat of another draft or an existing finding; merged into it.
+    SameAs,
+    /// No model could check it; written unchecked.
+    Unchecked,
+    /// No fact-check is configured; written as the lane wrote it.
+    NotChecked,
+    /// The review ended before it was settled; nothing written.
+    Cancelled,
+    /// The write to the platform failed.
+    Failed,
+}
+
+/// A stored verdict, refused when it is not one.
+pub(crate) fn draft_verdict(text: &str) -> Result<DraftVerdict, StoreError> {
+    DraftVerdict::parse(text).ok_or_else(|| StoreError::Corrupt {
+        column: "drafts.verdict",
+        value: text.to_owned(),
+    })
+}
+
+impl DraftVerdict {
+    /// The stored text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::SameAs => "same_as",
+            Self::Unchecked => "unchecked",
+            Self::NotChecked => "not_checked",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Reads the stored text back.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        [
+            Self::Confirmed,
+            Self::Rejected,
+            Self::SameAs,
+            Self::Unchecked,
+            Self::NotChecked,
+            Self::Cancelled,
+            Self::Failed,
+        ]
+        .into_iter()
+        .find(|verdict| verdict.as_str() == text)
     }
 }
 
@@ -202,7 +309,7 @@ pub struct TranscriptSummary {
 pub struct ToolCallRecord {
     /// RFC 3339; empty when recording means now.
     pub at: String,
-    /// The session: the lane row's name (`lane-a`, `check-lane-b-3`,
+    /// The session: the lane row's name (`lane-a`, `check-2`,
     /// `planner`, `address`).
     pub session: String,
     /// The session's model.

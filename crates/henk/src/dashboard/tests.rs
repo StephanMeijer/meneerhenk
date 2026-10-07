@@ -668,9 +668,53 @@ async fn run_detail_events_health_and_the_poller_answer() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
     let me = signed_in(&f, ALLOWED);
+    let review = RunId::parse("r-review").unwrap();
+    f.dashboard
+        .app
+        .store
+        .record_draft(
+            &review,
+            &henk_store::DraftRecord {
+                at: String::new(),
+                draft: "d1".into(),
+                lane: "lane-a".into(),
+                model: "model-x".into(),
+                kind: "finding".into(),
+                path: "src/a.rs".into(),
+                line: 4,
+                target: String::new(),
+                body: "<b>x</b> is never set.".into(),
+                decision: None,
+            },
+        )
+        .await
+        .unwrap();
+    f.dashboard
+        .app
+        .store
+        .decide_draft(
+            &review,
+            "d1",
+            &henk_store::DraftDecision {
+                at: String::new(),
+                verdict: henk_store::DraftVerdict::SameAs,
+                checker: "model-y".into(),
+                reason: "Same as c-77.".into(),
+                same_as: "c-77".into(),
+                comment_id: "c-77".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     let run = get(&f, "/dashboard/runs/r-review", Some(&me)).await;
     assert_eq!(run.status, StatusCode::OK);
+    assert!(
+        run.body.contains("<h2>Drafts</h2>")
+            && run.body.contains("<td>d1</td><td>lane-a</td><td><code>src/a.rs:4</code></td><td>&lt;b&gt;x&lt;/b&gt; is never set.</td><td>same as c-77</td><td>model-y</td><td>c-77</td><td>Same as c-77.</td>"),
+        "{}",
+        run.body
+    );
     assert!(run.body.contains("<h2>Lanes</h2>") && run.body.contains("model-x"));
     assert!(run.body.contains("<h2>Findings</h2>") && run.body.contains("<code>src/a.rs:4</code>"));
     assert!(

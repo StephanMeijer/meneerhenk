@@ -92,9 +92,10 @@ impl ReviewWorkspaces {
         };
         let mut opening = JoinSet::new();
         for name in &names {
-            // The fact-checker's checks share one copy but each get the
-            // profile's run time of their own (`workspace::metered`), so its
-            // copy does not hold them to one run's time together.
+            // The fact-checker's sessions use one copy, one after another,
+            // and each gets the profile's run time of its own
+            // (`workspace::metered`), so the copy does not hold them to one
+            // run's time together.
             let mut profile = profile.clone();
             if name == FACT_CHECK {
                 profile.limits.run_secs = u64::MAX;

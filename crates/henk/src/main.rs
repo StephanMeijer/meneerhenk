@@ -16,6 +16,7 @@ mod config;
 mod coordinator;
 mod dashboard;
 mod doctor;
+mod drafts;
 mod fact_check;
 mod git;
 mod hooks;
@@ -299,6 +300,7 @@ async fn cmd_runs_show(config: &Path, run: &str, transcript: Option<&str>) -> an
             &store.lanes(&id).await?,
             &henk_store::ToolUsage::from_calls(&store.tool_calls(&id).await?),
             &transcripts,
+            &store.drafts(&id).await?,
             &store.findings(&id).await?,
             &store.events(&id).await?
         )

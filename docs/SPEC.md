@@ -90,18 +90,21 @@ change against the target branch.
   default, or whatever is configured instead. They are listed as not
   reviewed and carry no finding. A change made only of such files is
   reported as "nothing to review", which is a completed review.
-- Each problem becomes a **comment on its line**, posted as soon as the lane
-  is sure of it. On GitHub that is a review comment; on GitLab, a diff
-  discussion.
-- **A second model checks each finding first**, when one is configured. It
-  reads the code the finding is about and confirms or rejects it. A rejected
-  finding is not posted; the lane is told why and may correct it. If no
-  check can be made, the finding is posted and the run records it as
-  unchecked.
-- **Lanes do not repeat each other.** Before posting, a lane looks at what is
-  already there. When it can explain an existing finding better, it improves
-  that comment rather than posting a second one. It never rewrites a comment a
-  person has already answered.
+- Each problem becomes a **comment on its line**. On GitHub that is a review
+  comment; on GitLab, a diff discussion. A lane drafts it as soon as it is
+  sure of it; drafts are posted once every lane has finished.
+- **A second model checks every draft first**, when one is configured, never
+  the model of the lane that wrote it when there is another. It checks the
+  drafts of all lanes together after the lanes, reads the code they are
+  about and confirms or rejects each. A rejected draft is not posted; the
+  lane is not asked to correct it. If no check can be made, the draft is
+  posted and the run records it as unchecked.
+- **Lanes do not repeat each other.** Before drafting, a lane looks at what is
+  already there and what other lanes have drafted. When it can explain an
+  existing finding better, it improves that comment rather than posting a
+  second one. It never rewrites a comment a person has already answered.
+  When two drafts report the same problem anyway, the check says so and only
+  one is posted.
 - **A wrong finding is withdrawn**, not left standing. A lane that sees one
   of Henk's findings is wrong replaces its text with the reason and resolves
   its thread, so it no longer counts. Withdrawals are checked like findings,
@@ -594,6 +597,16 @@ surprising reading of the earlier wording; veto any that is wrong.
 - §3.3: an interrupted review closes its check as "Review interrupted." and
   posts nothing, and runs a dead process left `running` are closed on the
   next start, found by a heartbeat that stopped (#7).
+
+## Revision notes (2026-10-07)
+
+- §3.2: lanes draft their findings, rewrites and withdrawals, and a second
+  model checks the drafts of all lanes together once the lanes have finished,
+  instead of one check per finding while the lane waits (#189). Nothing is
+  posted before its check. Drafts that repeat one another or an existing
+  finding are merged. A lane no longer hears a rejection and gets no second
+  try: on 40 recorded reviews, no rejected finding was ever posted after a
+  correction.
 
 ## Revision notes (2026-10-06)
 

@@ -1,21 +1,31 @@
-//! A second model checks every finding before it is posted (§3.2).
+//! A second model checks every draft before anything is written (§3.2,
+//! #189).
 //!
 //! Lanes are wrong in a recognisable way: they claim a file lacks something
-//! it has, or call intended behaviour a bug. The check is a short session of
-//! its own with a different model, the read-only diff tools and one tool to
-//! give its verdict. A rejected finding is not posted; the lane is told why
-//! and may correct it. When no check can be run, the finding goes out
-//! unchecked and the run records that: Henk is advisory, and an outage of
-//! the checking model must not silence reviews.
+//! it has, or call intended behaviour a bug. Lanes therefore write drafts,
+//! and once every lane has ended the drafts are checked together: one
+//! session per checking model and chunk of [`CHUNK`] drafts, each with the
+//! diff of the files it is about once, the read-only code tools and one
+//! tool to give a verdict per draft. A draft is never checked first by its
+//! own lane's model when there is another. The sessions run one after
+//! another, so the checker's workspace is each session's alone.
+//!
+//! What no model gives a verdict on goes out unchecked and the run records
+//! that: Henk is advisory, and an outage of the checking model must not
+//! silence reviews.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use henk_agent::{AgentConfig, Continuation, EndReason, Tool, ToolOutput, ToolSet};
 use henk_domain::diff::ReviewDiff;
+use henk_domain::draft::{
+    CHUNK, Draft, DraftBook, DraftId, DraftKind, Original, Verdict, same_as_allowed,
+};
+use henk_domain::finding::Finding;
 use henk_domain::marker::ModelId;
-use henk_domain::review::LaneName;
 use henk_domain::run::RunId;
 use henk_llm::{ChatMessage, ModelClient, ToolDef, ToolName};
 use henk_platform::DiffSide;
@@ -27,78 +37,13 @@ use tracing::{info, warn};
 
 use crate::review_tools::{DiffFiles, GetFileDiff, ListChangedFiles, ReadFile};
 
-/// What is being checked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckKind {
-    /// A new finding; the text is the finding.
-    NewFinding,
-    /// A rewrite of an existing finding; the text is the new version.
-    Rewrite {
-        /// The finding as it stands.
-        current: String,
-    },
-    /// Withdrawing a finding as wrong; the text is the reason.
-    Withdrawal {
-        /// The finding to withdraw.
-        finding: String,
-    },
-}
+/// How much of another draft or finding the opening shows: enough to see
+/// whether it is the same problem.
+const CONTEXT_CHARS: usize = 400;
 
-/// One claim to check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckRequest {
-    /// The lane making the claim.
-    pub lane: LaneName,
-    /// The model behind that lane; it does not check itself when another
-    /// model is configured.
-    pub lane_model: ModelId,
-    /// What is being checked.
-    pub kind: CheckKind,
-    /// File of the finding.
-    pub path: String,
-    /// Line of the finding.
-    pub line: u32,
-    /// Side of the line.
-    pub side: DiffSide,
-    /// The finding, the rewrite or the reason, per `kind`.
-    pub text: String,
-}
-
-/// The outcome of a check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckVerdict {
-    /// The claim holds.
-    Confirmed {
-        /// The checking model.
-        by: ModelId,
-        /// Why.
-        reason: String,
-    },
-    /// The claim does not hold.
-    Rejected {
-        /// The checking model.
-        by: ModelId,
-        /// What is wrong with it, for the lane.
-        reason: String,
-    },
-    /// No model gave a verdict.
-    Unavailable {
-        /// Why not, for the lane and the run.
-        why: String,
-    },
-}
-
-/// Something that checks claims. The review uses [`SessionFactCheck`];
-/// tests use fixed answers.
-#[async_trait::async_trait]
-pub trait FactCheck: Send + Sync {
-    /// Checks one claim.
-    async fn check(&self, request: &CheckRequest) -> CheckVerdict;
-}
-
-/// Checks each claim in a session of its own on the run.
-pub struct SessionFactCheck {
-    /// Run records; each check is a session row named `check-<lane>-<n>`.
+/// Checks a review's drafts after its lanes, in sessions on the run.
+pub struct FactChecker {
+    /// Run records; each check is a session row named `check-<n>`.
     pub store: Arc<dyn RunStore>,
     /// The run.
     pub run: RunId,
@@ -110,26 +55,24 @@ pub struct SessionFactCheck {
     pub file_reader: Option<Arc<dyn Tool>>,
     /// The checker's own workspace at the reviewed commit, when the review
     /// has them (#170). With it, the code tools read there instead of the
-    /// platform (#90). Checks only read, so they share it.
+    /// platform (#90). One session uses it at a time.
     pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
-    /// The time each check's commands get in that workspace, its own
-    /// and not shared with the other checks (#85).
+    /// The time each session's commands get in that workspace (#85).
     pub check_limits: henk_domain::workspace::Limits,
     /// The rendered system prompt, without skills.
     pub system: String,
     /// The skills the checker may load.
     pub skills: crate::skill_tools::AgentSkills,
-    /// Turn and time limits per check.
+    /// Turn and time limits per draft; a session gets them times the
+    /// drafts it judges.
     pub limits: AgentConfig,
     /// The review's cancellation.
     pub cancel: CancellationToken,
-    /// Numbers the check sessions of the run.
-    pub sequence: AtomicU32,
 }
 
-impl SessionFactCheck {
-    /// The models to try, in order: never the lane's own model first when
-    /// there is another.
+impl FactChecker {
+    /// The models to try for a draft of `lane_model`, in order: never the
+    /// lane's own model first when there is another.
     fn order(&self, lane_model: &ModelId) -> Vec<Arc<dyn ModelClient>> {
         let mut models = self.models.clone();
         if models.len() > 1
@@ -142,13 +85,82 @@ impl SessionFactCheck {
         models
     }
 
-    async fn check_with(
+    /// A verdict on every draft in `book`. `existing` are the findings on
+    /// the pull request, which a draft may repeat. A draft no model gave a
+    /// verdict on is [`Verdict::Unchecked`].
+    pub async fn check_all(
         &self,
+        book: &DraftBook,
+        existing: &[Finding],
+    ) -> BTreeMap<DraftId, Verdict> {
+        let mut verdicts = BTreeMap::new();
+        let mut tried: BTreeMap<DraftId, Vec<String>> = BTreeMap::new();
+        let mut pending: Vec<DraftId> = book.iter().map(|d| d.id).collect();
+        let mut sessions = 0;
+        while !pending.is_empty() && !self.cancel.is_cancelled() {
+            let next = |draft: &Draft| {
+                let done = tried.get(&draft.id).map_or(0, Vec::len);
+                self.order(&draft.model)
+                    .get(done)
+                    .map(|model| model_id(model.as_ref()))
+            };
+            let chunks = book.chunks(&pending, next, CHUNK);
+            if chunks.is_empty() {
+                break;
+            }
+            for (checker, ids) in chunks {
+                if self.cancel.is_cancelled() {
+                    break;
+                }
+                let Some(model) = self.models.iter().find(|m| model_id(m.as_ref()) == checker)
+                else {
+                    continue;
+                };
+                sessions += 1;
+                let got = self
+                    .session(sessions, Arc::clone(model), book, &ids, existing)
+                    .await;
+                for id in ids {
+                    match got.get(&id) {
+                        Some(verdict) => {
+                            verdicts.insert(id, verdict.clone());
+                        }
+                        None => tried.entry(id).or_default().push(checker.to_string()),
+                    }
+                }
+            }
+            pending.retain(|id| !verdicts.contains_key(id));
+        }
+        for draft in book.iter() {
+            verdicts.entry(draft.id).or_insert_with(|| {
+                let why = match tried.get(&draft.id) {
+                    Some(models) if !models.is_empty() => {
+                        format!("no verdict from {}", models.join(" or "))
+                    }
+                    _ => "the review was cancelled".to_owned(),
+                };
+                Verdict::Unchecked { why }
+            });
+        }
+        verdicts
+    }
+
+    /// One session on `model`, judging `ids`.
+    async fn session(
+        &self,
+        number: u32,
         model: Arc<dyn ModelClient>,
-        request: &CheckRequest,
-    ) -> Option<(bool, String)> {
-        let number = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        let slot = Arc::new(Mutex::new(None));
+        book: &DraftBook,
+        ids: &[DraftId],
+        existing: &[Finding],
+    ) -> BTreeMap<DraftId, Verdict> {
+        let by = model_id(model.as_ref());
+        let given = Arc::new(Mutex::new(BTreeMap::new()));
+        let comments: Vec<String> = existing
+            .iter()
+            .filter(|f| !f.resolved)
+            .map(|f| f.comment_id.clone())
+            .collect();
         let files = Arc::new(DiffFiles::new(Arc::clone(&self.diff)));
         let mut tools = ToolSet::new();
         tools.add(ListChangedFiles(Arc::clone(&files)));
@@ -162,7 +174,7 @@ impl SessionFactCheck {
                     &mut tools,
                     &workspace,
                     std::time::Duration::from_secs(self.check_limits.command_secs),
-                    crate::code_tools::BashUse::FactCheck,
+                    crate::code_tools::BashUse::Review,
                 );
             }
             (None, Some(inner)) => {
@@ -172,148 +184,186 @@ impl SessionFactCheck {
             }
             (None, None) => {}
         }
-        tools.add(GiveVerdict(Arc::clone(&slot)));
+        tools.add(GiveVerdict {
+            by: by.clone(),
+            book: book.clone(),
+            judging: ids.iter().copied().collect(),
+            comments,
+            given: Arc::clone(&given),
+        });
         let mut system = self.system.clone();
         crate::skill_tools::equip(&mut system, &mut tools, self.skills.clone());
+        let drafts = u32::try_from(ids.len()).unwrap_or(u32::MAX).max(1);
+        let limits = AgentConfig {
+            max_turns: self.limits.max_turns.saturating_mul(drafts),
+            timeout: self.limits.timeout.saturating_mul(drafts),
+            ..self.limits
+        };
         let spec = SessionSpec {
-            name: format!("check-{}-{number}", request.lane),
+            name: format!("check-{number}"),
             model,
             system,
-            opening: vec![ChatMessage::user(opening(request, &self.diff))],
+            opening: vec![ChatMessage::user(opening(book, ids, existing, &self.diff))],
             tools,
-            limits: self.limits,
-            continuation: Some(ask_for_verdict(Arc::clone(&slot))),
+            limits,
+            continuation: Some(ask_for_verdicts(ids.to_vec(), Arc::clone(&given))),
             turn_warning: None,
         };
         let outcome = run_session(self.store.as_ref(), &self.run, spec, self.cancel.clone()).await;
-        let verdict = slot.lock().ok().and_then(|v| v.clone());
-        if verdict.is_none() {
-            warn!(stop = ?outcome.stop, lane = %request.lane, "fact-check ended without a verdict");
+        let given = given.lock().map(|g| g.clone()).unwrap_or_default();
+        info!(session = number, %by, drafts = ids.len(), verdicts = given.len(), stop = ?outcome.stop, "fact-check session");
+        if given.len() < ids.len() {
+            warn!(session = number, %by, missing = ids.len() - given.len(), "fact-check ended without every verdict");
         }
-        verdict
+        given
     }
 }
 
-#[async_trait::async_trait]
-impl FactCheck for SessionFactCheck {
-    async fn check(&self, request: &CheckRequest) -> CheckVerdict {
-        let mut tried = Vec::new();
-        for model in self.order(&request.lane_model) {
-            if self.cancel.is_cancelled() {
-                break;
-            }
-            let by = model_id(model.as_ref());
-            if let Some((confirmed, reason)) = self.check_with(model, request).await {
-                let word = if confirmed { "confirmed" } else { "rejected" };
-                info!(lane = %request.lane, path = %request.path, line = request.line, %by, verdict = word, "fact-check");
-                let _ = self
-                    .store
-                    .event(
-                        &self.run,
-                        "info",
-                        &format!(
-                            "{}: {} {} on {}:{} ({by}): {reason}",
-                            request.lane,
-                            word,
-                            kind_name(&request.kind),
-                            request.path,
-                            request.line
-                        ),
-                    )
-                    .await;
-                return if confirmed {
-                    CheckVerdict::Confirmed { by, reason }
-                } else {
-                    CheckVerdict::Rejected { by, reason }
-                };
-            }
-            tried.push(by.to_string());
-        }
-        let why = if tried.is_empty() {
-            "the review was cancelled".to_owned()
-        } else {
-            format!("no verdict from {}", tried.join(" or "))
-        };
-        let _ = self
-            .store
-            .event(
-                &self.run,
-                "warn",
-                &format!(
-                    "{}: {} on {}:{} went out unchecked: {why}",
-                    request.lane,
-                    kind_name(&request.kind),
-                    request.path,
-                    request.line
-                ),
-            )
-            .await;
-        CheckVerdict::Unavailable { why }
+/// The opening message: the drafts to judge, fenced as material; the
+/// earlier drafts and the existing findings on the same files, for
+/// `same_as` only; and the numbered diff of each file the drafts are about,
+/// once.
+fn opening(book: &DraftBook, ids: &[DraftId], existing: &[Finding], diff: &ReviewDiff) -> String {
+    let judging: Vec<&Draft> = ids.iter().filter_map(|id| book.get(*id)).collect();
+    let paths: BTreeSet<&str> = judging.iter().map(|d| d.key.path.as_str()).collect();
+    let mut out = format!(
+        "Check these {} draft(s). Give one verdict per draft with give_verdict.\n",
+        judging.len()
+    );
+    for draft in &judging {
+        out.push('\n');
+        out.push_str(&describe(draft));
     }
-}
 
-fn kind_name(kind: &CheckKind) -> &'static str {
-    match kind {
-        CheckKind::NewFinding => "finding",
-        CheckKind::Rewrite { .. } => "rewrite",
-        CheckKind::Withdrawal { .. } => "withdrawal",
-    }
-}
-
-/// The opening message: the claim, fenced as material, and the numbered
-/// diff of its file.
-fn opening(request: &CheckRequest, diff: &ReviewDiff) -> String {
-    let side = match request.side {
-        DiffSide::Left => " (old side, a removed line)",
-        DiffSide::Right => "",
-    };
-    let mut out = String::new();
-    let place = format!("{}:{}{side}", request.path, request.line);
-    let _ = match &request.kind {
-        CheckKind::NewFinding => write!(
-            out,
-            "Check this new finding on {place}.\n\nFinding:\n```text\n{}\n```\n",
-            request.text
-        ),
-        CheckKind::Rewrite { current } => write!(
-            out,
-            "Check this rewrite of the finding on {place}.\n\nThe finding now:\n```text\n{current}\n```\n\nProposed text:\n```text\n{}\n```\n",
-            request.text
-        ),
-        CheckKind::Withdrawal { finding } => write!(
-            out,
-            "Check whether the finding on {place} should be withdrawn as wrong.\n\nThe finding:\n```text\n{finding}\n```\n\nReason given for withdrawing it:\n```text\n{}\n```\n",
-            request.text
-        ),
-    };
-    match diff.file(&request.path) {
-        Some(file) => {
-            let _ = write!(out, "\nThe diff of {}:\n{}", request.path, file.render());
-        }
-        None => {
-            let _ = write!(
+    let last = ids.iter().max().copied();
+    let earlier: Vec<&Draft> = book
+        .iter()
+        .filter(|d| !ids.contains(&d.id) && last.is_some_and(|last| d.id < last))
+        .collect();
+    let others: Vec<&Finding> = existing
+        .iter()
+        .filter(|f| !f.resolved && paths.contains(f.key.path.as_str()))
+        .collect();
+    if !earlier.is_empty() || !others.is_empty() {
+        out.push_str(
+            "\nFor same_as only, not to judge here: what other reviewers drafted earlier, and the findings already on these files.\n",
+        );
+        for draft in earlier {
+            let _ = writeln!(
                 out,
-                "\n{} is not part of this change; the changed files are:\n{}",
-                request.path,
-                diff.render_list()
+                "- {} at {}:{}: {}",
+                draft.id,
+                draft.key.path,
+                draft.key.line,
+                short(&draft.text)
             );
+        }
+        for finding in others {
+            let _ = writeln!(
+                out,
+                "- comment {} at {}:{}: {}",
+                finding.comment_id,
+                finding.key.path,
+                finding.key.line,
+                short(crate::review_tools::visible_text(&finding.body))
+            );
+        }
+    }
+
+    for path in paths {
+        match diff.file(path) {
+            Some(file) => {
+                let _ = write!(out, "\nThe diff of {path}:\n{}", file.render());
+            }
+            None => {
+                let _ = write!(
+                    out,
+                    "\n{path} is not part of this change; the changed files are:\n{}",
+                    diff.render_list()
+                );
+            }
         }
     }
     out
 }
 
-/// Asks once for the verdict when the model ends its turn without one.
-fn ask_for_verdict(slot: Arc<Mutex<Option<(bool, String)>>>) -> Continuation {
-    let asked = std::sync::atomic::AtomicBool::new(false);
+/// One draft to judge, as the opening shows it.
+fn describe(draft: &Draft) -> String {
+    let side = match draft.kind {
+        DraftKind::Finding {
+            side: DiffSide::Left,
+        } => " (old side, a removed line)",
+        _ => "",
+    };
+    let place = format!("{}:{}{side}", draft.key.path, draft.key.line);
+    match &draft.kind {
+        DraftKind::Finding { .. } => format!(
+            "## {}: a new finding on {place}\n```text\n{}\n```\n",
+            draft.id, draft.text
+        ),
+        DraftKind::Rewrite {
+            comment_id,
+            current,
+        } => format!(
+            "## {}: a rewrite of finding {comment_id} on {place}\nThe finding now:\n```text\n{current}\n```\nProposed text:\n```text\n{}\n```\n",
+            draft.id, draft.text
+        ),
+        DraftKind::Withdrawal {
+            comment_id,
+            finding,
+        } => format!(
+            "## {}: withdrawing finding {comment_id} on {place} as wrong\nThe finding:\n```text\n{finding}\n```\nThe reason given for withdrawing it:\n```text\n{}\n```\n",
+            draft.id, draft.text
+        ),
+    }
+}
+
+/// The first line of `text`, cut to [`CONTEXT_CHARS`].
+fn short(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    match line.char_indices().nth(CONTEXT_CHARS) {
+        Some((cut, _)) => format!("{}...", line.get(..cut).unwrap_or(line)),
+        None => line.to_owned(),
+    }
+}
+
+/// Asks once for the missing verdicts when the model ends its turn
+/// without all of them.
+fn ask_for_verdicts(
+    ids: Vec<DraftId>,
+    given: Arc<Mutex<BTreeMap<DraftId, Verdict>>>,
+) -> Continuation {
+    let asked = AtomicBool::new(false);
     Box::new(move |ending| {
-        let missing = slot.lock().is_ok_and(|v| v.is_none());
-        (ending.reason == EndReason::EndTurn && missing && !asked.swap(true, Ordering::SeqCst))
-            .then(|| "You ended without a verdict. Call give_verdict with confirmed or rejected and a reason.".to_owned())
+        if ending.reason != EndReason::EndTurn {
+            return None;
+        }
+        let missing: Vec<String> = given.lock().map_or_else(
+            |_| Vec::new(),
+            |given| {
+                ids.iter()
+                    .filter(|id| !given.contains_key(id))
+                    .map(ToString::to_string)
+                    .collect()
+            },
+        );
+        (!missing.is_empty() && !asked.swap(true, Ordering::SeqCst)).then(|| {
+            format!(
+                "You have no verdict yet on {}. Call give_verdict for each, then end your turn.",
+                missing.join(", ")
+            )
+        })
     })
 }
 
-/// `give_verdict`: the one thing a check produces.
-struct GiveVerdict(Arc<Mutex<Option<(bool, String)>>>);
+/// `give_verdict`: one verdict per draft of the session.
+struct GiveVerdict {
+    by: ModelId,
+    book: DraftBook,
+    judging: BTreeSet<DraftId>,
+    comments: Vec<String>,
+    given: Arc<Mutex<BTreeMap<DraftId, Verdict>>>,
+}
 
 #[async_trait::async_trait]
 impl Tool for GiveVerdict {
@@ -321,40 +371,77 @@ impl Tool for GiveVerdict {
         ToolDef {
             name: ToolName::parse("give_verdict")
                 .unwrap_or_else(|_| unreachable!("a constant tool name")),
-            description: "Records your verdict on the claim, once: confirmed if it holds, rejected if it does not, with the evidence as path:line.".to_owned(),
+            description: "Records your verdict on one draft, once: confirmed if it holds, rejected if it does not, or same_as when it says what an earlier draft or an existing finding already says. Cite the evidence as path:line.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "verdict": {"type": "string", "enum": ["confirmed", "rejected"]},
+                    "id": {"type": "string", "description": "The draft, such as d3"},
+                    "verdict": {"type": "string", "enum": ["confirmed", "rejected", "same_as"]},
+                    "same_as": {"type": "string", "description": "With same_as: the earlier draft (d2) or the comment id of the finding it repeats"},
                     "reason": {"type": "string", "description": "A few plain sentences citing the code as path:line"}
                 },
-                "required": ["verdict", "reason"]
+                "required": ["id", "verdict", "reason"]
             }),
         }
     }
 
     async fn call(&self, args: Value) -> ToolOutput {
-        let confirmed = match args.get("verdict").and_then(Value::as_str) {
-            Some("confirmed") => true,
-            Some("rejected") => false,
-            _ => return ToolOutput::error("verdict must be \"confirmed\" or \"rejected\""),
+        let text = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
         };
-        let Some(reason) = args
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-        else {
+        let Some(id) = text("id").and_then(DraftId::parse) else {
+            return ToolOutput::error("id must name a draft, such as d3");
+        };
+        if !self.judging.contains(&id) {
+            let yours: Vec<String> = self.judging.iter().map(ToString::to_string).collect();
+            return ToolOutput::error(format!(
+                "{id} is not yours to judge here; yours are {}.",
+                yours.join(", ")
+            ));
+        }
+        let Some(reason) = text("reason").map(str::to_owned) else {
             return ToolOutput::error("reason is required");
         };
-        let Ok(mut slot) = self.0.lock() else {
-            return ToolOutput::error("verdict unavailable");
+        let by = self.by.clone();
+        let verdict = match text("verdict") {
+            Some("confirmed") => Verdict::Confirmed { by, reason },
+            Some("rejected") => Verdict::Rejected { by, reason },
+            Some("same_as") => {
+                let Some(of) = text("same_as").map(Original::parse) else {
+                    return ToolOutput::error(
+                        "same_as needs the earlier draft (d2) or the comment id it repeats",
+                    );
+                };
+                let comments: Vec<&str> = self.comments.iter().map(String::as_str).collect();
+                if !same_as_allowed(&self.book, id, &of, &comments) {
+                    return ToolOutput::error(format!(
+                        "{id} can only repeat an earlier draft or a finding shown to you, not {of}."
+                    ));
+                }
+                Verdict::SameAs { by, of, reason }
+            }
+            _ => {
+                return ToolOutput::error(
+                    "verdict must be \"confirmed\", \"rejected\" or \"same_as\"",
+                );
+            }
         };
-        if slot.is_some() {
-            return ToolOutput::error("A verdict is already recorded. End your turn.");
+        let Ok(mut given) = self.given.lock() else {
+            return ToolOutput::error("verdicts unavailable");
+        };
+        if given.contains_key(&id) {
+            return ToolOutput::error(format!("{id} already has a verdict."));
         }
-        *slot = Some((confirmed, reason.to_owned()));
-        ToolOutput::ok("Recorded. End your turn now.")
+        given.insert(id, verdict);
+        let left = self.judging.len() - given.len();
+        ToolOutput::ok(if left == 0 {
+            "Recorded. Every draft has a verdict; end your turn now.".to_owned()
+        } else {
+            format!("Recorded. {left} draft(s) still need a verdict.")
+        })
     }
 }
 
@@ -365,14 +452,18 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::unnecessary_wraps
+        clippy::unnecessary_wraps,
+        clippy::needless_pass_by_value
     )]
 
     use std::time::Duration;
 
     use henk_domain::allowlist::Platform;
+    use henk_domain::finding::FindingKey;
+    use henk_domain::review::LaneName;
     use henk_llm::testing::ScriptedClient;
-    use henk_llm::{Completion, StopReason, ToolArguments, ToolCall, Usage};
+    use henk_llm::{Block, Completion, LlmError, Role, StopReason, ToolArguments, ToolCall, Usage};
+    use henk_store::SqliteStore;
 
     use super::*;
 
@@ -387,12 +478,11 @@ diff --git a/src/a.rs b/src/a.rs
  }
 ";
 
-    async fn store() -> (Arc<dyn RunStore>, RunId) {
-        let store = Arc::new(henk_store::SqliteStore::in_memory().unwrap());
-        let run = RunId::parse("r-1").unwrap();
+    async fn store() -> Arc<SqliteStore> {
+        let store = Arc::new(SqliteStore::in_memory().unwrap());
         store
             .create_run(&henk_store::NewRun {
-                id: run.clone(),
+                id: RunId::parse("r-1").unwrap(),
                 kind: henk_domain::run::RunKind::Review,
                 platform: Platform::GitHub,
                 repo: "o/r".into(),
@@ -404,17 +494,21 @@ diff --git a/src/a.rs b/src/a.rs
             })
             .await
             .unwrap();
-        (store, run)
+        store
     }
 
-    fn verdict_call(verdict: &str, reason: &str) -> Result<Completion, henk_llm::LlmError> {
+    fn verdict(id: &str, verdict: &str, extra: Value) -> Result<Completion, LlmError> {
+        let mut args = json!({"id": id, "verdict": verdict, "reason": "src/a.rs:2 says so."});
+        if let (Some(args), Some(extra)) = (args.as_object_mut(), extra.as_object()) {
+            args.extend(extra.clone());
+        }
         Ok(Completion {
             message: ChatMessage {
-                role: henk_llm::Role::Assistant,
-                blocks: vec![henk_llm::Block::ToolCall(ToolCall {
-                    id: "v1".into(),
+                role: Role::Assistant,
+                blocks: vec![Block::ToolCall(ToolCall {
+                    id: format!("v-{id}"),
                     name: "give_verdict".into(),
-                    arguments: ToolArguments::Parsed(json!({"verdict": verdict, "reason": reason})),
+                    arguments: ToolArguments::Parsed(args),
                 })],
             },
             stop: StopReason::ToolUse,
@@ -422,7 +516,7 @@ diff --git a/src/a.rs b/src/a.rs
         })
     }
 
-    fn done() -> Result<Completion, henk_llm::LlmError> {
+    fn done() -> Result<Completion, LlmError> {
         Ok(Completion {
             message: ChatMessage::assistant("Done."),
             stop: StopReason::EndTurn,
@@ -430,256 +524,276 @@ diff --git a/src/a.rs b/src/a.rs
         })
     }
 
-    async fn checker(models: Vec<Arc<dyn ModelClient>>) -> SessionFactCheck {
-        let (store, run) = store().await;
-        SessionFactCheck {
+    fn model(name: &str) -> ModelId {
+        ModelId::parse(name).unwrap()
+    }
+
+    fn checker(store: Arc<SqliteStore>, models: Vec<Arc<dyn ModelClient>>) -> FactChecker {
+        FactChecker {
             store,
-            run,
+            run: RunId::parse("r-1").unwrap(),
             models,
             diff: Arc::new(ReviewDiff::from_unified(DIFF)),
             file_reader: None,
             workspace: None,
-            check_limits: henk_domain::workspace::Limits {
-                command_secs: 10,
-                ..henk_domain::workspace::Limits::default()
-            },
-            system: "check".into(),
-            skills: crate::skill_tools::AgentSkills::new(),
+            check_limits: henk_domain::workspace::Limits::default(),
+            system: "Check.".into(),
+            skills: crate::skill_tools::AgentSkills::default(),
             limits: AgentConfig {
-                max_turns: 6,
+                max_turns: 10,
                 timeout: Duration::from_secs(10),
                 ..AgentConfig::default()
             },
             cancel: CancellationToken::new(),
-            sequence: AtomicU32::new(0),
         }
     }
 
-    fn request(lane_model: &str) -> CheckRequest {
-        CheckRequest {
-            lane: LaneName::new("lane-a"),
-            lane_model: ModelId::parse(lane_model).unwrap(),
-            kind: CheckKind::NewFinding,
-            path: "src/a.rs".into(),
-            line: 2,
-            side: DiffSide::Right,
-            text: "x is never set.".into(),
-        }
-    }
-
-    /// Every check gets the run's time for commands of its own: one that
-    /// used all of its time leaves the next one its full share (#85).
-    #[tokio::test]
-    async fn a_later_check_still_gets_time_for_its_commands() {
-        use crate::workspace::WorkspaceProvider as _;
-        let dir = crate::git::ScratchDir::new("henk-check-budget").unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        let mut provider = crate::workspace::fake::FakeProvider::default();
-        provider.script.insert(
-            "bash -c cargo test".to_owned(),
-            crate::workspace::fake::Scripted {
-                delay: Duration::from_secs(30),
-                ..crate::workspace::fake::Scripted::default()
-            },
-        );
-        let workspace = provider
-            .open(dir.path(), &henk_domain::workspace::Profile::default())
-            .await
-            .unwrap();
-        let bash = || {
-            Ok(Completion {
-                message: ChatMessage {
-                    role: henk_llm::Role::Assistant,
-                    blocks: vec![henk_llm::Block::ToolCall(ToolCall {
-                        id: "b1".into(),
-                        name: "bash".into(),
-                        arguments: ToolArguments::Parsed(json!({"command": "cargo test"})),
-                    })],
+    /// `n` new findings by lane-a on model `lane_model`, on line 2 then
+    /// lines past it (the book does not check the diff).
+    fn book(n: u32, lane_model: &str) -> DraftBook {
+        let mut book = DraftBook::new();
+        for line in 0..n {
+            book.add(
+                &LaneName::new("lane-a"),
+                &model(lane_model),
+                DraftKind::Finding {
+                    side: DiffSide::Right,
                 },
-                stop: StopReason::ToolUse,
-                usage: Usage::default(),
-            })
-        };
-        let model = Arc::new(ScriptedClient::new(
-            "opus",
-            [
-                bash(),
-                verdict_call("rejected", "the test passes."),
-                done(),
-                bash(),
-                verdict_call("rejected", "the test passes."),
-                done(),
-            ],
-        ));
-        let mut check = checker(vec![model.clone()]).await;
-        check.workspace = Some(workspace);
-        check.check_limits.run_secs = 1;
-        let mut seen = 0;
-        for _ in 0..2 {
-            check.check(&request("lane-model")).await;
-            let requests = model.requests();
-            let results: Vec<String> = requests[seen..]
-                .iter()
-                .flat_map(|r| r.messages.iter())
-                .flat_map(|m| m.blocks.iter())
-                .filter_map(|b| match b {
-                    henk_llm::Block::ToolResult(r) => Some(r.content.clone()),
-                    _ => None,
-                })
-                .collect();
-            seen = requests.len();
-            assert!(
-                results.iter().any(|r| r.starts_with("stopped after 1 s")),
-                "each check's command gets its own second: {results:?}"
-            );
-            assert!(
-                !results.iter().any(|r| r.contains("not started")),
-                "{results:?}"
-            );
+                FindingKey {
+                    path: "src/a.rs".into(),
+                    line: 2 + line,
+                },
+                &format!("Problem {line}."),
+            )
+            .unwrap();
         }
+        book
+    }
+
+    fn id(text: &str) -> DraftId {
+        DraftId::parse(text).unwrap()
     }
 
     #[tokio::test]
-    async fn with_a_workspace_the_checker_lists_searches_and_reads_it() {
-        use crate::workspace::WorkspaceProvider as _;
-        let dir = crate::git::ScratchDir::new("henk-check-ws").unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::write(dir.path().join("src/a.rs"), "let x = 1;\n").unwrap();
-        let workspace = crate::workspace::fake::FakeProvider::default()
-            .open(dir.path(), &henk_domain::workspace::Profile::default())
-            .await
-            .unwrap();
-        let search = Ok(Completion {
-            message: ChatMessage {
-                role: henk_llm::Role::Assistant,
-                blocks: vec![henk_llm::Block::ToolCall(ToolCall {
-                    id: "s1".into(),
-                    name: "search".into(),
-                    arguments: ToolArguments::Parsed(json!({"pattern": "let x = \\d"})),
-                })],
-            },
-            stop: StopReason::ToolUse,
-            usage: Usage::default(),
-        });
-        let model = Arc::new(ScriptedClient::new(
-            "opus",
+    async fn one_session_judges_its_drafts_with_the_diff_shown_once() {
+        let store = store().await;
+        let other = Arc::new(ScriptedClient::new(
+            "n",
             [
-                search,
-                verdict_call("rejected", "src/a.rs:1 sets x."),
+                verdict("d1", "confirmed", json!({})),
+                verdict("d2", "rejected", json!({})),
+                verdict("d3", "same_as", json!({"same_as": "d1"})),
                 done(),
             ],
         ));
-        let mut check = checker(vec![model.clone()]).await;
-        check.workspace = Some(workspace);
-        let verdict = check.check(&request("lane-model")).await;
-        assert!(
-            matches!(verdict, CheckVerdict::Rejected { .. }),
-            "{verdict:?}"
+        let own = Arc::new(ScriptedClient::new("m", []));
+        let checker = checker(
+            Arc::clone(&store),
+            vec![
+                Arc::clone(&own) as Arc<dyn ModelClient>,
+                Arc::clone(&other) as Arc<dyn ModelClient>,
+            ],
         );
-        let requests = model.requests();
-        let names: Vec<String> = requests[0]
-            .tools
-            .iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        for tool in ["list_files", "read_file", "search", "bash", "give_verdict"] {
-            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        let verdicts = checker.check_all(&book(3, "m"), &[]).await;
+        assert!(
+            matches!(verdicts[&id("d1")], Verdict::Confirmed { ref by, .. } if *by == model("n"))
+        );
+        assert!(matches!(verdicts[&id("d2")], Verdict::Rejected { .. }));
+        assert!(matches!(
+            verdicts[&id("d3")],
+            Verdict::SameAs { of: Original::Draft(of), .. } if of == id("d1")
+        ));
+        assert!(
+            own.requests().is_empty(),
+            "the lane's own model never checks first"
+        );
+
+        let requests = other.requests();
+        let opening = requests[0].messages[0].text();
+        assert_eq!(
+            opening.matches("The diff of src/a.rs:").count(),
+            1,
+            "{opening}"
+        );
+        for expected in ["## d1: a new finding on src/a.rs:2", "## d3:", "Problem 2."] {
+            assert!(opening.contains(expected), "{expected} in {opening}");
         }
-        let bash = requests[0]
-            .tools
-            .iter()
-            .find(|t| t.name.as_str() == "bash")
-            .map(|t| t.description.clone())
-            .unwrap_or_default();
-        assert!(
-            bash.contains("Other checks use the same copy") && !bash.contains("own copy"),
-            "the checks share the copy: {bash}"
+        let sessions: Vec<String> = store
+            .lanes(&RunId::parse("r-1").unwrap())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(sessions, ["check-1"]);
+    }
+
+    #[tokio::test]
+    async fn eleven_drafts_take_two_sessions() {
+        let store = store().await;
+        let mut script: Vec<_> = (1..=10)
+            .map(|n| verdict(&format!("d{n}"), "confirmed", json!({})))
+            .collect();
+        script.push(done());
+        script.push(verdict("d11", "confirmed", json!({})));
+        script.push(done());
+        let checker = checker(
+            Arc::clone(&store),
+            vec![Arc::new(ScriptedClient::new("n", script)) as Arc<dyn ModelClient>],
         );
-        let answered = requests[1]
+        let verdicts = checker.check_all(&book(11, "m"), &[]).await;
+        assert_eq!(verdicts.len(), 11);
+        assert!(
+            verdicts
+                .values()
+                .all(|v| matches!(v, Verdict::Confirmed { .. }))
+        );
+        let lanes = store.lanes(&RunId::parse("r-1").unwrap()).await.unwrap();
+        assert_eq!(lanes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bad_verdicts_are_refused_and_a_missing_one_falls_through_then_goes_unchecked() {
+        let store = store().await;
+        let first = Arc::new(ScriptedClient::new(
+            "n",
+            [
+                verdict("d9", "confirmed", json!({})),
+                verdict("d2", "same_as", json!({"same_as": "d3"})),
+                verdict("d1", "same_as", json!({"same_as": "c-404"})),
+                verdict("d1", "maybe", json!({})),
+                verdict("d1", "confirmed", json!({})),
+                verdict("d1", "rejected", json!({})),
+                done(),
+                done(),
+            ],
+        ));
+        let backup = Arc::new(ScriptedClient::new("o", [done(), done()]));
+        let checker = checker(
+            Arc::clone(&store),
+            vec![
+                Arc::clone(&first) as Arc<dyn ModelClient>,
+                Arc::clone(&backup) as Arc<dyn ModelClient>,
+            ],
+        );
+        let verdicts = checker.check_all(&book(2, "m"), &[]).await;
+        assert!(
+            matches!(verdicts[&id("d1")], Verdict::Confirmed { .. }),
+            "the first verdict stands"
+        );
+        assert_eq!(
+            verdicts[&id("d2")],
+            Verdict::Unchecked {
+                why: "no verdict from n or o".into()
+            }
+        );
+        let results: Vec<String> = first
+            .requests()
+            .last()
+            .unwrap()
             .messages
             .iter()
             .flat_map(|m| m.blocks.iter())
-            .any(|b| matches!(b, henk_llm::Block::ToolResult(r) if r.content == "src/a.rs:1: let x = 1;\n"));
+            .filter_map(|b| match b {
+                Block::ToolResult(r) => Some(r.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(results[0].contains("d9 is not yours"), "{results:?}");
         assert!(
-            answered,
-            "the search read the workspace: {:?}",
-            requests[1].messages
+            results[1].contains("only repeat an earlier draft"),
+            "{results:?}"
+        );
+        assert!(results[2].contains("not comment c-404"), "{results:?}");
+        assert!(results[3].contains("verdict must be"), "{results:?}");
+        assert!(results[5].contains("already has a verdict"), "{results:?}");
+        let nudge = first
+            .requests()
+            .last()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .text();
+        assert!(nudge.contains("no verdict yet on d2"), "{nudge}");
+        assert_eq!(
+            backup.requests()[0].messages[0]
+                .text()
+                .matches("## ")
+                .count(),
+            1,
+            "the backup gets only what is still open"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_as_may_name_an_existing_finding_shown_in_the_opening() {
+        let store = store().await;
+        let client = Arc::new(ScriptedClient::new(
+            "n",
+            [verdict("d1", "same_as", json!({"same_as": "c-7"})), done()],
+        ));
+        let checker = checker(
+            Arc::clone(&store),
+            vec![Arc::clone(&client) as Arc<dyn ModelClient>],
+        );
+        let existing = Finding {
+            key: FindingKey {
+                path: "src/a.rs".into(),
+                line: 2,
+            },
+            comment_id: "c-7".into(),
+            body: "x changes meaning.<!-- henk -->".into(),
+            lane: None,
+            answered_by_person: false,
+            resolved: false,
+            in_diff: true,
+        };
+        let verdicts = checker.check_all(&book(1, "m"), &[existing]).await;
+        assert!(matches!(
+            &verdicts[&id("d1")],
+            Verdict::SameAs { of: Original::Comment(c), .. } if c == "c-7"
+        ));
+        let opening = client.requests()[0].messages[0].text();
+        assert!(
+            opening.contains("- comment c-7 at src/a.rs:2: x changes meaning."),
+            "{opening}"
         );
     }
 
     #[tokio::test]
     async fn without_a_workspace_the_checker_has_no_code_tools() {
-        let model = Arc::new(ScriptedClient::new(
-            "opus",
-            [verdict_call("rejected", "no."), done()],
+        let store = store().await;
+        let client = Arc::new(ScriptedClient::new(
+            "n",
+            [verdict("d1", "confirmed", json!({})), done()],
         ));
-        let check = checker(vec![model.clone()]).await;
-        let _ = check.check(&request("lane-model")).await;
-        let names: Vec<String> = model.requests()[0]
+        let checker = checker(store, vec![Arc::clone(&client) as Arc<dyn ModelClient>]);
+        checker.check_all(&book(1, "m"), &[]).await;
+        let tools: Vec<String> = client.requests()[0]
             .tools
             .iter()
             .map(|t| t.name.to_string())
             .collect();
-        assert!(
-            !names
-                .iter()
-                .any(|n| n == "search" || n == "list_files" || n == "bash"),
-            "{names:?}"
+        assert_eq!(
+            tools,
+            ["get_file_diff", "give_verdict", "list_changed_files"]
         );
     }
 
     #[tokio::test]
-    async fn a_rejection_comes_back_with_its_reason_and_the_diff_was_shown() {
-        let model = Arc::new(ScriptedClient::new(
-            "opus",
-            [verdict_call("rejected", "src/a.rs:2 sets x."), done()],
-        ));
-        let check = checker(vec![model.clone()]).await;
-        let verdict = check.check(&request("lane-model")).await;
+    async fn a_cancelled_review_checks_nothing() {
+        let store = store().await;
+        let client = Arc::new(ScriptedClient::new("n", []));
+        let checker = checker(store, vec![Arc::clone(&client) as Arc<dyn ModelClient>]);
+        checker.cancel.cancel();
+        let verdicts = checker.check_all(&book(1, "m"), &[]).await;
         assert_eq!(
-            verdict,
-            CheckVerdict::Rejected {
-                by: ModelId::parse("opus").unwrap(),
-                reason: "src/a.rs:2 sets x.".into()
+            verdicts[&id("d1")],
+            Verdict::Unchecked {
+                why: "the review was cancelled".into()
             }
         );
-        let opening = model.requests()[0].messages[0].text();
-        assert!(opening.contains("x is never set."), "{opening}");
-        assert!(opening.contains("+    let x = 2;"), "{opening}");
-        let events = check.store.events(&check.run).await.unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|e| e.message.contains("rejected finding on src/a.rs:2"))
-        );
-    }
-
-    #[tokio::test]
-    async fn the_lanes_own_model_goes_last_and_a_silent_model_falls_through() {
-        // The lane runs on "opus", so the backup "sonnet" checks first; it
-        // ends without a verdict twice, and then "opus" confirms.
-        let sonnet = Arc::new(ScriptedClient::new("sonnet", [done(), done()]));
-        let opus = Arc::new(ScriptedClient::new(
-            "opus",
-            [verdict_call("confirmed", "It holds."), done()],
-        ));
-        let check = checker(vec![opus.clone(), sonnet.clone()]).await;
-        let verdict = check.check(&request("opus")).await;
-        assert!(matches!(verdict, CheckVerdict::Confirmed { ref by, .. } if by.as_str() == "opus"));
-        assert_eq!(
-            sonnet.requests().len(),
-            2,
-            "asked once for the missing verdict"
-        );
-        let last = sonnet.requests()[1].messages.last().unwrap().text();
-        assert!(last.contains("give_verdict"), "{last}");
-    }
-
-    #[tokio::test]
-    async fn no_verdict_from_anyone_is_unavailable() {
-        let model = Arc::new(ScriptedClient::new("opus", [done(), done()]));
-        let check = checker(vec![model]).await;
-        let verdict = check.check(&request("lane-model")).await;
-        assert!(matches!(verdict, CheckVerdict::Unavailable { ref why } if why.contains("opus")));
+        assert!(client.requests().is_empty());
     }
 }

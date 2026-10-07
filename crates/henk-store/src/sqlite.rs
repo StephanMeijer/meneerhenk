@@ -13,11 +13,11 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::store::RunStore;
 use crate::types::{
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, attach_outcomes, kind_str, now, platform_str, status_str,
-    to_i64, to_u64,
+    DraftDecision, DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
+    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    kind_str, now, platform_str, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -36,6 +36,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/006_event_requester.sql")),
         M::up(include_str!("../migrations/sqlite/007_tool_calls.sql")),
         M::up(include_str!("../migrations/sqlite/008_transcripts.sql")),
+        M::up(include_str!("../migrations/sqlite/009_drafts.sql")),
     ])
 }
 
@@ -278,6 +279,118 @@ impl RunStore for SqliteStore {
             )?;
             Ok(())
         })
+    }
+
+    async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
+        let at = if draft.at.is_empty() {
+            now()
+        } else {
+            draft.at.clone()
+        };
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO drafts (run_id, draft, lane, model, kind, path, line, target, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
+                params![
+                    run.as_str(),
+                    draft.draft,
+                    draft.lane,
+                    draft.model,
+                    draft.kind,
+                    draft.path,
+                    draft.line,
+                    draft.target,
+                    draft.body,
+                    at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn decide_draft(
+        &self,
+        run: &RunId,
+        draft: &str,
+        decision: &DraftDecision,
+    ) -> Result<(), StoreError> {
+        let at = if decision.at.is_empty() {
+            now()
+        } else {
+            decision.at.clone()
+        };
+        self.with(|c| {
+            c.execute(
+                "UPDATE drafts SET verdict = ?3, checker = ?4, reason = ?5, same_as = ?6, comment_id = ?7, decided_at = ?8 WHERE run_id = ?1 AND draft = ?2",
+                params![
+                    run.as_str(),
+                    draft,
+                    decision.verdict.as_str(),
+                    decision.checker,
+                    decision.reason,
+                    decision.same_as,
+                    decision.comment_id,
+                    at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError> {
+        type Row = (
+            DraftRecord,
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        );
+        let rows: Vec<Row> = self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT created_at, draft, lane, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = ?1 ORDER BY id",
+            )?;
+            let rows = statement.query_map(params![run.as_str()], |row| {
+                Ok((
+                    DraftRecord {
+                        at: row.get(0)?,
+                        draft: row.get(1)?,
+                        lane: row.get(2)?,
+                        model: row.get(3)?,
+                        kind: row.get(4)?,
+                        path: row.get(5)?,
+                        line: row.get(6)?,
+                        target: row.get(7)?,
+                        body: row.get(8)?,
+                        decision: None,
+                    },
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        })?;
+        rows.into_iter()
+            .map(
+                |(mut draft, verdict, checker, reason, same_as, comment_id, decided)| {
+                    if let Some(verdict) = verdict {
+                        draft.decision = Some(DraftDecision {
+                            at: decided.unwrap_or_default(),
+                            verdict: draft_verdict(&verdict)?,
+                            checker,
+                            reason,
+                            same_as,
+                            comment_id,
+                        });
+                    }
+                    Ok(draft)
+                },
+            )
+            .collect()
     }
 
     async fn record_transcript(

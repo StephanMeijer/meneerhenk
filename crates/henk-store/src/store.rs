@@ -5,9 +5,10 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    DraftDecision, DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
+    RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -129,6 +130,33 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure.
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError>;
+
+    /// Records a review lane's draft as queued (#189), or its new text when
+    /// the lane replaced it. Its `decision` is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError>;
+
+    /// Records what became of draft `draft` (`d3`) of a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn decide_draft(
+        &self,
+        run: &RunId,
+        draft: &str,
+        decision: &DraftDecision,
+    ) -> Result<(), StoreError>;
+
+    /// The drafts of a run, in the order they were queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError>;
 
     /// Records one tool call of a session (#190). An empty `at` means now.
     ///

@@ -16,11 +16,11 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, attach_outcomes, kind_str, platform_str, status_str,
-    to_i64, to_u64,
+    DraftDecision, DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
+    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    kind_str, platform_str, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/003_event_requester.sql"),
     include_str!("../migrations/postgres/004_tool_calls.sql"),
     include_str!("../migrations/postgres/005_transcripts.sql"),
+    include_str!("../migrations/postgres/006_drafts.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -468,6 +469,101 @@ impl RunStore for PgStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
+        let at = parse_time("drafts.created_at", &draft.at)?;
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO drafts (run_id, draft, lane, model, kind, path, line, target, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
+                &[
+                    &run.as_str(),
+                    &draft.draft,
+                    &draft.lane,
+                    &draft.model,
+                    &draft.kind,
+                    &draft.path,
+                    &i64::from(draft.line),
+                    &draft.target,
+                    &draft.body,
+                    &at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn decide_draft(
+        &self,
+        run: &RunId,
+        draft: &str,
+        decision: &DraftDecision,
+    ) -> Result<(), StoreError> {
+        let at = parse_time("drafts.decided_at", &decision.at)?;
+        self.client()
+            .await?
+            .execute(
+                "UPDATE drafts SET verdict = $3, checker = $4, reason = $5, same_as = $6, comment_id = $7, decided_at = $8 WHERE run_id = $1 AND draft = $2",
+                &[
+                    &run.as_str(),
+                    &draft,
+                    &decision.verdict.as_str(),
+                    &decision.checker,
+                    &decision.reason,
+                    &decision.same_as,
+                    &decision.comment_id,
+                    &at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT created_at, draft, lane, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = $1 ORDER BY id",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let line: i64 = row.try_get(6)?;
+                let verdict: Option<String> = row.try_get(9)?;
+                let decision = match verdict {
+                    Some(verdict) => Some(DraftDecision {
+                        at: row
+                            .try_get::<_, Option<OffsetDateTime>>(14)?
+                            .map(text)
+                            .unwrap_or_default(),
+                        verdict: draft_verdict(&verdict)?,
+                        checker: row.try_get(10)?,
+                        reason: row.try_get(11)?,
+                        same_as: row.try_get(12)?,
+                        comment_id: row.try_get(13)?,
+                    }),
+                    None => None,
+                };
+                Ok(DraftRecord {
+                    at: text(row.try_get(0)?),
+                    draft: row.try_get(1)?,
+                    lane: row.try_get(2)?,
+                    model: row.try_get(3)?,
+                    kind: row.try_get(4)?,
+                    path: row.try_get(5)?,
+                    line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
+                        column: "drafts.line",
+                        value: line.to_string(),
+                    })?,
+                    target: row.try_get(7)?,
+                    body: row.try_get(8)?,
+                    decision,
+                })
+            })
+            .collect()
     }
 
     async fn record_transcript(

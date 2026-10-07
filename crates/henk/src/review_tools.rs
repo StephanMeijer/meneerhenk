@@ -1,27 +1,27 @@
 //! The tools a review lane gets besides the read-only MCP tools:
-//! listing, posting, improving and withdrawing findings, with every rule of
-//! §3.2 and §8.5 enforced here rather than in the prompt. When a fact-check
-//! is configured, every write passes it first.
+//! listing findings and drafting new ones, rewrites and withdrawals, with
+//! every rule of §3.2 and §8.5 enforced here rather than in the prompt. A
+//! lane never writes to the platform: its writes are drafts, checked
+//! together after the lanes and written by [`crate::drafts`] (#189).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use henk_agent::{Continuation, EndReason, Ending, Tool, ToolOutput};
 use henk_domain::diff::ReviewDiff;
-use henk_domain::finding::{Claim, Finding, FindingKey, FindingRegistry};
-use henk_domain::marker::{Marker, MarkerKind, ModelId, Withdrawal};
-use henk_domain::review::{CommitSha, LaneName};
+use henk_domain::draft::{DraftBook, DraftKind};
+use henk_domain::finding::{Claim, FindingKey, FindingRegistry};
+use henk_domain::marker::ModelId;
+use henk_domain::review::LaneName;
 use henk_domain::run::RunId;
 use henk_domain::text::style_violations;
 use henk_llm::{ToolDef, ToolName};
-use henk_platform::{DiffSide, PlatformWriter, ReviewTarget};
-use henk_store::{FindingAction, RunStore};
+use henk_platform::DiffSide;
+use henk_store::{DraftRecord, FindingAction, RunStore};
 use serde_json::{Value, json};
-use tracing::{info, warn};
-
-use crate::fact_check::{CheckKind, CheckRequest, CheckVerdict, FactCheck};
+use tracing::info;
 
 /// The diff of a review as the read tools serve it, and which files a
 /// session asked the diff of.
@@ -61,23 +61,15 @@ pub struct LaneContext {
     pub lane: LaneName,
     /// The model behind this lane, for the marker.
     pub model: ModelId,
-    /// The pull/merge request.
-    pub target: ReviewTarget,
-    /// The reviewed commit.
-    pub commit: CommitSha,
     /// Findings known on the target, shared by all lanes of the review.
     pub registry: Arc<Mutex<FindingRegistry>>,
-    /// Where comments go.
-    pub writer: Arc<dyn PlatformWriter>,
+    /// The review's drafts, shared by all lanes (#189).
+    pub drafts: Arc<Mutex<DraftBook>>,
     /// Run records.
     pub store: Arc<dyn RunStore>,
     /// The diff of the review. Findings are checked against it before
-    /// anything is posted.
+    /// anything is drafted.
     pub files: Arc<DiffFiles>,
-    /// The second model every write passes, when configured (§3.2).
-    pub fact_check: Option<Arc<dyn FactCheck>>,
-    /// Fact-check rejections per line, for this lane.
-    pub rejections: Mutex<BTreeMap<FindingKey, u32>>,
     /// This lane's own workspace at the reviewed commit, when its profile
     /// reviews in one (#170). Never exported.
     pub workspace: Option<Arc<dyn crate::workspace::Workspace>>,
@@ -91,97 +83,7 @@ impl LaneContext {
     }
 }
 
-/// What the fact-check decided for one write.
-enum Gate {
-    /// Go ahead.
-    Pass {
-        /// The model that confirmed the write, for its marker.
-        checked_by: Option<ModelId>,
-        /// Why no check could be made, when none was.
-        unchecked: Option<String>,
-    },
-    /// Do not write; tell the lane this.
-    Stop(ToolOutput),
-}
-
-/// How often a line may be rejected before the lane is told to stop trying.
-const MAX_REJECTIONS: u32 = 2;
-
 impl LaneContext {
-    /// Runs the fact-check for one write. `what` completes "Not ...":
-    /// "posted", "updated", "withdrawn".
-    async fn gate(
-        &self,
-        kind: CheckKind,
-        key: &FindingKey,
-        side: DiffSide,
-        text: &str,
-        comment_id: Option<&str>,
-        what: &str,
-    ) -> Gate {
-        let Some(checker) = &self.fact_check else {
-            return Gate::Pass {
-                checked_by: None,
-                unchecked: None,
-            };
-        };
-        let earlier = self
-            .rejections
-            .lock()
-            .map_or(0, |r| r.get(key).copied().unwrap_or(0));
-        if earlier >= MAX_REJECTIONS {
-            return Gate::Stop(ToolOutput::error(format!(
-                "Not {what}: the fact-check has rejected claims on {}:{} {earlier} times. Do not try this line again; move on.",
-                key.path, key.line
-            )));
-        }
-        let request = CheckRequest {
-            lane: self.lane.clone(),
-            lane_model: self.model.clone(),
-            kind,
-            path: key.path.clone(),
-            line: key.line,
-            side,
-            text: text.to_owned(),
-        };
-        match checker.check(&request).await {
-            CheckVerdict::Confirmed { by, .. } => Gate::Pass {
-                checked_by: Some(by),
-                unchecked: None,
-            },
-            CheckVerdict::Unavailable { why } => Gate::Pass {
-                checked_by: None,
-                unchecked: Some(why),
-            },
-            CheckVerdict::Rejected { reason, .. } => {
-                let count = self.rejections.lock().map_or(MAX_REJECTIONS, |mut r| {
-                    let count = r.entry(key.clone()).or_insert(0);
-                    *count += 1;
-                    *count
-                });
-                let _ = self
-                    .store
-                    .record_finding(
-                        &self.run,
-                        self.lane.as_str(),
-                        &key.path,
-                        key.line,
-                        comment_id.unwrap_or(""),
-                        FindingAction::Rejected,
-                    )
-                    .await;
-                let next = if count >= MAX_REJECTIONS {
-                    "It has now been rejected twice: do not try this line again; move on."
-                } else {
-                    "If the problem still holds, correct what the reason says is wrong and try again; otherwise move on."
-                };
-                Gate::Stop(ToolOutput::error(format!(
-                    "Not {what}: a fact-check rejected it. Reason: {reason}\n{next}"
-                )))
-            }
-        }
-    }
-
     /// The refusal when `key` already has a finding: improve it instead.
     ///
     /// Claim under the lock, then release it before any I/O: a std mutex
@@ -216,23 +118,65 @@ impl LaneContext {
         )))
     }
 
-    /// Records a write that went out unchecked and says so to the lane.
-    async fn unverified(&self, key: &FindingKey, comment_id: &str, why: Option<&str>) -> String {
-        let Some(why) = why else {
-            return String::new();
+    /// Adds a draft and tells the lane what became of it: queued,
+    /// replacing its own earlier draft on that line, or refused because
+    /// another lane's draft holds the line.
+    async fn queue(&self, kind: DraftKind, key: FindingKey, text: &str) -> ToolOutput {
+        let added = match self.drafts.lock() {
+            Ok(mut drafts) => {
+                let replacing = drafts.iter().any(|d| d.key == key);
+                drafts
+                    .add(&self.lane, &self.model, kind.clone(), key.clone(), text)
+                    .map(|id| (id, replacing))
+            }
+            Err(_) => return ToolOutput::error("drafts unavailable"),
         };
-        let _ = self
-            .store
-            .record_finding(
-                &self.run,
-                self.lane.as_str(),
-                &key.path,
-                key.line,
-                comment_id,
-                FindingAction::Unverified,
-            )
-            .await;
-        format!(" The fact-check could not run ({why}), so it went out unchecked.")
+        let (path, line) = (&key.path, key.line);
+        match added {
+            Ok((id, replacing)) => {
+                let record = DraftRecord {
+                    at: String::new(),
+                    draft: id.to_string(),
+                    lane: self.lane.as_str().to_owned(),
+                    model: self.model.as_str().to_owned(),
+                    kind: kind.as_str().to_owned(),
+                    path: path.clone(),
+                    line,
+                    target: kind.comment_id().unwrap_or_default().to_owned(),
+                    body: text.to_owned(),
+                    decision: None,
+                };
+                if let Err(error) = self.store.record_draft(&self.run, &record).await {
+                    tracing::warn!(%error, draft = %id, "could not record a draft");
+                }
+                info!(lane = %self.lane, draft = %id, kind = kind.as_str(), path = %path, line, "draft queued");
+                let what = if replacing {
+                    format!("Replaced your draft {id} on {path}:{line}.")
+                } else {
+                    format!("Queued as draft {id}.")
+                };
+                ToolOutput::ok(format!(
+                    "{what} Every draft is checked after all reviewers are done and written only if it holds; you will not hear the verdict. Move on."
+                ))
+            }
+            Err(taken) => {
+                let _ = self
+                    .store
+                    .record_finding(
+                        &self.run,
+                        self.lane.as_str(),
+                        path,
+                        line,
+                        kind.comment_id().unwrap_or_default(),
+                        FindingAction::Refused,
+                    )
+                    .await;
+                ToolOutput::error(format!(
+                    "{path}:{line} already has draft {} by another reviewer, waiting for the fact-check. If yours is the same problem, move on; if it is a different one, put it on another line it concerns.",
+                    taken.id
+                ))
+            }
+        }
     }
 }
 
@@ -251,7 +195,7 @@ pub fn lane_continuation(context: Arc<LaneContext>) -> Continuation {
             }
             info!(lane = %context.lane, turn = ending.turn, "nudging after an output cap");
             Some(
-                "Your answer was cut off at the output limit. Post each finding you are sure of with post_finding, one call per finding, then end your turn.".to_owned(),
+                "Your answer was cut off at the output limit. Draft each finding you are sure of with post_finding, one call per finding, then end your turn.".to_owned(),
             )
         }
         EndReason::EndTurn => {
@@ -488,19 +432,6 @@ fn number_lines(content: &str, start: usize, end: usize) -> String {
 }
 
 impl LaneContext {
-    /// The marker of a finding this lane writes, naming the model that
-    /// fact-checked it, when one did.
-    fn marker(&self, checked_by: Option<ModelId>) -> Marker {
-        Marker {
-            run: self.run.clone(),
-            model: self.model.clone(),
-            requested_by: None,
-            kind: Some(MarkerKind::Finding),
-            checked_by,
-            withdrawn: None,
-        }
-    }
-
     fn style_error(body: &str) -> Option<ToolOutput> {
         let violations = style_violations(body);
         if violations.is_empty() {
@@ -532,19 +463,41 @@ impl Tool for ListExistingFindings {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("list_existing_findings"),
-            description: "Lists the findings already posted on this pull request by any reviewer, with their comment ids, locations and text. Call this before posting.".to_owned(),
+            description: "Lists the findings already on this pull request, with their comment ids, locations and text, and the drafts other reviewers of this review have queued. Call this before drafting a finding.".to_owned(),
             input_schema: json!({"type": "object", "properties": {}}),
         }
     }
 
     async fn call(&self, _: Value) -> ToolOutput {
+        let drafts: Vec<String> = match self.0.drafts.lock() {
+            Ok(drafts) => drafts
+                .iter()
+                .map(|d| {
+                    let what = match &d.kind {
+                        DraftKind::Finding { .. } => "a new finding".to_owned(),
+                        DraftKind::Rewrite { comment_id, .. } => {
+                            format!("a rewrite of {comment_id}")
+                        }
+                        DraftKind::Withdrawal { comment_id, .. } => {
+                            format!("withdrawing {comment_id}, because")
+                        }
+                    };
+                    let mine = if d.lane == self.0.lane { ", yours" } else { "" };
+                    format!(
+                        "- draft {} at {}:{}{mine}: {what}\n  {}",
+                        d.id, d.key.path, d.key.line, d.text
+                    )
+                })
+                .collect(),
+            Err(_) => return ToolOutput::error("drafts unavailable"),
+        };
         let Ok(registry) = self.0.registry.lock() else {
             return ToolOutput::error("finding registry unavailable");
         };
-        if registry.is_empty() {
+        if registry.is_empty() && drafts.is_empty() {
             return ToolOutput::ok("No findings yet.");
         }
-        let lines: Vec<String> = registry
+        let mut lines: Vec<String> = registry
             .iter()
             .map(|f| {
                 let state = match (f.resolved, f.answered_by_person, f.in_diff) {
@@ -560,6 +513,13 @@ impl Tool for ListExistingFindings {
                 )
             })
             .collect();
+        if !drafts.is_empty() {
+            lines.push(
+                "Drafts waiting for the fact-check, from every reviewer of this review (not posted yet):"
+                    .to_owned(),
+            );
+            lines.extend(drafts);
+        }
         ToolOutput::ok(lines.join("\n"))
     }
 }
@@ -572,7 +532,7 @@ impl Tool for PostFinding {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("post_finding"),
-            description: "Posts one finding as a comment on one line of the diff at the reviewed commit. Only for a real problem this change introduces. One finding per line; if the line already has one, improve it instead.".to_owned(),
+            description: "Drafts one finding as a comment on one line of the diff at the reviewed commit. Only for a real problem this change introduces. It is posted after the review if a fact-check confirms it. One finding per line; if the line already has one, improve it instead. Calling it again on a line with your own draft replaces that draft.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -619,70 +579,7 @@ impl Tool for PostFinding {
         if let Some(refusal) = ctx.refuse_if_taken(&key).await {
             return refusal;
         }
-
-        let (checked_by, unchecked) = match ctx
-            .gate(CheckKind::NewFinding, &key, side, body, None, "posted")
-            .await
-        {
-            Gate::Pass {
-                checked_by,
-                unchecked,
-            } => (checked_by, unchecked),
-            Gate::Stop(output) => return output,
-        };
-
-        let full_body = ctx.marker(checked_by).attach(body);
-        let posted = match ctx
-            .writer
-            .post_finding(&ctx.target, &ctx.commit, path, line, side, &full_body)
-            .await
-        {
-            Ok(posted) => posted,
-            Err(error) => {
-                warn!(%error, path, line, "posting a finding failed");
-                // On the timeline too, so a lane whose every post failed does
-                // not look like a lane that found nothing.
-                let _ = ctx
-                    .store
-                    .event(
-                        &ctx.run,
-                        "warn",
-                        &format!(
-                            "{}: could not post a finding on {path}:{line}: {error}",
-                            ctx.lane
-                        ),
-                    )
-                    .await;
-                return ToolOutput::error(format!(
-                    "Could not post on {path}:{line}: {error}. If the line is not part of the diff, pick a line that is."
-                ));
-            }
-        };
-        if let Ok(mut registry) = ctx.registry.lock() {
-            registry.record(Finding {
-                key: key.clone(),
-                comment_id: posted.id.clone(),
-                body: full_body,
-                lane: Some(ctx.lane.clone()),
-                answered_by_person: false,
-                resolved: false,
-                in_diff: true,
-            });
-        }
-        let _ = ctx
-            .store
-            .record_finding(
-                &ctx.run,
-                ctx.lane.as_str(),
-                path,
-                line,
-                &posted.id,
-                FindingAction::Posted,
-            )
-            .await;
-        info!(lane = %ctx.lane, path, line, comment = %posted.id, "finding posted");
-        let note = ctx.unverified(&key, &posted.id, unchecked.as_deref()).await;
-        ToolOutput::ok(format!("Posted as comment {}.{note}", posted.id))
+        ctx.queue(DraftKind::Finding { side }, key, body).await
     }
 }
 
@@ -694,7 +591,7 @@ impl Tool for ImproveFinding {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("improve_finding"),
-            description: "Replaces the text of an existing finding when you can explain the same problem better. Never changes a finding a person has already answered.".to_owned(),
+            description: "Drafts a better text for an existing finding when you can explain the same problem better. It replaces the finding after the review if a fact-check confirms it. Never changes a finding a person has already answered.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -723,60 +620,36 @@ impl Tool for ImproveFinding {
             Err(_) => return ToolOutput::error("finding registry unavailable"),
         };
         let Some(existing) = existing else {
-            return ToolOutput::error(format!("No finding with comment id {comment_id}."));
+            return not_found(comment_id);
         };
         if existing.answered_by_person {
             return ToolOutput::error("A person has answered that finding; it stays as it is.");
         }
         let current = visible_text(&existing.body).to_owned();
-        let (checked_by, unchecked) = match ctx
-            .gate(
-                CheckKind::Rewrite { current },
-                &existing.key,
-                DiffSide::Right,
-                body,
-                Some(comment_id),
-                "updated",
-            )
-            .await
-        {
-            Gate::Pass {
-                checked_by,
-                unchecked,
-            } => (checked_by, unchecked),
-            Gate::Stop(output) => return output,
-        };
-        let full_body = ctx.marker(checked_by).attach(body);
-        if let Err(error) = ctx
-            .writer
-            .update_finding(&ctx.target, comment_id, &full_body)
-            .await
-        {
-            return ToolOutput::error(format!("Could not update comment {comment_id}: {error}"));
-        }
-        if let Ok(mut registry) = ctx.registry.lock() {
-            registry.improve(&existing.key, full_body, Some(ctx.lane.clone()));
-        }
-        let _ = ctx
-            .store
-            .record_finding(
-                &ctx.run,
-                ctx.lane.as_str(),
-                &existing.key.path,
-                existing.key.line,
-                comment_id,
-                FindingAction::Improved,
-            )
-            .await;
-        let note = ctx
-            .unverified(&existing.key, comment_id, unchecked.as_deref())
-            .await;
-        ToolOutput::ok(format!("Updated comment {comment_id}.{note}"))
+        ctx.queue(
+            DraftKind::Rewrite {
+                comment_id: comment_id.to_owned(),
+                current,
+            },
+            existing.key,
+            body,
+        )
+        .await
     }
 }
 
+/// The refusal for a comment id that is not a finding on the pull request.
+fn not_found(comment_id: &str) -> ToolOutput {
+    if henk_domain::draft::DraftId::parse(comment_id).is_some() && comment_id.starts_with('d') {
+        return ToolOutput::error(format!(
+            "{comment_id} is a draft, not a comment yet; drafts are checked after the review and cannot be improved or withdrawn. To change your own, call post_finding again on its line."
+        ));
+    }
+    ToolOutput::error(format!("No finding with comment id {comment_id}."))
+}
+
 /// The visible text of a comment: everything before the hidden marker.
-fn visible_text(body: &str) -> &str {
+pub(crate) fn visible_text(body: &str) -> &str {
     body.split("<!--").next().unwrap_or("").trim()
 }
 
@@ -788,7 +661,7 @@ impl Tool for WithdrawFinding {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("withdraw_finding"),
-            description: "Withdraws an existing finding that is wrong: its text is replaced by your reason and its thread is resolved, so it no longer counts. Only for Henk's own findings that no person has answered.".to_owned(),
+            description: "Drafts withdrawing an existing finding that is wrong. If a fact-check agrees after the review, its text is replaced by your reason and its thread resolved, so it no longer counts. Only for Henk's own findings that no person has answered.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -818,7 +691,7 @@ impl Tool for WithdrawFinding {
             Err(_) => return ToolOutput::error("finding registry unavailable"),
         };
         let Some(existing) = existing else {
-            return ToolOutput::error(format!("No finding with comment id {comment_id}."));
+            return not_found(comment_id);
         };
         if existing.answered_by_person {
             return ToolOutput::error(
@@ -829,76 +702,15 @@ impl Tool for WithdrawFinding {
             return ToolOutput::error(format!("Finding {comment_id} is already resolved."));
         }
         let finding = visible_text(&existing.body).to_owned();
-        let (checked_by, unchecked) = match ctx
-            .gate(
-                CheckKind::Withdrawal { finding },
-                &existing.key,
-                DiffSide::Right,
-                reason,
-                Some(comment_id),
-                "withdrawn",
-            )
-            .await
-        {
-            Gate::Pass {
-                checked_by,
-                unchecked,
-            } => (checked_by, unchecked),
-            Gate::Stop(output) => return output,
-        };
-        // The finding keeps who wrote it (§8.6); the withdrawal is added.
-        let original = Marker::parse(&existing.body).unwrap_or_else(|| ctx.marker(None));
-        let full_body = Marker {
-            withdrawn: Some(Withdrawal {
-                run: ctx.run.clone(),
-                model: ctx.model.clone(),
-                checked_by,
-            }),
-            ..original
-        }
-        .attach(&format!("Withdrawn. {reason}"));
-        if let Err(error) = ctx
-            .writer
-            .update_finding(&ctx.target, comment_id, &full_body)
-            .await
-        {
-            return ToolOutput::error(format!("Could not update comment {comment_id}: {error}"));
-        }
-        if let Err(error) = ctx.writer.resolve_finding(&ctx.target, comment_id).await {
-            // The text already says it is withdrawn; an open thread only
-            // means it still counts until someone resolves it.
-            warn!(%error, comment = comment_id, "could not resolve a withdrawn finding");
-            let _ = ctx
-                .store
-                .event(
-                    &ctx.run,
-                    "warn",
-                    &format!(
-                        "{}: withdrew {comment_id} but could not resolve its thread: {error}",
-                        ctx.lane
-                    ),
-                )
-                .await;
-        }
-        if let Ok(mut registry) = ctx.registry.lock() {
-            registry.withdraw(&existing.key, full_body);
-        }
-        let _ = ctx
-            .store
-            .record_finding(
-                &ctx.run,
-                ctx.lane.as_str(),
-                &existing.key.path,
-                existing.key.line,
-                comment_id,
-                FindingAction::Withdrawn,
-            )
-            .await;
-        info!(lane = %ctx.lane, comment = comment_id, "finding withdrawn");
-        let note = ctx
-            .unverified(&existing.key, comment_id, unchecked.as_deref())
-            .await;
-        ToolOutput::ok(format!("Withdrew comment {comment_id}.{note}"))
+        ctx.queue(
+            DraftKind::Withdrawal {
+                comment_id: comment_id.to_owned(),
+                finding,
+            },
+            existing.key,
+            reason,
+        )
+        .await
     }
 }
 
@@ -911,13 +723,12 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::allowlist::Platform;
     use henk_domain::diff::ReviewDiff;
     use henk_domain::review::LaneName;
     use henk_llm::ToolName;
 
     use super::*;
-    use crate::listeners::testing::FakeWriter;
 
     pub(super) const DIFF: &str = "\
 diff --git a/src/a.rs b/src/a.rs
@@ -957,17 +768,10 @@ diff --git a/README.md b/README.md
             run,
             lane: LaneName::new("lane-a"),
             model: ModelId::parse("m").unwrap(),
-            target: ReviewTarget {
-                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
-                number: 7,
-            },
-            commit: CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap(),
             registry: Arc::new(Mutex::new(FindingRegistry::seeded(std::iter::empty()))),
-            writer: Arc::new(FakeWriter::default()),
+            drafts: Arc::new(Mutex::new(DraftBook::new())),
             store,
             files: Arc::new(DiffFiles::new(Arc::new(diff))),
-            fact_check: None,
-            rejections: Mutex::new(BTreeMap::new()),
             workspace: None,
         })
     }
@@ -1138,22 +942,16 @@ diff --git a/README.md b/README.md
             "{}",
             unknown.content
         );
-        // A line in the diff reaches the writer (the fake refuses, which is
-        // a different error) and lands on the timeline.
         let inside = tool
             .call(json!({"path": "src/a.rs", "line": 2, "body": "Wrong."}))
             .await;
-        assert!(
-            inside.content.contains("not in the fake"),
-            "{}",
-            inside.content
-        );
-        assert_eq!(ctx.store.events(&ctx.run).await.unwrap().len(), 1);
+        assert!(!inside.is_error, "{}", inside.content);
+        assert_eq!(ctx.drafts.lock().unwrap().len(), 1);
     }
 }
 
 #[cfg(test)]
-mod gate_tests {
+mod draft_tests {
     #![allow(
         clippy::panic,
         clippy::unwrap_used,
@@ -1161,82 +959,30 @@ mod gate_tests {
         clippy::indexing_slicing
     )]
 
-    use std::collections::VecDeque;
-
-    use henk_domain::allowlist::{Platform, RepoRef};
     use henk_domain::diff::ReviewDiff;
+    use henk_domain::finding::Finding;
 
     use super::tests::DIFF;
     use super::*;
-    use crate::fact_check::{CheckRequest, CheckVerdict, FactCheck};
-    use crate::listeners::testing::FakeWriter;
 
-    /// Answers each check with the next verdict and keeps the requests.
-    struct Fixed {
-        verdicts: Mutex<VecDeque<CheckVerdict>>,
-        seen: Mutex<Vec<CheckRequest>>,
-    }
-
-    #[async_trait::async_trait]
-    impl FactCheck for Fixed {
-        async fn check(&self, request: &CheckRequest) -> CheckVerdict {
-            self.seen.lock().unwrap().push(request.clone());
-            self.verdicts.lock().unwrap().pop_front().unwrap()
-        }
-    }
-
-    fn by() -> ModelId {
-        ModelId::parse("opus").unwrap()
-    }
-
-    fn rejected(reason: &str) -> CheckVerdict {
-        CheckVerdict::Rejected {
-            by: by(),
-            reason: reason.into(),
-        }
-    }
-
-    fn confirmed() -> CheckVerdict {
-        CheckVerdict::Confirmed {
-            by: by(),
-            reason: "holds".into(),
-        }
-    }
-
-    async fn setup(
-        verdicts: impl IntoIterator<Item = CheckVerdict>,
-    ) -> (Arc<LaneContext>, Arc<FakeWriter>, Arc<Fixed>) {
-        let base = super::tests::context(ReviewDiff::from_unified(DIFF)).await;
-        let writer = Arc::new(FakeWriter {
-            accept_posts: true,
-            ..FakeWriter::default()
-        });
-        let checker = Arc::new(Fixed {
-            verdicts: Mutex::new(verdicts.into_iter().collect()),
-            seen: Mutex::new(Vec::new()),
-        });
-        let ctx = Arc::new(LaneContext {
-            run: base.run.clone(),
-            lane: base.lane.clone(),
-            model: base.model.clone(),
-            target: ReviewTarget {
-                repo: RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
-                number: 7,
-            },
-            commit: base.commit.clone(),
-            registry: Arc::clone(&base.registry),
-            writer: Arc::clone(&writer) as Arc<dyn PlatformWriter>,
-            store: Arc::clone(&base.store),
-            files: Arc::clone(&base.files),
-            fact_check: Some(Arc::clone(&checker) as Arc<dyn FactCheck>),
-            rejections: Mutex::new(BTreeMap::new()),
+    /// lane-a, and lane-b on model `n` sharing its registry and drafts.
+    async fn two_lanes() -> (Arc<LaneContext>, Arc<LaneContext>) {
+        let a = super::tests::context(ReviewDiff::from_unified(DIFF)).await;
+        let b = Arc::new(LaneContext {
+            run: a.run.clone(),
+            lane: LaneName::new("lane-b"),
+            model: ModelId::parse("n").unwrap(),
+            registry: Arc::clone(&a.registry),
+            drafts: Arc::clone(&a.drafts),
+            store: Arc::clone(&a.store),
+            files: Arc::clone(&a.files),
             workspace: None,
         });
-        (ctx, writer, checker)
+        (a, b)
     }
 
-    fn post() -> Value {
-        json!({"path": "src/a.rs", "line": 2, "body": "x is never set."})
+    fn post(body: &str) -> Value {
+        json!({"path": "src/a.rs", "line": 2, "body": body})
     }
 
     async fn actions(ctx: &LaneContext) -> Vec<String> {
@@ -1250,147 +996,178 @@ mod gate_tests {
     }
 
     #[tokio::test]
-    async fn a_confirmed_finding_is_posted() {
-        let (ctx, writer, checker) = setup([confirmed()]).await;
-        let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
+    async fn a_post_queues_a_draft_on_the_run_and_writes_nothing() {
+        let (a, _) = two_lanes().await;
+        let out = PostFinding(Arc::clone(&a))
+            .call(post("x is never set."))
+            .await;
         assert!(!out.is_error, "{out:?}");
-        let posts = writer.posts.lock().unwrap();
-        assert_eq!(posts.len(), 1);
-        let marker = Marker::parse(&posts[0].2).unwrap();
-        assert_eq!(marker.checked_by.unwrap().as_str(), "opus");
-        let seen = checker.seen.lock().unwrap();
-        assert_eq!(seen[0].text, "x is never set.");
-        assert_eq!(seen[0].lane_model.as_str(), "m");
-    }
-
-    #[tokio::test]
-    async fn a_rejected_finding_is_not_posted_and_the_lane_hears_why_and_twice_is_final() {
-        let (ctx, writer, _) =
-            setup([rejected("src/a.rs:2 sets x."), rejected("Still set.")]).await;
-        let tool = PostFinding(Arc::clone(&ctx));
-        let first = tool.call(post()).await;
-        assert!(first.is_error);
         assert!(
-            first.content.contains("Reason: src/a.rs:2 sets x."),
-            "{}",
-            first.content
-        );
-        assert!(first.content.contains("try again"), "{}", first.content);
-        let second = tool.call(post()).await;
-        assert!(
-            second.content.contains("rejected twice"),
-            "{}",
-            second.content
-        );
-        let third = tool.call(post()).await;
-        assert!(
-            third.content.contains("Do not try this line again"),
-            "{}",
-            third.content
-        );
-        assert!(writer.posts.lock().unwrap().is_empty());
-        assert_eq!(actions(&ctx).await, vec!["rejected", "rejected"]);
-    }
-
-    #[tokio::test]
-    async fn an_unavailable_check_posts_unchecked_and_says_so() {
-        let (ctx, writer, _) = setup([CheckVerdict::Unavailable {
-            why: "no verdict from opus".into(),
-        }])
-        .await;
-        let out = PostFinding(Arc::clone(&ctx)).call(post()).await;
-        assert!(!out.is_error);
-        assert!(
-            out.content.contains("went out unchecked"),
+            out.content.starts_with("Queued as draft d1."),
             "{}",
             out.content
         );
-        assert_eq!(actions(&ctx).await, vec!["posted", "unverified"]);
-        let posts = writer.posts.lock().unwrap();
-        assert_eq!(posts.len(), 1);
-        assert_eq!(Marker::parse(&posts[0].2).unwrap().checked_by, None);
+        assert!(out.content.contains("you will not hear the verdict"));
+        let book = a.drafts.lock().unwrap().clone();
+        let draft = book.iter().next().unwrap();
+        assert_eq!((draft.lane.as_str(), draft.model.as_str()), ("lane-a", "m"));
+        assert_eq!(draft.text, "x is never set.");
+        let stored = a.store.drafts(&a.run).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            (
+                stored[0].draft.as_str(),
+                stored[0].kind.as_str(),
+                stored[0].line
+            ),
+            ("d1", "finding", 2)
+        );
+        assert!(stored[0].decision.is_none());
+        assert!(
+            actions(&a).await.is_empty(),
+            "nothing written, nothing refused"
+        );
     }
 
     #[tokio::test]
-    async fn a_confirmed_withdrawal_rewrites_resolves_and_stops_counting() {
-        let (ctx, writer, checker) = setup([confirmed(), confirmed()]).await;
-        PostFinding(Arc::clone(&ctx)).call(post()).await;
-        assert_eq!(ctx.registry.lock().unwrap().open_count(), 1);
-        let out = WithdrawFinding(Arc::clone(&ctx))
-            .call(json!({"comment_id": "c1", "reason": "src/a.rs:2 does set x."}))
+    async fn a_line_holds_one_draft_and_a_lane_may_replace_its_own() {
+        let (a, b) = two_lanes().await;
+        PostFinding(Arc::clone(&a))
+            .call(post("x is never set."))
             .await;
-        assert!(!out.is_error, "{out:?}");
-        assert_eq!(actions(&ctx).await, vec!["posted", "withdrawn"]);
-        let updates = writer.updates.lock().unwrap();
+        let other = PostFinding(Arc::clone(&b)).call(post("x is wrong.")).await;
+        assert!(other.is_error);
         assert!(
-            updates[0]
-                .1
-                .starts_with("Withdrawn. src/a.rs:2 does set x."),
+            other
+                .content
+                .contains("already has draft d1 by another reviewer"),
             "{}",
-            updates[0].1
+            other.content
         );
-        assert_eq!(*writer.resolved.lock().unwrap(), vec!["c1".to_owned()]);
-        assert_eq!(ctx.registry.lock().unwrap().open_count(), 0);
-        let seen = checker.seen.lock().unwrap();
+        assert_eq!(actions(&b).await, ["refused"]);
+        let again = PostFinding(Arc::clone(&a))
+            .call(post("x is never set on the error path."))
+            .await;
         assert!(
-            matches!(&seen[1].kind, CheckKind::Withdrawal { finding } if finding == "x is never set.")
+            again.content.starts_with("Replaced your draft d1"),
+            "{}",
+            again.content
         );
+        assert_eq!(a.drafts.lock().unwrap().len(), 1);
+        let stored = a.store.drafts(&a.run).await.unwrap();
+        assert_eq!(stored[0].body, "x is never set on the error path.");
     }
 
     #[tokio::test]
-    async fn a_withdrawn_finding_keeps_its_author_and_names_who_withdrew_it() {
-        let (ctx, writer, _) = setup([confirmed()]).await;
-        // A finding an earlier run posted, with another model.
-        let original = Marker {
-            run: RunId::parse("r-0").unwrap(),
-            model: ModelId::parse("orig").unwrap(),
-            checked_by: None,
-            requested_by: None,
-            kind: Some(MarkerKind::Finding),
-            withdrawn: None,
-        };
+    async fn other_lanes_see_waiting_drafts_with_the_findings() {
+        let (a, b) = two_lanes().await;
+        let empty = ListExistingFindings(Arc::clone(&b)).call(json!({})).await;
+        assert_eq!(empty.content, "No findings yet.");
+        PostFinding(Arc::clone(&a))
+            .call(post("x is never set."))
+            .await;
+        let listed = ListExistingFindings(Arc::clone(&b)).call(json!({})).await;
+        assert!(
+            listed.content.contains("Drafts waiting for the fact-check"),
+            "{}",
+            listed.content
+        );
+        assert!(
+            listed
+                .content
+                .contains("- draft d1 at src/a.rs:2: a new finding\n  x is never set."),
+            "{}",
+            listed.content
+        );
+        let own = ListExistingFindings(Arc::clone(&a)).call(json!({})).await;
+        assert!(own.content.contains("src/a.rs:2, yours"), "{}", own.content);
+    }
+
+    fn seed(ctx: &LaneContext, answered: bool, resolved: bool) {
         ctx.registry.lock().unwrap().record(Finding {
             key: FindingKey {
                 path: "src/a.rs".into(),
                 line: 2,
             },
             comment_id: "c9".into(),
-            body: original.attach("x is never set."),
+            body: "x is never set.<!-- marker -->".into(),
             lane: None,
-            answered_by_person: false,
-            resolved: false,
+            answered_by_person: answered,
+            resolved,
             in_diff: true,
         });
-        let out = WithdrawFinding(Arc::clone(&ctx))
-            .call(json!({"comment_id": "c9", "reason": "src/a.rs:2 sets x."}))
-            .await;
-        assert!(!out.is_error, "{out:?}");
-        let updates = writer.updates.lock().unwrap();
-        let body = &updates[0].1;
-        let marker = Marker::parse(body).unwrap();
-        assert_eq!(marker.run.as_str(), "r-0", "the original run stays");
-        assert_eq!(marker.model.as_str(), "orig", "the original model stays");
-        let withdrawal = marker.withdrawn.unwrap();
-        assert_eq!(withdrawal.run, ctx.run);
-        assert_eq!(withdrawal.model, ctx.model);
-        assert_eq!(withdrawal.checked_by.unwrap().as_str(), "opus");
-        assert!(body.starts_with("Withdrawn. src/a.rs:2 sets x."), "{body}");
-        assert!(
-            body.contains("was withdrawn by Meneer Henk"),
-            "the withdrawal note"
-        );
-        assert!(!body.contains("address it"), "not the finding note");
     }
 
     #[tokio::test]
-    async fn a_rejected_rewrite_leaves_the_finding_alone() {
-        let (ctx, writer, _) = setup([confirmed(), rejected("The rewrite is wrong.")]).await;
-        PostFinding(Arc::clone(&ctx)).call(post()).await;
-        let out = ImproveFinding(Arc::clone(&ctx))
-            .call(json!({"comment_id": "c1", "body": "Nothing is wrong here."}))
+    async fn rewrites_and_withdrawals_are_drafts_about_their_comment() {
+        let (a, b) = two_lanes().await;
+        seed(&a, false, false);
+        let rewrite = ImproveFinding(Arc::clone(&a))
+            .call(json!({"comment_id": "c9", "body": "x is never set on line 2."}))
             .await;
-        assert!(out.is_error);
-        assert!(writer.updates.lock().unwrap().is_empty());
+        assert!(
+            rewrite.content.starts_with("Queued as draft d1."),
+            "{}",
+            rewrite.content
+        );
+        let draft = a
+            .drafts
+            .lock()
+            .unwrap()
+            .get(henk_domain::draft::DraftId::parse("d1").unwrap())
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            draft.kind,
+            DraftKind::Rewrite {
+                comment_id: "c9".into(),
+                current: "x is never set.".into()
+            }
+        );
+        let withdraw = WithdrawFinding(Arc::clone(&b))
+            .call(json!({"comment_id": "c9", "reason": "src/a.rs:2 sets x."}))
+            .await;
+        assert!(withdraw.is_error, "one draft per comment");
+        let new = PostFinding(Arc::clone(&b)).call(post("Another.")).await;
+        assert!(
+            new.content.contains("already has finding c9"),
+            "{}",
+            new.content
+        );
+        assert_eq!(a.store.drafts(&a.run).await.unwrap()[0].target, "c9");
+    }
+
+    #[tokio::test]
+    async fn answered_resolved_and_draft_ids_are_refused() {
+        let (a, _) = two_lanes().await;
+        seed(&a, true, false);
+        let answered = WithdrawFinding(Arc::clone(&a))
+            .call(json!({"comment_id": "c9", "reason": "Wrong."}))
+            .await;
+        assert!(
+            answered.content.contains("A person has answered"),
+            "{}",
+            answered.content
+        );
+        let draft = ImproveFinding(Arc::clone(&a))
+            .call(json!({"comment_id": "d1", "body": "Better."}))
+            .await;
+        assert!(
+            draft.content.contains("d1 is a draft, not a comment yet"),
+            "{}",
+            draft.content
+        );
+        let (b, _) = two_lanes().await;
+        seed(&b, false, true);
+        let resolved = WithdrawFinding(Arc::clone(&b))
+            .call(json!({"comment_id": "c9", "reason": "Wrong."}))
+            .await;
+        assert!(
+            resolved.content.contains("already resolved"),
+            "{}",
+            resolved.content
+        );
+        assert!(a.drafts.lock().unwrap().is_empty() && b.drafts.lock().unwrap().is_empty());
     }
 }
 
