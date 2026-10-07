@@ -228,7 +228,10 @@ above; `RunMessage` in `types.ts` is the union.
   the messages of this run it missed, while this process still holds them
   (the last 2048 changes); otherwise it gets a new `snapshot`. Browsers
   send `Last-Event-ID` by themselves.
-- A run that has ended gets its `snapshot` and `end` at once.
+- A `snapshot` holds every change up to its id and none after, so no
+  message that follows repeats what it shows.
+- A run that has ended gets its `snapshot` and `end` at once. `end` always
+  comes after a message that shows the run ended.
 - A run another Henk process works on (two replicas on one PostgreSQL) is
   not on this process's feed: its stream sends a fresh `snapshot` every 5
   seconds until the run ends.

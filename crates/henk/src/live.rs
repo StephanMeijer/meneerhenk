@@ -4,6 +4,12 @@
 //! follow the feed. Nothing that writes needs to know: the store is the
 //! one place every lane, tool call, draft and verdict passes through.
 //!
+//! A write holds the feed's gate shared from the store write to its
+//! announcement, and a snapshot holds it alone ([`Feed::settled`]), so a
+//! snapshot holds every change up to [`Feed::last`] and none after: no
+//! change is both in a snapshot and sent after it. A snapshot is a few
+//! reads of one run; writes wait for it that long, never for a follower.
+//!
 //! The feed lives in this process only. A run another Henk process works
 //! on is announced there, not here; the streams read such a run from the
 //! store instead.
@@ -21,7 +27,7 @@ use henk_store::{
     RunStore, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
 use tracing::warn;
 
 /// How many changes a slow follower may fall behind before it is dropped;
@@ -67,6 +73,9 @@ struct Inner {
     epoch: String,
     sender: broadcast::Sender<Arc<Change>>,
     recent: Mutex<Recent>,
+    /// Shared by a write between the store and its announcement, alone by
+    /// a snapshot.
+    gate: RwLock<()>,
 }
 
 #[derive(Debug, Default)]
@@ -86,6 +95,7 @@ impl Default for Feed {
             epoch: epoch(),
             sender,
             recent: Mutex::new(Recent::default()),
+            gate: RwLock::new(()),
         }))
     }
 }
@@ -162,6 +172,19 @@ impl Feed {
         )
     }
 
+    /// Waits until no write is between the store and its announcement,
+    /// and holds off new ones while the guard lives: what the store then
+    /// holds is exactly what the feed announced up to [`Feed::last`]. For
+    /// a snapshot; hold it only for the reads, never while sending.
+    pub async fn settled(&self) -> RwLockWriteGuard<'_, ()> {
+        self.0.gate.write().await
+    }
+
+    /// Held by a write from the store write to its announcement.
+    async fn writing(&self) -> RwLockReadGuard<'_, ()> {
+        self.0.gate.read().await
+    }
+
     /// The last seq announced.
     #[must_use]
     pub fn last(&self) -> u64 {
@@ -189,15 +212,24 @@ fn or_now(at: &str) -> String {
 pub struct Announcing {
     inner: Arc<dyn RunStore>,
     feed: Feed,
+    /// Held from a read-back to its announcement, so read-backs are
+    /// announced in the order they were read: two lanes ending at once
+    /// cannot announce an older read last.
+    read_back: tokio::sync::Mutex<()>,
 }
 
 impl Announcing {
     /// Wraps `inner`, announcing on `feed`.
     pub fn new(inner: Arc<dyn RunStore>, feed: Feed) -> Self {
-        Self { inner, feed }
+        Self {
+            inner,
+            feed,
+            read_back: tokio::sync::Mutex::new(()),
+        }
     }
 
     async fn announce_run(&self, id: &RunId) {
+        let _order = self.read_back.lock().await;
         match self.inner.run(id).await {
             Ok(Some(run)) => self.feed.announce(id, ChangeKind::Run(run)),
             Ok(None) => {}
@@ -206,6 +238,7 @@ impl Announcing {
     }
 
     async fn announce_lanes(&self, id: &RunId) {
+        let _order = self.read_back.lock().await;
         match self.inner.lanes(id).await {
             Ok(lanes) => self.feed.announce(id, ChangeKind::Lanes(lanes)),
             Err(error) => warn!(%error, run = %id, "could not read lanes back to announce them"),
@@ -216,6 +249,7 @@ impl Announcing {
 #[async_trait]
 impl RunStore for Announcing {
     async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.create_run(run).await?;
         self.announce_run(&run.id).await;
         Ok(())
@@ -228,6 +262,7 @@ impl RunStore for Announcing {
         summary: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.finish_run(id, status, summary, error).await?;
         self.announce_run(id).await;
         Ok(())
@@ -242,6 +277,7 @@ impl RunStore for Announcing {
     }
 
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.set_check(id, check_id).await?;
         self.announce_run(id).await;
         Ok(())
@@ -255,12 +291,14 @@ impl RunStore for Announcing {
     }
 
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.drop_running_lanes(run, reason).await?;
         self.announce_lanes(run).await;
         Ok(())
     }
 
     async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.start_lane(run, name, model).await?;
         self.announce_lanes(run).await;
         Ok(())
@@ -276,6 +314,7 @@ impl RunStore for Announcing {
         output_tokens: u64,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner
             .finish_lane(run, name, status, turns, input_tokens, output_tokens, error)
             .await?;
@@ -296,6 +335,7 @@ impl RunStore for Announcing {
         comment_id: &str,
         action: FindingAction,
     ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner
             .record_finding(run, lane, path, line_number, comment_id, action)
             .await?;
@@ -318,6 +358,7 @@ impl RunStore for Announcing {
     }
 
     async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.record_draft(run, draft).await?;
         self.feed.announce(
             run,
@@ -335,7 +376,9 @@ impl RunStore for Announcing {
         draft: &str,
         decision: &DraftDecision,
     ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.decide_draft(run, draft, decision).await?;
+        let _order = self.read_back.lock().await;
         match self.inner.drafts(run).await {
             Ok(drafts) => {
                 if let Some(decided) = drafts.into_iter().find(|d| d.draft == draft) {
@@ -370,6 +413,7 @@ impl RunStore for Announcing {
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.record_tool_call(run, call).await?;
         self.feed.announce(
             run,
@@ -394,6 +438,7 @@ impl RunStore for Announcing {
         run: &RunId,
         transcript: &TranscriptRecord,
     ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.record_transcript(run, transcript).await?;
         self.feed.announce(
             run,
@@ -422,6 +467,7 @@ impl RunStore for Announcing {
     }
 
     async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
         self.inner.event(run, level, message).await?;
         self.feed.announce(
             run,
@@ -499,6 +545,7 @@ mod tests {
     use henk_domain::allowlist::Platform;
     use henk_domain::run::RunKind;
     use henk_store::{DraftVerdict, SqliteStore};
+    use tokio::sync::oneshot;
 
     use super::*;
 
@@ -518,6 +565,328 @@ mod tests {
             trigger: "opened".into(),
             link: String::new(),
         }
+    }
+
+    /// A store that stops once, right after the named call has done its
+    /// work, until the test lets it go: a write that is in the store but
+    /// not yet announced, or a read-back not yet announced.
+    #[derive(Debug)]
+    struct Paused {
+        inner: SqliteStore,
+        at: &'static str,
+        pause: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    /// The test's ends of a pause: told when the call stops, and the go.
+    struct Pause {
+        reached: oneshot::Receiver<()>,
+        go: oneshot::Sender<()>,
+    }
+
+    impl Paused {
+        fn new(at: &'static str) -> Self {
+            Self {
+                inner: SqliteStore::in_memory().unwrap(),
+                at,
+                pause: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// Stops the next call to `at`.
+        fn arm(&self) -> Pause {
+            let (reached_tx, reached) = oneshot::channel();
+            let (go, go_rx) = oneshot::channel();
+            *self.pause.lock().unwrap() = Some((reached_tx, go_rx));
+            Pause { reached, go }
+        }
+
+        async fn hold(&self, call: &str) {
+            if call != self.at {
+                return;
+            }
+            let pause = self.pause.lock().unwrap().take();
+            if let Some((reached, go)) = pause {
+                reached.send(()).unwrap();
+                go.await.unwrap();
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RunStore for Paused {
+        async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
+            self.inner.create_run(run).await
+        }
+        async fn finish_run(
+            &self,
+            id: &RunId,
+            status: RunStatus,
+            summary: Option<&str>,
+            error: Option<&str>,
+        ) -> Result<(), StoreError> {
+            self.inner.finish_run(id, status, summary, error).await
+        }
+        async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
+            self.inner.run(id).await
+        }
+        async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
+            self.inner.heartbeat(id).await
+        }
+        async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
+            self.inner.set_check(id, check_id).await
+        }
+        async fn orphaned_runs(
+            &self,
+            stale_before: OffsetDateTime,
+        ) -> Result<Vec<RunRecord>, StoreError> {
+            self.inner.orphaned_runs(stale_before).await
+        }
+        async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+            self.inner.drop_running_lanes(run, reason).await
+        }
+        async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
+            self.inner.start_lane(run, name, model).await
+        }
+        async fn finish_lane(
+            &self,
+            run: &RunId,
+            name: &str,
+            status: LaneStatus,
+            turns: u64,
+            input_tokens: u64,
+            output_tokens: u64,
+            error: Option<&str>,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .finish_lane(run, name, status, turns, input_tokens, output_tokens, error)
+                .await
+        }
+        async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
+            let lanes = self.inner.lanes(run).await;
+            self.hold("lanes").await;
+            lanes
+        }
+        async fn record_finding(
+            &self,
+            run: &RunId,
+            lane: &str,
+            path: &str,
+            line_number: u32,
+            comment_id: &str,
+            action: FindingAction,
+        ) -> Result<(), StoreError> {
+            self.inner
+                .record_finding(run, lane, path, line_number, comment_id, action)
+                .await
+        }
+        async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
+            self.inner.findings(run).await
+        }
+        async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
+            self.inner.record_draft(run, draft).await
+        }
+        async fn decide_draft(
+            &self,
+            run: &RunId,
+            draft: &str,
+            decision: &DraftDecision,
+        ) -> Result<(), StoreError> {
+            self.inner.decide_draft(run, draft, decision).await
+        }
+        async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError> {
+            self.inner.drafts(run).await
+        }
+        async fn record_tool_call(
+            &self,
+            run: &RunId,
+            call: &ToolCallRecord,
+        ) -> Result<(), StoreError> {
+            self.inner.record_tool_call(run, call).await
+        }
+        async fn draft_rates(
+            &self,
+            group: DraftGroup,
+            filter: &DraftFilter,
+        ) -> Result<Vec<DraftRates>, StoreError> {
+            self.inner.draft_rates(group, filter).await
+        }
+        async fn list_drafts(
+            &self,
+            filter: &DraftFilter,
+            page: Page,
+        ) -> Result<Vec<DraftListing>, StoreError> {
+            self.inner.list_drafts(filter, page).await
+        }
+        async fn tool_calls(&self, run: &RunId) -> Result<Vec<ToolCallRecord>, StoreError> {
+            self.inner.tool_calls(run).await
+        }
+        async fn tool_usage_since(
+            &self,
+            since: OffsetDateTime,
+        ) -> Result<Vec<ToolUsage>, StoreError> {
+            self.inner.tool_usage_since(since).await
+        }
+        async fn record_transcript(
+            &self,
+            run: &RunId,
+            transcript: &TranscriptRecord,
+        ) -> Result<(), StoreError> {
+            self.inner.record_transcript(run, transcript).await
+        }
+        async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {
+            self.inner.transcripts(run).await
+        }
+        async fn transcript(
+            &self,
+            run: &RunId,
+            session: &str,
+        ) -> Result<Option<TranscriptRecord>, StoreError> {
+            self.inner.transcript(run, session).await
+        }
+        async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
+            let written = self.inner.event(run, level, message).await;
+            self.hold("event").await;
+            written
+        }
+        async fn events(&self, run: &RunId) -> Result<Vec<EventRecord>, StoreError> {
+            self.inner.events(run).await
+        }
+        async fn joined(&self, run: &RunId, source: &str) -> Result<(), StoreError> {
+            self.inner.joined(run, source).await
+        }
+        async fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
+            self.inner.record_event(event).await
+        }
+        async fn record_outcome(&self, outcome: &OutcomeRecord) -> Result<(), StoreError> {
+            self.inner.record_outcome(outcome).await
+        }
+        async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
+            self.inner.inbound_event(id).await
+        }
+        async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
+            self.inner.outcomes(id).await
+        }
+        async fn inbound_events_for_run(
+            &self,
+            run: &RunId,
+        ) -> Result<Vec<InboundEvent>, StoreError> {
+            self.inner.inbound_events_for_run(run).await
+        }
+        async fn prune_events(
+            &self,
+            older_than: OffsetDateTime,
+        ) -> Result<PruneCounts, StoreError> {
+            self.inner.prune_events(older_than).await
+        }
+        async fn list_runs(
+            &self,
+            filter: &RunFilter,
+            page: Page,
+        ) -> Result<Vec<RunRecord>, StoreError> {
+            self.inner.list_runs(filter, page).await
+        }
+        async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
+            self.inner.count_runs(filter).await
+        }
+        async fn list_inbound_events(
+            &self,
+            filter: &EventFilter,
+            page: Page,
+        ) -> Result<Vec<EventWithOutcomes>, StoreError> {
+            self.inner.list_inbound_events(filter, page).await
+        }
+    }
+
+    /// An announcing store over [`Paused`].
+    fn paused(at: &'static str) -> (Arc<Announcing>, Feed, Arc<Paused>) {
+        let feed = Feed::default();
+        let inner = Arc::new(Paused::new(at));
+        let store = Arc::new(Announcing::new(
+            Arc::clone(&inner) as Arc<dyn RunStore>,
+            feed.clone(),
+        ));
+        (store, feed, inner)
+    }
+
+    /// Long enough for a task that is not blocked to finish.
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+    #[tokio::test]
+    async fn two_lanes_ending_at_once_announce_their_lanes_in_the_order_read() {
+        let (store, feed, paused) = paused("lanes");
+        let run = id("r-1");
+        store.create_run(&new_run("r-1")).await.unwrap();
+        store.start_lane(&run, "lane-a", "m").await.unwrap();
+        store.start_lane(&run, "lane-b", "m").await.unwrap();
+        let pause = paused.arm();
+        // The pause is taken by the next read-back: lane-a's, which reads
+        // lane-a finished and lane-b running, and stops before announcing.
+        let a = tokio::spawn({
+            let (store, run) = (Arc::clone(&store), run.clone());
+            async move {
+                store
+                    .finish_lane(&run, "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+                    .await
+            }
+        });
+        pause.reached.await.unwrap();
+        let mut b = tokio::spawn({
+            let (store, run) = (Arc::clone(&store), run.clone());
+            async move {
+                store
+                    .finish_lane(&run, "lane-b", LaneStatus::Finished, 2, 2, 2, None)
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(SETTLE, &mut b).await.is_err(),
+            "lane-b's read-back waits for lane-a's announcement"
+        );
+        pause.go.send(()).unwrap();
+        a.await.unwrap().unwrap();
+        b.await.unwrap().unwrap();
+
+        let all = feed.since(feed.epoch(), 0, &run).unwrap();
+        let Some(ChangeKind::Lanes(last)) = all.last().map(|c| &c.kind) else {
+            panic!("{:?}", kinds(&all))
+        };
+        assert!(
+            last.iter().all(|lane| lane.status == LaneStatus::Finished),
+            "the last announcement is the latest read: {last:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settled_feed_holds_no_write_between_the_store_and_its_announcement() {
+        let (store, feed, paused) = paused("event");
+        let run = id("r-1");
+        store.create_run(&new_run("r-1")).await.unwrap();
+        let pause = paused.arm();
+        let write = tokio::spawn({
+            let (store, run) = (Arc::clone(&store), run.clone());
+            async move { store.event(&run, "info", "in the store").await }
+        });
+        pause.reached.await.unwrap();
+        let mut snapshot = tokio::spawn({
+            let (store, feed, run) = (Arc::clone(&store), feed.clone(), run.clone());
+            async move {
+                let _settled = feed.settled().await;
+                (feed.last(), store.events(&run).await.unwrap())
+            }
+        });
+        assert!(
+            tokio::time::timeout(SETTLE, &mut snapshot).await.is_err(),
+            "the snapshot waits for the write's announcement"
+        );
+        pause.go.send(()).unwrap();
+        write.await.unwrap().unwrap();
+        let (seq, events) = snapshot.await.unwrap();
+        assert_eq!(events.len(), 1);
+        let announced = feed.since(feed.epoch(), 0, &run).unwrap();
+        assert!(
+            announced.iter().all(|c| c.seq <= seq),
+            "what the snapshot holds is announced at or before its seq, so nothing repeats"
+        );
     }
 
     fn announcing() -> (Announcing, Feed) {

@@ -18,6 +18,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
+use henk_domain::run::RunId;
 use henk_store::{Page, RunFilter, RunRecord, RunStatus};
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
@@ -25,7 +26,7 @@ use tokio::sync::{broadcast, mpsc};
 use super::ApiError;
 use super::runs::{run_detail, run_of};
 use super::types::{
-    Draft, Finding, Lane, RunEvent, RunMessage, RunSummary, RunUpdate, RunningMessage,
+    Draft, Finding, Lane, RunDetail, RunEvent, RunMessage, RunSummary, RunUpdate, RunningMessage,
     RunningSnapshot, ToolCall, TranscriptRef,
 };
 use crate::dashboard::Dashboard;
@@ -155,36 +156,62 @@ async fn send<T: serde::Serialize>(
     }
 }
 
+/// The run as the store holds it, the seq it is current to, and whether
+/// it has ended. Read while the feed is settled, so every change up to the
+/// seq is in it and none after: nothing the stream sends next repeats it.
+async fn snapshot(dashboard: &Dashboard, id: &RunId) -> Option<(u64, RunDetail, bool)> {
+    let _settled = dashboard.app.feed.settled().await;
+    let seq = dashboard.app.feed.last();
+    let run = dashboard.app.store.run(id).await.ok()??;
+    let detail = run_detail(dashboard, &run).await.ok()?;
+    Some((seq, detail, run.status != RunStatus::Running))
+}
+
+/// Sends a snapshot. The seq it is current to and whether the run has
+/// ended; `None` once the follower has gone or the run cannot be read.
+async fn send_snapshot(
+    dashboard: &Dashboard,
+    id: &RunId,
+    out: &mpsc::Sender<Event>,
+) -> Option<(u64, bool)> {
+    let (seq, detail, ended) = snapshot(dashboard, id).await?;
+    send(
+        out,
+        &RunMessage::Snapshot(Box::new(detail)),
+        Some(id_of(dashboard, seq)),
+    )
+    .await
+    .then_some((seq, ended))
+}
+
 /// Sends a follower what it missed since `last`, or a snapshot when the
-/// feed cannot say. The seq it is now up to; `None` once it has gone.
+/// feed cannot say. The seq it is now up to and whether what it was sent
+/// shows the run ended; `None` once it has gone.
 async fn catch_up(
     dashboard: &Dashboard,
     run: &RunRecord,
     last: Option<&str>,
     out: &mpsc::Sender<Event>,
-) -> Option<u64> {
-    if let Some(replay) = missed(dashboard, last, run) {
-        let mut sent = last
-            .and_then(|l| l.rsplit_once('-'))
-            .and_then(|(_, s)| s.parse().ok())
-            .unwrap_or(0);
-        for change in replay {
-            let id = Some(id_of(dashboard, change.seq));
-            if !send(out, &message(dashboard, &change), id).await {
-                return None;
-            }
-            sent = change.seq;
+) -> Option<(u64, bool)> {
+    let Some(replay) = missed(dashboard, last, run) else {
+        return send_snapshot(dashboard, &run.id, out).await;
+    };
+    let mut sent = last
+        .and_then(|l| l.rsplit_once('-'))
+        .and_then(|(_, s)| s.parse().ok())
+        .unwrap_or(0);
+    let mut ended = false;
+    for change in replay {
+        let id = Some(id_of(dashboard, change.seq));
+        if !send(out, &message(dashboard, &change), id).await {
+            return None;
         }
-        return Some(sent);
+        sent = change.seq;
+        if let ChangeKind::Run(r) = &change.kind {
+            ended = r.status != RunStatus::Running;
+        }
     }
-    // Read before the snapshot: a change racing it may come twice, none is
-    // lost.
-    let seq = dashboard.app.feed.last();
-    let detail = run_detail(dashboard, run).await.ok()?;
-    let id = Some(id_of(dashboard, seq));
-    send(out, &RunMessage::Snapshot(Box::new(detail)), id)
-        .await
-        .then_some(seq)
+    Some((sent, ended))
 }
 
 /// Feeds one run's stream until the run ends or the follower goes.
@@ -195,14 +222,25 @@ async fn follow_run(
     mut changes: broadcast::Receiver<Arc<Change>>,
     out: mpsc::Sender<Event>,
 ) {
-    let Some(mut sent) = catch_up(&dashboard, &run, last.as_deref(), &out).await else {
+    let Some((mut sent, shown_ended)) = catch_up(&dashboard, &run, last.as_deref(), &out).await
+    else {
         return;
     };
-    let current = dashboard.app.store.run(&run.id).await.ok().flatten();
-    if current
-        .as_ref()
-        .is_none_or(|r| r.status != RunStatus::Running)
-    {
+    let ended = shown_ended
+        || match dashboard.app.store.run(&run.id).await {
+            Ok(Some(now)) if now.status == RunStatus::Running => false,
+            // It ended after what the follower was sent, and that change
+            // may still be on its way: the run as it ended goes first, so
+            // the page does not stay running.
+            Ok(Some(_)) => {
+                if send_snapshot(&dashboard, &run.id, &out).await.is_none() {
+                    return;
+                }
+                true
+            }
+            Ok(None) | Err(_) => true,
+        };
+    if ended {
         let _ = send(&out, &RunMessage::End, None).await;
         return;
     }

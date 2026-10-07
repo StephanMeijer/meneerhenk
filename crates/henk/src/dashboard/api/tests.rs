@@ -1302,6 +1302,30 @@ async fn a_reconnect_gets_exactly_what_it_missed_or_a_snapshot() {
 }
 
 #[tokio::test]
+async fn a_run_that_ends_after_catching_up_is_shown_ended_before_end() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let (run, _alive) = live_run(&f, "r-live").await;
+    let store = Arc::clone(&f.dashboard.app.store);
+    store
+        .finish_run(&run, RunStatus::Finished, Some("Not bad."), None)
+        .await
+        .unwrap();
+    // Up to date with the feed but not shown the run ended, as when it
+    // ends between catching up and following: the replay is empty and the
+    // store says it ended.
+    let feed = &f.dashboard.app.feed;
+    let last = format!("{}-{}", feed.epoch(), feed.last());
+    let uri = "/dashboard/api/v1/runs/r-live/stream";
+    let mut events = stream(&f, uri, &cookie, Some(&last)).await;
+    let ended = events.next().await.unwrap();
+    assert_eq!(ended.event, "snapshot", "the run as it ended, not only end");
+    assert_eq!(ended.data["run"]["status"], "finished");
+    assert_eq!(ended.data["summary"], "Not bad.");
+    assert_eq!(events.names_until_end().await, ["end"]);
+}
+
+#[tokio::test]
 async fn an_ended_run_streams_its_snapshot_and_ends() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
