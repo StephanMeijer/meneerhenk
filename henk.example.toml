@@ -105,8 +105,8 @@ lanes = [
   { name = "lane-a", model = "proxy-fast" },
   { name = "lane-b", model = "claude" },
 ]
-# A lane waits for the fact-check of each of its findings, and that time
-# counts against its limit.
+# What a lane drafts is checked after every lane has finished, so the
+# checking does not count against a lane's limit.
 lane_timeout_secs = 900
 lane_max_turns = 40
 # Every turn resends the conversation. Past this many characters, the oldest
@@ -125,11 +125,15 @@ ignore = [
   "**/go.sum", "**/poetry.lock", "**/uv.lock", "CHANGELOG.md",
 ]
 
-# A second model checks every finding, rewrite and withdrawal before it is
-# made (spec §3.2). A rejected finding is not posted; the lane hears why.
-# backup_model checks when the lane itself runs on model, or when model
-# gives no verdict. When neither does, the finding is posted unchecked and
-# the run says so. Leave the section out to post unchecked.
+# A second model checks every finding, rewrite and withdrawal the lanes
+# draft before anything is posted (spec §3.2). It checks them together once
+# every lane has finished, in one session per checking model and ten drafts,
+# and merges drafts that report the same problem. A rejected draft is not
+# posted. backup_model checks the drafts of lanes that run on model, and
+# what model gives no verdict on. When neither does, the draft is posted
+# unchecked and the run says so. Leave the section out to post unchecked.
+# timeout_secs and max_turns are per draft: a session gets them times the
+# drafts it checks.
 [review.fact_check]
 model = "opus"
 backup_model = "claude"

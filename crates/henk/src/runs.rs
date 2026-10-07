@@ -3,7 +3,8 @@
 use std::fmt::Write as _;
 
 use henk_store::{
-    EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage, TranscriptSummary,
+    DraftRecord, EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage,
+    TranscriptSummary,
 };
 use serde_json::Value;
 
@@ -228,14 +229,59 @@ fn indent(text: &str) -> String {
         .join("\n")
 }
 
-/// Renders one run with its lanes, tool calls, transcripts, findings and
-/// timeline.
+/// One draft as a line: what it was, and what became of it (#189).
+#[must_use]
+pub fn draft_text(draft: &DraftRecord) -> String {
+    let what = match draft.kind.as_str() {
+        "finding" => String::new(),
+        kind => format!(" {kind} of {}", draft.target),
+    };
+    let fate = match &draft.decision {
+        None => "waiting".to_owned(),
+        Some(decision) => {
+            let mut fate = decision.verdict.as_str().replace('_', " ");
+            if !decision.same_as.is_empty() {
+                let _ = write!(fate, " {}", decision.same_as);
+            }
+            if !decision.checker.is_empty() {
+                let _ = write!(fate, " by {}", decision.checker);
+            }
+            if !decision.comment_id.is_empty() {
+                let _ = write!(fate, ", comment {}", decision.comment_id);
+            }
+            if !decision.reason.is_empty() {
+                let _ = write!(fate, ": {}", decision.reason);
+            }
+            fate
+        }
+    };
+    format!(
+        "{:<4} {:<12} {}:{}{what}  {fate}",
+        draft.draft, draft.lane, draft.path, draft.line
+    )
+}
+
+/// The drafts section of a run: empty without drafts.
+fn drafts_section(drafts: &[DraftRecord]) -> String {
+    let mut out = String::new();
+    if !drafts.is_empty() {
+        let _ = writeln!(out, "\ndrafts ({})", drafts.len());
+        for draft in drafts {
+            let _ = writeln!(out, "  {}", draft_text(draft));
+        }
+    }
+    out
+}
+
+/// Renders one run with its lanes, tool calls, transcripts, drafts,
+/// findings and timeline.
 #[must_use]
 pub fn render(
     run: &RunRecord,
     lanes: &[LaneRecord],
     tools: &[ToolUsage],
     transcripts: &[TranscriptSummary],
+    drafts: &[DraftRecord],
     findings: &[FindingRecord],
     events: &[EventRecord],
 ) -> String {
@@ -320,6 +366,8 @@ pub fn render(
         }
     }
 
+    out.push_str(&drafts_section(drafts));
+
     let _ = writeln!(out, "\nfindings ({})", findings.len());
     for finding in findings {
         let _ = writeln!(
@@ -347,7 +395,8 @@ mod tests {
         clippy::panic,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::too_many_lines
     )]
 
     use henk_domain::allowlist::Platform;
@@ -406,7 +455,54 @@ mod tests {
             turns: 3,
             bytes: 1234,
         }];
-        let text = render(&run, &lanes, &[], &transcripts, &findings, &events);
+        let drafts = vec![
+            DraftRecord {
+                at: "t".into(),
+                draft: "d1".into(),
+                lane: "lane-a".into(),
+                model: "m".into(),
+                kind: "finding".into(),
+                path: "src/x.rs".into(),
+                line: 12,
+                target: String::new(),
+                body: "x is never set.".into(),
+                decision: Some(henk_store::DraftDecision {
+                    at: "t".into(),
+                    verdict: henk_store::DraftVerdict::Confirmed,
+                    checker: "n".into(),
+                    reason: "Line 12 never assigns x.".into(),
+                    same_as: String::new(),
+                    comment_id: "c1".into(),
+                }),
+            },
+            DraftRecord {
+                draft: "d2".into(),
+                lane: "lane-b".into(),
+                kind: "rewrite".into(),
+                target: "c0".into(),
+                decision: Some(henk_store::DraftDecision {
+                    at: "t".into(),
+                    verdict: henk_store::DraftVerdict::SameAs,
+                    checker: "m".into(),
+                    reason: "Same problem.".into(),
+                    same_as: "d1".into(),
+                    comment_id: "c1".into(),
+                }),
+                ..DraftRecord {
+                    at: "t".into(),
+                    draft: String::new(),
+                    lane: String::new(),
+                    model: "n".into(),
+                    kind: String::new(),
+                    path: "src/x.rs".into(),
+                    line: 13,
+                    target: String::new(),
+                    body: "b".into(),
+                    decision: None,
+                }
+            },
+        ];
+        let text = render(&run, &lanes, &[], &transcripts, &drafts, &findings, &events);
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
         assert!(text.contains("lanes (1)"));
@@ -417,6 +513,10 @@ mod tests {
         assert!(text.contains("warn  lane-a: could not post"));
         assert!(text.contains("             Second line."), "{text}");
         assert!(text.contains("transcripts (1)"), "{text}");
+        assert!(
+            text.contains("drafts (2)\n  d1   lane-a       src/x.rs:12  confirmed by n, comment c1: Line 12 never assigns x.\n  d2   lane-b       src/x.rs:13 rewrite of c0  same as d1 by m, comment c1: Same problem.\n"),
+            "{text}"
+        );
         assert!(
             text.contains("lane-a                       endturn   turns   3  1234 bytes"),
             "{text}"
@@ -506,7 +606,7 @@ mod tests {
             heartbeat_at: None,
             check_id: None,
         };
-        let text = render(&run, &[], &[], &[], &[], &events);
+        let text = render(&run, &[], &[], &[], &[], &[], &events);
         assert!(
             !text.contains('\u{1b}') && !text.contains('\u{7}'),
             "{text:?}"
@@ -585,6 +685,7 @@ mod tests {
             &store.lanes(&id).await.unwrap(),
             &ToolUsage::from_calls(&store.tool_calls(&id).await.unwrap()),
             &store.transcripts(&id).await.unwrap(),
+            &store.drafts(&id).await.unwrap(),
             &store.findings(&id).await.unwrap(),
             &store.events(&id).await.unwrap(),
         );

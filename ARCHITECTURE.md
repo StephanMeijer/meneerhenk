@@ -184,17 +184,21 @@ sequenceDiagram
                 L->>X: call_tool
                 X-->>L: text, truncated
             else post_finding
-                L->>L: claim the line, check style
-                opt fact_check configured
-                    L->>F: check session: diff tools + give_verdict
-                    F-->>L: confirmed, rejected (reason) or unavailable
-                end
-                L->>W: post_finding at the commit, Marker attached
-                L->>DB: record_finding
+                L->>L: check style and the line, add a draft to the DraftBook
+                L->>DB: record_draft
             end
         end
         L-->>R: LaneResult Finished, Stopped or Dropped
     end
+    opt fact_check configured
+        loop one session per checking model and 10 drafts
+            R->>F: drafts, diff once, code tools + give_verdict per draft
+            F-->>R: confirmed, rejected or same_as, per draft
+        end
+    end
+    R->>R: draft::settle
+    R->>W: post_finding, update_finding, resolve_finding, Marker attached
+    R->>DB: record_finding, decide_draft
     R->>W: existing_findings again
     R->>R: open = in diff and not resolved
     R->>W: fold earlier summaries and resolved findings
@@ -220,14 +224,21 @@ append-only for several turns between edits. On an Anthropic model with
 `prompt_cache` (the default), the system prompt and the end of the
 conversation carry a cache marker, so each turn reads what the last one
 wrote; the run timeline records how much of the prompt came from the cache.
-Findings are posted inside the loop by `post_finding`, not collected until the
-end (§3.2). With `[review.fact_check]`, every post, rewrite and withdrawal
-first passes a check session on another model (`crate::fact_check`): a
-rejection is not posted and the lane gets the reason back, at most twice per
-line; a check that yields no verdict lets the write through and records it
-as `unverified`. A lane that fails comes back as `Dropped` and the review stands on
-the others (§3.3). A lane that reaches its time limit comes back as `Stopped`:
-what it posted stands, it posts nothing more, and the review completes.
+Lanes draft inside the loop with `post_finding`, `improve_finding` and
+`withdraw_finding`, and never write (§3.2, #189): a draft goes into the
+review's `henk_domain::draft::DraftBook`, one per line across lanes, and
+other lanes see it in `list_existing_findings`. Once every lane has ended,
+`crate::fact_check` checks the drafts, with `[review.fact_check]`, in one
+session per checking model and chunk of ten, never on the lane's own model
+first, run one after another in the fact-checker's workspace. Each session
+gets the diff of its files once and gives a verdict per draft: confirmed,
+rejected, or the same as an earlier draft or an existing finding. Drafts
+without a verdict go to the backup model, then out unchecked, recorded as
+`unverified`. `draft::settle` turns the verdicts into writes, and
+`crate::drafts` writes them with the checking model on the marker. A lane
+that fails comes back as `Dropped` and the review stands on the others
+(§3.3). A lane that reaches its time limit comes back as `Stopped`: what it
+drafted is still checked, and the review completes.
 
 ## 4. Where a tool call goes
 
@@ -250,10 +261,10 @@ flowchart TD
     T --> M
     N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file, opened files tracked"]
     N -- "read_file" --> F6["a numbered line range<br/>through the guarded file read"]
-    N -- "list_existing_findings" --> F1["read the shared FindingRegistry"]
-    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>claim the line, first claim wins<br/>fact-check, when configured<br/>Marker attached<br/>PlatformWriter::post_finding"]
-    N -- "improve_finding" --> F3["refuse when a person answered<br/>fact-check, when configured<br/>PlatformWriter::update_finding"]
-    N -- "withdraw_finding" --> F7["refuse when a person answered<br/>fact-check, when configured<br/>update_finding + resolve_finding"]
+    N -- "list_existing_findings" --> F1["read the shared FindingRegistry<br/>and the other lanes' drafts"]
+    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>line free of findings and other lanes' drafts<br/>a draft, written after the lanes and the fact-check"]
+    N -- "improve_finding" --> F3["refuse when a person answered<br/>a draft, written after the lanes and the fact-check"]
+    N -- "withdraw_finding" --> F7["refuse when a person answered<br/>a draft, written after the lanes and the fact-check"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]

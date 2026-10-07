@@ -14,9 +14,9 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    EventFilter, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord,
-    Page, PgStore, PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SqliteStore,
-    ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, EventFilter, FindingAction, InboundEvent, LaneStatus,
+    MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunRecord,
+    RunStatus, RunStore, SqliteStore, ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -86,8 +86,98 @@ macro_rules! for_each_scenario {
             a_number_beyond_i64_is_refused_not_stored_as_something_else,
             tool_calls_are_kept_in_order_and_add_up_across_runs,
             transcripts_are_kept_whole_listed_and_pruned,
+            drafts_are_kept_replaced_and_decided,
         );
     };
+}
+
+fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
+    DraftRecord {
+        at: String::new(),
+        draft: number.into(),
+        lane: lane.into(),
+        model: "opus".into(),
+        kind: "finding".into(),
+        path: "src/a.rs".into(),
+        line: row,
+        target: String::new(),
+        body: body.into(),
+        decision: None,
+    }
+}
+
+async fn drafts_are_kept_replaced_and_decided(store: &dyn RunStore) {
+    let run = new_run("r-drafts");
+    store.create_run(&run).await.unwrap();
+    store
+        .record_draft(&run.id, &draft("d1", "lane-a", 4, "x is never set."))
+        .await
+        .unwrap();
+    store
+        .record_draft(&run.id, &draft("d2", "lane-b", 9, "y leaks."))
+        .await
+        .unwrap();
+    store
+        .record_draft(
+            &run.id,
+            &draft("d1", "lane-a", 4, "x is never set on the error path."),
+        )
+        .await
+        .unwrap();
+    let mut rewrite = draft("d3", "lane-b", 12, "Better text.");
+    "rewrite".clone_into(&mut rewrite.kind);
+    "c-7".clone_into(&mut rewrite.target);
+    store.record_draft(&run.id, &rewrite).await.unwrap();
+
+    let waiting = store.drafts(&run.id).await.unwrap();
+    assert_eq!(
+        waiting.iter().map(|d| d.draft.as_str()).collect::<Vec<_>>(),
+        ["d1", "d2", "d3"],
+        "a replaced draft keeps its place"
+    );
+    assert_eq!(waiting[0].body, "x is never set on the error path.");
+    assert_eq!(waiting[2].target, "c-7");
+    assert!(waiting.iter().all(|d| d.decision.is_none()));
+    assert!(OffsetDateTime::parse(&waiting[0].at, &Rfc3339).is_ok());
+
+    let confirmed = DraftDecision {
+        at: String::new(),
+        verdict: DraftVerdict::Confirmed,
+        checker: "sonnet".into(),
+        reason: "Line 4 never assigns x.".into(),
+        same_as: String::new(),
+        comment_id: "c-9".into(),
+    };
+    store.decide_draft(&run.id, "d1", &confirmed).await.unwrap();
+    let merged = DraftDecision {
+        verdict: DraftVerdict::SameAs,
+        same_as: "d1".into(),
+        ..confirmed.clone()
+    };
+    store.decide_draft(&run.id, "d2", &merged).await.unwrap();
+
+    let decided = store.drafts(&run.id).await.unwrap();
+    let first = decided[0].decision.clone().unwrap();
+    assert_eq!(first.verdict, DraftVerdict::Confirmed);
+    assert_eq!(
+        (
+            first.checker.as_str(),
+            first.reason.as_str(),
+            first.comment_id.as_str()
+        ),
+        ("sonnet", "Line 4 never assigns x.", "c-9")
+    );
+    assert!(OffsetDateTime::parse(&first.at, &Rfc3339).is_ok());
+    let second = decided[1].decision.clone().unwrap();
+    assert_eq!(
+        (second.verdict, second.same_as.as_str()),
+        (DraftVerdict::SameAs, "d1")
+    );
+    assert!(decided[2].decision.is_none(), "d3 still waits");
+    assert!(
+        store.drafts(&id("r-other")).await.unwrap().is_empty(),
+        "only the run's own drafts"
+    );
 }
 
 fn transcript(session: &str, at: &str, body: &str) -> TranscriptRecord {

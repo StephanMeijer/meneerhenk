@@ -13,8 +13,8 @@ pub use postgres::{PgStore, describe_url};
 pub use sqlite::SqliteStore;
 pub use store::RunStore;
 pub use types::{
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
-    RunRecord, RunStatus, StoreError, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord,
-    TranscriptSummary, session_kind,
+    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventRecord, EventWithOutcomes,
+    FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
+    OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord,
+    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, session_kind,
 };

@@ -378,7 +378,8 @@ pub struct ReviewConfig {
     /// The lanes.
     #[serde(default)]
     pub lanes: Vec<LaneFileConfig>,
-    /// Wall-clock limit per lane, in seconds.
+    /// Wall-clock limit per lane, in seconds. The fact-check of what it
+    /// drafted runs after it and is not counted.
     #[serde(default = "default_lane_timeout_secs")]
     pub lane_timeout_secs: u64,
     /// Model calls per lane.
@@ -398,8 +399,8 @@ pub struct ReviewConfig {
     /// Whether GitHub draft pull requests are reviewed (open question 1).
     #[serde(default)]
     pub github_drafts: bool,
-    /// Fact-checking of findings before they are posted. Absent: findings
-    /// are posted unchecked.
+    /// Fact-checking of the lanes' drafts before they are posted, after the
+    /// lanes (#189). Absent: drafts are posted unchecked.
     #[serde(default)]
     pub fact_check: Option<FactCheckConfig>,
     /// Changed files no lane reviews (§3.2): lockfiles and generated
@@ -441,14 +442,16 @@ pub struct SkillsConfig {
 pub struct FactCheckConfig {
     /// Model id from `[models]`.
     pub model: String,
-    /// Model id from `[models]`, used when `model` wrote the finding itself
-    /// or when its check could not be run.
+    /// Model id from `[models]`, used for drafts `model` wrote itself and
+    /// for those `model` gave no verdict on.
     #[serde(default)]
     pub backup_model: Option<String>,
-    /// Wall-clock limit per check, in seconds.
+    /// Wall-clock limit per draft, in seconds; a session gets this times
+    /// the drafts it checks.
     #[serde(default = "default_fact_check_timeout_secs")]
     pub timeout_secs: u64,
-    /// Model calls per check.
+    /// Model calls per draft; a session gets this times the drafts it
+    /// checks.
     #[serde(default = "default_fact_check_max_turns")]
     pub max_turns: u32,
     /// The skills the checker may load.

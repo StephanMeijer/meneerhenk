@@ -134,12 +134,16 @@ Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
 the list (see `henk.example.toml`), and a change made only of such files is
 reported as nothing to review.
 
-A finding is posted only after a second model has checked it when
-`[review.fact_check]` names one (the example uses Claude Opus 5.5 at
-`effort = "high"`, with Claude Sonnet 5.5 as the backup). A rejected finding
-is not posted; the lane gets the reason and may correct it once. `henk runs
-show <id>` lists each check as a `check-<lane>-<n>` session, with its
-verdict on the timeline. `effort` on an Anthropic model sets how much it
+Lanes draft their findings; nothing is posted while they work. When
+`[review.fact_check]` names a second model (the example uses Claude Opus 5.5
+at `effort = "high"`, with Claude Sonnet 5.5 as the backup), it checks the
+drafts of all lanes together once the lanes have finished: one session per
+checking model and ten drafts, with the diff once, never the lane's own model
+first (#189). It confirms or rejects each draft, or calls it the same as an
+earlier draft or an existing finding, which is then merged. Only what it
+confirms is posted. `henk runs show <id>` lists the checks as `check-<n>`
+sessions and every draft with its verdict, checker and comment; so does the
+dashboard's run page. `effort` on an Anthropic model sets how much it
 thinks; it needs a `max_tokens` of 16384 or so and a longer `timeout_secs`.
 
 Skills give lanes, the fact-checker and the planner the team's own

@@ -122,6 +122,7 @@ mod tests {
             "get_file_diff",
             "read_file",
             "give_verdict",
+            "same_as",
         ] {
             assert!(FACT_CHECK.contains(&format!("`{tool}`")), "{tool}");
         }

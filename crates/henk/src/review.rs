@@ -1,6 +1,5 @@
 //! The review orchestrator (§3).
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
 use crate::app::App;
-use crate::fact_check::{FactCheck, SessionFactCheck};
+use crate::fact_check::FactChecker;
 use crate::ids::new_run_id;
 use crate::lane_workspace::ReviewWorkspaces;
 use crate::liveness::KeepAlive;
@@ -51,9 +50,14 @@ pub struct Interrupted;
 /// Turns left when a lane is told to wrap up (#12).
 const LANE_TURN_WARNING_AT: u32 = 3;
 
+/// Appended to the fact-checker's prompt when it has a workspace: one copy
+/// serves every check session of the review in turn, and nothing resets it
+/// between them.
+const SHARED_COPY: &str = "Your copy is shared with the checks of this review that run after you, and they judge their drafts against it: run what you need, but do not change files in it. A file you write goes outside it, at a fresh path from `mktemp`.";
+
 /// What a lane is told then. Lanes that run into the turn limit otherwise
 /// end mid-review, with what they were sure of never posted.
-const LANE_TURN_WARNING: &str = "3 turns left. Post each finding you are sure of with post_finding now, one call per finding, then end your turn.";
+const LANE_TURN_WARNING: &str = "3 turns left. Draft each finding you are sure of with post_finding now, one call per finding, then end your turn.";
 
 /// One review run, as every step of it sees it: known once `run_review`
 /// has the commit.
@@ -72,19 +76,17 @@ struct LaneInputs {
     session: Arc<dyn McpSession>,
     scope: Scope,
     registry: Arc<Mutex<FindingRegistry>>,
+    /// The drafts every lane queues, checked and written after the lanes
+    /// (#189).
+    drafts: Arc<Mutex<henk_domain::draft::DraftBook>>,
     diff: Arc<ReviewDiff>,
     excluded: Vec<&'static str>,
-    fact_check: Option<Arc<dyn FactCheck>>,
     title: String,
     base_ref: String,
     cancel: CancellationToken,
     /// The profile's limits on commands in the review's workspaces.
     limits: henk_domain::workspace::Limits,
 }
-
-/// Appended to the fact-checker's prompt when it has a workspace: its copy
-/// serves every check of the review, some at the same time.
-const SHARED_COPY: &str = "Your copy is shared with the other checks of this review, some running at the same time: run what you need, but do not change files in it. A file you write goes outside it, at a fresh path from `mktemp`.";
 
 /// A request to review one pull/merge request.
 #[derive(Debug, Clone)]
@@ -572,6 +574,7 @@ async fn run_lanes(
 ) -> anyhow::Result<Vec<LaneResult>> {
     let ReviewRun {
         app,
+        writer,
         target,
         commit,
         run,
@@ -591,9 +594,9 @@ async fn run_lanes(
         session,
         scope,
         registry,
+        drafts: Arc::new(Mutex::new(henk_domain::draft::DraftBook::new())),
         diff,
         excluded,
-        fact_check: None,
         title: title.to_owned(),
         base_ref: base_ref.to_owned(),
         cancel: cancel.clone(),
@@ -605,7 +608,7 @@ async fn run_lanes(
     // destroys them too.
     let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
     lanes.limits = workspaces.limits();
-    lanes.fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
+    let fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
     let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
     let mut results = Vec::new();
@@ -619,6 +622,42 @@ async fn run_lanes(
                     outcome: LaneOutcome::Dropped,
                 });
             }
+        }
+    }
+    // Every lane has ended: check what they drafted, together, and write
+    // what holds (#189). Nothing was written before this.
+    let book = lanes
+        .drafts
+        .lock()
+        .map(|book| book.clone())
+        .unwrap_or_default();
+    let writes = crate::drafts::ReviewWrites {
+        run: run.clone(),
+        target: target.clone(),
+        commit: commit.clone(),
+        writer: Arc::clone(writer),
+        store: Arc::clone(&app.store),
+        registry: Arc::clone(&lanes.registry),
+    };
+    if !book.is_empty() {
+        let verdicts = match &fact_check {
+            _ if cancel.is_cancelled() => None,
+            Some(checker) => Some(
+                checker
+                    .check_all(&book, &crate::drafts::open_findings(&lanes.registry))
+                    .await,
+            ),
+            None => Some(
+                book.iter()
+                    .map(|d| (d.id, henk_domain::draft::Verdict::NoCheck))
+                    .collect(),
+            ),
+        };
+        match verdicts {
+            Some(verdicts) if !cancel.is_cancelled() => {
+                crate::drafts::write_all(&writes, &book, &verdicts).await;
+            }
+            _ => crate::drafts::cancel_all(&writes, &book).await,
         }
     }
     workspaces.close_all().await;
@@ -820,7 +859,6 @@ async fn build_lane(
 ) -> anyhow::Result<Lane> {
     let ReviewRun {
         app,
-        writer,
         target,
         commit,
         run,
@@ -857,14 +895,10 @@ async fn build_lane(
         run: run.clone(),
         lane: lane.name.clone(),
         model: model_id(model.as_ref()),
-        target: target.clone(),
-        commit: commit.clone(),
         registry: Arc::clone(&lanes.registry),
-        writer: Arc::clone(writer),
+        drafts: Arc::clone(&lanes.drafts),
         store: Arc::clone(&app.store),
         files: Arc::new(DiffFiles::new(Arc::clone(&lanes.diff))),
-        fact_check: lanes.fact_check.clone(),
-        rejections: Mutex::new(BTreeMap::new()),
         workspace,
     });
     set.add(ListChangedFiles(Arc::clone(&context.files)));
@@ -965,7 +999,7 @@ async fn build_fact_check(
     review: ReviewRun<'_>,
     lanes: &LaneInputs,
     workspace: Option<Arc<dyn crate::workspace::Workspace>>,
-) -> anyhow::Result<Option<Arc<dyn FactCheck>>> {
+) -> anyhow::Result<Option<FactChecker>> {
     let ReviewRun {
         app,
         target,
@@ -1007,7 +1041,7 @@ async fn build_fact_check(
     if workspace.is_some() {
         system = format!("{system}\n\n{}\n\n{SHARED_COPY}", prompts::REVIEW_WORKSPACE);
     }
-    Ok(Some(Arc::new(SessionFactCheck {
+    Ok(Some(FactChecker {
         store: Arc::clone(&app.store),
         run: run.clone(),
         models,
@@ -1027,8 +1061,7 @@ async fn build_fact_check(
             ..AgentConfig::default()
         },
         cancel: cancel.clone(),
-        sequence: std::sync::atomic::AtomicU32::new(0),
-    })))
+    }))
 }
 
 /// A lane ready to run: its session and the context its tools share, kept
@@ -1049,10 +1082,10 @@ mod lifecycle_tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::indexing_slicing,
-        clippy::unnecessary_wraps
+        clippy::unnecessary_wraps,
+        clippy::too_many_lines
     )]
 
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use henk_domain::allowlist::{Platform, RepoRef};
@@ -1157,7 +1190,8 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         let session: Arc<dyn McpSession> = Arc::new(server.connect("github").await);
         let model = Arc::new(model);
-        let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
+        let mut models: std::collections::BTreeMap<String, Arc<dyn ModelClient>> =
+            std::collections::BTreeMap::new();
         models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         Fixture {
             app: App {
@@ -2100,6 +2134,348 @@ lanes = [{ name = "lane-a", model = "m" }]
             "nor the timeline"
         );
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
+    }
+
+    /// Lane-a on model `aa` and lane-b on model `bb`, with `extra` added
+    /// to the configuration, and a writer that takes posts. `aa` is the
+    /// fixture's model, `bb` its second.
+    async fn two_lane_review(
+        extra: &str,
+        aa: ScriptedClient,
+        bb: ScriptedClient,
+    ) -> (Fixture, Arc<ScriptedClient>) {
+        let config = CONFIG
+            .replace(
+                "lanes = [{ name = \"lane-a\", model = \"m\" }]\n",
+                &format!(
+                    "lanes = [{{ name = \"lane-a\", model = \"m\" }}, {{ name = \"lane-b\", model = \"m2\" }}]\n{extra}"
+                ),
+            )
+            .replace(
+                "[review]\n",
+                "[models.m2]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"scripted\"\n[review]\n",
+            );
+        let mut f = fixture_on(
+            DIFF,
+            aa,
+            &config,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        let bb = Arc::new(bb);
+        f.app
+            .models
+            .insert("m2".to_owned(), Arc::clone(&bb) as Arc<dyn ModelClient>);
+        let writer = Arc::new(FakeWriter {
+            head: SHA.to_owned(),
+            patches: henk_domain::diff::split_unified(DIFF),
+            accept_posts: true,
+            ..FakeWriter::default()
+        });
+        f.app.test_writer = Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>);
+        f.writer = writer;
+        (f, bb)
+    }
+
+    fn draft(line: u32, body: &str) -> Result<Completion, henk_llm::LlmError> {
+        call(
+            "post_finding",
+            serde_json::json!({"path": "src/a.rs", "line": line, "body": body}),
+        )
+    }
+
+    fn verdict(
+        id: &str,
+        verdict: &str,
+        same_as: Option<&str>,
+    ) -> Result<Completion, henk_llm::LlmError> {
+        let mut args =
+            serde_json::json!({"id": id, "verdict": verdict, "reason": "src/a.rs:2 shows it."});
+        if let Some(of) = same_as {
+            args["same_as"] = serde_json::json!(of);
+        }
+        call("give_verdict", args)
+    }
+
+    async fn decisions(f: &Fixture, run: &RunId) -> Vec<(String, String, String, String)> {
+        f.app
+            .store
+            .drafts(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| {
+                let decision = d.decision.unwrap();
+                (
+                    d.lane,
+                    decision.verdict.as_str().to_owned(),
+                    decision.checker,
+                    decision.same_as,
+                )
+            })
+            .collect()
+    }
+
+    /// #189: two lanes on different models report one problem. Nothing is
+    /// posted while they work; afterwards each draft is checked by the
+    /// other lane's model, one session each, and the repeat is merged.
+    #[tokio::test]
+    async fn drafts_are_checked_by_another_model_after_the_lanes_and_a_repeat_is_merged() {
+        let aa = ScriptedClient::new(
+            "aa",
+            [
+                draft(2, "x changes from 1 to 2 and no test covers it."),
+                done(),
+                done(),
+                verdict("d2", "same_as", Some("d1")),
+                done(),
+            ],
+        );
+        // Later than lane-a, so its draft is d2.
+        let bb = ScriptedClient::new(
+            "bb",
+            [
+                draft(3, "The new value of x is untested."),
+                done(),
+                done(),
+                verdict("d1", "confirmed", None),
+                done(),
+            ],
+        )
+        .with_delay(Duration::from_millis(100));
+        let (f, bb) = two_lane_review(
+            "[review.fact_check]\nmodel = \"m\"\nbackup_model = \"m2\"\n",
+            aa,
+            bb,
+        )
+        .await;
+        let run = RunId::parse("r-drafts").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let posts = f.writer.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1, "one problem, one comment: {posts:?}");
+        assert_eq!(posts[0].1, 2);
+        let marker = Marker::parse(&posts[0].2).unwrap();
+        assert_eq!(marker.model.as_str(), "aa", "lane-a wrote it");
+        assert_eq!(
+            marker.checked_by.unwrap().as_str(),
+            "bb",
+            "lane-b's model checked it"
+        );
+        assert_eq!(
+            decisions(&f, &run).await,
+            [
+                (
+                    "lane-a".into(),
+                    "confirmed".into(),
+                    "bb".into(),
+                    String::new()
+                ),
+                ("lane-b".into(), "same_as".into(), "aa".into(), "d1".into()),
+            ]
+        );
+        let actions: Vec<(String, String)> = f
+            .app
+            .store
+            .findings(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.lane, r.action))
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                ("lane-a".to_owned(), "posted".to_owned()),
+                ("lane-b".to_owned(), "merged".to_owned())
+            ]
+        );
+        let sessions: Vec<String> = f
+            .app
+            .store
+            .lanes(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .filter(|n| n.starts_with("check-"))
+            .collect();
+        assert_eq!(
+            sessions,
+            ["check-1", "check-2"],
+            "one session per checking model"
+        );
+        let check = bb.requests().last().unwrap().messages[0].text();
+        assert!(
+            check.contains("## d1: a new finding on src/a.rs:2"),
+            "{check}"
+        );
+        assert!(
+            !check.contains("## d2"),
+            "bb never checks its own lane's draft first"
+        );
+
+        // The lanes had ended before anything was confirmed or posted.
+        let events: Vec<String> = f
+            .app
+            .store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        let at = |needle: &str| {
+            events
+                .iter()
+                .position(|e| e.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {events:?}"))
+        };
+        assert!(at("lane-b:") < at("confirmed by bb"), "{events:?}");
+        assert!(at("lane-a:") < at("confirmed by bb"), "{events:?}");
+    }
+
+    /// A rejected draft is not posted, and a review without a fact-check
+    /// posts its drafts after the lanes as they are.
+    #[tokio::test]
+    async fn a_rejected_draft_is_not_posted_and_without_a_checker_drafts_go_out() {
+        let aa = ScriptedClient::new("aa", [draft(2, "x is wrong."), done(), done()]);
+        let bb = ScriptedClient::new(
+            "bb",
+            [done(), done(), verdict("d1", "rejected", None), done()],
+        );
+        let (f, _) = two_lane_review(
+            "[review.fact_check]\nmodel = \"m\"\nbackup_model = \"m2\"\n",
+            aa,
+            bb,
+        )
+        .await;
+        let run = RunId::parse("r-rejected").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(f.writer.posts.lock().unwrap().is_empty());
+        assert_eq!(
+            decisions(&f, &run).await,
+            [(
+                "lane-a".into(),
+                "rejected".into(),
+                "bb".into(),
+                String::new()
+            )]
+        );
+
+        let aa = ScriptedClient::new("aa", [draft(2, "x is wrong."), done(), done()]);
+        let bb = ScriptedClient::new("bb", [done(), done()]);
+        let (f, _) = two_lane_review("", aa, bb).await;
+        let run = RunId::parse("r-unchecked").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let posts = f.writer.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(Marker::parse(&posts[0].2).unwrap().checked_by, None);
+        assert_eq!(
+            decisions(&f, &run).await,
+            [(
+                "lane-a".into(),
+                "not_checked".into(),
+                String::new(),
+                String::new()
+            )]
+        );
+        let actions: Vec<String> = f
+            .app
+            .store
+            .findings(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.action)
+            .collect();
+        assert_eq!(
+            actions,
+            ["posted"],
+            "not marked unverified: nothing was configured to check"
+        );
+    }
+
+    /// Three drafts on one file, one per line of its diff: one check
+    /// session, with the diff once. Checked one by one, each check got the
+    /// diff again (#189).
+    #[tokio::test]
+    async fn drafts_on_one_file_are_checked_in_one_session_with_the_diff_once() {
+        let mut lane = Vec::new();
+        for line in 1..=3 {
+            lane.push(draft(line, &format!("Problem on line {line}.")));
+        }
+        lane.extend([done(), done()]);
+        let aa = ScriptedClient::new("aa", lane);
+        let mut check: Vec<_> = Vec::new();
+        let (f, bb) = {
+            check.extend([done(), done()]);
+            for n in 1..=3 {
+                check.push(verdict(&format!("d{n}"), "confirmed", None));
+            }
+            check.push(done());
+            two_lane_review(
+                "[review.fact_check]\nmodel = \"m2\"\n",
+                aa,
+                ScriptedClient::new("bb", check),
+            )
+            .await
+        };
+        let run = RunId::parse("r-six").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let checks: Vec<String> = bb
+            .requests()
+            .iter()
+            .filter(|r| r.tools.iter().any(|t| t.name.as_str() == "give_verdict"))
+            .map(|r| r.messages[0].text())
+            .collect();
+        assert!(!checks.is_empty());
+        let openings: std::collections::BTreeSet<&String> = checks.iter().collect();
+        assert_eq!(openings.len(), 1, "one check session");
+        let opening = openings.into_iter().next().unwrap();
+        assert_eq!(
+            opening.matches("The diff of src/a.rs:").count(),
+            1,
+            "{opening}"
+        );
+        assert_eq!(opening.matches("## d").count(), 3, "{opening}");
+    }
+
+    /// A review cancelled while its lanes work posts none of their drafts.
+    #[tokio::test]
+    async fn a_cancelled_review_posts_no_drafts() {
+        let aa = ScriptedClient::new("aa", [draft(2, "x is wrong."), done(), done()])
+            .with_delay(Duration::from_millis(400));
+        let bb = ScriptedClient::new("bb", [done(), done()]);
+        let (f, _) = two_lane_review("[review.fact_check]\nmodel = \"m2\"\n", aa, bb).await;
+        let run = RunId::parse("r-cancel-drafts").unwrap();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            trigger.cancel();
+        });
+        let _ = run_review(&f.app, request(&run), cancel).await;
+        assert!(f.writer.posts.lock().unwrap().is_empty());
+        assert_eq!(
+            decisions(&f, &run).await,
+            [(
+                "lane-a".into(),
+                "cancelled".into(),
+                String::new(),
+                String::new()
+            )]
+        );
     }
 
     fn many_done() -> ScriptedClient {

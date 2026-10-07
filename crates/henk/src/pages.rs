@@ -119,6 +119,7 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
         .into_iter()
         .map(|t| t.session)
         .collect();
+    let drafts = store.drafts(run_id).await.unwrap_or_default();
     let findings = store.findings(run_id).await.unwrap_or_default();
     let events = store.events(run_id).await.unwrap_or_default();
     let inbound = store
@@ -190,9 +191,61 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
         links.transcript(run.id.as_str(), session)
     }));
     html.push_str(&tools_table(&tools));
+    html.push_str(&drafts_table(&drafts));
     html.push_str(&findings_table(&findings));
     html.push_str(&timeline_table(&events));
     page(&format!("Run {}", run.id), links.nav, &html)
+}
+
+/// What the lanes drafted and what became of each draft (#189): the
+/// verdict, the model that gave it, what it repeats and the comment.
+fn drafts_table(drafts: &[henk_store::DraftRecord]) -> String {
+    let mut html = String::new();
+    if drafts.is_empty() {
+        return html;
+    }
+    html.push_str("<h2>Drafts</h2><table><tr><th>Draft</th><th>Lane</th><th>Where</th><th>What</th><th>Verdict</th><th>By</th><th>Comment</th><th>Reason</th></tr>");
+    for draft in drafts {
+        let what = match draft.kind.as_str() {
+            "finding" => escape(&draft.body),
+            kind => format!(
+                "{} of {}: {}",
+                escape(kind),
+                escape(&draft.target),
+                escape(&draft.body)
+            ),
+        };
+        let (verdict, by, comment, reason) = match &draft.decision {
+            Some(decision) => {
+                let mut verdict = decision.verdict.as_str().replace('_', " ");
+                if !decision.same_as.is_empty() {
+                    verdict = format!("{verdict} {}", decision.same_as);
+                }
+                (
+                    escape(&verdict),
+                    escape(&decision.checker),
+                    escape(&decision.comment_id),
+                    escape(&decision.reason),
+                )
+            }
+            None => (
+                "waiting".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+        };
+        let _ = write!(
+            html,
+            "<tr><td>{}</td><td>{}</td><td><code>{}:{}</code></td><td>{what}</td><td>{verdict}</td><td>{by}</td><td>{comment}</td><td>{reason}</td></tr>",
+            escape(&draft.draft),
+            escape(&draft.lane),
+            escape(&draft.path),
+            draft.line
+        );
+    }
+    html.push_str("</table>");
+    html
 }
 
 /// A tool result longer than this many lines is folded away.
