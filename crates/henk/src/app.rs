@@ -171,6 +171,7 @@ impl App {
         // The sandbox host's key is read now, so a missing or broken one
         // stops Henk at start instead of failing the first address run.
         let ssh = crate::workspace::ssh_provider(&settings)?;
+        let kubernetes = crate::workspace::kubernetes_provider(&settings).await?;
 
         Ok(Self {
             settings,
@@ -181,7 +182,7 @@ impl App {
             shutdown: CancellationToken::new(),
             live_runs: LiveRuns::default(),
             cancels: crate::cancel::Cancels::default(),
-            workspace_provider: Arc::new(Backends::new(ssh)),
+            workspace_provider: Arc::new(Backends::new(ssh, kubernetes)),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]

@@ -475,6 +475,69 @@ host: `deploy/sandbox/test-host.Containerfile` builds one, and
 `HENK_TEST_SSH_HOST`, `_PORT`, `_USER`, `_KEY_PATH` and `_HOST_KEY` point
 `cargo test -p henk -- --ignored live_` at it.
 
+### Workspaces on Kubernetes
+
+The `kubernetes` workspace backend (#89) makes one Pod per workspace in a
+sandbox namespace of its own, apart from the namespace Henk runs in. Henk
+talks to the API server himself, as his own ServiceAccount, and may do
+nothing but make, read and remove Pods and run commands in them, and only
+in that namespace. Each request is a `pods/exec` of the same sandbox
+script the `ssh` backend sends, in its single-user mode: the Pod is the
+workspace and its boundary, the record of changes is in the Pod with
+everything else, and what leaves it is the changeset Henk checks as for
+every backend.
+
+Every Pod is locked down by its spec: not root (`run_as_user`), no
+privilege escalation, every capability dropped, a read-only root
+filesystem, seccomp `RuntimeDefault`, no ServiceAccount token and no
+service links, and the profile's `memory_mib`, `cpus` and `disk_mib` as its
+memory, cpu and scratch disk. The number of processes is the node's
+setting (`podPidsLimit`). A command that runs out of memory ends the whole
+Pod on Kubernetes 1.32 and later; the result says so, and the workspace is
+gone for the rest of that run. Pods live at most six hours whatever
+happens to Henk, and `henk serve` removes those of a Henk that died when
+it starts: one Henk per sandbox namespace.
+
+To set it up, apply `deploy/kubernetes/`:
+1. `henk-serviceaccount.yaml`: Henk's ServiceAccount, in Henk's own
+   namespace (`henk` there; change it to yours). Henk's Deployment runs as
+   it.
+2. `sandbox-namespace.yaml`: the sandbox namespace with Pod Security
+   `restricted` enforced, a Role for Pods and `pods/exec` bound to Henk's
+   ServiceAccount, a default ServiceAccount that never mounts a token, and
+   a quota and default limits for the namespace as a whole.
+3. `sandbox-network.yaml`: a `NetworkPolicy` that lets nothing in and lets
+   the Pods reach DNS and the internet but not the cluster: fill in your
+   Pod, Service and node ranges. It needs a CNI that enforces policies.
+4. An image with `sh`, coreutils, findutils, GNU `grep` with PCRE2, `tar`,
+   `git`, `bash` and `catatonit` (the Pod's first process, which reaps
+   what a run leaves running), and `mise` for profiles with
+   `toolchain = "mise"`:
+   `deploy/kubernetes/sandbox-image/Containerfile` is a start. Pin it by
+   digest. A profile may name its own with `image`, so each repository can
+   start from the toolchains it needs.
+
+```toml
+[workspace]
+backend = "kubernetes"
+review = true
+[workspace.kubernetes]
+namespace = "henk-sandbox"
+image = "registry.example/henk-sandbox@sha256:…"
+# run_as_user = 1000
+# runtime_class = "gvisor"           # gVisor or Kata, #87
+# node_selector = { pool = "sandbox" }
+# kubeconfig_env = "KUBECONFIG"      # outside the cluster only
+```
+
+`henk doctor --probe` asks the API server what Henk may do in the
+namespace (it fails when he could read Secrets there, or lacks what he
+needs), and starts a Pod from each image a profile uses to check its
+tools. The live tests run against any cluster, kind included: apply the
+manifests, load the image, and set `HENK_TEST_KUBE_NAMESPACE`,
+`_IMAGE` and `_SERVICEACCOUNT` (`henk:henk`, which the tests act as) for
+`cargo test -p henk -- --ignored live_kube`.
+
 ### Dashboard
 
 With a `[dashboard]` table and its three secrets set, `henk serve` also

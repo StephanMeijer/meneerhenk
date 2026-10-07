@@ -1,0 +1,33 @@
+# What the sandbox Pods may reach (#86's default, "open"): nothing may reach
+# them, and they may reach DNS and the internet, but not the cluster itself:
+# fill in your cluster's Pod and Service ranges, and the node network if the
+# API server or the kubelets are there. A CNI that enforces NetworkPolicy is
+# needed (kind's default does not).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: henk-workspaces
+  namespace: henk-sandbox
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8        # your Pod range (example)
+              - 172.16.0.0/12     # your Service range (example)
+              - 192.168.0.0/16    # your node network (example)
+              - 169.254.169.254/32  # cloud metadata

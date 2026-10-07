@@ -706,6 +706,109 @@ pub struct WorkspaceConfig {
     pub repositories: BTreeMap<String, String>,
     /// The sandbox host the `ssh` backend uses (#84).
     pub ssh: Option<SshConfig>,
+    /// The cluster and namespace the `kubernetes` backend uses (#89).
+    pub kubernetes: Option<KubernetesConfig>,
+}
+
+/// Where the `kubernetes` backend makes its Pods: a namespace of their own,
+/// apart from Henk's, and the image they start from unless a profile names
+/// another. Henk reaches the cluster with its own service account, or with
+/// the kubeconfig the variable `kubeconfig_env` names; no token is in this
+/// file (§8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesConfig {
+    /// The sandbox namespace. Henk's service account needs a Role there and
+    /// nowhere else (`deploy/kubernetes/`).
+    pub namespace: String,
+    /// The image every profile on this backend uses unless it names its own.
+    pub image: Option<String>,
+    /// A variable holding a kubeconfig's path, for running outside the
+    /// cluster; unset, Henk uses the service account it runs as.
+    pub kubeconfig_env: Option<String>,
+    /// The user id the Pod runs as; never root.
+    #[serde(default = "default_pod_user")]
+    pub run_as_user: i64,
+    /// A runtime class for the Pods, such as gVisor or Kata (#87).
+    pub runtime_class: Option<String>,
+    /// Node labels the Pods must land on, such as a sandbox node pool.
+    #[serde(default)]
+    pub node_selector: BTreeMap<String, String>,
+}
+
+const fn default_pod_user() -> i64 {
+    1000
+}
+
+impl KubernetesConfig {
+    /// The table is usable, present when a profile needs it, and every
+    /// profile on the backend has an image.
+    fn check(kubernetes: Option<&Self>, workspace: &WorkspacePolicy) -> Result<(), ConfigError> {
+        let refuse = |what: String| Err(ConfigError::Workspace(what));
+        let on_pods: Vec<(&str, &Profile)> = workspace
+            .named()
+            .filter(|(_, p)| p.backend == BackendKind::Kubernetes)
+            .collect();
+        let Some(config) = kubernetes else {
+            return if on_pods.is_empty() {
+                Ok(())
+            } else {
+                refuse(
+                    "a workspace profile uses the kubernetes backend, but [workspace.kubernetes] is missing"
+                        .to_owned(),
+                )
+            };
+        };
+        if !is_dns_label(&config.namespace) {
+            return refuse(format!(
+                "workspace.kubernetes: namespace {:?} is not a Kubernetes namespace name",
+                config.namespace
+            ));
+        }
+        if config.run_as_user <= 0 {
+            return refuse(
+                "workspace.kubernetes: run_as_user must be a user other than root".to_owned(),
+            );
+        }
+        if config.image.as_deref().is_some_and(|i| i.trim().is_empty()) {
+            return refuse("workspace.kubernetes: image is empty".to_owned());
+        }
+        if config
+            .kubeconfig_env
+            .as_deref()
+            .is_some_and(|v| v.trim().is_empty())
+        {
+            return refuse("workspace.kubernetes: kubeconfig_env names no variable".to_owned());
+        }
+        if let Some((name, _)) = on_pods
+            .iter()
+            .find(|(_, p)| p.image.is_none() && config.image.is_none())
+        {
+            return refuse(format!(
+                "workspace profile {name} uses the kubernetes backend but has no image, and [workspace.kubernetes] names none"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The image `profile` starts from.
+    #[must_use]
+    pub fn image_for<'a>(&'a self, profile: &'a Profile) -> Option<&'a str> {
+        profile.image.as_deref().or(self.image.as_deref())
+    }
+}
+
+/// A DNS label as Kubernetes names namespaces: lowercase letters, digits
+/// and `-`, starting and ending with a letter or digit, at most 63.
+fn is_dns_label(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
 }
 
 /// The sandbox host of the `ssh` backend: where it is, who Henk signs in
@@ -799,6 +902,7 @@ impl Default for WorkspaceConfig {
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
+            kubernetes: None,
         }
     }
 }
@@ -836,6 +940,13 @@ pub struct ProfileConfig {
     pub plan: Option<bool>,
 }
 
+/// The workspace settings, checked.
+struct WorkspaceParts {
+    policy: WorkspacePolicy,
+    ssh: Option<SshConfig>,
+    kubernetes: Option<KubernetesConfig>,
+}
+
 impl WorkspaceConfig {
     /// The policy, with `check_timeout_secs` from `[address]` as the default
     /// profile's command limit when it is set.
@@ -843,16 +954,23 @@ impl WorkspaceConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError::Workspace`] when the policy is unusable.
-    /// The policy and the sandbox host, checked together: a profile on the
-    /// ssh backend needs `[workspace.ssh]`.
+    /// The policy, the sandbox host and the cluster, checked together: a
+    /// profile on the ssh backend needs `[workspace.ssh]`, one on the
+    /// kubernetes backend `[workspace.kubernetes]`.
     fn into_parts(
         mut self,
         check_timeout_secs: Option<u64>,
-    ) -> Result<(WorkspacePolicy, Option<SshConfig>), ConfigError> {
+    ) -> Result<WorkspaceParts, ConfigError> {
         let ssh = self.ssh.take();
+        let kubernetes = self.kubernetes.take();
         let policy = self.into_policy(check_timeout_secs)?;
         SshConfig::check(ssh.as_ref(), &policy)?;
-        Ok((policy, ssh))
+        KubernetesConfig::check(kubernetes.as_ref(), &policy)?;
+        Ok(WorkspaceParts {
+            policy,
+            ssh,
+            kubernetes,
+        })
     }
 
     fn into_policy(self, check_timeout_secs: Option<u64>) -> Result<WorkspacePolicy, ConfigError> {
@@ -1086,6 +1204,8 @@ pub struct Settings {
     pub workspace: WorkspacePolicy,
     /// The sandbox host of the `ssh` backend, when configured.
     pub workspace_ssh: Option<SshConfig>,
+    /// The `kubernetes` backend's cluster settings, when configured.
+    pub workspace_kubernetes: Option<KubernetesConfig>,
     /// True when the command limit came from the deprecated
     /// `address.check_timeout_secs`.
     pub legacy_check_timeout: bool,
@@ -1161,7 +1281,11 @@ impl Config {
             .collect::<Result<BTreeMap<_, _>, ConfigError>>()?;
         let legacy_database_path = self.server.database_path.is_some();
         let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
-        let (workspace, workspace_ssh) = self.workspace.into_parts(check_timeout_secs)?;
+        let WorkspaceParts {
+            policy: workspace,
+            ssh: workspace_ssh,
+            kubernetes: workspace_kubernetes,
+        } = self.workspace.into_parts(check_timeout_secs)?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
         if let Some(dashboard) = &self.dashboard {
             validate_dashboard(dashboard)?;
@@ -1208,6 +1332,7 @@ impl Config {
             address: self.address,
             workspace,
             workspace_ssh,
+            workspace_kubernetes,
             legacy_check_timeout: check_timeout_secs.is_some(),
             committers,
             mcp: self.mcp,
@@ -1705,6 +1830,22 @@ impl Settings {
                 ssh.user, ssh.host, ssh.port, ssh.key_path_env
             );
         }
+        if let Some(kube) = &self.workspace_kubernetes {
+            let _ = writeln!(
+                out,
+                "  sandbox pods: namespace {}, image {}, as user {}{}{}; the number of processes is the node's limit",
+                kube.namespace,
+                kube.image.as_deref().unwrap_or("from each profile"),
+                kube.run_as_user,
+                kube.runtime_class
+                    .as_deref()
+                    .map_or_else(String::new, |c| format!(", runtime class {c}")),
+                kube.kubeconfig_env.as_deref().map_or_else(
+                    || ", in-cluster".to_owned(),
+                    |v| format!(", kubeconfig from ${v}")
+                ),
+            );
+        }
         for backend in weak {
             let unenforced = and_list(&Limits::unenforced_on(backend));
             let _ = match backend {
@@ -1719,6 +1860,7 @@ impl Settings {
                         .as_ref()
                         .map_or("the sandbox host", |s| s.host.as_str())
                 ),
+                BackendKind::Kubernetes => Ok(()),
             };
         }
     }
@@ -2525,6 +2667,69 @@ github_owners = ["docspec"]
             refused.contains("plan = true needs a backend apart from Henk"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn the_kubernetes_backend_needs_its_namespace_and_an_image() {
+        let pods = "[workspace]\nbackend = \"kubernetes\"\nreview = true\n";
+        let refused = database(pods).unwrap_err().to_string();
+        assert!(
+            refused.contains("[workspace.kubernetes] is missing"),
+            "{refused}"
+        );
+        let no_image = database(&format!(
+            "{pods}[workspace.kubernetes]\nnamespace = \"henk-sandbox\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(no_image.contains("has no image"), "{no_image}");
+
+        let settings = database(&format!(
+            "{pods}[workspace.profiles.big]\nimage = \"big:2\"\nmemory_mib = 4096\n[workspace.kubernetes]\nnamespace = \"henk-sandbox\"\nimage = \"sandbox:1\"\nruntime_class = \"gvisor\"\n"
+        ))
+        .unwrap();
+        let config = settings.workspace_kubernetes.as_ref().unwrap();
+        assert_eq!(
+            (config.namespace.as_str(), config.run_as_user),
+            ("henk-sandbox", 1000)
+        );
+        let big = settings.workspace.profiles.get("big").unwrap();
+        assert_eq!(
+            config.image_for(big),
+            Some("big:2"),
+            "a profile's own image"
+        );
+        assert_eq!(
+            config.image_for(&settings.workspace.default),
+            Some("sandbox:1")
+        );
+        let text = settings.describe();
+        assert!(
+            text.contains("  default: kubernetes, 600s per command"),
+            "{text}"
+        );
+        assert!(
+            text.contains(", image big:2, reviews in a workspace, memory 4096 MiB"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  sandbox pods: namespace henk-sandbox, image sandbox:1, as user 1000, runtime class gvisor, in-cluster; the number of processes is the node's limit"),
+            "{text}"
+        );
+        assert!(!text.contains("Warning: the kubernetes"), "{text}");
+
+        for bad in [
+            "namespace = \"Henk_Sandbox\"\nimage = \"x\"\n",
+            "namespace = \"ok\"\nimage = \"x\"\nrun_as_user = 0\n",
+            "namespace = \"ok\"\nimage = \" \"\n",
+            "namespace = \"ok\"\nimage = \"x\"\nkubeconfig_env = \"\"\n",
+            "namespace = \"ok\"\nimage = \"x\"\ncluster_admin = true\n",
+        ] {
+            assert!(
+                database(&format!("{pods}[workspace.kubernetes]\n{bad}")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     fn host_key_line() -> String {

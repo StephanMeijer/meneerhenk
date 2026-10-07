@@ -1,0 +1,81 @@
+# The sandbox namespace of the kubernetes workspace backend (#89): where Henk
+# makes one Pod per workspace, apart from the namespace Henk runs in.
+# `[workspace.kubernetes] namespace` names it. Henk's ServiceAccount may make,
+# read and remove Pods here and run commands in them, nothing else and
+# nowhere else; the Pods themselves get no token at all.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: henk-sandbox
+  labels:
+    # Pod Security Admission: only Pods as locked down as Henk makes them.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: henk-workspaces
+  namespace: henk-sandbox
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: henk-workspaces
+  namespace: henk-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: henk-workspaces
+subjects:
+  # Henk's ServiceAccount, in Henk's own namespace.
+  - kind: ServiceAccount
+    name: henk
+    namespace: henk
+---
+# The default ServiceAccount of the sandbox namespace, which the Pods use,
+# never mounts a token, whatever a Pod asks.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: henk-sandbox
+automountServiceAccountToken: false
+---
+# A cap for the namespace as a whole, whatever the profiles say: adjust to
+# how many workspaces run at once (lanes, the fact-checker, address runs).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: henk-workspaces
+  namespace: henk-sandbox
+spec:
+  hard:
+    pods: "20"
+    limits.memory: 40Gi
+    limits.cpu: "20"
+---
+# What a Pod gets when its profile sets no limits.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: henk-workspaces
+  namespace: henk-sandbox
+spec:
+  limits:
+    - type: Container
+      default:
+        memory: 2Gi
+        cpu: "2"
+        ephemeral-storage: 4Gi
+      defaultRequest:
+        memory: 512Mi
+        cpu: 250m
+        ephemeral-storage: 1Gi

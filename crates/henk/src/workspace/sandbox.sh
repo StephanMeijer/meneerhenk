@@ -33,13 +33,16 @@
 #   sweep                     destroy every workspace on this host
 #   probe                     print the version and which tools are present
 #
-# For tests only: run as a normal user with HENK_SANDBOX_BASE set, a
+# Single-user mode: run as a normal user with HENK_SANDBOX_BASE set, a
 # workspace is a directory under it and nothing changes user. As root that
-# variable is ignored.
+# variable is ignored. It is what a Pod of the kubernetes backend (#89)
+# runs: the Pod is the workspace and its boundary, and HENK_SANDBOX_POD=1
+# says so, which lets `stop` end every other process in it. The tests run
+# the same mode on their own machine, without HENK_SANDBOX_POD.
 set -eu
 umask 022
 
-VERSION=4
+VERSION=5
 RUN_PATH=/usr/local/bin:/usr/bin:/bin
 # Named after the runner this script replaced, so a sweep still finds what
 # an older Henk left on the host.
@@ -113,7 +116,33 @@ record_git() {
 # Kills every process of the workspace's user, until none is left; fails
 # when they keep coming.
 stop() {
-    [ -z "$BASE" ] || return 0
+    if [ -n "$BASE" ]; then
+        [ "${HENK_SANDBOX_POD:-}" = 1 ] || return 0
+        # In a Pod, every process but the Pod's first and this script is the
+        # run's: end them all, as `pkill -u` does on a sandbox host.
+        tries=0
+        while :; do
+            left=0
+            for proc in /proc/[0-9]*; do
+                pid=${proc#/proc/}
+                case $pid in 1 | "$$") continue ;; esac
+                # A killed process is a zombie until the Pod's first
+                # process reaps it: it is dead, not running.
+                # The State line is the kernel's; a process's own name
+                # cannot fake it.
+                zombie=0
+                while IFS= read -r line; do
+                    case $line in "State:"*Z*) zombie=1 ;; esac
+                done <"$proc/status" 2>/dev/null || continue
+                [ "$zombie" -eq 0 ] || continue
+                kill -KILL "$pid" 2>/dev/null && left=1
+            done
+            [ "$left" -eq 1 ] || return 0
+            tries=$((tries + 1))
+            [ "$tries" -lt 50 ] || return 1
+            sleep 0.1
+        done
+    fi
     uid=$(id -u "$user" 2>/dev/null) || return 0
     tries=0
     while pkill -KILL -u "$uid" 2>/dev/null; do

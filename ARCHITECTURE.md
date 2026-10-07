@@ -434,7 +434,11 @@ The model's tools talk only to a `Workspace` (`crates/henk/src/workspace`);
 the backend is a configuration choice (`[workspace]`, per repository
 through profiles): `host`, or `ssh` to a sandbox host where each run is a
 throwaway user, made and removed by a script Henk sends with every request
-as root (`workspace/sandbox.sh`; nothing is installed there). Either way
+as root (`workspace/sandbox.sh`; nothing is installed there), or
+`kubernetes`, a Pod per workspace in a sandbox namespace, where Henk runs
+the same script through `pods/exec` in its single-user mode and the Pod is
+the boundary (`workspace/kubernetes.rs`; both on `workspace/remote.rs`).
+On the `host` and `ssh` backends
 the record of changes is a git directory outside the tree that nothing a
 check runs can write, `HOME` is outside the tree, and `.git` (the `ssh`
 backend leaves the checkout's own in the tree for the run's commands) is

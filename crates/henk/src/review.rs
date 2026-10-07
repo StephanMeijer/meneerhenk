@@ -1928,10 +1928,10 @@ lanes = [{ name = "lane-a", model = "m" }]
 
     #[tokio::test]
     async fn a_review_on_the_ssh_backend_leaves_nothing_on_the_host() {
-        use crate::workspace::ssh::tests::LocalRunner;
+        use crate::workspace::remote::tests::LocalRunner;
         let runner = LocalRunner::new("henk-review-ssh");
         let provider = crate::workspace::ssh::SshProvider::with_runner(
-            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
         );
         review_on_ssh("ssh-local", Arc::new(provider)).await;
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
@@ -1943,6 +1943,16 @@ lanes = [{ name = "lane-a", model = "m" }]
         let provider =
             crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
         review_on_ssh("ssh-live", Arc::new(provider)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_a_review_opens_and_closes_a_pod_per_lane() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        review_on_ssh("kube-live", Arc::new(provider.clone())).await;
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
     }
 
     /// A one-lane review on `provider` whose lane asks `bash` for the
@@ -1981,10 +1991,10 @@ lanes = [{ name = "lane-a", model = "m" }]
 
     #[tokio::test]
     async fn bash_on_the_ssh_backend_sees_the_reviewed_commit() {
-        use crate::workspace::ssh::tests::LocalRunner;
+        use crate::workspace::remote::tests::LocalRunner;
         let runner = LocalRunner::new("henk-review-ssh-bash");
         let provider = crate::workspace::ssh::SshProvider::with_runner(
-            Arc::clone(&runner) as Arc<dyn crate::workspace::ssh::Runner>
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
         );
         bash_on_ssh("ssh-local-bash", Arc::new(provider)).await;
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
@@ -1996,6 +2006,16 @@ lanes = [{ name = "lane-a", model = "m" }]
         let provider =
             crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
         bash_on_ssh("ssh-live-bash", Arc::new(provider)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_a_review_lane_runs_bash_in_its_pod() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        bash_on_ssh("kube-live-bash", Arc::new(provider.clone())).await;
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
     }
 
     fn many_done() -> ScriptedClient {
