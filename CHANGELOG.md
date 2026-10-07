@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.12...v0.1.13) - 2026-10-07
+
+### Added
+
+- *(dashboard)* a JSON API behind the dashboard's sign-in, with CSRF
+- *(review)* lanes draft, and the drafts are fact-checked together after the lanes
+- *(store)* every session's whole conversation is kept with its run
+- *(store)* every tool call of every session is on the run record
+
+### Fixed
+
+- *(dashboard)* JSON errors for a bad query, time bounds compared as times in SQLite, and a doc link that resolves
+- *(agent)* a cancel records the calls after the one it cut off as not run
+
+### Other
+
+- Merge pull request #215 from StephanMeijer/feat/dashboard-api
+- Merge pull request #193 from StephanMeijer/feat/tool-call-records
+
 ## [0.1.12](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.11...v0.1.12) - 2026-10-07
 
 ### Added
