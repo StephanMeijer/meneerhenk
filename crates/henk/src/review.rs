@@ -26,12 +26,12 @@ use tracing::{error, info, instrument, warn};
 use crate::app::App;
 use crate::fact_check::{FactCheck, SessionFactCheck};
 use crate::ids::new_run_id;
+use crate::lane_workspace::ReviewWorkspaces;
 use crate::liveness::KeepAlive;
 use crate::review_tools::{
     DiffFiles, GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings,
     PostFinding, ReadFile, WithdrawFinding, lane_continuation,
 };
-use crate::review_workspace::ReviewWorkspaces;
 
 /// The review was cancelled because a newer commit arrived.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -875,7 +875,7 @@ async fn build_lane(
                 &mut set,
                 workspace,
                 Duration::from_secs(lanes.limits.command_secs),
-                crate::code_tools::Sharing::Own,
+                crate::code_tools::BashUse::Review,
             );
         }
         (None, Some(inner)) => {
@@ -1713,6 +1713,12 @@ lanes = [{ name = "lane-a", model = "m" }]
         ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
         {
             Ok(None)
+        }
+        async fn repo_head(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+            Err(unused())
         }
         async fn commit_identity(
             &self,

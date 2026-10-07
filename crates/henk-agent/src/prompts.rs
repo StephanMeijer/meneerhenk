@@ -13,6 +13,14 @@ pub const FACT_CHECK: &str = include_str!("../prompts/fact_check.md");
 /// they have a workspace at the reviewed commit (#90).
 pub const REVIEW_WORKSPACE: &str = include_str!("../prompts/review_workspace.md");
 
+/// Appended to an address run's instructions when its workspace lets the
+/// model run commands of its own (#172).
+pub const ADDRESS_BASH: &str = include_str!("../prompts/address_bash.md");
+
+/// Appended to the planner's instructions when it has a workspace at the
+/// default branch (#172). `{{branch}}` and `{{commit}}` say which.
+pub const PLAN_WORKSPACE: &str = include_str!("../prompts/plan_workspace.md");
+
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
@@ -68,6 +76,12 @@ mod tests {
         assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
         assert!(henk_domain::text::is_in_style(REVIEW_WORKSPACE));
+        assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
+        assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
+        assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
+        for tool in ["list_files", "search", "read_file", "bash"] {
+            assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
+        }
         for tool in ["list_files", "search", "read_file", "bash"] {
             assert!(REVIEW_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
         }

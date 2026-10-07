@@ -233,6 +233,9 @@ requester_id = 523456789012345678
 # the reviewed commit, set up as above, never exported. Refused on the
 # host backend: a review runs setup on the pull request's code.
 # review = true
+# The planner gets a workspace too: the default branch, set up as above,
+# never exported. Also refused on the host backend.
+# plan = true
 # [workspace.ssh]
 # host = "sandbox.example.com"
 # The host's key as `ssh-keyscan -t ed25519 sandbox.example.com` prints it.

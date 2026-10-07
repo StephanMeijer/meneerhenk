@@ -25,6 +25,15 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+    /// Whether a model may run commands of its own choosing there (`bash`,
+    /// #85 and #172). Not on the host, where they would run as Henk's own
+    /// user beside his configuration, database and keys (§8.4); on a backend
+    /// apart from Henk, they run as the workspace's own user.
+    #[must_use]
+    pub const fn runs_model_commands(self) -> bool {
+        !matches!(self, Self::Host)
+    }
+
     /// Whether the backend keeps the workspace's processes away from Henk's
     /// own: its files, its user and its network.
     #[must_use]
@@ -124,6 +133,10 @@ pub struct Profile {
     /// by default, so a review reads through its MCP session only. Never on
     /// the host backend: see [`Profile::serves`].
     pub review: bool,
+    /// Whether the planner gets a workspace too (#172): one copy of the
+    /// repository at its default branch, set up as for any run, never
+    /// exported. Off by default, and never on the host backend.
+    pub plan: bool,
 }
 
 /// A tool manager that installs what the repository's own configuration
@@ -155,14 +168,15 @@ impl Default for Profile {
             setup: Vec::new(),
             toolchain: None,
             review: false,
+            plan: false,
         }
     }
 }
 
 impl Profile {
     /// Whether a run of this kind opens a workspace with this profile. An
-    /// address run always does; a review only when the profile says so and
-    /// not on the host backend; a planner not yet.
+    /// address run always does; a review or a planner only when the profile
+    /// says so and not on the host backend.
     ///
     /// A review workspace runs the setup stage on the pull request's code,
     /// and anyone who can open a pull request, from a fork too, decides
@@ -170,13 +184,14 @@ impl Profile {
     /// beside his configuration, database and keys (§8.4), so a review
     /// gets a workspace only on a backend apart from Henk. An address run
     /// is asked for by a colleague and touches only the repository's own
-    /// branches (§3.5).
+    /// branches (§3.5). A planner's workspace holds the default branch,
+    /// but its model runs commands there, so it too stays off the host.
     #[must_use]
     pub const fn serves(&self, lane: EnvLane) -> bool {
         match lane {
             EnvLane::Address => true,
-            EnvLane::Review => self.review && !matches!(self.backend, BackendKind::Host),
-            EnvLane::Plan => false,
+            EnvLane::Review => self.review && self.backend.runs_model_commands(),
+            EnvLane::Plan => self.plan && self.backend.runs_model_commands(),
         }
     }
 
@@ -195,6 +210,11 @@ impl Profile {
         if self.review && self.backend == BackendKind::Host {
             return Some(format!(
                 "workspace profile {name}: review = true needs a backend apart from Henk, such as ssh; on the host, a pull request's setup would run as Henk's own user"
+            ));
+        }
+        if self.plan && self.backend == BackendKind::Host {
+            return Some(format!(
+                "workspace profile {name}: plan = true needs a backend apart from Henk, such as ssh; on the host, the planner's commands would run as Henk's own user"
             ));
         }
         if self.image.as_deref().is_some_and(|i| i.trim().is_empty()) {
@@ -567,6 +587,33 @@ mod tests {
         assert!(tools(EnvLane::Review).is_empty());
         assert!(tools(EnvLane::Plan).is_empty());
         assert!(tools(EnvLane::Address).contains(&ToolKind::Exec));
+    }
+
+    #[test]
+    fn a_planner_gets_a_workspace_only_off_the_host_and_when_asked() {
+        let mut profile = Profile::default();
+        assert!(!BackendKind::Host.runs_model_commands());
+        assert!(BackendKind::Ssh.runs_model_commands());
+        profile.plan = true;
+        assert!(!profile.serves(EnvLane::Plan), "never on the host");
+        let mut policy = WorkspacePolicy {
+            default: profile.clone(),
+            ..WorkspacePolicy::default()
+        };
+        let refused = policy.validate().unwrap_err();
+        assert!(
+            refused.contains("plan = true needs a backend apart from Henk"),
+            "{refused}"
+        );
+        assert!(crate::text::is_in_style(&refused));
+        policy.default.backend = BackendKind::Ssh;
+        assert_eq!(policy.validate(), Ok(()));
+        assert!(policy.default.serves(EnvLane::Plan));
+        assert!(
+            !policy.default.serves(EnvLane::Review),
+            "review is its own switch"
+        );
+        assert!(!EnvLane::Plan.exports());
     }
 
     #[test]

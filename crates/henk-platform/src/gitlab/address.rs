@@ -9,8 +9,10 @@ use henk_domain::commit::noreply;
 use henk_domain::review::CommitSha;
 use serde_json::{Value, json};
 
+use henk_domain::allowlist::RepoRef;
+
 use crate::address::{
-    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, ThreadNote,
+    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, RepoHead, ThreadNote,
 };
 use crate::error::PlatformError;
 use crate::gitlab::rest::path_segment;
@@ -197,6 +199,35 @@ impl AddressWriter for GitLabWriter {
 
     async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
         Ok(Some(self.rest()?.git_credential()))
+    }
+
+    async fn repo_head(&self, repo: &RepoRef) -> Result<RepoHead, PlatformError> {
+        let rest = self.rest()?;
+        let project = path_segment(&repo.path());
+        let info = rest.get(&format!("/projects/{project}")).await?;
+        let default_branch = text(&info, "default_branch");
+        let remote = text(&info, "http_url_to_repo");
+        if default_branch.is_empty() || remote.is_empty() {
+            return Err(PlatformError::Decode(
+                "project without a default branch or http_url_to_repo".to_owned(),
+            ));
+        }
+        let branch = rest
+            .get(&format!(
+                "/projects/{project}/repository/branches/{}",
+                path_segment(&default_branch)
+            ))
+            .await?;
+        let head = branch
+            .pointer("/commit/id")
+            .and_then(Value::as_str)
+            .and_then(|sha| CommitSha::parse(sha).ok())
+            .ok_or_else(|| PlatformError::Decode("branch without a head commit".to_owned()))?;
+        Ok(RepoHead {
+            default_branch,
+            head,
+            remote,
+        })
     }
 
     async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {

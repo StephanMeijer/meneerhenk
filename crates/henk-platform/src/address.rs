@@ -2,6 +2,7 @@
 //! threads and the facts that decide whether Henk may push to it.
 
 use henk_domain::address::PushFacts;
+use henk_domain::allowlist::RepoRef;
 use henk_domain::review::CommitSha;
 use secrecy::SecretString;
 
@@ -65,6 +66,18 @@ pub struct PullFacts {
     pub remote: String,
 }
 
+/// A repository's default branch as it is now: what a planner's workspace
+/// holds (#172).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoHead {
+    /// The default branch's name.
+    pub default_branch: String,
+    /// Its head commit.
+    pub head: CommitSha,
+    /// The repository's clone URL.
+    pub remote: String,
+}
+
 /// Who Henk's commit is by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitIdentity {
@@ -109,6 +122,10 @@ impl GitCredential {
 pub trait AddressWriter: Send + Sync {
     /// The facts that decide whether Henk may push, and where to.
     async fn pull_facts(&self, target: &ReviewTarget) -> Result<PullFacts, PlatformError>;
+
+    /// The default branch of `repo` and its head commit, and where to fetch
+    /// it from.
+    async fn repo_head(&self, repo: &RepoRef) -> Result<RepoHead, PlatformError>;
 
     /// The unresolved review threads, from anyone.
     async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError>;
