@@ -79,9 +79,12 @@ mod tests {
         assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
-        for tool in ["list_files", "search", "read_file", "bash"] {
+        for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {
             assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
         }
+        // The planner's copy is one commit without history (#183).
+        assert!(PLAN_WORKSPACE.contains("without history"));
+        assert!(!PLAN_WORKSPACE.contains("`git log` on a file"));
         for tool in ["list_files", "search", "read_file", "bash"] {
             assert!(REVIEW_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
         }
