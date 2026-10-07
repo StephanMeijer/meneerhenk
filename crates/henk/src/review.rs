@@ -1688,8 +1688,13 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
     }
 
+    /// The platform's git credential in these tests: it reaches git on
+    /// Henk's side and must never reach a model (§8.4).
+    const GIT_TOKEN: &str = "ghs_TestOnlyGitCredential4f9c2e";
+
     /// The pull request's head repository as a review sees it (#170): where
-    /// to fetch from and no credential. Nothing else is asked of it.
+    /// to fetch from and the credential to fetch with. Nothing else is asked
+    /// of it.
     struct Source(henk_platform::address::PullFacts);
 
     fn unused() -> henk_platform::PlatformError {
@@ -1714,7 +1719,9 @@ lanes = [{ name = "lane-a", model = "m" }]
             &self,
         ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
         {
-            Ok(None)
+            Ok(Some(henk_platform::address::GitCredential::github(
+                GIT_TOKEN.to_owned().into(),
+            )))
         }
         async fn repo_head(
             &self,
@@ -1989,6 +1996,19 @@ lanes = [{ name = "lane-a", model = "m" }]
                 .any(|r| r.starts_with("exit 0 in ") && r.ends_with(&expected)),
             "the lane's bash sees the reviewed commit: {results:?}"
         );
+        let stored = f
+            .app
+            .store
+            .transcript(&run, "lane-a")
+            .await
+            .unwrap()
+            .expect("the lane's transcript is stored with the run");
+        assert!(
+            stored.body.contains(&expected.replace('\n', "\\n")),
+            "what bash printed is in the transcript: {}",
+            stored.body
+        );
+        assert!(!stored.body.contains(GIT_TOKEN));
     }
 
     #[tokio::test]
@@ -2018,6 +2038,68 @@ lanes = [{ name = "lane-a", model = "m" }]
         let provider = live_provider().await;
         bash_on_ssh("kube-live-bash", Arc::new(provider.clone())).await;
         assert_eq!(pods_left(&provider).await, Vec::<String>::new());
+    }
+
+    /// A lane that goes looking for the credential the commit was fetched
+    /// with finds nothing, and its run keeps nothing of it: no transcript
+    /// and no tool call holds the token (#191, §8.4).
+    #[tokio::test]
+    async fn no_transcript_or_tool_call_holds_the_git_credential() {
+        use crate::workspace::remote::tests::LocalRunner;
+        let runner = LocalRunner::new("henk-review-credential");
+        let provider = crate::workspace::ssh::SshProvider::with_runner(
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
+        );
+        let config = reviewing_config("")
+            .replace(", { name = \"lane-b\", model = \"m\" }", "")
+            .replace("[[\"make\", \"deps\"]]", "[[\"true\"]]");
+        let looking =
+            "env; git config --list --show-origin; cat .git/config; grep -rn ghs_ .git . || true";
+        let model = ScriptedClient::new(
+            "scripted",
+            [
+                call("bash", serde_json::json!({"command": looking})),
+                call("search", serde_json::json!({"pattern": "ghs_"})),
+                done(),
+                done(),
+                done(),
+            ],
+        );
+        let (f, _remote) = reviewed_on("credential", &config, model, Arc::new(provider)).await;
+        let run = RunId::parse("r-credential").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let store = &f.app.store;
+        let listed = store.transcripts(&run).await.unwrap();
+        assert!(listed.iter().any(|t| t.session == "lane-a"), "{listed:?}");
+        for summary in &listed {
+            let stored = store
+                .transcript(&run, &summary.session)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !stored.body.contains(GIT_TOKEN),
+                "{} holds the credential",
+                summary.session
+            );
+        }
+        let lane = store.transcript(&run, "lane-a").await.unwrap().unwrap();
+        assert!(
+            lane.body.contains("PATH=") && lane.body.contains("core.repositoryformatversion"),
+            "the lane's bash did read its environment and git config: {}",
+            lane.body
+        );
+        let calls = store.tool_calls(&run).await.unwrap();
+        assert!(calls.len() >= 2, "{calls:?}");
+        assert!(!format!("{calls:?}").contains(GIT_TOKEN));
+        assert!(
+            !format!("{:?}", store.events(&run).await.unwrap()).contains(GIT_TOKEN),
+            "nor the timeline"
+        );
+        assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
     }
 
     fn many_done() -> ScriptedClient {

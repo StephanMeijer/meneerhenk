@@ -117,7 +117,7 @@ OpenBao.
 | `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
 | `RUST_LOG`, `HENK_LOG_JSON=1` | Logging |
-| `HENK_TRANSCRIPT_DIR` | When set, every model session writes its full transcript as JSON under this directory. Local diagnostics only; nothing reads it back or sends it anywhere |
+| `HENK_TRANSCRIPT_DIR` | When set, every model session also writes its full transcript as JSON under this directory, a local copy of what is stored with the run |
 
 Run records live in one SQLite file by default (`[database] backend =
 "sqlite"`, `path`). With `backend = "postgres"` they go to a PostgreSQL
@@ -186,11 +186,11 @@ on one machine, with one lane:
 4. `henk doctor --probe` until it reports `0 failing check(s)`.
 5. `henk mcp probe --server github --show pull_request_read` shows what a
    lane will see.
-6. `RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts henk review <url>`
-   on a pull request in an allowlisted repository. The run id is printed
-   first; `henk runs show <id>` prints the run, lanes, tool calls,
-   findings and timeline afterwards, and `transcripts/<run>/<lane>.json`
-   holds what the model saw and said.
+6. `RUST_LOG=info,henk=debug henk review <url>` on a pull request in an
+   allowlisted repository. The run id is printed first; `henk runs show <id>`
+   prints the run, lanes, tool calls, transcripts, findings and timeline
+   afterwards, and `henk runs show <id> --transcript lane-a` what that lane's
+   model saw and said.
 
 Every tool call of every session (review lanes, fact-checks, the planner,
 address runs) is on the run record (#190): the session, model, turn, tool
@@ -204,6 +204,19 @@ kept with the run, like its lanes and findings. `henk runs show` and the
 dashboard's run page count them per lane and tool, each session logs one
 `tool usage` line at info, and the `tool_calls` table answers questions
 across runs.
+
+Every session's whole conversation is stored with its run too (#191): the
+system prompt, every message, each tool call with its arguments and what it
+returned, kept whole. `henk runs show <id>` lists them by session, and
+`henk runs show <id> --transcript <session>` prints one. On the dashboard,
+each lane on the run page links to its transcript at
+`/dashboard/runs/{id}/transcripts/{session}`, behind the same sign-in. A
+transcript holds what the model was shown: code, diffs, comments and
+command output from the repository, never a credential (§8.4); a test
+fetches with a known token and checks that no transcript or tool call holds
+it. Transcripts are large, so they follow `server.keep_events_days` like
+inbound events; the run, its lanes, findings and tool calls are kept.
+`HENK_TRANSCRIPT_DIR` still writes a local copy of each as a file.
 
 ### Reviewing a pull request from a laptop
 
@@ -237,6 +250,7 @@ installations when the token is refused). Variants:
 RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
 cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head
 cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, lanes, findings, timeline
+cargo run -q -- runs show r-20261005-8f8b812b --transcript lane-a                        # what lane-a's model saw and said
 cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
 ```
 
@@ -286,6 +300,7 @@ henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
 henk runs show r-20261005-1a2b3c4d                 # a run from the configured database
+henk runs show r-20261005-1a2b3c4d --transcript lane-a   # one session's conversation
 ```
 
 In serve mode everything is an event. Hooks receive and publish; listeners
@@ -355,7 +370,8 @@ Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in
 the service; nothing is sent anywhere. While serving, Henk deletes events
 and their outcomes older than `server.keep_events_days` (30 by default) once
-an hour. Runs are kept, since their links are posted on the platforms. An
+an hour, and session transcripts of that age with them. Runs are kept, since
+their links are posted on the platforms. An
 event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
 run and the events that led to it at `/dashboard/runs/{id}`.
 

@@ -129,6 +129,25 @@ pub async fn run_session(
     if !calls.is_empty() {
         info!(lane = %spec.name, usage = %usage_line(&ToolUsage::from_calls(&calls)), "tool usage");
     }
+    // The whole conversation goes on the run (#191); a store that cannot
+    // take it costs the transcript, never the session.
+    match transcript::json(run, &spec.name, &model_name, &system, &outcome) {
+        Ok(body) => {
+            let record = henk_store::TranscriptRecord {
+                at: String::new(),
+                session: spec.name.clone(),
+                model: model_name.clone(),
+                stop: format!("{:?}", outcome.stop),
+                turns: outcome.turns,
+                bytes: u64::try_from(body.len()).unwrap_or(u64::MAX),
+                body,
+            };
+            if let Err(error) = store.record_transcript(run, &record).await {
+                tracing::warn!(%error, "could not store the transcript");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not serialise the transcript"),
+    }
     if let Some(dir) = transcript::directory_from_env() {
         match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
             Ok(path) => info!(path = %path.display(), "transcript written"),
@@ -661,6 +680,45 @@ mod tests {
         assert_eq!(lanes[0].status, LaneStatus::Finished);
         assert_eq!(lanes[0].input_tokens, 12);
         assert_eq!(store.events(&run_id()).await.unwrap().len(), 1);
+
+        let listed = store.transcripts(&run_id()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (
+                listed[0].session.as_str(),
+                listed[0].model.as_str(),
+                listed[0].turns
+            ),
+            ("planner", "m", 1)
+        );
+        let stored = store
+            .transcript(&run_id(), "planner")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes, stored.body.len() as u64);
+        let body: serde_json::Value = serde_json::from_str(&stored.body).unwrap();
+        assert_eq!(body["session"], "planner");
+        assert_eq!(body["stop"], "EndTurn", "{body}");
+        assert_eq!(body["system"], "s");
+        assert_eq!(
+            body["messages"],
+            serde_json::to_value([ChatMessage::user("go"), ChatMessage::assistant("done")])
+                .unwrap(),
+            "the whole conversation, as the model saw it"
+        );
+    }
+
+    /// A store that takes nothing, here because the run is not in it, costs
+    /// the records and the transcript, never the session.
+    #[tokio::test]
+    async fn a_store_that_refuses_the_transcript_still_ends_the_session() {
+        let store = henk_store::SqliteStore::in_memory().unwrap();
+        let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new("m", [text("done")]));
+        let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
+        assert!(outcome.finished());
+        assert_eq!(outcome.final_text, "done");
+        assert!(store.transcripts(&run_id()).await.unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

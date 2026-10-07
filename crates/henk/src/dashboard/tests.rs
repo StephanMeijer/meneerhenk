@@ -570,6 +570,100 @@ async fn running_now_counts_every_running_run_beyond_one_page() {
 }
 
 #[tokio::test]
+async fn a_sessions_transcript_reads_behind_sign_in_and_escaped() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let store = &f.dashboard.app.store;
+    let review = RunId::parse("r-review").unwrap();
+    store
+        .start_lane(&review, "check lane/a?", "model-x")
+        .await
+        .unwrap();
+    let long: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+    let body = json!({
+        "session": "lane-a", "model": "model-x", "stop": "EndTurn", "turns": 1,
+        "usage": {"input_tokens": 7, "output_tokens": 2},
+        "system": "You review <b>this</b>.",
+        "messages": [
+            {"role": "user", "blocks": [{"text": "<script>alert(1)</script>"}]},
+            {"role": "assistant", "blocks": [{"tool_call": {"id": "c", "name": "read_file", "arguments": {"parsed": {"path": "a.rs"}}}}]},
+            {"role": "user", "blocks": [{"tool_result": {"call_id": "c", "content": long.join("\n"), "is_error": false}}]}
+        ]
+    })
+    .to_string();
+    for session in ["lane-a", "check lane/a?"] {
+        store
+            .record_transcript(
+                &review,
+                &henk_store::TranscriptRecord {
+                    at: String::new(),
+                    session: session.into(),
+                    model: "model-x".into(),
+                    stop: "EndTurn".into(),
+                    turns: 1,
+                    bytes: body.len() as u64,
+                    body: body.clone(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let unsigned = get(&f, "/dashboard/runs/r-review/transcripts/lane-a", None).await;
+    assert_eq!(unsigned.status, StatusCode::SEE_OTHER);
+    assert!(!unsigned.body.contains("alert"));
+
+    let me = signed_in(&f, ALLOWED);
+    let run = get(&f, "/dashboard/runs/r-review", Some(&me)).await;
+    assert!(
+        run.body
+            .contains("<a href=\"/dashboard/runs/r-review/transcripts/lane-a\""),
+        "{}",
+        run.body
+    );
+    assert!(
+        run.body
+            .contains("<a href=\"/dashboard/runs/r-review/transcripts/check%20lane%2Fa%3F\""),
+        "a session name stays in its path segment: {}",
+        run.body
+    );
+
+    let page = get(&f, "/dashboard/runs/r-review/transcripts/lane-a", Some(&me)).await;
+    assert_eq!(page.status, StatusCode::OK);
+    for expected in [
+        "<h1>Transcript of lane-a</h1>",
+        "You review &lt;b&gt;this&lt;/b&gt;.",
+        "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "Call <code>read_file</code>",
+        "<details><summary>Result, 40 lines</summary>",
+        "<a href=\"/dashboard/runs/r-review\">r-review</a>",
+    ] {
+        assert!(page.body.contains(expected), "{expected} in {}", page.body);
+    }
+    assert!(!page.body.contains("<script>alert"));
+    let escaped = get(
+        &f,
+        "/dashboard/runs/r-review/transcripts/check%20lane%2Fa%3F",
+        Some(&me),
+    )
+    .await;
+    assert_eq!(escaped.status, StatusCode::OK);
+    assert_eq!(
+        get(&f, "/dashboard/runs/r-review/transcripts/lane-b", Some(&me))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&f, "/dashboard/runs/r-plan/transcripts/lane-a", Some(&me))
+            .await
+            .status,
+        StatusCode::NOT_FOUND,
+        "a transcript belongs to its own run"
+    );
+}
+
+#[tokio::test]
 async fn run_detail_events_health_and_the_poller_answer() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;

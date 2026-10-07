@@ -42,10 +42,11 @@ pub(crate) async fn prune_every(
 /// One pass. A failure is logged and the next pass tries again.
 async fn prune_before(app: &App, cutoff: time::OffsetDateTime) {
     match app.store.prune_events(cutoff).await {
-        Ok(counts) if counts.events > 0 || counts.outcomes > 0 => {
+        Ok(counts) if counts.events > 0 || counts.outcomes > 0 || counts.transcripts > 0 => {
             info!(
                 events = counts.events,
                 outcomes = counts.outcomes,
+                transcripts = counts.transcripts,
                 "pruned old events"
             );
         }

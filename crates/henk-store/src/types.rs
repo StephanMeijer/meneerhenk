@@ -160,6 +160,43 @@ impl FindingAction {
     }
 }
 
+/// One session's whole conversation, as the run record keeps it (#191).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRecord {
+    /// RFC 3339; empty when recording means now.
+    pub at: String,
+    /// The session: the lane row's name.
+    pub session: String,
+    /// The session's model.
+    pub model: String,
+    /// How the session stopped.
+    pub stop: String,
+    /// Model calls made.
+    pub turns: u32,
+    /// The body's size in bytes.
+    pub bytes: u64,
+    /// The transcript as JSON: system prompt, messages, tool calls and
+    /// results, usage. Whole, never cut.
+    pub body: String,
+}
+
+/// A transcript without its body, for listing what a run has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptSummary {
+    /// RFC 3339.
+    pub at: String,
+    /// The session.
+    pub session: String,
+    /// The session's model.
+    pub model: String,
+    /// How it stopped.
+    pub stop: String,
+    /// Model calls made.
+    pub turns: u32,
+    /// The body's size in bytes.
+    pub bytes: u64,
+}
+
 /// One tool call of a session, as the run record keeps it (#190).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
@@ -430,6 +467,8 @@ pub struct PruneCounts {
     pub events: u64,
     /// Outcomes of those events deleted.
     pub outcomes: u64,
+    /// Session transcripts deleted (#191).
+    pub transcripts: u64,
 }
 
 /// What one listener did with an event.

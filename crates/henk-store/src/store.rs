@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, StoreError, ToolCallRecord, ToolUsage,
+    RunStatus, StoreError, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -152,6 +152,37 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure.
     async fn tool_usage_since(&self, since: OffsetDateTime) -> Result<Vec<ToolUsage>, StoreError>;
 
+    /// Stores one session's whole conversation (#191). An empty `at` means
+    /// now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn record_transcript(
+        &self,
+        run: &RunId,
+        transcript: &TranscriptRecord,
+    ) -> Result<(), StoreError>;
+
+    /// The transcripts a run has, without their bodies, in the order they
+    /// were stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError>;
+
+    /// The latest transcript of `session` in a run, with its body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn transcript(
+        &self,
+        run: &RunId,
+        session: &str,
+    ) -> Result<Option<TranscriptRecord>, StoreError>;
+
     /// Adds a line to a run's timeline.
     ///
     /// # Errors
@@ -209,8 +240,9 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError>;
 
     /// Deletes inbound events received before `older_than`, with their
-    /// outcomes, in one transaction. Runs are kept: links to them are
-    /// posted on the platforms (§8.6).
+    /// outcomes, and session transcripts recorded before it (#191), in one
+    /// transaction. Runs, their lanes, findings and tool calls are kept:
+    /// links to runs are posted on the platforms (§8.6).
     ///
     /// # Errors
     ///

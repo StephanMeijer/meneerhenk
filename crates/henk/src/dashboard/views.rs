@@ -18,7 +18,7 @@ use super::Dashboard;
 use super::auth::{Viewer, encode};
 use crate::config::Settings;
 use crate::doctor::{Verdict, check_secrets};
-use crate::pages::{Links, escape, event_page, page, run_page};
+use crate::pages::{Links, escape, event_page, page, run_page, transcript_page};
 
 /// Rows per page.
 const PER_PAGE: u32 = 50;
@@ -299,6 +299,25 @@ pub async fn run(
         ..LINKS
     };
     run_page(dashboard.app.store.as_ref(), &run_id, links).await
+}
+
+/// One session's transcript on a run (#191).
+pub async fn transcript(
+    State(dashboard): State<Arc<Dashboard>>,
+    Viewer(viewer): Viewer,
+    Path((id, session)): Path<(String, String)>,
+) -> Response {
+    let Ok(run_id) = RunId::parse(id) else {
+        return (StatusCode::BAD_REQUEST, "bad run id").into_response();
+    };
+    let token = dashboard.signer.csrf(&viewer);
+    let nav = nav(&token);
+    let links = Links {
+        nav: &nav,
+        csrf: Some(&token),
+        ..LINKS
+    };
+    transcript_page(dashboard.app.store.as_ref(), &run_id, &session, links).await
 }
 
 /// Inbound events, with what each listener did.

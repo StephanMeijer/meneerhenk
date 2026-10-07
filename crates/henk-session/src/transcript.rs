@@ -1,5 +1,7 @@
-//! Local transcripts of sessions, for diagnosing a run on the machine that
-//! ran it. Written only when `HENK_TRANSCRIPT_DIR` is set; never shipped.
+//! Transcripts of sessions: what a model was told, what it answered, and
+//! every tool call with its result (#191). Every session's transcript is
+//! stored with its run ([`json`]); `HENK_TRANSCRIPT_DIR` also writes a
+//! local copy as a file, on the machine that ran it.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +20,7 @@ pub fn directory_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// What a transcript file holds.
+/// What a transcript holds, in the store and in a file.
 #[derive(Debug, Serialize)]
 struct Transcript<'a> {
     run: &'a str,
@@ -29,6 +31,40 @@ struct Transcript<'a> {
     usage: henk_llm::Usage,
     system: &'a str,
     messages: &'a [henk_llm::ChatMessage],
+}
+
+/// The transcript of one session as compact JSON, as the store keeps it.
+///
+/// # Errors
+///
+/// Returns the serialisation error.
+pub fn json(
+    run: &RunId,
+    session: &str,
+    model: &str,
+    system: &str,
+    outcome: &AgentOutcome,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&transcript(run, session, model, system, outcome))
+}
+
+fn transcript<'a>(
+    run: &'a RunId,
+    session: &'a str,
+    model: &'a str,
+    system: &'a str,
+    outcome: &'a AgentOutcome,
+) -> Transcript<'a> {
+    Transcript {
+        run: run.as_str(),
+        session,
+        model,
+        stop: format!("{:?}", outcome.stop),
+        turns: outcome.turns,
+        usage: outcome.usage,
+        system,
+        messages: &outcome.messages,
+    }
 }
 
 /// Writes `<dir>/<run>/<session>.json` and returns its path.
@@ -47,17 +83,8 @@ pub fn write(
     let run_dir = dir.join(run.as_str());
     std::fs::create_dir_all(&run_dir)?;
     let path = run_dir.join(format!("{}.json", file_safe(session)));
-    let transcript = Transcript {
-        run: run.as_str(),
-        session,
-        model,
-        stop: format!("{:?}", outcome.stop),
-        turns: outcome.turns,
-        usage: outcome.usage,
-        system,
-        messages: &outcome.messages,
-    };
-    let text = serde_json::to_string_pretty(&transcript).map_err(std::io::Error::other)?;
+    let text = serde_json::to_string_pretty(&transcript(run, session, model, system, outcome))
+        .map_err(std::io::Error::other)?;
     std::fs::write(&path, text)?;
     Ok(path)
 }

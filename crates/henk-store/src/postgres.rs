@@ -19,7 +19,8 @@ use crate::types::{
     EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
     LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeRecord, OutcomeRow, Page,
     PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallRecord, ToolUsage,
-    attach_outcomes, kind_str, platform_str, status_str, to_i64, to_u64,
+    TranscriptRecord, TranscriptSummary, attach_outcomes, kind_str, platform_str, status_str,
+    to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -28,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/002_dashboard.sql"),
     include_str!("../migrations/postgres/003_event_requester.sql"),
     include_str!("../migrations/postgres/004_tool_calls.sql"),
+    include_str!("../migrations/postgres/005_transcripts.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -172,6 +174,14 @@ fn tls() -> Result<MakeRustlsConnect, StoreError> {
 
 fn now() -> OffsetDateTime {
     OffsetDateTime::now_utc()
+}
+
+/// A stored turn count, refused when it is not one.
+fn turns(value: i64) -> Result<u32, StoreError> {
+    u32::try_from(value).map_err(|_| StoreError::Corrupt {
+        column: "transcripts.turns",
+        value: value.to_string(),
+    })
 }
 
 fn text(at: OffsetDateTime) -> String {
@@ -460,6 +470,86 @@ impl RunStore for PgStore {
         Ok(())
     }
 
+    async fn record_transcript(
+        &self,
+        run: &RunId,
+        transcript: &TranscriptRecord,
+    ) -> Result<(), StoreError> {
+        let at = if transcript.at.is_empty() {
+            now()
+        } else {
+            parse_time("transcripts.recorded_at", &transcript.at)?
+        };
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO transcripts (run_id, session, model, stop, turns, bytes, body, recorded_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &run.as_str(),
+                    &transcript.session,
+                    &transcript.model,
+                    &transcript.stop,
+                    &i64::from(transcript.turns),
+                    &i64::try_from(transcript.bytes).unwrap_or(i64::MAX),
+                    &transcript.body,
+                    &at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT recorded_at, session, model, stop, turns, bytes FROM transcripts WHERE run_id = $1 ORDER BY id",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(TranscriptSummary {
+                    at: text(row.try_get(0)?),
+                    session: row.try_get(1)?,
+                    model: row.try_get(2)?,
+                    stop: row.try_get(3)?,
+                    turns: turns(row.try_get(4)?)?,
+                    bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    async fn transcript(
+        &self,
+        run: &RunId,
+        session: &str,
+    ) -> Result<Option<TranscriptRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT recorded_at, session, model, stop, turns, bytes, body FROM transcripts WHERE run_id = $1 AND session = $2 ORDER BY id DESC LIMIT 1",
+                &[&run.as_str(), &session],
+            )
+            .await?;
+        rows.first()
+            .map(|row| {
+                Ok(TranscriptRecord {
+                    at: text(row.try_get(0)?),
+                    session: row.try_get(1)?,
+                    model: row.try_get(2)?,
+                    stop: row.try_get(3)?,
+                    turns: turns(row.try_get(4)?)?,
+                    bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
+                    body: row.try_get(6)?,
+                })
+            })
+            .transpose()
+    }
+
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
         let at = if call.at.is_empty() {
             now()
@@ -715,8 +805,18 @@ impl RunStore for PgStore {
                 &[&older_than],
             )
             .await?;
+        let transcripts = transaction
+            .execute(
+                "DELETE FROM transcripts WHERE recorded_at < $1",
+                &[&older_than],
+            )
+            .await?;
         transaction.commit().await?;
-        Ok(PruneCounts { events, outcomes })
+        Ok(PruneCounts {
+            events,
+            outcomes,
+            transcripts,
+        })
     }
 
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError> {

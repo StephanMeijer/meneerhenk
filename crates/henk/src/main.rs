@@ -131,6 +131,10 @@ enum RunsCommand {
     Show {
         /// The run id, such as `r-20261005-1a2b3c4d`.
         run: String,
+        /// Print the whole conversation of this session instead, as the
+        /// run's transcripts list them.
+        #[arg(long, value_name = "SESSION")]
+        transcript: Option<String>,
     },
 }
 
@@ -255,12 +259,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             command: McpCommand::Probe { server, show },
         } => cmd_mcp_probe(&cli.config, &server, &show).await,
         Command::Runs {
-            command: RunsCommand::Show { run },
-        } => cmd_runs_show(&cli.config, &run).await,
+            command: RunsCommand::Show { run, transcript },
+        } => cmd_runs_show(&cli.config, &run, transcript.as_deref()).await,
     }
 }
 
-async fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
+async fn cmd_runs_show(config: &Path, run: &str, transcript: Option<&str>) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
     let store = app::open_store(&settings.database).await?;
     let id = henk_domain::run::RunId::parse(run)?;
@@ -269,12 +273,32 @@ async fn cmd_runs_show(config: &Path, run: &str) -> anyhow::Result<()> {
         .await
         .map_err(anyhow::Error::from)?
         .ok_or_else(|| anyhow!("no run {run} in {}", settings.database.describe()))?;
+    let transcripts = store.transcripts(&id).await?;
+    if let Some(session) = transcript {
+        let Some(stored) = store.transcript(&id, session).await? else {
+            let known: Vec<&str> = transcripts.iter().map(|t| t.session.as_str()).collect();
+            return Err(anyhow!(
+                "run {run} has no transcript of {session}; it has: {}",
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            ));
+        };
+        print!(
+            "{}",
+            runs::transcript_text(&stored.body).context("reading the stored transcript")?
+        );
+        return Ok(());
+    }
     print!(
         "{}",
         runs::render(
             &record,
             &store.lanes(&id).await?,
             &henk_store::ToolUsage::from_calls(&store.tool_calls(&id).await?),
+            &transcripts,
             &store.findings(&id).await?,
             &store.events(&id).await?
         )

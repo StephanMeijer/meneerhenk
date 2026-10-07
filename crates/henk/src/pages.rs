@@ -9,6 +9,8 @@ use axum::response::{Html, IntoResponse, Response};
 use henk_domain::run::{EventId, RunId};
 use henk_store::{EventRecord, FindingRecord, LaneRecord, RunStatus, RunStore};
 
+use crate::runs::{PartView, TranscriptView};
+
 /// Escapes text for HTML content and attribute values.
 #[must_use]
 pub fn escape(text: &str) -> String {
@@ -67,11 +69,35 @@ impl Links<'_> {
         format!("{}/runs/{}", self.prefix, escape(run))
     }
 
+    /// The page of `session`'s transcript on `run` (#191).
+    #[must_use]
+    pub fn transcript(self, run: &str, session: &str) -> String {
+        format!(
+            "{}/transcripts/{}",
+            self.run(run),
+            escape(&path_segment(session))
+        )
+    }
+
     /// The event page of `event`.
     #[must_use]
     pub fn event(self, event: &str) -> String {
         format!("{}/events/{}", self.prefix, escape(event))
     }
+}
+
+/// `text` as one URL path segment: everything but unreserved characters is
+/// percent-escaped, so a session name can never leave its segment.
+fn path_segment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 /// A run with its lanes, findings, timeline and the events that led to it.
@@ -86,6 +112,13 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
     let lanes = store.lanes(run_id).await.unwrap_or_default();
     let tools =
         henk_store::ToolUsage::from_calls(&store.tool_calls(run_id).await.unwrap_or_default());
+    let transcripts: Vec<String> = store
+        .transcripts(run_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.session)
+        .collect();
     let findings = store.findings(run_id).await.unwrap_or_default();
     let events = store.events(run_id).await.unwrap_or_default();
     let inbound = store
@@ -153,11 +186,100 @@ pub async fn run_page(store: &dyn RunStore, run_id: &RunId, links: Links<'_>) ->
         }
         html.push_str("</table>");
     }
-    html.push_str(&lanes_table(&lanes));
+    html.push_str(&lanes_table(&lanes, &transcripts, |session| {
+        links.transcript(run.id.as_str(), session)
+    }));
     html.push_str(&tools_table(&tools));
     html.push_str(&findings_table(&findings));
     html.push_str(&timeline_table(&events));
     page(&format!("Run {}", run.id), links.nav, &html)
+}
+
+/// A tool result longer than this many lines is folded away.
+const FOLD_LINES: usize = 12;
+
+/// One session's whole conversation (#191): what the model was told, what
+/// it answered and what each tool returned. All of it is escaped; most of
+/// it is other people's text or the model's (§8.3).
+pub async fn transcript_page(
+    store: &dyn RunStore,
+    run_id: &RunId,
+    session: &str,
+    links: Links<'_>,
+) -> Response {
+    let stored = match store.transcript(run_id, session).await {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such transcript").into_response(),
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    let view = match TranscriptView::parse(&stored.body) {
+        Ok(view) => view,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the stored transcript does not read: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let mut html = String::new();
+    let _ = write!(
+        html,
+        "<h1>Transcript of {}</h1><p>Run <a href=\"{}\">{}</a><br>Model {}, stopped {}, {} turns, tokens in {} out {}<br>Recorded {}, {} bytes</p><h2>System prompt</h2><pre>{}</pre>",
+        escape(&view.session),
+        links.run(run_id.as_str()),
+        escape(run_id.as_str()),
+        escape(&view.model),
+        escape(&view.stop),
+        view.turns,
+        view.tokens.0,
+        view.tokens.1,
+        escape(&stored.at),
+        stored.bytes,
+        escape(&view.system)
+    );
+    for message in &view.messages {
+        let _ = write!(
+            html,
+            "<h2>{} <span class=\"muted\">turn {}</span></h2>",
+            escape(&message.role),
+            message.turn
+        );
+        for part in &message.parts {
+            html.push_str(&part_html(part));
+        }
+    }
+    page(
+        &format!("Transcript of {} on {}", view.session, run_id),
+        links.nav,
+        &html,
+    )
+}
+
+fn part_html(part: &PartView) -> String {
+    match part {
+        PartView::Text(text) => format!("<pre>{}</pre>", escape(text)),
+        PartView::Call { name, arguments } => format!(
+            "<p>Call <code>{}</code></p><pre>{}</pre>",
+            escape(name),
+            escape(arguments)
+        ),
+        PartView::Result { error, content } => {
+            let label = if *error { "Result: error" } else { "Result" };
+            let lines = content.lines().count();
+            if lines > FOLD_LINES {
+                format!(
+                    "<details><summary>{label}, {lines} lines</summary><pre>{}</pre></details>",
+                    escape(content)
+                )
+            } else {
+                format!("<p>{label}</p><pre>{}</pre>", escape(content))
+            }
+        }
+        PartView::Opaque => "<p class=\"muted\">Provider content, not shown.</p>".to_owned(),
+    }
 }
 
 /// One inbound event with what each listener did with it.
@@ -222,7 +344,12 @@ pub async fn event_page(store: &dyn RunStore, event_id: &EventId, links: Links<'
     page(&format!("Event {}", event.id), links.nav, &html)
 }
 
-fn lanes_table(lanes: &[LaneRecord]) -> String {
+/// The lanes, each linking to its transcript when one is stored.
+fn lanes_table(
+    lanes: &[LaneRecord],
+    transcripts: &[String],
+    link: impl Fn(&str) -> String,
+) -> String {
     let mut html = String::new();
     if lanes.is_empty() {
         return html;
@@ -232,7 +359,15 @@ fn lanes_table(lanes: &[LaneRecord]) -> String {
         let _ = write!(
             html,
             "<tr><td>{}</td><td>{}</td><td>{:?}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape(&lane.name),
+            if transcripts.contains(&lane.name) {
+                format!(
+                    "<a href=\"{}\" title=\"The whole conversation\">{}</a>",
+                    link(&lane.name),
+                    escape(&lane.name)
+                )
+            } else {
+                escape(&lane.name)
+            },
             escape(&lane.model),
             lane.status,
             lane.turns,
