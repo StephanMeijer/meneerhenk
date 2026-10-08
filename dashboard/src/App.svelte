@@ -10,6 +10,7 @@
   import Health from '$lib/views/Health.svelte';
   import NotFound from '$lib/views/NotFound.svelte';
   import Overview from '$lib/views/Overview.svelte';
+  import Lanes from '$lib/views/Lanes.svelte';
   import Quality from '$lib/views/Quality.svelte';
   import Tools from '$lib/views/Tools.svelte';
   import Run from '$lib/views/Run.svelte';
@@ -34,6 +35,7 @@
     ],
     [
       { path: '/quality', label: 'Quality', routes: ['quality'] },
+      { path: '/lanes', label: 'Lanes', routes: ['lanes'] },
       { path: '/tools', label: 'Tools', routes: ['tools'] },
     ],
     [{ path: '/health', label: 'Health', routes: ['health'] }],
@@ -121,6 +123,8 @@
       <Tools query={$route.query} />
     {:else if $route.name === 'quality'}
       <Quality query={$route.query} />
+    {:else if $route.name === 'lanes'}
+      <Lanes query={$route.query} />
     {:else if $route.name === 'health'}
       <Health />
     {:else}

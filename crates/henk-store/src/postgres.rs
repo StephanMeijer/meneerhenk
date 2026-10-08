@@ -18,12 +18,13 @@ use crate::store::RunStore;
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
     DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
-    OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage,
-    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes,
-    draft_verdict, kind_parse, kind_str, lane_dots, merge_days, platform_parse, platform_str,
-    stage_dots, stage_records, status_str, to_i64, to_u64,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
+    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
+    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    lane_dots, lane_endings, merge_days, platform_parse, platform_str, stage_dots, stage_records,
+    status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -537,6 +538,41 @@ impl RunStore for PgStore {
             .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
             .collect::<Result<Vec<_>, StoreError>>()?;
         lane_dots(rows)
+    }
+
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError> {
+        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+                 FROM (SELECT id, started_at FROM runs
+                       WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
+                         AND ($1::timestamptz IS NULL OR started_at >= $1)
+                       ORDER BY started_at DESC, id DESC LIMIT $2) r
+                 JOIN lanes l ON l.run_id = r.id
+                 ORDER BY r.started_at DESC, r.id DESC, l.name",
+                &[&since, &reviews],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    text(row.try_get(1)?),
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                    row.try_get(4)?,
+                    row.try_get(5)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        lane_endings(rows)
     }
 
     async fn stages_of(

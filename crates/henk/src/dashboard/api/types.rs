@@ -149,6 +149,83 @@ pub struct OverviewStats {
     pub days: Vec<DayStats>,
 }
 
+/// How the lanes of the recent reviews ended (#229): `GET /stats/lanes`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneStats {
+    /// The reviews, oldest first: the grid's columns.
+    pub reviews: Vec<ReviewMark>,
+    /// The lanes, then the fact-check sessions: the grid's rows.
+    pub lanes: Vec<LaneRow>,
+}
+
+/// One review in the grid.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ReviewMark {
+    /// The run.
+    pub run_id: String,
+    /// RFC 3339.
+    pub started_at: String,
+}
+
+/// One lane or fact-check session, by name, across the reviews.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneRow {
+    /// `lane-a`, `check-1`.
+    pub name: String,
+    /// `lane` or `check`.
+    pub kind: String,
+    /// The models it ran, newest first.
+    pub models: Vec<String>,
+    /// Per review in `reviews`, how it ended; `null` where it did not run.
+    pub outcomes: Vec<Option<LaneOutcome>>,
+    /// The reviews it ran in.
+    pub ran: u64,
+    /// Of those, finished.
+    pub finished: u64,
+    /// Of those, stopped at the time limit; what it drafted until then counts.
+    pub timed_out: u64,
+    /// Of those, did not finish.
+    pub did_not_finish: u64,
+    /// Why it timed out or did not finish, counted.
+    pub reasons: LaneReasons,
+}
+
+/// How a lane ended in one review.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneOutcome {
+    /// The run.
+    pub run_id: String,
+    /// The model it ran.
+    pub model: String,
+    /// `finished`, `timed_out`, `did_not_finish` or `running`.
+    pub status: String,
+    /// Why it did not finish: `time_limit`, `rate_limit`, `provider_error`,
+    /// `cancelled`, `declined` or `stuck`; `null` when it finished.
+    pub reason: Option<String>,
+}
+
+/// Why lanes did not finish, counted.
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneReasons {
+    /// Stopped at the time limit.
+    pub time_limit: u64,
+    /// The model endpoint's rate limit.
+    pub rate_limit: u64,
+    /// Another model endpoint error.
+    pub provider_error: u64,
+    /// Cancelled with the review.
+    pub cancelled: u64,
+    /// The model declined.
+    pub declined: u64,
+    /// Stuck repeating a tool call.
+    pub stuck: u64,
+}
+
 /// One UTC day.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

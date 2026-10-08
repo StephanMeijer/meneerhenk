@@ -15,12 +15,13 @@ use crate::store::RunStore;
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
     DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
-    OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage,
-    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes,
-    draft_verdict, kind_parse, kind_str, lane_dots, merge_days, now, platform_parse, platform_str,
-    stage_dots, stage_records, status_str, to_i64, to_u64,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
+    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
+    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    lane_dots, lane_endings, merge_days, now, platform_parse, platform_str, stage_dots,
+    stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -1139,6 +1140,33 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError> {
+        let since = since
+            .map(|at| instant("since", &at.format(&Rfc3339).unwrap_or_default()))
+            .transpose()?;
+        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+        self.with(|c| {
+            let rows = c
+                .prepare(LANE_ENDINGS)?
+                .query_map(params![since, reviews], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            lane_endings(rows)
+        })
+    }
+
     async fn stages_of(
         &self,
         runs: &[RunId],
@@ -1435,6 +1463,24 @@ fn window(
     let until = until.map(|v| instant("until", v)).transpose()?;
     Ok((since, until))
 }
+
+/// The lanes of the newest reviews that ended (#229), over parameters 1
+/// (since, an [`instant`], or null) and 2 (how many reviews). Ordered as
+/// instants, not as text, so runs started in the same second keep their
+/// order (#216).
+const LANE_ENDINGS: &str = concat!(
+    "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+     FROM (SELECT id, started_at, ",
+    instant_of!("started_at"),
+    " AS at FROM runs
+           WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
+             AND (?1 IS NULL OR ",
+    instant_of!("started_at"),
+    " >= ?1)
+           ORDER BY at DESC, id DESC LIMIT ?2) r
+     JOIN lanes l ON l.run_id = r.id
+     ORDER BY r.at DESC, r.id DESC, l.name"
+);
 
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
 /// RFC 3339, so the first ten characters are the day.

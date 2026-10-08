@@ -23,10 +23,10 @@ use henk_domain::run::{EventId, RunId};
 use henk_store::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
     DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
-    RunFilter, RunRecord, RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite,
-    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, Stage, StageRecord, StageState,
+    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
@@ -340,6 +340,14 @@ impl RunStore for Announcing {
         runs: &[RunId],
     ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
         self.inner.lanes_of(runs).await
+    }
+
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError> {
+        self.inner.lane_endings(since, reviews).await
     }
 
     async fn stages_of(
@@ -752,6 +760,13 @@ mod tests {
             runs: &[RunId],
         ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
             self.inner.lanes_of(runs).await
+        }
+        async fn lane_endings(
+            &self,
+            since: Option<OffsetDateTime>,
+            reviews: u32,
+        ) -> Result<Vec<LaneEnding>, StoreError> {
+            self.inner.lane_endings(since, reviews).await
         }
         async fn stages_of(
             &self,

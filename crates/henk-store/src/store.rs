@@ -7,9 +7,9 @@ use time::OffsetDateTime;
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
     DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
-    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary,
 };
 
@@ -420,6 +420,23 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError>;
+
+    /// How the lanes of the newest `reviews` reviews that ended (#229)
+    /// ended, the reviews started at or after `since` when given. Running,
+    /// cancelled and superseded reviews are left out: the lanes of a
+    /// review someone cancelled or a newer commit replaced were cancelled
+    /// for it, not by their own failing. Newest review
+    /// first, each review's lanes by name. `reviews` is capped at
+    /// [`crate::MOST_LANE_REVIEWS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError>;
 
     /// The stages of each of `runs` as (run, stage, state), in one read.
     ///

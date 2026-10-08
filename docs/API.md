@@ -293,6 +293,29 @@ every day from `from` to `to` with:
   (`unverified`); improved comments are not new;
 - `drafts`: drafts the lanes wrote.
 
+### `GET /stats/lanes`
+
+How each lane and fact-check session of the recent reviews ended (#229).
+`last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
+3339) for every review started since then, the newest 1000 of them. Not
+both. Only reviews that ended on their own count: running ones are left
+out, and so are cancelled and superseded ones, whose lanes were cancelled
+for them by a person or for a newer commit.
+
+The answer has `reviews` (`run_id`, `started_at`), oldest first, and
+`lanes`: the review lanes by name, then the `check-N` sessions by number.
+Each lane has:
+
+- `kind`: `lane` or `check`; `models`: the models it ran, newest first;
+- `outcomes`: one per review in `reviews`, in the same order: `run_id`,
+  the `model` it ran there, `status` (`finished`, `timed_out`,
+  `did_not_finish`) and `reason`, or `null` where it did not run;
+- `ran`, `finished`, `timed_out`, `did_not_finish`: counts;
+- `reasons`: why it timed out or did not finish, counted: `time_limit`,
+  `rate_limit`, `provider_error`, `cancelled`, `declined` (the model
+  declined) and `stuck` (it kept repeating a call). The reason is read
+  from the error the lane ended with.
+
 ### `GET /quality`
 
 What the fact-check made of the lanes' drafts across runs (#205), one row
