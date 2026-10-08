@@ -114,10 +114,9 @@
       {/key}
     {:else if $route.name === 'transcript'}
       <Transcript id={$route.id} session={$route.session} />
-    {:else if $route.name === 'events'}
-      <Events query={$route.query} />
-    {:else if $route.name === 'event'}
-      <Events query={$route.query} selected={$route.id} />
+    {:else if $route.name === 'events' || $route.name === 'event'}
+      <!-- One branch for both, so choosing an event keeps the list mounted. -->
+      <Events query={$route.query} selected={$route.name === 'event' ? $route.id : null} />
     {:else if $route.name === 'tools'}
       <Tools query={$route.query} />
     {:else if $route.name === 'quality'}
