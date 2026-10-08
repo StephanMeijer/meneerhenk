@@ -22,7 +22,7 @@ use tracing::warn;
 use super::Dashboard;
 use super::api::ApiError;
 use super::session::{SESSION_COOKIE, STATE_COOKIE, Session, cookie_value};
-use crate::pages::page;
+use crate::pages::{Notice, notice_page};
 
 /// Someone signed in and allowed. Every page of the dashboard app takes
 /// one; without it the browser goes to sign-in and back.
@@ -117,9 +117,10 @@ fn api_session(parts: &Parts, dashboard: &Dashboard) -> Result<Session, ApiError
     if allowed(dashboard, &session) {
         Ok(session)
     } else {
-        Err(ApiError::forbidden(
-            "This GitHub account may not use Henk's dashboard.",
-        ))
+        Err(ApiError::forbidden(format!(
+            "This GitHub account (github:{}) may not use Henk's dashboard. Ask an operator to add this id.",
+            session.github_id
+        )))
     }
 }
 
@@ -300,12 +301,35 @@ pub(super) fn encode(value: &str) -> String {
 }
 
 pub(super) fn notice(status: StatusCode, title: &str, text: &str) -> Response {
-    let body = format!(
-        "<h1>{}</h1><p>{}</p>",
-        crate::pages::escape(title),
-        crate::pages::escape(text)
-    );
-    (status, page(title, "", &body)).into_response()
+    say(
+        status,
+        &Notice {
+            title,
+            text,
+            ..Notice::default()
+        },
+    )
+}
+
+/// A notice page with more to it: an id to pass on, a way on (#232).
+fn say(status: StatusCode, notice: &Notice<'_>) -> Response {
+    (status, notice_page(notice)).into_response()
+}
+
+/// Where a failed sign-in goes on: a fresh one.
+const SIGN_IN: (&str, &str) = ("Sign in with GitHub", "/dashboard/login");
+
+/// A sign-in that did not go through, with the way to try again.
+fn sign_in_failed(status: StatusCode, text: &str) -> Response {
+    say(
+        status,
+        &Notice {
+            title: "Sign-in failed",
+            text,
+            action: Some(SIGN_IN),
+            ..Notice::default()
+        },
+    )
 }
 
 /// Sends the browser to GitHub with a fresh state, kept in a signed cookie
@@ -366,16 +390,14 @@ pub async fn callback(
     };
     let (Some(code), Some(state), Some(expected)) = (callback.code, callback.state, expected)
     else {
-        return notice(
+        return sign_in_failed(
             StatusCode::BAD_REQUEST,
-            "Sign-in failed",
             "The sign-in expired or did not start here. Try again.",
         );
     };
     if !bool::from(state.as_bytes().ct_eq(expected.as_bytes())) {
-        return notice(
+        return sign_in_failed(
             StatusCode::BAD_REQUEST,
-            "Sign-in failed",
             "The sign-in did not start here. Try again.",
         );
     }
@@ -383,9 +405,8 @@ pub async fn callback(
         Ok(user) => user,
         Err(error) => {
             warn!(%error, "GitHub sign-in failed");
-            return notice(
+            return sign_in_failed(
                 StatusCode::BAD_GATEWAY,
-                "Sign-in failed",
                 "GitHub did not confirm who you are. Try again.",
             );
         }
@@ -400,10 +421,19 @@ pub async fn callback(
             github_id = user.github_id,
             "a GitHub account not on the list tried to sign in"
         );
-        let mut response = notice(
+        let framed = format!(
+            "Signed in at GitHub as github:{}. Ask an operator to add this id.",
+            user.github_id
+        );
+        let mut response = say(
             StatusCode::FORBIDDEN,
-            "Not for you",
-            "This GitHub account may not see Henk's dashboard.",
+            &Notice {
+                title: "Not for you",
+                text: "This GitHub account may not see Henk's dashboard.",
+                framed: Some(&framed),
+                action: Some(("Sign in again", "/dashboard/login")),
+                hint: Some("To use another GitHub account, sign out of GitHub first."),
+            },
         );
         if let Ok(value) = HeaderValue::from_str(&clear_state) {
             response.headers_mut().append(header::SET_COOKIE, value);
@@ -474,10 +504,14 @@ async fn github_user(dashboard: &Dashboard, code: &str) -> anyhow::Result<Sessio
 /// Signs out. A form like every other action, so another site cannot sign
 /// someone out.
 pub async fn logout(State(dashboard): State<Arc<Dashboard>>, _act: Act) -> Response {
-    let mut response = notice(
+    let mut response = say(
         StatusCode::OK,
-        "Signed out",
-        "You are signed out of Henk's dashboard.",
+        &Notice {
+            title: "Signed out",
+            text: "You are signed out of Henk's dashboard.",
+            action: Some(("Sign in", "/dashboard/login")),
+            ..Notice::default()
+        },
     );
     if let Ok(value) = HeaderValue::from_str(&dashboard.signer.clear(SESSION_COOKIE)) {
         response.headers_mut().append(header::SET_COOKIE, value);

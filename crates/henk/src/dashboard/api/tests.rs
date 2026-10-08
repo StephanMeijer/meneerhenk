@@ -142,6 +142,18 @@ async fn no_route_answers_without_a_session_or_to_an_id_off_the_list_and_none_re
         .await;
         assert_eq!(off_the_list.status, StatusCode::FORBIDDEN, "{uri}");
         assert_eq!(off_the_list.code(), "forbidden", "{uri}");
+        assert!(
+            off_the_list.body.contains("github:999")
+                && off_the_list
+                    .body
+                    .contains("Ask an operator to add this id."),
+            "the refusal names the id to add (#232): {}",
+            off_the_list.body
+        );
+        assert!(
+            !off_the_list.body.contains("mallory"),
+            "the id, never the login"
+        );
     }
 }
 
