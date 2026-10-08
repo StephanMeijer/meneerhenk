@@ -13,11 +13,11 @@ pub use postgres::{PgStore, describe_url};
 pub use sqlite::SqliteStore;
 pub use store::RunStore;
 pub use types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftListing, DraftRates,
-    DraftRecord, DraftVerdict, EventFilter, EventKey, EventRecord, EventWithOutcomes,
-    FindingAction, FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, Page, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus,
-    Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallKey,
-    ToolCallListing, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary,
-    VerdictFilter, session_kind,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftListing,
+    DraftRates, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, EventRecord,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
+    LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, Stage, StageRecord, StageState,
+    StageWrite, StoreError, ToolCallFilter, ToolCallKey, ToolCallListing, ToolCallRecord,
+    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, session_kind,
 };

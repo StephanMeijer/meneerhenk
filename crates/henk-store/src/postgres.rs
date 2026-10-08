@@ -16,13 +16,14 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow,
-    Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState,
-    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
-    kind_str, lane_dots, merge_days, platform_parse, platform_str, stage_dots, stage_records,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
+    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
+    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    lane_dots, lane_endings, merge_days, platform_parse, platform_str, stage_dots, stage_records,
     status_str, to_i64, to_u64,
 };
 
@@ -539,6 +540,41 @@ impl RunStore for PgStore {
         lane_dots(rows)
     }
 
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError> {
+        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+                 FROM (SELECT id, started_at FROM runs
+                       WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
+                         AND ($1::timestamptz IS NULL OR started_at >= $1)
+                       ORDER BY started_at DESC, id DESC LIMIT $2) r
+                 JOIN lanes l ON l.run_id = r.id
+                 ORDER BY r.started_at DESC, r.id DESC, l.name",
+                &[&since, &reviews],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    text(row.try_get(1)?),
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                    row.try_get(4)?,
+                    row.try_get(5)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        lane_endings(rows)
+    }
+
     async fn stages_of(
         &self,
         runs: &[RunId],
@@ -888,6 +924,68 @@ impl RunStore for PgStore {
                 })
             })
             .collect()
+    }
+
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let key = match group {
+            DraftGroup::Model => "d.model",
+            DraftGroup::Lane => "d.lane",
+            DraftGroup::Repo => "r.repo",
+            DraftGroup::Target => "r.repo || ' #' || r.target::text",
+        };
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {key}, to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
+                            COUNT(*) FILTER (WHERE d.verdict IN ('confirmed', 'rejected', 'same_as')),
+                            COUNT(*) FILTER (WHERE d.verdict = 'rejected')
+                     FROM drafts d JOIN runs r ON r.id = d.run_id
+                     WHERE {DRAFT_FILTER}
+                     GROUP BY 1, 2 ORDER BY 1, 2"
+                ),
+                &[&filter.model, &filter.lane, &filter.repo, &since, &until],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let count = |i: usize| -> Result<u64, StoreError> {
+                    let n: i64 = row.try_get(i)?;
+                    Ok(u64::try_from(n).unwrap_or_default())
+                };
+                Ok(DayRates {
+                    key: row.try_get(0)?,
+                    day: row.try_get(1)?,
+                    judged: count(2)?,
+                    rejected: count(3)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let verdict = VerdictFilter::param(filter.verdict);
+        let count: i64 = self
+            .client()
+            .await?
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM drafts d JOIN runs r ON r.id = d.run_id
+                     WHERE {DRAFT_FILTER}
+                       AND ($6::text IS NULL OR ($6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = $6)"
+                ),
+                &[&filter.model, &filter.lane, &filter.repo, &since, &until, &verdict],
+            )
+            .await?
+            .try_get(0)?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 
     async fn list_drafts(
@@ -1372,6 +1470,23 @@ impl RunStore for PgStore {
             .await?
             .map(|row| inbound_event(&row))
             .transpose()
+    }
+
+    async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+        let client = self.client().await?;
+        let mut facets = EventFacets::default();
+        for (column, values) in [("source", &mut facets.sources), ("kind", &mut facets.kinds)] {
+            *values = client
+                .query(
+                    &format!("SELECT DISTINCT {column} FROM inbound_events ORDER BY 1"),
+                    &[],
+                )
+                .await?
+                .iter()
+                .map(|row| row.try_get(0))
+                .collect::<Result<Vec<String>, _>>()?;
+        }
+        Ok(facets)
     }
 
     async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {

@@ -6,12 +6,16 @@ import type {
   DraftItem,
   ErrorBody,
   EventDetail,
+  EventFacets,
   EventItem,
   Health,
+  LaneStats,
   Me,
   OverviewStats,
   Page,
   QualityRow,
+  QualitySeries,
+  DraftCount,
   RunCount,
   RunDetail,
   RunSummary,
@@ -118,6 +122,12 @@ export function overviewStats(days = 14): Promise<OverviewStats> {
   return getJson<OverviewStats>(`/stats/overview?days=${days}`);
 }
 
+/** How the lanes of the recent reviews ended (#229); `query` is
+ * `last=30` or `since=...`. */
+export function laneStats(query = ''): Promise<LaneStats> {
+  return getJson<LaneStats>(`/stats/lanes${query === '' ? '' : `?${query}`}`);
+}
+
 /** Runs, newest first; `query` is the `GET /runs` query. */
 export function runs(query = ''): Promise<Page<RunSummary>> {
   return getJson<Page<RunSummary>>(`/runs${query === '' ? '' : `?${query}`}`);
@@ -145,6 +155,11 @@ export function events(query = ''): Promise<Page<EventItem>> {
   return getJson<Page<EventItem>>(`/events${query === '' ? '' : `?${query}`}`);
 }
 
+/** The sources and kinds Henk has recorded, for the events filters. */
+export function eventFacets(): Promise<EventFacets> {
+  return getJson<EventFacets>('/events/facets');
+}
+
 /** One inbound event with its payload and outcomes. */
 export function event(id: string): Promise<EventDetail> {
   return getJson<EventDetail>(`/events/${encodeURIComponent(id)}`);
@@ -163,6 +178,16 @@ export function cancelRun(id: string): Promise<Cancelled> {
 /** What became of the drafts per group; `query` is the `GET /quality` query. */
 export function quality(query = ''): Promise<QualityRow[]> {
   return getJson<QualityRow[]>(`/quality${query === '' ? '' : `?${query}`}`);
+}
+
+/** The rejection rate per day of the largest groups; the `GET /quality` query. */
+export function qualityDaily(query = ''): Promise<QualitySeries[]> {
+  return getJson<QualitySeries[]>(`/quality/daily${query === '' ? '' : `?${query}`}`);
+}
+
+/** How many drafts the `GET /drafts` query matches, over every page. */
+export function draftCount(query = ''): Promise<DraftCount> {
+  return getJson<DraftCount>(`/drafts/count${query === '' ? '' : `?${query}`}`);
 }
 
 /** Drafts across runs, newest first; `query` is the `GET /drafts` query. */

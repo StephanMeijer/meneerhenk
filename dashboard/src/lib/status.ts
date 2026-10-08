@@ -56,6 +56,10 @@ const STATES: Record<string, Omit<Look, 'label'>> = {
   refused: look('refused', 'shield'),
   waiting: look('neutral', 'clock'),
   skipped: look('neutral', 'minus'),
+  // What a listener did with an event (#227).
+  started: look('ok', 'check'),
+  joined: look('neutral', 'link'),
+  ignored: look('neutral', 'minus'),
 };
 
 /** What the fact-check decided about a draft. */

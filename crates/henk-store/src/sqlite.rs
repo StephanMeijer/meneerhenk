@@ -13,14 +13,15 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::store::RunStore;
 use crate::types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow,
-    Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState,
-    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
-    kind_str, lane_dots, merge_days, now, platform_parse, platform_str, stage_dots, stage_records,
-    status_str, to_i64, to_u64,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
+    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
+    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    lane_dots, lane_endings, merge_days, now, platform_parse, platform_str, stage_dots,
+    stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -549,6 +550,72 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError> {
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
+        let key = match group {
+            DraftGroup::Model => "d.model",
+            DraftGroup::Lane => "d.lane",
+            DraftGroup::Repo => "r.repo",
+            DraftGroup::Target => "r.repo || ' #' || r.target",
+        };
+        self.with(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {key}, substr(d.created_at, 1, 10),
+                        SUM(CASE WHEN d.verdict IN ('confirmed', 'rejected', 'same_as') THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN d.verdict = 'rejected' THEN 1 ELSE 0 END)
+                 FROM drafts d JOIN runs r ON r.id = d.run_id
+                 WHERE {DRAFT_FILTER}
+                 GROUP BY 1, 2 ORDER BY 1, 2"
+            ))?;
+            let rows = statement
+                .query_map(
+                    params![filter.model, filter.lane, filter.repo, since, until],
+                    |row| {
+                        let count = |i: usize| -> rusqlite::Result<u64> {
+                            let n: i64 = row.get(i)?;
+                            Ok(u64::try_from(n).unwrap_or_default())
+                        };
+                        Ok(DayRates {
+                            key: row.get(0)?,
+                            day: row.get(1)?,
+                            judged: count(2)?,
+                            rejected: count(3)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
+        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
+        let verdict = VerdictFilter::param(filter.verdict);
+        self.with(|c| {
+            let count: i64 = c.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM drafts d JOIN runs r ON r.id = d.run_id
+                     WHERE {DRAFT_FILTER}
+                       AND (?6 IS NULL OR (?6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = ?6)"
+                ),
+                params![
+                    filter.model,
+                    filter.lane,
+                    filter.repo,
+                    since,
+                    until,
+                    verdict
+                ],
+                |row| row.get(0),
+            )?;
+            Ok(u64::try_from(count).unwrap_or_default())
+        })
+    }
+
     async fn list_drafts(
         &self,
         filter: &DraftFilter,
@@ -905,6 +972,24 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+        self.with(|c| {
+            let distinct = |column: &str| -> Result<Vec<String>, StoreError> {
+                let mut statement = c.prepare(&format!(
+                    "SELECT DISTINCT {column} FROM inbound_events ORDER BY 1"
+                ))?;
+                let values = statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()?;
+                Ok(values)
+            };
+            Ok(EventFacets {
+                sources: distinct("source")?,
+                kinds: distinct("kind")?,
+            })
+        })
+    }
+
     async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
@@ -1052,6 +1137,33 @@ impl RunStore for SqliteStore {
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
             lane_dots(rows)
+        })
+    }
+
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError> {
+        let since = since
+            .map(|at| instant("since", &at.format(&Rfc3339).unwrap_or_default()))
+            .transpose()?;
+        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+        self.with(|c| {
+            let rows = c
+                .prepare(LANE_ENDINGS)?
+                .query_map(params![since, reviews], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            lane_endings(rows)
         })
     }
 
@@ -1351,6 +1463,24 @@ fn window(
     let until = until.map(|v| instant("until", v)).transpose()?;
     Ok((since, until))
 }
+
+/// The lanes of the newest reviews that ended (#229), over parameters 1
+/// (since, an [`instant`], or null) and 2 (how many reviews). Ordered as
+/// instants, not as text, so runs started in the same second keep their
+/// order (#216).
+const LANE_ENDINGS: &str = concat!(
+    "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+     FROM (SELECT id, started_at, ",
+    instant_of!("started_at"),
+    " AS at FROM runs
+           WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
+             AND (?1 IS NULL OR ",
+    instant_of!("started_at"),
+    " >= ?1)
+           ORDER BY at DESC, id DESC LIMIT ?2) r
+     JOIN lanes l ON l.run_id = r.id
+     ORDER BY r.at DESC, r.id DESC, l.name"
+);
 
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
 /// RFC 3339, so the first ten characters are the day.

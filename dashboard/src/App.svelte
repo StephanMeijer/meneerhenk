@@ -6,11 +6,11 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Problem from '$lib/ui/Problem.svelte';
-  import Event from '$lib/views/Event.svelte';
   import Events from '$lib/views/Events.svelte';
   import Health from '$lib/views/Health.svelte';
   import NotFound from '$lib/views/NotFound.svelte';
   import Overview from '$lib/views/Overview.svelte';
+  import Lanes from '$lib/views/Lanes.svelte';
   import Quality from '$lib/views/Quality.svelte';
   import Tools from '$lib/views/Tools.svelte';
   import Run from '$lib/views/Run.svelte';
@@ -35,6 +35,7 @@
     ],
     [
       { path: '/quality', label: 'Quality', routes: ['quality'] },
+      { path: '/lanes', label: 'Lanes', routes: ['lanes'] },
       { path: '/tools', label: 'Tools', routes: ['tools'] },
     ],
     [{ path: '/health', label: 'Health', routes: ['health'] }],
@@ -115,14 +116,15 @@
       {/key}
     {:else if $route.name === 'transcript'}
       <Transcript id={$route.id} session={$route.session} />
-    {:else if $route.name === 'events'}
-      <Events query={$route.query} />
-    {:else if $route.name === 'event'}
-      <Event id={$route.id} />
+    {:else if $route.name === 'events' || $route.name === 'event'}
+      <!-- One branch for both, so choosing an event keeps the list mounted. -->
+      <Events query={$route.query} selected={$route.name === 'event' ? $route.id : null} />
     {:else if $route.name === 'tools'}
       <Tools query={$route.query} />
     {:else if $route.name === 'quality'}
       <Quality query={$route.query} />
+    {:else if $route.name === 'lanes'}
+      <Lanes query={$route.query} />
     {:else if $route.name === 'health'}
       <Health />
     {:else}

@@ -142,6 +142,18 @@ async fn no_route_answers_without_a_session_or_to_an_id_off_the_list_and_none_re
         .await;
         assert_eq!(off_the_list.status, StatusCode::FORBIDDEN, "{uri}");
         assert_eq!(off_the_list.code(), "forbidden", "{uri}");
+        assert!(
+            off_the_list.body.contains("github:999")
+                && off_the_list
+                    .body
+                    .contains("Ask an operator to add this id."),
+            "the refusal names the id to add (#232): {}",
+            off_the_list.body
+        );
+        assert!(
+            !off_the_list.body.contains("mallory"),
+            "the id, never the login"
+        );
     }
 }
 
@@ -1131,6 +1143,9 @@ fn api_types_are_current() {
         types::RunCount::decl(&cfg),
         types::RunUpdate::decl(&cfg),
         types::QualityRow::decl(&cfg),
+        types::QualitySeries::decl(&cfg),
+        types::DayRate::decl(&cfg),
+        types::DraftCount::decl(&cfg),
         types::ToolSummaryRow::decl(&cfg),
         types::ToolCallItem::decl(&cfg),
         types::DraftItem::decl(&cfg),
@@ -1145,6 +1160,15 @@ fn api_types_are_current() {
         types::WaitingReview::decl(&cfg),
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),
+        types::LaneStats::decl(&cfg),
+        types::SessionMessage::decl(&cfg),
+        types::LiveSnapshot::decl(&cfg),
+        types::LiveMessage::decl(&cfg),
+        types::SessionEnd::decl(&cfg),
+        types::ReviewMark::decl(&cfg),
+        types::LaneRow::decl(&cfg),
+        types::LaneOutcome::decl(&cfg),
+        types::LaneReasons::decl(&cfg),
         types::Stage::decl(&cfg),
         types::Heartbeat::decl(&cfg),
         types::Lane::decl(&cfg),
@@ -1161,6 +1185,7 @@ fn api_types_are_current() {
         types::EventSummary::decl(&cfg),
         types::EventItem::decl(&cfg),
         types::EventDetail::decl(&cfg),
+        types::EventFacets::decl(&cfg),
         types::ListenerOutcome::decl(&cfg),
         types::Health::decl(&cfg),
         types::HealthCheck::decl(&cfg),
@@ -1749,12 +1774,229 @@ async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
 }
 
 #[tokio::test]
+async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
+    let f = fixture("https://127.0.0.1:9");
+    let store = &f.dashboard.app.store;
+    for (run, lane_status, error) in [
+        ("r-1", LaneStatus::Finished, None),
+        (
+            "r-2",
+            LaneStatus::DidNotFinish,
+            Some("rate limited by the model endpoint"),
+        ),
+    ] {
+        let id = RunId::parse(run).unwrap();
+        store
+            .create_run(&NewRun {
+                id: id.clone(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "opened".into(),
+                link: format!("https://henk.example/runs/{run}"),
+            })
+            .await
+            .unwrap();
+        store.start_lane(&id, "lane-a", "m").await.unwrap();
+        store
+            .finish_lane(&id, "lane-a", lane_status, 1, 1, 1, error)
+            .await
+            .unwrap();
+        store
+            .finish_run(&id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let (cookie, _) = viewer(&f);
+    let answer = get(&f, "/dashboard/api/v1/stats/lanes", &cookie).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let stats = answer.json();
+    assert_eq!(stats["reviews"][0]["run_id"], "r-1", "oldest first");
+    let lane = &stats["lanes"][0];
+    assert_eq!(lane["name"], "lane-a");
+    assert_eq!(lane["did_not_finish"], 1);
+    assert_eq!(lane["reasons"]["rate_limit"], 1);
+    assert_eq!(lane["outcomes"][1]["status"], "did_not_finish");
+    assert_eq!(lane["outcomes"][1]["reason"], "rate_limit");
+    assert_eq!(lane["outcomes"][0]["reason"], Value::Null);
+
+    let newest = get(&f, "/dashboard/api/v1/stats/lanes?last=1", &cookie)
+        .await
+        .json();
+    assert_eq!(newest["reviews"].as_array().unwrap().len(), 1);
+    assert_eq!(newest["reviews"][0]["run_id"], "r-2");
+    let since = get(
+        &f,
+        "/dashboard/api/v1/stats/lanes?since=2000-01-01T00:00:00Z",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(since["reviews"].as_array().unwrap().len(), 2);
+    for bad in [
+        "last=0",
+        "last=201",
+        "last=x",
+        "since=yesterday",
+        "last=5&since=2000-01-01T00:00:00Z",
+    ] {
+        let answer = get(&f, &format!("/dashboard/api/v1/stats/lanes?{bad}"), &cookie).await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let refused = call(&f, Method::GET, "/dashboard/api/v1/stats/lanes", &[], None).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_event_filters_are_the_sources_and_kinds_recorded() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let facets = get(&f, "/dashboard/api/v1/events/facets", &cookie).await;
+    assert_eq!(facets.status, StatusCode::OK, "{}", facets.body);
+    let facets = facets.json();
+    let sources = facets["sources"].as_array().unwrap();
+    assert!(!sources.is_empty());
+    let mut sorted = sources.clone();
+    sorted.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(*sources, sorted, "sorted");
+    assert!(facets["kinds"].is_array());
+    let refused = call(
+        &f,
+        Method::GET,
+        "/dashboard/api/v1/events/facets",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+}
+
+fn said(message: &henk_llm::ChatMessage) -> String {
+    serde_json::to_string(message).unwrap()
+}
+
+#[tokio::test]
+async fn a_running_session_streams_what_it_says_as_text_and_ends_with_it() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let (run, _alive) = live_run(&f, "r-live").await;
+    let store = Arc::clone(&f.dashboard.app.store);
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    let opening = henk_llm::ChatMessage::user("<script>alert(1)</script> Review this.");
+    store
+        .session_message(&run, "lane-a", 0, &said(&opening))
+        .await;
+    let uri = "/dashboard/api/v1/runs/r-live/sessions/lane-a/stream";
+    let mut events = stream(&f, uri, &cookie, None).await;
+
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    let epoch = f.dashboard.app.feed.epoch().to_owned();
+    assert_eq!(snapshot.id.as_deref(), Some(format!("{epoch}-1").as_str()));
+    assert_eq!(snapshot.data["cut"], false);
+    let first = &snapshot.data["messages"][0];
+    assert_eq!(first["seq"], 1);
+    assert_eq!(first["message"]["role"], "user");
+    assert_eq!(first["message"]["turn"], 0);
+    assert_eq!(
+        first["message"]["parts"][0]["text"], "<script>alert(1)</script> Review this.",
+        "text, as it was said"
+    );
+
+    let answer = henk_llm::ChatMessage::assistant("Looking.");
+    store
+        .session_message(&run, "lane-a", 1, &said(&answer))
+        .await;
+    store
+        .session_message(&run, "lane-b", 1, &said(&answer))
+        .await;
+    let next = events.next().await.unwrap();
+    assert_eq!(next.event, "message");
+    assert_eq!(next.id.as_deref(), Some(format!("{epoch}-2").as_str()));
+    assert_eq!(next.data["message"]["parts"][0]["text"], "Looking.");
+    assert_eq!(next.data["message"]["turn"], 1);
+
+    // A follower that saw the first message gets only the second.
+    let mut again = stream(&f, uri, &cookie, Some(&format!("{epoch}-1"))).await;
+    let replayed = again.next().await.unwrap();
+    assert_eq!(
+        (replayed.event.as_str(), replayed.data["seq"].as_u64()),
+        ("message", Some(2))
+    );
+    // One from another process, or before a restart, starts again.
+    let mut other = stream(&f, uri, &cookie, Some("0badf00d-1")).await;
+    assert_eq!(other.next().await.unwrap().event, "snapshot");
+
+    store
+        .finish_lane(&run, "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+        .await
+        .unwrap();
+    let end = events.next().await.unwrap();
+    assert_eq!(end.event, "end");
+    assert_eq!(end.data["elsewhere"], false);
+    assert!(events.next().await.is_none(), "the stream closes");
+    assert_eq!(again.names_until_end().await, ["end"]);
+
+    // Ended now: the transcript takes over.
+    let mut late = stream(&f, uri, &cookie, None).await;
+    assert_eq!(late.names_until_end().await, ["end"]);
+}
+
+#[tokio::test]
+async fn a_session_another_process_runs_ends_its_stream_at_once() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = Arc::clone(&f.dashboard.app.store);
+    let run = RunId::parse("r-there").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "opened".into(),
+            link: String::new(),
+        })
+        .await
+        .unwrap();
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    let mut events = stream(
+        &f,
+        "/dashboard/api/v1/runs/r-there/sessions/lane-a/stream",
+        &cookie,
+        None,
+    )
+    .await;
+    let end = events.next().await.unwrap();
+    assert_eq!(
+        (end.event.as_str(), &end.data["elsewhere"]),
+        ("end", &json!(true))
+    );
+    let missing = get(
+        &f,
+        "/dashboard/api/v1/runs/r-none/sessions/lane-a/stream",
+        &cookie,
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn no_stream_without_a_session() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
     for uri in [
         "/dashboard/api/v1/runs/stream",
         "/dashboard/api/v1/runs/r-review/stream",
+        "/dashboard/api/v1/runs/r-review/sessions/lane-a/stream",
     ] {
         let answer = call(&f, Method::GET, uri, &[], None).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{uri}");
@@ -1766,8 +2008,13 @@ async fn no_stream_without_a_session() {
 
 /// Drafts on `r-review` and `r-plan` (seeded by `seed`): mistral rejected
 /// three times and confirmed once on r-review, deepseek confirmed once,
-/// repeated once and is waiting once on r-plan.
+/// repeated once and is waiting once on r-plan. All on 2026-10-07.
 async fn seed_drafts(f: &Fixture) {
+    seed_drafts_on(f, "2026-10-07").await;
+}
+
+/// The drafts of [`seed_drafts`] on `day` (`YYYY-MM-DD`).
+async fn seed_drafts_on(f: &Fixture, day: &str) {
     let store = &f.dashboard.app.store;
     let drafts: [(&str, &str, &str, &str, Option<DraftVerdict>); 7] = [
         (
@@ -1816,7 +2063,7 @@ async fn seed_drafts(f: &Fixture) {
     ];
     for (minute, (run, draft, lane, model, verdict)) in (0u32..).zip(drafts) {
         let run = RunId::parse(run).unwrap();
-        let at = format!("2026-10-07T10:{minute:02}:00Z");
+        let at = format!("{day}T10:{minute:02}:00Z");
         store
             .record_draft(
                 &run,
@@ -1914,6 +2161,131 @@ async fn quality_counts_drafts_per_group_with_the_rejection_rate() {
         assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(bad.code(), "bad_request");
     }
+}
+
+#[tokio::test]
+async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    // The chart ends today, so the drafts are seeded today and the test
+    // does not depend on the date it runs on.
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    seed_drafts_on(&f, &today).await;
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie).await;
+    assert_eq!(daily.status, StatusCode::OK, "{}", daily.body);
+    let daily = daily.json();
+    let series = daily.as_array().unwrap();
+    assert_eq!(
+        series
+            .iter()
+            .map(|s| s["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mistral", "deepseek"],
+        "the largest group first"
+    );
+    let days = series[0]["days"].as_array().unwrap();
+    assert_eq!(days[0]["day"], today.as_str(), "from the first drafted day");
+    let judged: u64 = days.iter().map(|d| d["judged"].as_u64().unwrap()).sum();
+    let rejected: u64 = days.iter().map(|d| d["rejected"].as_u64().unwrap()).sum();
+    assert_eq!((judged, rejected), (4, 3));
+    assert!(
+        days.iter()
+            .all(|d| d["rate"].is_null() == (d["judged"] == 0))
+    );
+    let bad = get(&f, "/dashboard/api/v1/quality/daily?group=colour", &cookie).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    for query in ["verdict=rejected", "model=deepseek", "verdict=waiting", ""] {
+        let counted = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts/count?{query}"),
+            &cookie,
+        )
+        .await
+        .json();
+        let listed = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts?{query}&limit=100"),
+            &cookie,
+        )
+        .await
+        .json();
+        assert_eq!(
+            counted["count"].as_u64().unwrap(),
+            listed["items"].as_array().unwrap().len() as u64,
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn quality_daily_picks_the_largest_groups_of_the_days_it_draws() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-review").unwrap();
+    let today = time::OffsetDateTime::now_utc().date();
+    let long_ago = today - time::Duration::days(100);
+    // Seven busy models before the 90 days the chart draws, one quiet
+    // model inside them.
+    let mut drafts = Vec::new();
+    for model in 0..7 {
+        for _ in 0..3 {
+            drafts.push((long_ago, format!("retired-{model}")));
+        }
+    }
+    drafts.push((today, "recent".to_owned()));
+    for (n, (day, model)) in drafts.into_iter().enumerate() {
+        let at = format!("{day}T10:00:00Z");
+        let draft = format!("d{n}");
+        store
+            .record_draft(
+                &run,
+                &DraftRecord {
+                    at: at.clone(),
+                    draft: draft.clone(),
+                    lane: "lane-a".into(),
+                    model,
+                    kind: "finding".into(),
+                    path: "src/a.rs".into(),
+                    line: 4,
+                    target: String::new(),
+                    body: "a finding".into(),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .decide_draft(
+                &run,
+                &draft,
+                &DraftDecision {
+                    at,
+                    verdict: DraftVerdict::Rejected,
+                    checker: "opus".into(),
+                    reason: "src/a.rs:4 says otherwise.".into(),
+                    same_as: String::new(),
+                    comment_id: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie)
+        .await
+        .json();
+    let keys: Vec<&str> = daily
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["recent"], "nothing the chart does not draw");
+    assert_eq!(daily[0]["days"][0]["day"], today.to_string().as_str());
+    assert_eq!(daily[0]["days"][0]["rejected"], 1);
 }
 
 #[tokio::test]

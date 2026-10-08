@@ -11,6 +11,7 @@ import {
   lineCount,
   outcomeClass,
   periodSince,
+  prettyPayload,
   ratePercent,
   runDuration,
   share,
@@ -106,5 +107,11 @@ describe('tool helpers', () => {
     expect(count(1284)).toBe('1,284');
     expect(share(72, 75)).toBe('96% of 75');
     expect(share(0, 0)).toBe('-');
+  });
+
+  it('lays out a JSON payload to read, and leaves anything else as it came', () => {
+    expect(prettyPayload('{"a":1,"b":["<img src=x>"]}')).toBe('{\n  "a": 1,\n  "b": [\n    "<img src=x>"\n  ]\n}');
+    expect(prettyPayload('not json {')).toBe('not json {');
+    expect(prettyPayload('')).toBe('');
   });
 });
