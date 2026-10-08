@@ -91,6 +91,12 @@ pub(crate) mod testing {
         pub fail_queue: bool,
         /// The queued check each `start_review` was given, in order.
         pub started: Mutex<Vec<Option<String>>>,
+        /// The link each `finish_review` was given, in order.
+        pub finished_links: Mutex<Vec<String>>,
+        /// `pull_request` answers that the pull request is closed.
+        pub closed: bool,
+        /// `pull_request` fails instead, with this error text.
+        pub fail_pull_request: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -101,12 +107,19 @@ pub(crate) mod testing {
 
         async fn pull_request(&self, _: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {
             *self.pull_request_calls.lock().unwrap() += 1;
+            if let Some(error) = &self.fail_pull_request {
+                return Err(PlatformError::Decode(error.clone()));
+            }
             Ok(PullRequestInfo {
                 title: "t".into(),
                 head: CommitSha::parse(&self.head).unwrap(),
                 base_ref: "main".into(),
                 draft: false,
-                state: PullRequestState::Open,
+                state: if self.closed {
+                    PullRequestState::Closed
+                } else {
+                    PullRequestState::Open
+                },
             })
         }
 
@@ -274,8 +287,9 @@ pub(crate) mod testing {
             _: &CommitSha,
             handle: Option<&ReviewHandle>,
             outcome: &ReviewOutcome,
-            _: &str,
+            link: &str,
         ) -> Result<(), PlatformError> {
+            self.finished_links.lock().unwrap().push(link.to_owned());
             self.finished.lock().unwrap().push(outcome.clone());
             self.finished_checks
                 .lock()

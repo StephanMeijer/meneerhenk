@@ -49,6 +49,13 @@ pub struct CancelledBy(pub String);
 #[error("interrupted")]
 pub struct Interrupted;
 
+/// The pull request is not one Henk reviews: closed, a draft, not on the
+/// allowlist, or no lanes configured. Not Henk's failure, unlike a read that
+/// failed (#262). The reason is Henk's own words and safe to show.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct NotReviewable(pub String);
+
 /// Turns left when a lane is told to wrap up (#12).
 const LANE_TURN_WARNING_AT: u32 = 3;
 
@@ -141,7 +148,10 @@ pub async fn run_review(
     let (info, commit) = match preflight(app, &writer, &request).await {
         Ok(read) => read,
         Err(error) => {
-            not_reviewed(&writer, &request, &link, &error).await;
+            // Nothing was stored yet: the queued check links where the
+            // queue is shown, as one that ends while queued does.
+            let queue_link = app.settings.queue_link(&run);
+            close_queued_check(&writer, &request, &queue_link, &error).await;
             return Err(error);
         }
     };
@@ -262,9 +272,11 @@ async fn open_check(
 }
 
 /// A review that waited with its check queued and then could not run
-/// (#262): the check closes neutral with why, so it does not stay queued.
-/// Without a queued check nothing was shown, and nothing is.
-async fn not_reviewed(
+/// (#262), so the check does not stay queued. A pull request Henk does not
+/// review closes it neutral with why; anything else, such as a read that
+/// failed, is Henk's failure and closes it as one (§3.3), with the error in
+/// the log only. Without a queued check nothing was shown, and nothing is.
+async fn close_queued_check(
     writer: &Arc<dyn PlatformWriter>,
     request: &ReviewRequest,
     link: &str,
@@ -273,7 +285,19 @@ async fn not_reviewed(
     let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
         return;
     };
-    let outcome = ReviewOutcome::not_reviewed(commit.clone(), format!("{error:#}"));
+    let outcome = if let Some(NotReviewable(why)) = error.downcast_ref::<NotReviewable>() {
+        ReviewOutcome::not_reviewed(commit.clone(), why.clone())
+    } else {
+        error!(error = %format!("{error:#}"), "a queued review could not start");
+        ReviewOutcome {
+            commit: commit.clone(),
+            lanes: Vec::new(),
+            open_findings: 0,
+            nothing_to_review: false,
+            stopped: None,
+            not_reviewed: None,
+        }
+    };
     if let Err(finish_error) = writer
         .finish_review(&request.target, commit, Some(handle), &outcome, link)
         .await
@@ -289,10 +313,12 @@ async fn preflight(
 ) -> anyhow::Result<(henk_platform::PullRequestInfo, CommitSha)> {
     let platform = request.target.platform();
     if !app.settings.allowlist.allows(&request.target.repo) {
-        return Err(anyhow!("{} is not on the allowlist", request.target.repo));
+        return Err(
+            NotReviewable(format!("{} is not on the allowlist", request.target.repo)).into(),
+        );
     }
     if app.settings.lanes.is_empty() {
-        return Err(anyhow!("no review lanes are configured"));
+        return Err(NotReviewable("no review lanes are configured".to_owned()).into());
     }
 
     let info = writer
@@ -300,16 +326,18 @@ async fn preflight(
         .await
         .context("reading the pull request")?;
     if info.state != PullRequestState::Open {
-        return Err(anyhow!(
+        return Err(NotReviewable(format!(
             "pull request #{} is not open",
             request.target.number
-        ));
+        ))
+        .into());
     }
     if info.draft && platform == Platform::GitHub && !app.settings.review.github_drafts {
-        return Err(anyhow!(
+        return Err(NotReviewable(format!(
             "pull request #{} is a draft; drafts are not reviewed",
             request.target.number
-        ));
+        ))
+        .into());
     }
     let commit = request.commit.clone().unwrap_or_else(|| info.head.clone());
 
@@ -2257,6 +2285,91 @@ lanes = [{ name = "lane-a", model = "m" }]
         .await;
         assert_eq!(*writer.started.lock().unwrap(), [None, None]);
         app.shutdown.cancel();
+    }
+
+    /// A review that waited with a queued check, then ran preflight against
+    /// `writer`, with a dashboard so the queue link differs from the run's.
+    async fn queued_then_preflight(writer: FakeWriter) -> (App, Arc<FakeWriter>, RunId) {
+        let config = format!("{CONFIG}[dashboard]\nallowed_github_ids = [1]\n");
+        let mut f = fixture_on(
+            DIFF,
+            ScriptedClient::new("scripted", Vec::new()),
+            &config,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        let writer = Arc::new(writer);
+        f.app.test_writer = Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>);
+        let run = RunId::parse("r-queued").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        queued.queued_check = Some(ReviewHandle("queued-1".to_owned()));
+        let result = run_review(&f.app, queued, CancellationToken::new()).await;
+        assert!(result.is_err(), "the review does not run");
+        (f.app, writer, run)
+    }
+
+    #[tokio::test]
+    async fn a_queued_review_of_a_closed_pull_request_ends_not_reviewed_with_the_queue_link() {
+        let (app, writer, run) = queued_then_preflight(FakeWriter {
+            head: SHA.to_owned(),
+            closed: true,
+            ..FakeWriter::default()
+        })
+        .await;
+        let finished = writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(
+            finished[0].stopped,
+            Some(henk_domain::review::Stopped::NotReviewed)
+        );
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(
+            finished[0].headline(),
+            "Not reviewed: pull request #7 is not open."
+        );
+        assert_eq!(
+            *writer.finished_checks.lock().unwrap(),
+            [Some("queued-1".to_owned())]
+        );
+        let links = writer.finished_links.lock().unwrap().clone();
+        assert_eq!(links, [app.settings.queue_link(&run)]);
+        assert_ne!(
+            links[0],
+            app.settings.run_link(&run),
+            "the run was never stored: no link to it"
+        );
+        assert!(app.store.run(&run).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_queued_review_whose_pull_request_read_fails_ends_as_a_failure_without_the_error() {
+        let secret = "502 Bad Gateway from https://api.github.test/repos/o/r/pulls/7";
+        let (app, writer, run) = queued_then_preflight(FakeWriter {
+            head: SHA.to_owned(),
+            fail_pull_request: Some(secret.to_owned()),
+            ..FakeWriter::default()
+        })
+        .await;
+        let finished = writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].stopped, None);
+        assert_eq!(
+            finished[0].check_conclusion(),
+            CheckConclusion::Failure,
+            "an incomplete review is Henk's failure (§3.3)"
+        );
+        assert_eq!(finished[0].headline(), "Review did not complete.");
+        for text in [finished[0].headline(), finished[0].summary()] {
+            assert!(!text.contains("502"), "{text}");
+            assert!(!text.contains("api.github.test"), "{text}");
+        }
+        assert_eq!(
+            *writer.finished_links.lock().unwrap(),
+            [app.settings.queue_link(&run)]
+        );
     }
 
     #[tokio::test]
