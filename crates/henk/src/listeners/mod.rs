@@ -93,10 +93,12 @@ pub(crate) mod testing {
         pub started: Mutex<Vec<Option<String>>>,
         /// The link each `finish_review` was given, in order.
         pub finished_links: Mutex<Vec<String>>,
-        /// `pull_request` answers that the pull request is closed.
-        pub closed: bool,
+        /// The state `pull_request` answers; open when unset.
+        pub state: Option<PullRequestState>,
         /// `pull_request` fails instead, with this error text.
         pub fail_pull_request: Option<String>,
+        /// `start_review` fails instead, after recording what it was given.
+        pub fail_start: bool,
     }
 
     #[async_trait::async_trait]
@@ -115,11 +117,7 @@ pub(crate) mod testing {
                 head: CommitSha::parse(&self.head).unwrap(),
                 base_ref: "main".into(),
                 draft: false,
-                state: if self.closed {
-                    PullRequestState::Closed
-                } else {
-                    PullRequestState::Open
-                },
+                state: self.state.unwrap_or(PullRequestState::Open),
             })
         }
 
@@ -151,6 +149,9 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push(queued.map(|h| h.0.clone()));
+            if self.fail_start {
+                return Err(PlatformError::Decode("the check would not move".to_owned()));
+            }
             Ok(queued.cloned())
         }
 

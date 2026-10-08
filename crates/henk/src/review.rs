@@ -243,7 +243,9 @@ pub async fn run_review(
 
 /// The review's check, in progress: the queued one moved on (#262), or a
 /// new one. Its id goes on the run. A platform that will not have it costs
-/// the check, never the review.
+/// the check, never the review; a queued check that could not be moved on
+/// is still the review's, so its end completes it and it does not stay
+/// queued (#262).
 async fn open_check(
     app: &App,
     writer: &Arc<dyn PlatformWriter>,
@@ -252,23 +254,22 @@ async fn open_check(
     run: &RunId,
     link: &str,
 ) -> Option<ReviewHandle> {
-    match writer
+    let handle = match writer
         .start_review(&request.target, commit, link, request.queued_check.as_ref())
         .await
     {
-        Ok(handle) => {
-            if let Some(ReviewHandle(check_id)) = &handle
-                && let Err(error) = app.store.set_check(run, check_id).await
-            {
-                warn!(%error, "could not store the check id");
-            }
-            handle
-        }
+        Ok(handle) => handle,
         Err(error) => {
             warn!(%error, "could not mark the review as started");
-            None
+            request.queued_check.clone()
         }
+    };
+    if let Some(ReviewHandle(check_id)) = &handle
+        && let Err(error) = app.store.set_check(run, check_id).await
+    {
+        warn!(%error, "could not store the check id");
     }
+    handle
 }
 
 /// A review that waited with its check queued and then could not run
@@ -2312,10 +2313,43 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_queued_check_that_could_not_be_started_is_still_completed_at_the_end() {
+        let mut f = fixture(
+            DIFF,
+            ScriptedClient::new("scripted", (0..12).map(|_| done())),
+        )
+        .await;
+        let writer = Arc::new(FakeWriter {
+            head: SHA.to_owned(),
+            patches: henk_domain::diff::split_unified(DIFF),
+            fail_start: true,
+            ..FakeWriter::default()
+        });
+        f.app.test_writer = Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>);
+        let run = RunId::parse("r-start-failed").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        queued.queued_check = Some(ReviewHandle("queued-1".to_owned()));
+        let report = run_review(&f.app, queued, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            *writer.started.lock().unwrap(),
+            [Some("queued-1".to_owned())]
+        );
+        assert_eq!(
+            *writer.finished_checks.lock().unwrap(),
+            [Some("queued-1".to_owned())],
+            "the queued check is completed, not left queued (#262)"
+        );
+        assert!(report.outcome.unwrap().completed());
+    }
+
+    #[tokio::test]
     async fn a_queued_review_of_a_closed_pull_request_ends_not_reviewed_with_the_queue_link() {
         let (app, writer, run) = queued_then_preflight(FakeWriter {
             head: SHA.to_owned(),
-            closed: true,
+            state: Some(PullRequestState::Closed),
             ..FakeWriter::default()
         })
         .await;
