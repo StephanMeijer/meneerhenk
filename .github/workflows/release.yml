@@ -258,10 +258,10 @@ jobs:
           name: signed-artifacts
           path: artifacts
 
-  # One multi-platform build on one amd64 runner, with no QEMU and no
-  # per-architecture merge. The Dockerfile cross-compiles henk on
-  # $BUILDPLATFORM and the arm64 runtime stages only COPY, so nothing runs
-  # under emulation. Adding a platform is a Dockerfile change first.
+  # One multi-platform build on one amd64 runner, with no per-architecture
+  # merge. The Dockerfile cross-compiles henk on $BUILDPLATFORM; only the
+  # runtime stage's apt-get install (git, CA certificates) runs under QEMU.
+  # Adding a platform is a Dockerfile change first.
   docker:
     name: Publish Docker image
     needs: plan
@@ -277,6 +277,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v4
 

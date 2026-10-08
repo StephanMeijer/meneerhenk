@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { noteServerDate } from '$lib/clock';
 import type { Page, ToolCallItem, ToolSummaryRow } from '$lib/api/types';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
 import Tools from './Tools.svelte';
@@ -105,5 +106,35 @@ describe('Tools', () => {
     render(Tools, { query: new URLSearchParams('period=forever&session_kind=robot'), loadSummary, loadCalls, now: () => NOW });
     await settle();
     expect(loadSummary).toHaveBeenCalledWith('since=2026-09-07T12%3A00%3A00.000Z');
+  });
+});
+
+/** The browser at noon, the server an hour ahead of it (#257). */
+const BROWSER = new Date('2026-10-07T12:00:00Z');
+const SERVER = new Date('2026-10-07T13:00:00Z');
+
+function serverAhead(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(BROWSER);
+  noteServerDate(SERVER.toUTCString());
+}
+
+function clocksAgree(): void {
+  vi.useRealTimers();
+  noteServerDate(new Date().toUTCString());
+}
+
+describe('Tools on the server clock', () => {
+  afterEach(clocksAgree);
+
+  it('asks for the period and says how long ago by the server clock, not the browser one', async () => {
+    serverAhead();
+    const loadSummary = vi.fn(() => Promise.resolve([]));
+    const twoMinutes = { ...item, call: { ...item.call, at: '2026-10-07T12:58:00Z' } };
+    const loadCalls = vi.fn((): Promise<Page<ToolCallItem>> => Promise.resolve({ items: [twoMinutes], next: null }));
+    render(Tools, { query: new URLSearchParams(), loadSummary, loadCalls });
+    await settle();
+    expect(loadSummary).toHaveBeenCalledWith('since=2026-09-07T13%3A00%3A00.000Z');
+    expect(document.querySelector('ul.calls time')?.textContent).toBe('2 min ago');
   });
 });

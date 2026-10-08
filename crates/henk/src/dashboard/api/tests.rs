@@ -1020,6 +1020,265 @@ async fn health_answers_and_no_response_holds_a_secret() {
     }
 }
 
+/// The health row named `name`: its state and detail.
+async fn health_row(f: &Fixture, cookie: &str, name: &str) -> (String, String) {
+    let health = get(f, "/dashboard/api/v1/health", cookie).await.json();
+    let row = health["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} row: {health}"))
+        .clone();
+    (
+        row["state"].as_str().unwrap().to_owned(),
+        row["detail"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn the_health_page_says_when_reviews_go_without_their_workspaces() {
+    let quiet = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&quiet);
+    assert_eq!(
+        health_row(&quiet, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "reviews run without workspaces: no profile has review = true".to_owned()
+        )
+    );
+    assert_eq!(health_row(&quiet, &cookie, "git").await.0, "ok");
+
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    for (run, checked_out) in [("r-1", true), ("r-2", false), ("r-3", false)] {
+        let id = RunId::parse(run).unwrap();
+        store
+            .create_run(&NewRun {
+                id: id.clone(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "opened".into(),
+                link: String::new(),
+            })
+            .await
+            .unwrap();
+        if checked_out {
+            store
+                .stage(
+                    &id,
+                    &henk_store::StageWrite::now(
+                        henk_store::Stage::Checkout,
+                        henk_store::StageState::Done,
+                        "",
+                    ),
+                )
+                .await
+                .unwrap();
+        } else {
+            store
+                .event(
+                    &id,
+                    "warn",
+                    "review workspaces: none, the reviewed commit could not be checked out: git could not run: No such file or directory (os error 2)",
+                )
+                .await
+                .unwrap();
+            store
+                .stage(
+                    &id,
+                    &henk_store::StageWrite::now(
+                        henk_store::Stage::Checkout,
+                        henk_store::StageState::Failed,
+                        "x",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .finish_run(&id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "warn".to_owned(),
+            "1 of the last 3 reviews had one (checkout failed: git could not run: No such file or directory (os error 2))".to_owned()
+        )
+    );
+    let (state, detail) = health_row(&f, &cookie, "git").await;
+    assert_eq!(state, "ok", "git runs on the test machine: {detail}");
+    assert!(
+        detail.contains("needed for review workspaces (profile default)"),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn reviews_that_never_reach_their_checkout_do_not_count_as_going_without() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    // A review with nothing to review skips its checkout; one cancelled in
+    // the queue ends with no checkout stage at all.
+    let end = |run: &'static str, checkout: Option<henk_store::StageState>, status: RunStatus| {
+        let store = store.clone();
+        async move {
+            let id = RunId::parse(run).unwrap();
+            store
+                .create_run(&NewRun {
+                    id: id.clone(),
+                    kind: RunKind::Review,
+                    platform: Platform::GitHub,
+                    repo: "docspec/app".into(),
+                    target: 7,
+                    commit: None,
+                    requester: None,
+                    trigger: "opened".into(),
+                    link: String::new(),
+                })
+                .await
+                .unwrap();
+            if checkout == Some(henk_store::StageState::Failed) {
+                store
+                    .event(
+                        &id,
+                        "warn",
+                        "review workspaces: none, the reviewed commit could not be checked out: fetch refused",
+                    )
+                    .await
+                    .unwrap();
+            }
+            if let Some(state) = checkout {
+                store
+                    .stage(
+                        &id,
+                        &henk_store::StageWrite::now(henk_store::Stage::Checkout, state, ""),
+                    )
+                    .await
+                    .unwrap();
+            }
+            store.finish_run(&id, status, None, None).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    end(
+        "r-1",
+        Some(henk_store::StageState::Skipped),
+        RunStatus::Finished,
+    )
+    .await;
+    end("r-2", None, RunStatus::Cancelled).await;
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "no review with workspaces has reached its checkout yet".to_owned()
+        )
+    );
+
+    end(
+        "r-3",
+        Some(henk_store::StageState::Failed),
+        RunStatus::Finished,
+    )
+    .await;
+    end(
+        "r-4",
+        Some(henk_store::StageState::Skipped),
+        RunStatus::Finished,
+    )
+    .await;
+    end("r-5", None, RunStatus::Cancelled).await;
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "warn".to_owned(),
+            "0 of the last 1 reviews had one (checkout failed: fetch refused)".to_owned()
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_review_cancelled_during_its_checkout_does_not_count_as_going_without() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let id = RunId::parse("r-1").unwrap();
+    store
+        .create_run(&NewRun {
+            id: id.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "opened".into(),
+            link: String::new(),
+        })
+        .await
+        .unwrap();
+    crate::stages::mark(
+        &**store,
+        &id,
+        henk_store::Stage::Checkout,
+        henk_store::StageState::Running,
+        "checking out abc1234",
+    )
+    .await;
+    crate::stages::cancelled(&**store, &id, "someone", "").await;
+    store
+        .finish_run(&id, RunStatus::Cancelled, None, None)
+        .await
+        .unwrap();
+    let stages = store.stages_of(std::slice::from_ref(&id)).await.unwrap();
+    assert!(
+        stages.contains(&(
+            id.clone(),
+            henk_store::Stage::Checkout,
+            henk_store::StageState::Failed
+        )),
+        "cancelling fails the running checkout: {stages:?}"
+    );
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "no review with workspaces has reached its checkout yet".to_owned()
+        )
+    );
+}
+
 /// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
 /// writes them; otherwise a difference fails, so the checked-in file
 /// always matches the API.
