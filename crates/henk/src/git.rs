@@ -20,6 +20,43 @@ use tokio::process::Command;
 /// How long one git command may take.
 const GIT_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// How long `git --version` may take.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Whether `git` runs in Henk's own environment (#254): its version line,
+/// or why it could not run. `path` replaces `PATH` when given, for a test.
+///
+/// # Errors
+///
+/// Returns why git did not run or answer, in words.
+pub async fn version(path: Option<&std::ffi::OsStr>) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("--version")
+        .env_clear()
+        .env(
+            "PATH",
+            path.map_or_else(
+                || std::env::var_os("PATH").unwrap_or_default(),
+                ToOwned::to_owned,
+            ),
+        )
+        .env("LANG", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(VERSION_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(format!("git could not run: {error}")),
+        Err(_) => return Err("git --version did not answer".to_owned()),
+    };
+    if !output.status.success() {
+        return Err(format!("git --version failed ({})", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// Why a git step failed.
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
