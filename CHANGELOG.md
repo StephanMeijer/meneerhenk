@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.18](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.17...v0.1.18) - 2026-10-08
+
+### Added
+
+- *(runs)* the run page as a pipeline of stages
+- *(dashboard)* start dialog that checks the URL, cancel with confirmation, review again
+
+### Fixed
+
+- *(runs)* a review cancelled while queued shows its queue stage skipped
+
 ## [0.1.17](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.16...v0.1.17) - 2026-10-08
 
 ### Added
