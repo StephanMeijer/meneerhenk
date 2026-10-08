@@ -381,6 +381,53 @@ pub enum RunMessage {
     End,
 }
 
+/// One message of `/runs/{id}/sessions/{session}/stream` (#238).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum SessionMessage {
+    /// What the session said as far back as is kept: the first message,
+    /// and after a gap.
+    Snapshot(LiveSnapshot),
+    /// It said something.
+    Message(LiveMessage),
+    /// It ended, or does not run in this process; the stream closes.
+    End(SessionEnd),
+}
+
+/// A running session's conversation as far back as is kept.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LiveSnapshot {
+    /// Oldest first.
+    pub messages: Vec<LiveMessage>,
+    /// Older messages were let go; the transcript has them once the
+    /// session ends.
+    pub cut: bool,
+}
+
+/// One message of a running session, as it was appended: before
+/// compaction, so it can be longer than in the stored transcript.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LiveMessage {
+    /// Its place in the session, from 1.
+    pub seq: u64,
+    /// When it was appended, RFC 3339.
+    pub at: String,
+    /// The message.
+    pub message: Message,
+}
+
+/// Why a session's stream closes.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionEnd {
+    /// It runs in another Henk process, whose sessions this one does not
+    /// hear; its tool calls still show on the run.
+    pub elsewhere: bool,
+}
+
 /// One message of `/runs/stream`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

@@ -492,6 +492,40 @@ reviews: Array<ReviewMark>,
  */
 lanes: Array<LaneRow>, };
 
+export type SessionMessage = { "kind": "snapshot", "data": LiveSnapshot } | { "kind": "message", "data": LiveMessage } | { "kind": "end", "data": SessionEnd };
+
+export type LiveSnapshot = { 
+/**
+ * Oldest first.
+ */
+messages: Array<LiveMessage>, 
+/**
+ * Older messages were let go; the transcript has them once the
+ * session ends.
+ */
+cut: boolean, };
+
+export type LiveMessage = { 
+/**
+ * Its place in the session, from 1.
+ */
+seq: number, 
+/**
+ * When it was appended, RFC 3339.
+ */
+at: string, 
+/**
+ * The message.
+ */
+message: Message, };
+
+export type SessionEnd = { 
+/**
+ * It runs in another Henk process, whose sessions this one does not
+ * hear; its tool calls still show on the run.
+ */
+elsewhere: boolean, };
+
 export type ReviewMark = { 
 /**
  * The run.

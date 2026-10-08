@@ -1081,3 +1081,53 @@ async fn a_call_cut_off_by_a_cancel_is_an_event() {
     let outcomes: Vec<_> = calls_of(&mut rx).into_iter().map(|c| c.4).collect();
     assert_eq!(outcomes, [CallOutcome::Cancelled, CallOutcome::NotRun]);
 }
+
+#[tokio::test]
+async fn every_message_joining_the_conversation_is_an_event_in_order() {
+    let (set, _, _) = counted_tools();
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [
+            call("c", "read", json!({"path": "a.rs"})),
+            text("I am done."),
+            text("Still done."),
+        ],
+    ));
+    let nudged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let agent = Agent::new(model, set, "s", roomy())
+        .with_continuation(Box::new(move |_| {
+            (!nudged.swap(true, std::sync::atomic::Ordering::SeqCst))
+                .then(|| "Look again.".to_owned())
+        }))
+        .with_events(tx);
+    let outcome = agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    drop(agent);
+    let mut said = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Message { turn, message } = event {
+            said.push((turn, message));
+        }
+    }
+    let roles: Vec<_> = said.iter().map(|(turn, m)| (*turn, m.role)).collect();
+    assert_eq!(
+        roles,
+        [
+            (0, Role::User),
+            (1, Role::Assistant),
+            (1, Role::User),
+            (2, Role::Assistant),
+            (2, Role::User),
+            (3, Role::Assistant),
+        ],
+        "opening, call, results, answer, nudge, answer"
+    );
+    assert_eq!(said[4].1.text(), "Look again.");
+    let messages: Vec<_> = said.into_iter().map(|(_, m)| m).collect();
+    assert_eq!(
+        messages, outcome.messages,
+        "the conversation, message by message"
+    );
+}

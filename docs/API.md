@@ -263,6 +263,35 @@ above; `RunMessage` in `types.ts` is the union.
 curl -N -H "Cookie: henk_session=..." https://henk.example/dashboard/api/v1/runs/r-1/stream
 ```
 
+### `GET /runs/{id}/sessions/{session}/stream`
+
+One running session's conversation as it happens (#238), as Server-Sent
+Events; `SessionMessage` in `types.ts` is the union. The stored
+transcript (`GET /runs/{id}/transcripts/{session}`) is kept only when a
+session ends; this is the conversation until then.
+
+| Event | Data | When |
+|---|---|---|
+| `snapshot` | `LiveSnapshot`: `messages`, `cut` | First, and whenever the stream cannot replay what was missed |
+| `message` | `LiveMessage`: `seq`, `at`, `message` | The session appended a message: the opening (turn 0), an answer, tool results, a nudge |
+| `end` | `{"elsewhere": bool}` | The session ended, or does not run in this process; the stream closes |
+
+- A `message` is a `Message` as in a transcript, shown as text: what a
+  model or a tool said is data (§8.3).
+- Message ids are `<feed>-<seq>`, `seq` counting the session's messages
+  from 1. A client that reconnects with `Last-Event-ID` (or `?last=`)
+  gets the messages it missed while this process still holds them;
+  otherwise a new `snapshot`.
+- This process keeps the newest 200 messages or 512 KiB of each running
+  session, and a text part longer than 16 KiB is cut with a note. `cut`
+  says older messages were let go: the transcript has them once the
+  session ends. Nothing here is stored.
+- Messages are as the session appended them, before old tool results are
+  shortened for the model, so the stored transcript can show less.
+- A session that has ended gets `end` at once: its transcript takes
+  over. One that another Henk process runs gets `end` with `elsewhere:
+  true`; its tool calls still show on the run's stream.
+
 ### `GET /runs/stream`
 
 What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the

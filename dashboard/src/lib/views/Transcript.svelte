@@ -1,9 +1,10 @@
 <script lang="ts">
   import { transcript as loadTranscript } from '$lib/api/client';
   import type { Transcript } from '$lib/api/types';
-  import { FOLD_LINES, count, lineCount } from '$lib/format';
+  import { count } from '$lib/format';
   import { href, link, runPath } from '$lib/router';
   import Loading from '$lib/ui/Loading.svelte';
+  import MessageParts from '$lib/ui/MessageParts.svelte';
   import Problem from '$lib/ui/Problem.svelte';
 
   let {
@@ -58,28 +59,7 @@
           {message.role} <span class="muted">turn {message.turn}</span>
         </h2>
       </div>
-      <div class="panel-body parts">
-        {#each message.parts as part, at (at)}
-          {#if part.type === 'text'}
-            <pre>{part.text}</pre>
-          {:else if part.type === 'call'}
-            <p>Call <code>{part.name}</code></p>
-            <pre>{part.arguments}</pre>
-          {:else if part.type === 'result'}
-            {#if lineCount(part.content) > FOLD_LINES}
-              <details>
-                <summary>{part.error ? 'Result: error' : 'Result'}, {lineCount(part.content)} lines</summary>
-                <pre>{part.content}</pre>
-              </details>
-            {:else}
-              <p class:fail={part.error}>{part.error ? 'Result: error' : 'Result'}</p>
-              <pre>{part.content}</pre>
-            {/if}
-          {:else}
-            <p class="muted">Provider content, not shown.</p>
-          {/if}
-        {/each}
-      </div>
+      <div class="panel-body"><MessageParts parts={message.parts} /></div>
     </section>
   {/each}
 {:catch error}
@@ -87,9 +67,6 @@
 {/await}
 
 <style>
-  .parts { display: flex; flex-direction: column; gap: var(--space-2); }
-  .parts p { margin: 0; }
   .message.assistant { border-left: 3px solid var(--accent); }
-  .fail { color: var(--fail); }
   h2[id] { scroll-margin-top: var(--space-4); }
 </style>
