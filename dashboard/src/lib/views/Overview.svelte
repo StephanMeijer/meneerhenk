@@ -2,13 +2,14 @@
   import { onMount } from 'svelte';
   import { health as loadHealth, laneStats, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
+  import { serverNow } from '$lib/clock';
   import type { Health, LaneStats, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
-  import { now as clock } from '$lib/clock';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
   import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Commit from '$lib/ui/Commit.svelte';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Live from '$lib/ui/Live.svelte';
   import Loading from '$lib/ui/Loading.svelte';
@@ -17,11 +18,14 @@
   import Status from '$lib/ui/Status.svelte';
   import HealthTiles from './HealthTiles.svelte';
   import LaneReliability from './LaneReliability.svelte';
+  import Queued from './Queued.svelte';
   import RunsTable from './RunsTable.svelte';
   import StageStepper from './StageStepper.svelte';
   import StatTiles from './StatTiles.svelte';
 
-  /** The loaders, the stream and the clock are replaced in the tests. */
+  /** The loaders, the stream and the clock are replaced in the tests. The
+   * clock is the server's, like the durations' (#252), so the queued waits
+   * agree with them. */
   let {
     me,
     query,
@@ -31,7 +35,7 @@
     loadStats = overviewStats,
     loadLanes = laneStats,
     connect = connectEventSource,
-    now = () => new Date(),
+    now = serverNow,
   }: {
     me: Me;
     query: URLSearchParams;
@@ -85,6 +89,13 @@
     return () => following.close();
   });
 
+  /** The runs "Running now" lists, so a review that just took its slot is
+   * not also shown as queued. */
+  let shownIds = $derived(running.runs.map((run) => run.id));
+  let queuedCount = $derived(
+    (running.slots?.waiting ?? []).filter((entry) => !shownIds.includes(entry.run_id)).length,
+  );
+
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -127,12 +138,12 @@
 
 <HealthTiles load={health} />
 
-<StatTiles slots={running.slots} {now} load={loadStats} />
+<StatTiles slots={running.slots} load={loadStats} />
 
 <section class="panel" aria-labelledby="running-title">
   <div class="panel-head">
     <h2 id="running-title">Running now <span class="count-badge">({running.count})</span></h2>
-    <span class="note">Updates as runs start and end</span>
+    <span class="note">{running.count} running, {queuedCount} queued · Updates as runs start and end</span>
   </div>
   {#if running.runs.length === 0}
     <Empty why="Nothing runs right now." />
@@ -158,7 +169,7 @@
             <StageStepper stages={run.stages} lanes={run.lanes} />
             <span class="muted">{lanesLine(run)}</span>
           </span>
-          <span class="num duration">{runDuration(run, $clock)}</span>
+          <span class="num duration">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</span>
         </li>
       {/each}
     </ul>
@@ -167,6 +178,8 @@
     <div class="panel-foot">And {running.count - running.runs.length} more not shown.</div>
   {/if}
 </section>
+
+<Queued slots={running.slots} shown={shownIds} {now} />
 
 <LaneReliability load={loadLanes} />
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LiveMessage, ToolCall } from './api/types';
 import { NO_LOG, applyLive, applyRun, applyRunning, callsOf, connectionAfter } from './live';
-import { draft, reviewStages, runDetail, runSummary } from './testing/fixtures';
+import { draft, reviewStages, runDetail, runSummary, waitingReview } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
   at: '',
@@ -103,7 +103,7 @@ describe('running runs moving on', () => {
       kind: 'snapshot',
       data: { runs: [runSummary('r-1', 'running')], count: 1, slots: { limit: 1, in_use: 0, waiting: [] } },
     });
-    const slots = { limit: 1, in_use: 1, waiting: [{ repo: 'o/r', target: 8, since: '2026-10-07T10:00:00Z' }] };
+    const slots = { limit: 1, in_use: 1, waiting: [waitingReview('r-8', 8, 1)] };
     const after = applyRunning(before, { kind: 'slots', data: slots });
     expect(after.slots).toEqual(slots);
     expect([after.runs, after.count]).toEqual([before.runs, before.count]);

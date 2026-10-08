@@ -2130,6 +2130,94 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn waiting_reviews_queue_in_order_with_who_asked_and_why_they_wait() {
+        let model = ScriptedClient::new("scripted", [done(), done(), done()])
+            .with_delay(Duration::from_secs(30));
+        let mut f = fixture(DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let app = Arc::new(f.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let commit = CommitSha::parse(SHA).unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, first) = coordinator.submit_review(request(&placeholder), commit.clone());
+        for _ in 0..200 {
+            if coordinator.running_reviews() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut queued = Vec::new();
+        for (number, requester) in [(8, Some("github:1234")), (9, None)] {
+            let mut other = request(&placeholder);
+            other.target.number = number;
+            other.trigger = format!("push {number}");
+            other.requester = requester.map(str::to_owned);
+            queued.push(coordinator.submit_review(other, commit.clone()).1);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            (
+                coordinator.running_reviews(),
+                coordinator.queued_reviews(),
+                coordinator.tracked_reviews()
+            ),
+            (1, 2, 3),
+            "a waiting review is not running"
+        );
+        let slots = coordinator.slots();
+        let seen: Vec<_> = slots
+            .waiting
+            .iter()
+            .map(|w| {
+                (
+                    w.position,
+                    w.run.clone(),
+                    w.number,
+                    w.trigger.as_str(),
+                    w.requester.as_deref(),
+                    w.reason,
+                    w.commit.as_str() == SHA,
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (
+                    1,
+                    queued[0].clone(),
+                    8,
+                    "push 8",
+                    Some("github:1234"),
+                    crate::coordinator::Reason::NoSlot,
+                    true
+                ),
+                (
+                    2,
+                    queued[1].clone(),
+                    9,
+                    "push 9",
+                    None,
+                    crate::coordinator::Reason::NoSlot,
+                    true
+                ),
+            ]
+        );
+        assert!(slots.waiting.iter().all(|w| w.run != first));
+
+        assert!(coordinator.cancel(&queued[0], "github:1234".to_owned()));
+        let after: Vec<_> = coordinator
+            .slots()
+            .waiting
+            .iter()
+            .map(|w| (w.position, w.number))
+            .collect();
+        assert_eq!(after, [(1, 9)], "the next one moves up");
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn a_superseded_review_posts_no_failure() {
         let run = RunId::parse("r-superseded").unwrap();
         let (f, result) = cancelled_review(&run, false).await;

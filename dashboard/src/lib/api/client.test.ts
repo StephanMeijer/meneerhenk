@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { serverNow, noteServerDate } from '../clock';
 import { ApiError, browser, forget, getJson, health, loginUrl, postJson } from './client';
 
 type Call = { url: string; init: RequestInit };
@@ -31,6 +32,14 @@ afterEach(() => {
 });
 
 describe('reads', () => {
+  it('take the clock of the server from the Date header', async () => {
+    const ahead = new Date(Date.now() + 60_000);
+    replies.push(new Response('{"checks":[]}', { status: 200, headers: { date: ahead.toUTCString() } }));
+    await health();
+    expect(Math.abs(serverNow().getTime() - ahead.getTime())).toBeLessThan(1500);
+    noteServerDate(new Date().toUTCString());
+  });
+
   it('ask the API with the session cookie', async () => {
     replies.push(answer(200, { checks: [] }));
     expect(await health()).toEqual({ checks: [] });

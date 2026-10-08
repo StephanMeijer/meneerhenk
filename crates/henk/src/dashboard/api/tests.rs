@@ -1610,6 +1610,98 @@ async fn the_running_stream_sends_the_slots_when_they_change_not_only_in_snapsho
     assert!(freed.data["limit"].as_u64().unwrap() >= 1);
 }
 
+/// The next `slots` message on `events` that `wanted` accepts.
+async fn slots_where(events: &mut EventStream, wanted: impl Fn(&Value) -> bool) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = events.next().await.unwrap();
+            if message.event == "slots" && wanted(&message.data) {
+                return message.data;
+            }
+        }
+    })
+    .await
+    .expect("the slots message")
+}
+
+#[tokio::test]
+async fn a_review_waiting_for_a_slot_is_on_the_running_stream_until_it_is_cancelled() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.review.max_concurrent = 1;
+        },
+    );
+    let (cookie, csrf) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    assert_eq!(events.next().await.unwrap().event, "snapshot");
+    let held = f
+        .dashboard
+        .coordinator
+        .take_a_slot()
+        .expect("the only slot");
+
+    let request = crate::review::ReviewRequest {
+        target: henk_platform::ReviewTarget {
+            repo: henk_domain::allowlist::RepoRef::parse(Platform::GitHub, "docspec/app").unwrap(),
+            number: 8,
+        },
+        commit: None,
+        trigger: "new commits".to_owned(),
+        requester: Some("github:1234".to_owned()),
+        acknowledge: None,
+        run: None,
+        submitted_at: None,
+    };
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let commit = henk_domain::review::CommitSha::parse(sha).unwrap();
+    let (_, run) = f.dashboard.coordinator.submit_review(request, commit);
+
+    let queued = slots_where(&mut events, |d| {
+        d["waiting"].as_array().is_some_and(|w| !w.is_empty())
+    })
+    .await;
+    assert_eq!(
+        (queued["limit"].as_u64(), queued["in_use"].as_u64()),
+        (Some(1), Some(1))
+    );
+    let entry = &queued["waiting"][0];
+    assert_eq!(entry["run_id"], run.as_str());
+    assert_eq!(entry["kind"], "review");
+    assert_eq!(entry["platform"], "github");
+    assert_eq!(
+        (entry["repo"].as_str(), entry["target"].as_u64()),
+        (Some("docspec/app"), Some(8))
+    );
+    assert_eq!(entry["commit"], sha);
+    assert_eq!(entry["trigger"], "new commits");
+    assert_eq!(entry["requester"], "github:1234");
+    assert_eq!(entry["position"], 1);
+    assert_eq!(entry["reason"], "no_slot");
+    assert!(entry["since"].as_str().unwrap().ends_with('Z'));
+    assert!(
+        entry["target_url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/docspec/app/pull/8"),
+        "{entry}"
+    );
+
+    let cancelled = act(
+        &f,
+        &format!("/dashboard/api/v1/runs/{}/cancel", run.as_str()),
+        &cookie,
+        &csrf,
+        &json!({}),
+    )
+    .await;
+    assert_eq!(cancelled.status, StatusCode::ACCEPTED, "{}", cancelled.body);
+    let after = slots_where(&mut events, |d| d["waiting"] == json!([])).await;
+    assert_eq!(after["in_use"], 1, "the held slot is still taken");
+    drop(held);
+}
+
 #[tokio::test]
 async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
     let f = fixture("https://127.0.0.1:9");

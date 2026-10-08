@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { RunSummary } from '$lib/api/types';
-  import { now } from '$lib/clock';
   import { about, kindText, runDuration } from '$lib/format';
   import { href, link, runPath } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Commit from '$lib/ui/Commit.svelte';
   import Empty from '$lib/ui/Empty.svelte';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
@@ -44,7 +44,7 @@
             <td>{#if run.commit}<Commit sha={run.commit} />{/if}</td>
             <td>{run.trigger} {#if run.requester}<span class="who">{run.requester}</span>{/if}</td>
             <td class="nowrap"><Time iso={run.started_at} /></td>
-            <td class="num">{runDuration(run, $now)}</td>
+            <td class="num">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</td>
             {#if lanes}
               <td class="lane-icons">
                 {#each run.lanes.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}

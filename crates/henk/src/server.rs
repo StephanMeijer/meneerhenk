@@ -220,7 +220,7 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     // Reviews in flight end as interrupted and close their checks (#7).
     app.shutdown.cancel();
     let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
-    while composed.coordinator.active_reviews() > 0 && tokio::time::Instant::now() < deadline {
+    while composed.coordinator.tracked_reviews() > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     cancel.cancel();
@@ -258,7 +258,8 @@ async fn shutdown_signal() {
 async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
     axum::Json(json!({
         "status": "ok",
-        "active_reviews": shared.coordinator.active_reviews(),
+        "active_reviews": shared.coordinator.running_reviews(),
+        "queued_reviews": shared.coordinator.queued_reviews(),
         "listeners": shared.bus.listeners().collect::<Vec<_>>(),
     }))
     .into_response()
@@ -399,6 +400,7 @@ github_owners = ["docspec"]
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"active_reviews\":0"));
+        assert!(body.contains("\"queued_reviews\":0"));
         assert!(body.contains("\"review\""));
     }
 
