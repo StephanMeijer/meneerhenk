@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Lane, Stage } from '$lib/api/types';
-  import { now } from '$lib/clock';
   import { clockTime, duration, utc } from '$lib/format';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Status from '$lib/ui/Status.svelte';
 
   /** A run's stages as boxes in the order they come (#226), the lanes
@@ -35,17 +35,17 @@
   };
 
   /** A stage's time: the clock time of a moment, or how long it took. */
-  function when(stage: Stage, at: Date): string {
+  function when(stage: Stage): string {
     const start = Date.parse(stage.started_at);
-    const end = stage.ended_at === null ? at.getTime() : Date.parse(stage.ended_at);
+    const end = Date.parse(stage.ended_at ?? '');
     if (Number.isNaN(start) || Number.isNaN(end)) return '';
     if (stage.state !== 'running' && end - start < 1000) return clockTime(stage.started_at).replace(' UTC', '');
     return duration(end - start);
   }
 
-  function laneTime(lane: Lane, at: Date): string {
+  function laneTime(lane: Lane): string {
     const start = Date.parse(lane.started_at);
-    const end = lane.finished_at === null ? at.getTime() : Date.parse(lane.finished_at);
+    const end = Date.parse(lane.finished_at ?? '');
     return Number.isNaN(start) || Number.isNaN(end) ? '' : duration(end - start);
   }
 
@@ -66,7 +66,7 @@
       >
         <span class="head">
           <span class="name">{NAMES[stage.name] ?? stage.name}</span>
-          <span class="time">{when(stage, $now)}</span>
+          <span class="time">{#if stage.ended_at === null}<Elapsed since={stage.started_at} />{:else}{when(stage)}{/if}</span>
         </span>
         <Status word={stage.state === 'done' ? 'done' : stage.state} kind="stage-state" />
         {#if stage.detail}<span class="detail">{stage.detail}</span>{/if}
@@ -85,7 +85,7 @@
                 <span class="mono">{lane.name}</span>
                 <span class="muted mono model">{lane.model}</span>
                 <Status word={lane.status} kind="lane-status" />
-                <span class="muted">{laneTime(lane, $now)}</span>
+                <span class="muted">{#if lane.finished_at === null}<Elapsed since={lane.started_at} />{:else}{laneTime(lane)}{/if}</span>
               </button>
             </li>
           {/each}

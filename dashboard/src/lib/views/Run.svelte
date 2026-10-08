@@ -2,12 +2,12 @@
   import { ApiError, cancelRun, run as loadRun, runToolCalls, startRun } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Cancelled, RunDetail, RunMessage, StartRequest, Started, ToolCall } from '$lib/api/types';
-  import { now } from '$lib/clock';
   import { about, clockTime, count, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
   import { applyRun, connectionAfter, type Connection } from '$lib/live';
   import { eventPath, href, link, navigate, runPath, transcriptPath } from '$lib/router';
   import Commit from '$lib/ui/Commit.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Live from '$lib/ui/Live.svelte';
   import Loading from '$lib/ui/Loading.svelte';
@@ -256,7 +256,7 @@
         </div>
         <div>
           <dt>Duration</dt>
-          <dd>{runDuration(d.run, $now)}{#if d.run.finished_at}<span class="muted">, ended <Time iso={d.run.finished_at} /></span>{/if}</dd>
+          <dd>{#if d.run.finished_at === null}<Elapsed since={d.run.started_at} />{:else}{runDuration(d.run)}{/if}{#if d.run.finished_at}<span class="muted">, ended <Time iso={d.run.finished_at} /></span>{/if}</dd>
         </div>
         <div>
           <dt>Trigger</dt>
@@ -291,7 +291,7 @@
     <p>
       <code>{d.run.id}</code>
       {#if d.run.repo}on <strong>{about(d.run.repo, d.run.target)}</strong>{/if}
-      has run for {runDuration(d.run, $now)}. {stillWorking(d)}
+      has run for {#if d.run.finished_at === null}<Elapsed since={d.run.started_at} />{:else}{runDuration(d.run)}{/if}. {stillWorking(d)}
     </p>
     <ul class="effects">
       {#each cancelEffects(d) as line (line)}

@@ -3,12 +3,12 @@
   import { health as loadHealth, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Health, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
-  import { now as clock } from '$lib/clock';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
   import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Commit from '$lib/ui/Commit.svelte';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Live from '$lib/ui/Live.svelte';
   import Loading from '$lib/ui/Loading.svelte';
@@ -163,7 +163,7 @@
             <StageStepper stages={run.stages} lanes={run.lanes} />
             <span class="muted">{lanesLine(run)}</span>
           </span>
-          <span class="num duration">{runDuration(run, $clock)}</span>
+          <span class="num duration">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</span>
         </li>
       {/each}
     </ul>
