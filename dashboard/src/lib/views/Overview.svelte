@@ -23,7 +23,7 @@
   } = $props();
 
   const KINDS = ['review', 'plan', 'address', 'discord_turn', 'mail_reply'];
-  const STATUSES = ['running', 'finished', 'failed', 'cancelled'];
+  const STATUSES = ['running', 'finished', 'failed', 'cancelled', 'superseded'];
   const PLATFORMS = ['github', 'gitlab'];
   const FILTERS = ['kind', 'status', 'platform', 'repo', 'cursor'];
 

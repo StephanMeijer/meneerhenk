@@ -102,7 +102,7 @@ Runs, newest first. Every filter is optional:
 | Query | Meaning |
 |---|---|
 | `kind` | `review`, `plan`, `address`, `discord_turn` or `mail_reply` |
-| `status` | `running`, `finished`, `failed` or `cancelled` |
+| `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
 | `target` | The pull request, merge request or issue number |
@@ -117,7 +117,7 @@ Runs, newest first. Every filter is optional:
     "target_url": "https://github.com/StephanMeijer/meneerhenk/pull/70",
     "commit": "7744f99", "status": "finished", "trigger": "synchronize",
     "requester": null, "started_at": "2026-10-06T08:27:11.629860842Z",
-    "finished_at": "2026-10-06T08:41:02.1Z"
+    "finished_at": "2026-10-06T08:41:02.1Z", "superseded_by": null
   }],
   "next": "MjAyNi0xMC0wNlQwODoyNzoxMS42Mjk4NjA4NDJafHItMjAyNjEwMDYtMWEyYjNjNGQ"
 }
@@ -137,10 +137,13 @@ Each lane also has `last_call_turn`: the turn of its latest tool call.
 
 One run with everything the run record holds about it:
 
-- `run`: the summary above;
+- `run`: the summary above; a review replaced by a review of a newer
+  commit has status `superseded` and names that run in `superseded_by`;
 - `summary`, `error`, `check_id`, `heartbeat_at`;
 - `lanes`: every session (lanes, checks, planner, address) with turns and
-  tokens;
+  tokens, and its `status`: `running`, `finished`, `timed_out` (stopped at
+  its time limit; what it drafted counts) or `did_not_finish` (`error` says
+  why);
 - `findings`: what was done on the platform;
 - `drafts`: each draft and its `decision` (#189);
 - `transcripts`: the sessions whose conversation is kept (#191);

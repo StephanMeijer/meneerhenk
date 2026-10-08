@@ -386,6 +386,7 @@ const STATUSES: &[(&str, RunStatus)] = &[
     ("finished", RunStatus::Finished),
     ("failed", RunStatus::Failed),
     ("cancelled", RunStatus::Cancelled),
+    ("superseded", RunStatus::Superseded),
 ];
 
 const PLATFORMS: &[(&str, Platform)] =

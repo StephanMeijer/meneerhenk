@@ -269,6 +269,13 @@ impl RunStore for Announcing {
         Ok(())
     }
 
+    async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.supersede_run(id, by, reason).await?;
+        self.announce_run(id).await;
+        Ok(())
+    }
+
     async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
         self.inner.run(id).await
     }
@@ -634,6 +641,14 @@ mod tests {
             error: Option<&str>,
         ) -> Result<(), StoreError> {
             self.inner.finish_run(id, status, summary, error).await
+        }
+        async fn supersede_run(
+            &self,
+            id: &RunId,
+            by: &RunId,
+            reason: &str,
+        ) -> Result<(), StoreError> {
+            self.inner.supersede_run(id, by, reason).await
         }
         async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
             self.inner.run(id).await

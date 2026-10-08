@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/004_tool_calls.sql"),
     include_str!("../migrations/postgres/005_transcripts.sql"),
     include_str!("../migrations/postgres/006_drafts.sql"),
+    include_str!("../migrations/postgres/007_superseded_by.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -279,7 +280,7 @@ impl<'a> RunParams<'a> {
     }
 }
 
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by";
 
 fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
     let at = |i: usize| -> Result<String, StoreError> { Ok(text(row.try_get(i)?)) };
@@ -303,6 +304,7 @@ fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
         error: row.try_get(13)?,
         heartbeat_at: maybe_at(14)?,
         check_id: row.try_get(15)?,
+        superseded_by: row.try_get(16)?,
     })
 }
 
@@ -371,6 +373,23 @@ impl RunStore for PgStore {
         Ok(())
     }
 
+    async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE runs SET status = $2, finished_at = $3, error = $4, superseded_by = $5 WHERE id = $1",
+                &[
+                    &id.as_str(),
+                    &RunStatus::Superseded.as_str(),
+                    &now(),
+                    &reason,
+                    &by.as_str(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
         self.client()
             .await?
@@ -433,7 +452,7 @@ impl RunStore for PgStore {
                  WHERE run_id = $1 AND status = $5",
                 &[
                     &run.as_str(),
-                    &LaneStatus::Dropped.as_str(),
+                    &LaneStatus::DidNotFinish.as_str(),
                     &now(),
                     &reason,
                     &LaneStatus::Running.as_str(),

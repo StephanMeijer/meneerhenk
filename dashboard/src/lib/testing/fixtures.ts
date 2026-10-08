@@ -17,6 +17,7 @@ export function runSummary(id: string, status = 'finished'): RunSummary {
     requester: null,
     started_at: '2026-10-07T10:00:00Z',
     finished_at: status === 'running' ? null : '2026-10-07T10:05:00Z',
+    superseded_by: null,
   };
 }
 
@@ -45,7 +46,7 @@ export function runDetail(status = 'finished'): RunDetail {
     heartbeat_at: null,
     lanes: [
       { name: 'lane-a', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, error: null, last_call_turn: null },
-      { name: 'lane-b', model: 'model-y', status: 'dropped', turns: 1, input_tokens: 10, output_tokens: 2, error: 'gave up', last_call_turn: null },
+      { name: 'lane-b', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, error: 'gave up', last_call_turn: null },
     ],
     findings: [{ at: '2026-10-07T10:02:00Z', lane: 'lane-a', path: 'src/a.rs', line: 4, comment_id: 'c-77', action: 'posted' }],
     drafts: [
