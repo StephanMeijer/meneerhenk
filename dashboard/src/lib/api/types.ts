@@ -180,6 +180,40 @@ judged: number,
  */
 rejection_rate: number | null, };
 
+export type QualitySeries = { 
+/**
+ * The model, lane or repository; `owner/name #7` for a pull request.
+ */
+key: string, 
+/**
+ * Every day of the period, oldest first.
+ */
+days: Array<DayRate>, };
+
+export type DayRate = { 
+/**
+ * `YYYY-MM-DD`, UTC.
+ */
+day: string, 
+/**
+ * Drafts the check judged: confirmed, rejected and repeats.
+ */
+judged: number, 
+/**
+ * Of those, rejected.
+ */
+rejected: number, 
+/**
+ * Rejected of judged, from 0 to 1; `null` on a day it judged none.
+ */
+rate: number | null, };
+
+export type DraftCount = { 
+/**
+ * The number.
+ */
+count: number, };
+
 export type ToolSummaryRow = { 
 /**
  * The tool, as the model named it.
@@ -483,6 +517,143 @@ findings_posted: number,
  * Drafts the lanes wrote.
  */
 drafts: number, };
+
+export type LaneStats = { 
+/**
+ * The reviews, oldest first: the grid's columns.
+ */
+reviews: Array<ReviewMark>, 
+/**
+ * The lanes, then the fact-check sessions: the grid's rows.
+ */
+lanes: Array<LaneRow>, };
+
+export type SessionMessage = { "kind": "snapshot", "data": LiveSnapshot } | { "kind": "message", "data": LiveMessage } | { "kind": "end", "data": SessionEnd };
+
+export type LiveSnapshot = { 
+/**
+ * Oldest first.
+ */
+messages: Array<LiveMessage>, 
+/**
+ * Older messages were let go; the transcript has them once the
+ * session ends.
+ */
+cut: boolean, };
+
+export type LiveMessage = { 
+/**
+ * Its place in the session, from 1.
+ */
+seq: number, 
+/**
+ * When it was appended, RFC 3339.
+ */
+at: string, 
+/**
+ * The message.
+ */
+message: Message, };
+
+export type SessionEnd = { 
+/**
+ * It runs in another Henk process, whose sessions this one does not
+ * hear; its tool calls still show on the run.
+ */
+elsewhere: boolean, };
+
+export type ReviewMark = { 
+/**
+ * The run.
+ */
+run_id: string, 
+/**
+ * RFC 3339.
+ */
+started_at: string, };
+
+export type LaneRow = { 
+/**
+ * `lane-a`, `check-1`.
+ */
+name: string, 
+/**
+ * `lane` or `check`.
+ */
+kind: string, 
+/**
+ * The models it ran, newest first.
+ */
+models: Array<string>, 
+/**
+ * Per review in `reviews`, how it ended; `null` where it did not run.
+ */
+outcomes: Array<LaneOutcome | null>, 
+/**
+ * The reviews it ran in.
+ */
+ran: number, 
+/**
+ * Of those, finished.
+ */
+finished: number, 
+/**
+ * Of those, stopped at the time limit; what it drafted until then counts.
+ */
+timed_out: number, 
+/**
+ * Of those, did not finish.
+ */
+did_not_finish: number, 
+/**
+ * Why it timed out or did not finish, counted.
+ */
+reasons: LaneReasons, };
+
+export type LaneOutcome = { 
+/**
+ * The run.
+ */
+run_id: string, 
+/**
+ * The model it ran.
+ */
+model: string, 
+/**
+ * `finished`, `timed_out`, `did_not_finish` or `running`.
+ */
+status: string, 
+/**
+ * Why it did not finish: `time_limit`, `rate_limit`, `provider_error`,
+ * `cancelled`, `declined` or `stuck`; `null` when it finished.
+ */
+reason: string | null, };
+
+export type LaneReasons = { 
+/**
+ * Stopped at the time limit.
+ */
+time_limit: number, 
+/**
+ * The model endpoint's rate limit.
+ */
+rate_limit: number, 
+/**
+ * Another model endpoint error.
+ */
+provider_error: number, 
+/**
+ * Cancelled with the review.
+ */
+cancelled: number, 
+/**
+ * The model declined.
+ */
+declined: number, 
+/**
+ * Stuck repeating a tool call.
+ */
+stuck: number, };
 
 export type Stage = { 
 /**
@@ -892,6 +1063,16 @@ payload: string | null,
  * What each listener did, in order.
  */
 outcomes: Array<ListenerOutcome>, };
+
+export type EventFacets = { 
+/**
+ * `github_webhook`, `api`, `dashboard`, and so on, sorted.
+ */
+sources: Array<string>, 
+/**
+ * `pull_request`, `review_requested`, and so on, sorted.
+ */
+kinds: Array<string>, };
 
 export type ListenerOutcome = { 
 /**

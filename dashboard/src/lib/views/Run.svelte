@@ -15,6 +15,7 @@
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
   import CallTimeline from './CallTimeline.svelte';
+  import LiveSession from './LiveSession.svelte';
   import Pipeline from './Pipeline.svelte';
 
   /** `who` is the viewer's id (`github:1234`), which a cancel names.
@@ -58,6 +59,10 @@
   ];
 
   let d: RunDetail | null = $state(null);
+  /** The calls the stream brought since the page opened, for the live
+   * conversation of a lane (#238); the newest few thousand. */
+  let streamedCalls: ToolCall[] = $state([]);
+  const MOST_STREAMED_CALLS = 2000;
   let problem: unknown = $state(null);
   let connection: Connection = $state('connecting');
   let cancelling = $state(false);
@@ -73,6 +78,7 @@
     let following: { close(): void } | null = null;
     let gone = false;
     d = null;
+    streamedCalls = [];
     problem = null;
     connection = 'connecting';
     load(wanted)
@@ -85,6 +91,9 @@
             KINDS,
             (message) => {
               if (d !== null) d = applyRun(d, message);
+              if (message.kind === 'tool_call') {
+                streamedCalls = [...streamedCalls, message.data].slice(-MOST_STREAMED_CALLS);
+              }
             },
             (open) => (connection = connectionAfter(connection, open)),
             connect,
@@ -102,6 +111,15 @@
 
   /** The box selected in the pipeline: a stage, or `lane:<name>`. */
   let selected: string | null = $state(null);
+
+  /** The lane selected in the pipeline, if a lane is. */
+  let selectedLane = $derived.by(() => {
+    const detail: RunDetail | null = d;
+    const key: string | null = selected;
+    if (detail === null || key === null || !key.startsWith('lane:')) return null;
+    const name = key.slice('lane:'.length);
+    return detail.lanes.find((lane) => lane.name === name) ?? null;
+  });
 
   /** The timeline lines of what is selected: a lane's own lines, or the
    * lines written while a stage was going. */
@@ -346,6 +364,12 @@
       </div>
       <div class="panel-body"><Pipeline stages={d.stages} lanes={d.lanes} bind:selected /></div>
     </section>
+  {/if}
+
+  {#if selectedLane !== null && selectedLane.status === 'running'}
+    {#key selectedLane.name}
+      <LiveSession runId={d.run.id} session={selectedLane.name} streamed={streamedCalls} {connect} {loadCalls} />
+    {/key}
   {/if}
 
   {#if d.findings.length > 0}

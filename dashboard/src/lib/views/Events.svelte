@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { events as listEvents } from '$lib/api/client';
-  import type { EventItem, Page } from '$lib/api/types';
+  import { event as loadEvent, eventFacets, events as listEvents } from '$lib/api/client';
+  import type { EventDetail, EventFacets, EventItem, Page } from '$lib/api/types';
   import { about } from '$lib/format';
   import { eventPath, href, link, navigate, withQuery } from '$lib/router';
   import Empty from '$lib/ui/Empty.svelte';
@@ -8,34 +8,54 @@
   import Pager from '$lib/ui/Pager.svelte';
   import Problem from '$lib/ui/Problem.svelte';
   import Time from '$lib/ui/Time.svelte';
+  import EventInspector from './EventInspector.svelte';
   import Outcomes from './Outcomes.svelte';
 
+  /** The events and the one chosen beside them (#227). `/events` shows
+   * the newest; `/events/{id}` that one. The loaders are replaced in the
+   * tests. */
   let {
     query,
+    selected = null,
     load = listEvents,
-  }: { query: URLSearchParams; load?: (query: string) => Promise<Page<EventItem>> } = $props();
+    loadFacets = eventFacets,
+    loadOne = loadEvent,
+  }: {
+    query: URLSearchParams;
+    selected?: string | null;
+    load?: (query: string) => Promise<Page<EventItem>>;
+    loadFacets?: () => Promise<EventFacets>;
+    loadOne?: (id: string) => Promise<EventDetail>;
+  } = $props();
 
-  const FILTERS = [
-    ['source', 'github_webhook'],
-    ['kind', 'pull_request'],
-    ['repo', 'owner/name'],
-  ] as const;
   const KEYS = ['source', 'kind', 'repo', 'cursor'];
 
+  /** The page's own query, one value a key: the first, as the form shows
+   * it, so the list, the form and the links agree on a repeated key. */
+  let kept = $derived(Object.fromEntries(KEYS.map((key) => [key, query.get(key) ?? ''])));
+
   let listQuery = $derived(
-    new URLSearchParams([...query.entries()].filter(([key, value]) => KEYS.includes(key) && value !== '')).toString(),
+    new URLSearchParams(Object.entries(kept).filter(([, value]) => value !== '')).toString(),
   );
   let page = $derived(load(listQuery));
+  let facets = $derived(loadFacets());
+
+  /** A select's options: the facets, and the current value when they no
+   * longer know it (pruned, or typed), so the form shows the filter that
+   * is applied and sends it again. */
+  function choices(known: string[], current: string): string[] {
+    return current === '' || known.includes(current) ? known : [current, ...known];
+  }
 
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
-    navigate(
-      withQuery(
-        '/events',
-        Object.fromEntries(FILTERS.map(([name]) => [name, String(form.get(name) ?? '')])),
-      ),
-    );
+    const value = (key: string): string => String(form.get(key) ?? '');
+    navigate(withQuery('/events', { source: value('source'), kind: value('kind'), repo: value('repo') }));
+  }
+
+  function choose(id: string): void {
+    navigate(withQuery(eventPath(id), kept), { keepScroll: true });
   }
 </script>
 
@@ -50,56 +70,119 @@
 <section class="panel">
   <div class="panel-head">
     <form class="filters" onsubmit={filter}>
-      {#each FILTERS as [name, hint] (name)}
-        <label>{name === 'repo' ? 'repository' : name} <input {name} value={query.get(name) ?? ''} placeholder={hint}></label>
-      {/each}
+      {#snippet typed()}
+        <!-- While the facets load, or if they fail: the same fields as text,
+             so a filter sent meanwhile keeps the source and kind. -->
+        {#each ['source', 'kind'] as name (name)}
+          <label>{name} <input {name} value={kept[name]}></label>
+        {/each}
+      {/snippet}
+      {#await facets}
+        {@render typed()}
+      {:then known}
+        {#each [['source', known.sources], ['kind', known.kinds]] as const as [name, options] (name)}
+          <label>
+            {name}
+            <select {name} value={kept[name]}>
+              <option value="">any</option>
+              {#each choices(options, kept[name] ?? '') as option (option)}
+                <option value={option}>{option}</option>
+              {/each}
+            </select>
+          </label>
+        {/each}
+      {:catch}
+        {@render typed()}
+      {/await}
+      <label>repository <input name="repo" value={kept.repo} placeholder="owner/name"></label>
       <button>Show</button>
     </form>
   </div>
-  {#await page}
-    <Loading />
-  {:then result}
-    {#if result.items.length === 0}
-      <Empty why="No events match these filters." />
-    {:else}
-      <div class="scroll">
-        <table>
-          <thead>
-            <tr><th>Event</th><th>Received</th><th>Source</th><th>Kind</th><th>About</th><th>What the listeners did</th></tr>
-          </thead>
-          <tbody>
-            {#each result.items as item (item.event.id)}
-              <tr>
-                <td><a class="mono" href={href(eventPath(item.event.id))} use:link>{item.event.id}</a></td>
-                <td class="nowrap"><Time iso={item.event.received_at} /></td>
-                <td class="mono">{item.event.source}</td>
-                <td class="mono">{item.event.kind}</td>
-                <td>
-                  {#if item.event.repo}
-                    {about(item.event.repo, item.event.target)}
-                  {:else}
-                    <span class="muted">no repository</span>
-                  {/if}
-                  {#if item.event.requester}<span class="sub who">{item.event.requester}</span>{/if}
-                </td>
-                <td>
-                  {#if item.outcomes.length === 0}
-                    <span class="muted">no listener</span>
-                  {:else}
-                    <Outcomes outcomes={item.outcomes} />
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-    <div class="panel-foot">
-      <span>Newest first.</span>
-      <Pager path="/events" {query} next={result.next} />
-    </div>
-  {:catch error}
-    <Problem {error} />
-  {/await}
 </section>
+
+{#await page}
+  <Loading />
+{:then result}
+  {@const shown = selected ?? result.items[0]?.event.id ?? null}
+  <div class="split">
+    <section class="panel list">
+      {#if result.items.length === 0}
+        <Empty why="No events match these filters." />
+      {:else}
+        <div class="scroll">
+          <table class="events">
+            <thead>
+              <tr><th>Event</th><th>Received</th><th>Source</th><th>About</th><th>What the listeners did</th></tr>
+            </thead>
+            <tbody>
+              {#each result.items as item (item.event.id)}
+                <tr
+                  class:chosen={item.event.id === shown}
+                  aria-current={item.event.id === shown ? 'true' : undefined}
+                  onclick={(e) => {
+                    if (!(e.target instanceof HTMLAnchorElement)) choose(item.event.id);
+                  }}
+                >
+                  <td>
+                    <a class="mono" href={href(withQuery(eventPath(item.event.id), kept))} use:link={{ keepScroll: true }}>{item.event.id}</a>
+                  </td>
+                  <td class="nowrap"><Time iso={item.event.received_at} /></td>
+                  <td>
+                    <span class="chip-tag mono">{item.event.source}</span>
+                    <span class="chip-tag mono kind">{item.event.kind}</span>
+                  </td>
+                  <td>
+                    {#if item.event.repo}
+                      {about(item.event.repo, item.event.target)}
+                    {:else}
+                      <span class="muted">no repository</span>
+                    {/if}
+                    {#if item.event.requester}<span class="sub who">{item.event.requester}</span>{/if}
+                  </td>
+                  <td>
+                    {#if item.outcomes.length === 0}
+                      <span class="muted">no listener</span>
+                    {:else}
+                      <Outcomes outcomes={item.outcomes} />
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+      <div class="panel-foot">
+        <span>Newest first.</span>
+        <Pager path="/events" {query} next={result.next} />
+      </div>
+    </section>
+    {#if shown !== null}
+      {#key shown}
+        <EventInspector id={shown} load={loadOne} />
+      {/key}
+    {/if}
+  </div>
+{:catch error}
+  <Problem {error} />
+{/await}
+
+<style>
+  .split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--space-4); align-items: start; }
+  .events tbody tr { cursor: pointer; }
+  .events tr.chosen td { background: var(--accent-soft); }
+  .events tr.chosen td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  .chip-tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    background: var(--sunk);
+    border: 1px solid var(--line-soft);
+    margin: 0 4px 2px 0;
+  }
+
+  @media (max-width: 960px) {
+    .split { grid-template-columns: 1fr; }
+  }
+</style>

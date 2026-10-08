@@ -105,18 +105,10 @@ impl TranscriptView {
                 messages
                     .iter()
                     .map(|message| {
-                        let role = field(message, "role")
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned();
-                        if role == "assistant" {
+                        if field(message, "role").as_str() == Some("assistant") {
                             turn += 1;
                         }
-                        let parts = field(message, "blocks")
-                            .as_array()
-                            .map(|blocks| blocks.iter().filter_map(part).collect())
-                            .unwrap_or_default();
-                        MessageView { role, turn, parts }
+                        MessageView::read(message, turn)
                     })
                     .collect()
             })
@@ -133,6 +125,30 @@ impl TranscriptView {
             system: text("system"),
             messages,
         })
+    }
+}
+
+impl MessageView {
+    /// One message as JSON, as a transcript holds it, of `turn` (#238:
+    /// the live view reads each message as it comes).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error when the body is not JSON.
+    pub fn parse(body: &str, turn: u64) -> Result<Self, serde_json::Error> {
+        Ok(Self::read(&serde_json::from_str(body)?, turn))
+    }
+
+    fn read(message: &Value, turn: u64) -> Self {
+        let role = field(message, "role")
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let parts = field(message, "blocks")
+            .as_array()
+            .map(|blocks| blocks.iter().filter_map(part).collect())
+            .unwrap_or_default();
+        Self { role, turn, parts }
     }
 }
 

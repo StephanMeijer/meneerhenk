@@ -52,8 +52,7 @@ pub async fn overview(
 /// for a day it does not mention.
 fn every_day(from: Date, to: Date, counts: &[DayCounts]) -> Vec<DayStats> {
     let mut days = Vec::new();
-    let mut day = from;
-    while day <= to {
+    for day in dates(from, to) {
         let name = day.to_string();
         let counted = counts.iter().find(|c| c.day == name);
         days.push(DayStats {
@@ -64,10 +63,20 @@ fn every_day(from: Date, to: Date, counts: &[DayCounts]) -> Vec<DayStats> {
             drafts: counted.map_or(0, |c| c.drafts),
             day: name,
         });
+    }
+    days
+}
+
+/// Every date from `from` to `to`, both counted.
+pub(super) fn dates(from: Date, to: Date) -> Vec<Date> {
+    let mut all = Vec::new();
+    let mut day = from;
+    while day <= to {
+        all.push(day);
         let Some(next) = day.next_day() else { break };
         day = next;
     }
-    days
+    all
 }
 
 #[cfg(test)]

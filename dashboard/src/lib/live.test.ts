@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ToolCall } from './api/types';
-import { applyRun, applyRunning, connectionAfter } from './live';
+import type { LiveMessage, ToolCall } from './api/types';
+import { NO_LOG, applyLive, applyRun, applyRunning, callsOf, connectionAfter } from './live';
 import { draft, reviewStages, runDetail, runSummary, waitingReview } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
@@ -146,5 +146,34 @@ describe('the live connection', () => {
     expect(connectionAfter('live', false)).toBe('reconnecting');
     expect(connectionAfter('reconnecting', true)).toBe('live');
     expect(connectionAfter('ended', true)).toBe('ended');
+  });
+});
+
+const said = (seq: number, text: string): LiveMessage => ({
+  seq,
+  at: '2026-10-08T12:00:00Z',
+  message: { role: 'assistant', turn: seq, parts: [{ type: 'text', text }] },
+});
+
+describe('applyLive', () => {
+  it('starts from a snapshot, adds what is new once, and ends', () => {
+    let log = applyLive(NO_LOG, { kind: 'snapshot', data: { messages: [said(1, 'a'), said(2, 'b')], cut: true } });
+    expect(log.cut).toBe(true);
+    log = applyLive(log, { kind: 'message', data: said(2, 'b') });
+    log = applyLive(log, { kind: 'message', data: said(3, 'c') });
+    expect(log.messages.map((m) => m.seq)).toEqual([1, 2, 3]);
+    log = applyLive(log, { kind: 'end', data: { elsewhere: false } });
+    expect([log.ended, log.elsewhere]).toEqual([true, false]);
+  });
+});
+
+describe('callsOf', () => {
+  it('gives the calls of one session and turn in order, each once', () => {
+    const call = (session: string, turn: number, tool: string, at: string): ToolCall => ({
+      at, session, model: 'm', turn, tool, origin: 'henk', outcome: 'ok', arguments: '{}', arguments_len: 2, result_chars: 1, elapsed_ms: 1,
+    });
+    const first = call('lane-a', 2, 'read_file', 't1');
+    const calls = [first, call('lane-b', 2, 'search', 't1'), call('lane-a', 1, 'search', 't0'), call('lane-a', 2, 'search', 't2'), first];
+    expect(callsOf(calls, 'lane-a', 2).map((c) => c.tool)).toEqual(['read_file', 'search']);
   });
 });

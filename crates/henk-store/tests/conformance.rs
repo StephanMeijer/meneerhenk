@@ -16,11 +16,11 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord, DraftVerdict,
-    EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey,
-    ToolCallRecord, TranscriptRecord, VerdictFilter,
+    DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord,
+    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
+    MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
+    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite,
+    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -80,7 +80,9 @@ macro_rules! for_each_scenario {
             lanes_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
             days_count_runs_findings_and_drafts,
+            event_facets_are_the_sources_and_kinds_seen,
             lanes_and_stages_of_many_runs_come_in_one_read,
+            lane_endings_are_the_ended_reviews_newest_first,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             dropping_running_lanes_leaves_finished_ones_alone,
@@ -557,12 +559,46 @@ async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore
             .collect::<Vec<_>>(),
         [("o/a", 6), ("o/b", 3)]
     );
+    let daily = store
+        .daily_draft_rates(DraftGroup::Model, &all)
+        .await
+        .unwrap();
+    assert_eq!(
+        daily,
+        [
+            DayRates {
+                key: "deepseek".into(),
+                day: "2026-10-07".into(),
+                judged: 1,
+                rejected: 0,
+            },
+            DayRates {
+                key: "mistral".into(),
+                day: "2026-10-07".into(),
+                judged: 5,
+                rejected: 3,
+            },
+        ],
+        "judged is confirmed, rejected and repeats; unchecked, not checked and waiting are not"
+    );
     let window = DraftFilter {
         since: Some("2026-10-07T10:02:00Z".into()),
         until: Some("2026-10-07T10:07:00Z".into()),
         repo: Some("o/a".into()),
         ..DraftFilter::default()
     };
+    assert_eq!(store.count_drafts(&window).await.unwrap(), 5);
+    let rejected = DraftFilter {
+        verdict: Some(VerdictFilter::Is(DraftVerdict::Rejected)),
+        ..DraftFilter::default()
+    };
+    assert_eq!(store.count_drafts(&rejected).await.unwrap(), 3);
+    let waiting = DraftFilter {
+        verdict: Some(VerdictFilter::Waiting),
+        model: Some("deepseek".into()),
+        ..DraftFilter::default()
+    };
+    assert_eq!(store.count_drafts(&waiting).await.unwrap(), 1);
     let by_lane = store.draft_rates(DraftGroup::Lane, &window).await.unwrap();
     assert_eq!(
         by_lane
@@ -1121,6 +1157,31 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
     assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
 }
 
+async fn event_facets_are_the_sources_and_kinds_seen(store: &dyn RunStore) {
+    assert_eq!(store.event_facets().await.unwrap(), EventFacets::default());
+    for (id, source, kind) in [
+        ("e-1", "github_webhook", "pull_request"),
+        ("e-2", "dashboard", "review_requested"),
+        ("e-3", "github_webhook", "issue_comment"),
+        ("e-4", "api", "pull_request"),
+    ] {
+        store
+            .record_event(&InboundEvent {
+                source: source.into(),
+                kind: kind.into(),
+                ..inbound(id, "2026-10-07T10:00:00Z")
+            })
+            .await
+            .unwrap();
+    }
+    let facets = store.event_facets().await.unwrap();
+    assert_eq!(facets.sources, ["api", "dashboard", "github_webhook"]);
+    assert_eq!(
+        facets.kinds,
+        ["issue_comment", "pull_request", "review_requested"]
+    );
+}
+
 async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
     for (run, status) in [
         ("r-1", Some(RunStatus::Finished)),
@@ -1187,6 +1248,113 @@ async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
     assert_eq!(sum(|d| d.drafts), 3);
     let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
     assert!(store.daily_stats(later).await.unwrap().is_empty());
+}
+
+async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
+    // r-1 and r-2 are ended reviews, r-3 was cancelled, r-4 runs, r-5 was
+    // superseded, r-6 is a plan; each has a lane-a, and r-2 a lane-b and a
+    // check-1 too.
+    for (run, status, kind) in [
+        ("r-1", Some(RunStatus::Finished), RunKind::Review),
+        ("r-2", Some(RunStatus::Failed), RunKind::Review),
+        ("r-3", Some(RunStatus::Cancelled), RunKind::Review),
+        ("r-4", None, RunKind::Review),
+        ("r-5", Some(RunStatus::Superseded), RunKind::Review),
+        ("r-6", Some(RunStatus::Finished), RunKind::Plan),
+    ] {
+        store
+            .create_run(&NewRun {
+                kind,
+                ..new_run(run)
+            })
+            .await
+            .unwrap();
+        store.start_lane(&id(run), "lane-a", "m-1").await.unwrap();
+        store
+            .finish_lane(&id(run), "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+            .await
+            .unwrap();
+        if let Some(status) = status {
+            store
+                .finish_run(&id(run), status, None, None)
+                .await
+                .unwrap();
+        }
+    }
+    store.start_lane(&id("r-2"), "lane-b", "m-2").await.unwrap();
+    store
+        .finish_lane(
+            &id("r-2"),
+            "lane-b",
+            LaneStatus::DidNotFinish,
+            1,
+            1,
+            1,
+            Some("rate limited by the model endpoint"),
+        )
+        .await
+        .unwrap();
+    store
+        .start_lane(&id("r-2"), "check-1", "m-3")
+        .await
+        .unwrap();
+    store
+        .finish_lane(&id("r-2"), "check-1", LaneStatus::TimedOut, 1, 1, 1, None)
+        .await
+        .unwrap();
+
+    let all = store.lane_endings(None, 30).await.unwrap();
+    let seen: Vec<_> = all
+        .iter()
+        .map(|e| {
+            (
+                e.run_id.as_str(),
+                e.name.as_str(),
+                e.model.as_str(),
+                e.status,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("r-2", "check-1", "m-3", LaneStatus::TimedOut),
+            ("r-2", "lane-a", "m-1", LaneStatus::Finished),
+            ("r-2", "lane-b", "m-2", LaneStatus::DidNotFinish),
+            ("r-1", "lane-a", "m-1", LaneStatus::Finished),
+        ],
+        "running, cancelled, superseded and plan runs are left out"
+    );
+    let dropped = all.iter().find(|e| e.name == "lane-b").unwrap();
+    assert_eq!(
+        dropped.error.as_deref(),
+        Some("rate limited by the model endpoint")
+    );
+    assert!(OffsetDateTime::parse(&dropped.started_at, &Rfc3339).is_ok());
+
+    let newest_two: Vec<_> = store
+        .lane_endings(None, 2)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.run_id.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        newest_two,
+        ["r-2", "r-2", "r-2", "r-1"],
+        "two reviews, not two lanes"
+    );
+
+    let hour_ago = OffsetDateTime::now_utc() - time::Duration::hours(1);
+    assert_eq!(store.lane_endings(Some(hour_ago), 30).await.unwrap(), all);
+    let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    assert!(
+        store
+            .lane_endings(Some(later), 30)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {

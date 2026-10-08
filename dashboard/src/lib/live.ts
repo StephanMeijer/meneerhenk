@@ -1,6 +1,15 @@
 // Applying stream messages to what a page shows (#202). Pure: each takes
 // the state and a message and returns the new state.
-import type { RunDetail, RunMessage, RunningMessage, RunSummary, Slots, ToolCall } from './api/types';
+import type {
+  LiveMessage,
+  RunDetail,
+  RunMessage,
+  RunningMessage,
+  RunSummary,
+  SessionMessage,
+  Slots,
+  ToolCall,
+} from './api/types';
 
 const REFUSED = new Set(['refused_scope', 'refused_repeat']);
 
@@ -123,4 +132,44 @@ export function connectionAfter(connection: Connection, open: boolean): Connecti
   if (connection === 'ended') return 'ended';
   if (open) return 'live';
   return connection === 'connecting' ? 'connecting' : 'reconnecting';
+}
+
+/** A running session's conversation as its stream tells it (#238). */
+export type LiveLog = {
+  messages: LiveMessage[];
+  /** Older messages were let go; the transcript has them once it ends. */
+  cut: boolean;
+  /** The session ended, or runs where this page cannot hear it. */
+  ended: boolean;
+  elsewhere: boolean;
+};
+
+export const NO_LOG: LiveLog = { messages: [], cut: false, ended: false, elsewhere: false };
+
+/** A session's log after one message of its stream. A message it already
+ * holds (a replay after a reconnect) is not added twice. */
+export function applyLive(log: LiveLog, message: SessionMessage): LiveLog {
+  switch (message.kind) {
+    case 'snapshot':
+      return { ...log, messages: message.data.messages, cut: message.data.cut };
+    case 'message': {
+      const last = log.messages.at(-1)?.seq ?? 0;
+      return message.data.seq <= last ? log : { ...log, messages: [...log.messages, message.data] };
+    }
+    case 'end':
+      return { ...log, ended: true, elsewhere: message.data.elsewhere };
+  }
+}
+
+/** The calls of `session` in `turn`, in the order they ran, from `calls`
+ * that may hold one twice (loaded, then streamed). */
+export function callsOf(calls: ToolCall[], session: string, turn: number): ToolCall[] {
+  const seen = new Set<string>();
+  return calls.filter((call) => {
+    if (call.session !== session || call.turn !== turn) return false;
+    const key = `${call.at}/${call.tool}/${call.arguments}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

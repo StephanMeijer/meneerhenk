@@ -5,11 +5,12 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -203,6 +204,27 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         filter: &DraftFilter,
     ) -> Result<Vec<DraftRates>, StoreError>;
 
+    /// What the check made of each group's drafts per UTC day (#228): how
+    /// many it judged and how many of those it rejected, for drafts that
+    /// match `filter` (its verdict and keyset are not used).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError>;
+
+    /// How many drafts the listing's `filter` matches, over every page
+    /// (its keyset is not used).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError>;
+
     /// Drafts across runs, newest first, by filter and page (#205).
     ///
     /// # Errors
@@ -340,6 +362,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError>;
 
+    /// The sources and kinds of the recorded inbound events, sorted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn event_facets(&self) -> Result<EventFacets, StoreError>;
+
     /// The outcomes of one event, in recording order.
     ///
     /// # Errors
@@ -391,6 +420,30 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError>;
+
+    /// How the lanes of the newest `reviews` reviews that ended (#229)
+    /// ended, the reviews started at or after `since` when given. Running,
+    /// cancelled and superseded reviews are left out: the lanes of a
+    /// review someone cancelled or a newer commit replaced were cancelled
+    /// for it, not by their own failing. Newest review
+    /// first, each review's lanes by name. `reviews` is capped at
+    /// [`crate::MOST_LANE_REVIEWS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn lane_endings(
+        &self,
+        since: Option<OffsetDateTime>,
+        reviews: u32,
+    ) -> Result<Vec<LaneEnding>, StoreError>;
+
+    /// A message a session appended to its conversation, as it happens
+    /// (#238): `message` is the message as JSON, as a stored transcript
+    /// holds it. Not stored: the transcript kept when the session ends is
+    /// the record. A store that announces what happens passes it on to
+    /// the live view; the default ignores it.
+    async fn session_message(&self, _run: &RunId, _session: &str, _turn: u32, _message: &str) {}
 
     /// The stages of each of `runs` as (run, stage, state), in one read.
     ///

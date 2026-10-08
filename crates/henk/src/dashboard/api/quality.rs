@@ -7,10 +7,16 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{DraftFilter, DraftGroup, DraftKey, DraftRates, DraftVerdict, VerdictFilter};
+use henk_store::{
+    DayRates, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftVerdict, VerdictFilter,
+};
 use serde::Deserialize;
+use time::format_description::well_known::Rfc3339;
+use time::{Date, Duration, OffsetDateTime};
 
-use super::types::{Draft, DraftItem, Page, QualityRow, link_to};
+use super::types::{
+    DayRate, Draft, DraftCount, DraftItem, Page, QualityRow, QualitySeries, link_to,
+};
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -137,6 +143,124 @@ fn row(settings: &crate::config::Settings, rates: DraftRates) -> QualityRow {
     }
 }
 
+/// The groups the rejection-rate chart draws: the largest of the period.
+const CHART_GROUPS: usize = 6;
+/// How far back the chart goes when the period is all time.
+const CHART_DAYS: i64 = 90;
+
+/// `GET /quality/daily`: the rejection rate per UTC day of the largest
+/// groups (#228), every day of the period, a day the check judged nothing
+/// `null`.
+pub async fn daily(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+    ApiQuery(query): ApiQuery<QualityQuery>,
+) -> ApiResult<Vec<QualitySeries>> {
+    let group = query.group()?;
+    let asked = query.filter()?;
+    let asked_since = asked.since.clone();
+    let today = OffsetDateTime::now_utc().date();
+    // The groups are chosen, and the days counted, over the days the chart
+    // draws, so a group busy only before them takes no slot.
+    let filter = DraftFilter {
+        verdict: None,
+        before: None,
+        since: chart_since(asked_since.as_deref(), today),
+        ..asked
+    };
+    let store = &dashboard.app.store;
+    let largest: Vec<String> = store
+        .draft_rates(group, &filter)
+        .await?
+        .into_iter()
+        .take(CHART_GROUPS)
+        .map(|rates| rates.key)
+        .collect();
+    let rows = store.daily_draft_rates(group, &filter).await?;
+    let from = first_day(asked_since.as_deref(), &rows, today);
+    Ok(Json(series(&largest, &rows, from, today)))
+}
+
+/// The `since` the chart's queries take when it ends `today`: the later of
+/// the caller's `since` and the start of the first day it can draw.
+fn chart_since(since: Option<&str>, today: Date) -> Option<String> {
+    let start = (today - Duration::days(CHART_DAYS - 1))
+        .midnight()
+        .assume_utc();
+    let asked = since.and_then(|since| OffsetDateTime::parse(since, &Rfc3339).ok());
+    match asked {
+        Some(asked) if asked >= start => since.map(str::to_owned),
+        _ => start
+            .format(&Rfc3339)
+            .ok()
+            .or_else(|| since.map(str::to_owned)),
+    }
+}
+
+/// The first day the chart shows when it ends `today`: the day of `since`,
+/// or of the earliest row when there is none, but no more than
+/// [`CHART_DAYS`] back.
+fn first_day(since: Option<&str>, rows: &[DayRates], today: Date) -> Date {
+    let earliest = today - Duration::days(CHART_DAYS - 1);
+    since
+        .and_then(|since| OffsetDateTime::parse(since, &Rfc3339).ok())
+        .map(OffsetDateTime::date)
+        .or_else(|| rows.iter().filter_map(|r| day_of(&r.day)).min())
+        .map_or(today, |from| from.max(earliest))
+}
+
+fn day_of(text: &str) -> Option<Date> {
+    Date::parse(
+        text,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .ok()
+}
+
+/// Each of `keys` over every day from `from` to `to`.
+fn series(keys: &[String], rows: &[DayRates], from: Date, to: Date) -> Vec<QualitySeries> {
+    let days = super::stats::dates(from, to);
+    keys.iter()
+        .map(|key| QualitySeries {
+            key: key.clone(),
+            days: days
+                .iter()
+                .map(|date| {
+                    let day = date.to_string();
+                    let found = rows.iter().find(|r| &r.key == key && r.day == day);
+                    let (judged, rejected) = found.map_or((0, 0), |r| (r.judged, r.rejected));
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "counts of drafts are far below 2^52"
+                    )]
+                    let rate = (judged > 0).then(|| rejected as f64 / judged as f64);
+                    DayRate {
+                        day,
+                        judged,
+                        rejected,
+                        rate,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// `GET /drafts/count`: how many drafts the filters of `GET /drafts`
+/// match, over every page.
+pub async fn count(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+    ApiQuery(query): ApiQuery<QualityQuery>,
+) -> ApiResult<DraftCount> {
+    let filter = DraftFilter {
+        before: None,
+        ..query.filter()?
+    };
+    let count = dashboard.app.store.count_drafts(&filter).await?;
+    Ok(Json(DraftCount { count }))
+}
+
 /// `GET /drafts`: drafts across runs, newest first, a page at a time.
 pub async fn drafts(
     State(dashboard): State<Arc<Dashboard>>,
@@ -177,4 +301,92 @@ pub async fn drafts(
             .collect(),
         next,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::float_cmp)]
+
+    use time::Month;
+
+    use super::*;
+
+    #[test]
+    fn a_series_has_every_day_and_no_rate_on_a_day_nothing_was_judged() {
+        let from = Date::from_calendar_date(2026, Month::October, 5).unwrap();
+        let to = Date::from_calendar_date(2026, Month::October, 7).unwrap();
+        let rows = vec![
+            DayRates {
+                key: "m".into(),
+                day: "2026-10-05".into(),
+                judged: 4,
+                rejected: 1,
+            },
+            DayRates {
+                key: "m".into(),
+                day: "2026-10-07".into(),
+                judged: 0,
+                rejected: 0,
+            },
+            DayRates {
+                key: "other".into(),
+                day: "2026-10-06".into(),
+                judged: 2,
+                rejected: 2,
+            },
+        ];
+        let got = series(&["m".to_owned()], &rows, from, to);
+        assert_eq!(got.len(), 1);
+        let days = &got[0].days;
+        assert_eq!(
+            days.iter().map(|d| d.day.as_str()).collect::<Vec<_>>(),
+            ["2026-10-05", "2026-10-06", "2026-10-07"]
+        );
+        assert_eq!(days[0].rate, Some(0.25));
+        assert_eq!(days[1].rate, None, "a day without drafts");
+        assert_eq!(days[2].rate, None, "a day with drafts, none judged");
+    }
+
+    #[test]
+    fn the_chart_starts_at_since_or_the_first_row_and_at_most_ninety_days_back() {
+        let day = |month, day| Date::from_calendar_date(2026, month, day).unwrap();
+        let today = day(Month::October, 8);
+        let rows = vec![DayRates {
+            key: "m".into(),
+            day: "2026-10-05".into(),
+            judged: 1,
+            rejected: 0,
+        }];
+        assert_eq!(first_day(None, &[], today), today, "nothing yet");
+        assert_eq!(first_day(None, &rows, today), day(Month::October, 5));
+        assert_eq!(
+            first_day(Some("2026-10-07T10:06:00Z"), &rows, today),
+            day(Month::October, 7),
+            "since wins over the rows"
+        );
+        let ninety_days = day(Month::July, 11);
+        assert_eq!(today - ninety_days, Duration::days(CHART_DAYS - 1));
+        assert_eq!(
+            first_day(Some("2020-01-01T00:00:00Z"), &rows, today),
+            ninety_days
+        );
+        let old = vec![DayRates {
+            day: "2025-01-01".into(),
+            ..rows[0].clone()
+        }];
+        assert_eq!(first_day(None, &old, today), ninety_days);
+    }
+
+    #[test]
+    fn the_chart_queries_only_the_days_it_draws() {
+        let today = Date::from_calendar_date(2026, Month::October, 8).unwrap();
+        let start = Some("2026-07-11T00:00:00Z".to_owned());
+        assert_eq!(chart_since(None, today), start, "all time");
+        assert_eq!(chart_since(Some("2020-01-01T00:00:00Z"), today), start);
+        assert_eq!(
+            chart_since(Some("2026-10-07T10:06:00Z"), today).as_deref(),
+            Some("2026-10-07T10:06:00Z"),
+            "a later since is kept"
+        );
+    }
 }

@@ -200,6 +200,83 @@ pub struct OverviewStats {
     pub days: Vec<DayStats>,
 }
 
+/// How the lanes of the recent reviews ended (#229): `GET /stats/lanes`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneStats {
+    /// The reviews, oldest first: the grid's columns.
+    pub reviews: Vec<ReviewMark>,
+    /// The lanes, then the fact-check sessions: the grid's rows.
+    pub lanes: Vec<LaneRow>,
+}
+
+/// One review in the grid.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct ReviewMark {
+    /// The run.
+    pub run_id: String,
+    /// RFC 3339.
+    pub started_at: String,
+}
+
+/// One lane or fact-check session, by name, across the reviews.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneRow {
+    /// `lane-a`, `check-1`.
+    pub name: String,
+    /// `lane` or `check`.
+    pub kind: String,
+    /// The models it ran, newest first.
+    pub models: Vec<String>,
+    /// Per review in `reviews`, how it ended; `null` where it did not run.
+    pub outcomes: Vec<Option<LaneOutcome>>,
+    /// The reviews it ran in.
+    pub ran: u64,
+    /// Of those, finished.
+    pub finished: u64,
+    /// Of those, stopped at the time limit; what it drafted until then counts.
+    pub timed_out: u64,
+    /// Of those, did not finish.
+    pub did_not_finish: u64,
+    /// Why it timed out or did not finish, counted.
+    pub reasons: LaneReasons,
+}
+
+/// How a lane ended in one review.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneOutcome {
+    /// The run.
+    pub run_id: String,
+    /// The model it ran.
+    pub model: String,
+    /// `finished`, `timed_out`, `did_not_finish` or `running`.
+    pub status: String,
+    /// Why it did not finish: `time_limit`, `rate_limit`, `provider_error`,
+    /// `cancelled`, `declined` or `stuck`; `null` when it finished.
+    pub reason: Option<String>,
+}
+
+/// Why lanes did not finish, counted.
+#[derive(Debug, Default, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneReasons {
+    /// Stopped at the time limit.
+    pub time_limit: u64,
+    /// The model endpoint's rate limit.
+    pub rate_limit: u64,
+    /// Another model endpoint error.
+    pub provider_error: u64,
+    /// Cancelled with the review.
+    pub cancelled: u64,
+    /// The model declined.
+    pub declined: u64,
+    /// Stuck repeating a tool call.
+    pub stuck: u64,
+}
+
 /// One UTC day.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -355,6 +432,53 @@ pub enum RunMessage {
     End,
 }
 
+/// One message of `/runs/{id}/sessions/{session}/stream` (#238).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum SessionMessage {
+    /// What the session said as far back as is kept: the first message,
+    /// and after a gap.
+    Snapshot(LiveSnapshot),
+    /// It said something.
+    Message(LiveMessage),
+    /// It ended, or does not run in this process; the stream closes.
+    End(SessionEnd),
+}
+
+/// A running session's conversation as far back as is kept.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LiveSnapshot {
+    /// Oldest first.
+    pub messages: Vec<LiveMessage>,
+    /// Older messages were let go; the transcript has them once the
+    /// session ends.
+    pub cut: bool,
+}
+
+/// One message of a running session, as it was appended: before
+/// compaction, so it can be longer than in the stored transcript.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LiveMessage {
+    /// Its place in the session, from 1.
+    pub seq: u64,
+    /// When it was appended, RFC 3339.
+    pub at: String,
+    /// The message.
+    pub message: Message,
+}
+
+/// Why a session's stream closes.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SessionEnd {
+    /// It runs in another Henk process, whose sessions this one does not
+    /// hear; its tool calls still show on the run.
+    pub elsewhere: bool,
+}
+
 /// One message of `/runs/stream`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
@@ -368,6 +492,49 @@ pub enum RunningMessage {
     Progress(Progress),
     /// A review started waiting, took or freed a slot, or left the queue.
     Slots(Slots),
+}
+
+/// One group's rejection rate per UTC day (#228): `GET /quality/daily`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct QualitySeries {
+    /// The model, lane or repository; `owner/name #7` for a pull request.
+    pub key: String,
+    /// Every day of the period, oldest first.
+    pub days: Vec<DayRate>,
+}
+
+/// What the check made of one group's drafts on one day.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DayRate {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// Drafts the check judged: confirmed, rejected and repeats.
+    pub judged: u64,
+    /// Of those, rejected.
+    pub rejected: u64,
+    /// Rejected of judged, from 0 to 1; `null` on a day it judged none.
+    pub rate: Option<f64>,
+}
+
+/// How many drafts a filter matches, over every page.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DraftCount {
+    /// The number.
+    pub count: u64,
+}
+
+/// The sources and kinds Henk has recorded, for the events page's filters
+/// (#227): `GET /events/facets`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct EventFacets {
+    /// `github_webhook`, `api`, `dashboard`, and so on, sorted.
+    pub sources: Vec<String>,
+    /// `pull_request`, `review_requested`, and so on, sorted.
+    pub kinds: Vec<String>,
 }
 
 /// What became of the drafts of one group: a model, a lane, a repository

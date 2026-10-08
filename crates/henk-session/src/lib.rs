@@ -256,7 +256,8 @@ async fn end_events(
 }
 
 /// Runs `agent` and puts every tool call on the run as it happens (#190),
-/// so the dashboard sees a session's calls while it runs. The recorder ends
+/// so the dashboard sees a session's calls while it runs, and passes every
+/// message to the store's live view (#238). The recorder ends
 /// when the agent, and with it the sender, is gone. Returns the outcome and
 /// the calls recorded.
 #[expect(
@@ -278,6 +279,15 @@ async fn run_recorded(
     let recorder = async {
         let mut calls = Vec::new();
         while let Some(event) = received.recv().await {
+            // What the session says goes to the live view as it happens
+            // (#238); the transcript kept at the end is the record.
+            if let AgentEvent::Message { turn, message } = &event {
+                match serde_json::to_string(message) {
+                    Ok(json) => store.session_message(run, session, *turn, &json).await,
+                    Err(error) => tracing::warn!(%error, "could not serialise a message"),
+                }
+                continue;
+            }
             let Some(call) = call_record(session, model, cap, event) else {
                 continue;
             };

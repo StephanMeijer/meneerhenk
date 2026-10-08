@@ -7,8 +7,10 @@
 
 mod events;
 mod health;
+mod lanes;
 mod quality;
 mod runs;
+mod session_stream;
 mod stats;
 mod stream;
 #[cfg(test)]
@@ -160,13 +162,21 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/runs/{id}/tool-calls", get(runs::tool_calls))
         .route("/runs/{id}/transcripts/{session}", get(runs::transcript))
         .route("/runs/{id}/cancel", post(runs::cancel))
+        .route(
+            "/runs/{id}/sessions/{session}/stream",
+            get(session_stream::session_stream),
+        )
         .route("/quality", get(quality::rates))
+        .route("/quality/daily", get(quality::daily))
         .route("/drafts", get(quality::drafts))
+        .route("/drafts/count", get(quality::count))
         .route("/tool-calls/summary", get(tools::summary))
         .route("/tool-calls", get(tools::list))
         .route("/events", get(events::list))
+        .route("/events/facets", get(events::facets))
         .route("/events/{id}", get(events::detail))
         .route("/stats/overview", get(stats::overview))
+        .route("/stats/lanes", get(lanes::lanes))
         .fallback(not_found)
         .layer(middleware::map_response(no_store))
         .with_state(dashboard)

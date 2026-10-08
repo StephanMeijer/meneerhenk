@@ -7,8 +7,14 @@ describe('routeOf', () => {
     expect(routeOf(`${BASE}/`)).toMatchObject({ name: 'overview' });
     expect(routeOf(`${BASE}/health/`)).toEqual({ name: 'health' });
     expect(routeOf(`${BASE}/events`)).toMatchObject({ name: 'events' });
-    expect(routeOf(`${BASE}/events/e-1`)).toEqual({ name: 'event', id: 'e-1' });
+    expect(routeOf(`${BASE}/events/e-1`)).toEqual({ name: 'event', id: 'e-1', query: new URLSearchParams() });
+    expect(routeOf(`${BASE}/events/e-1`, '?source=api')).toEqual({
+      name: 'event',
+      id: 'e-1',
+      query: new URLSearchParams('source=api'),
+    });
     expect(routeOf(`${BASE}/quality`, '?group=lane')).toMatchObject({ name: 'quality' });
+    expect(routeOf(`${BASE}/lanes`, '?period=7d')).toMatchObject({ name: 'lanes' });
     expect(routeOf(`${BASE}/runs/r-1`)).toEqual({ name: 'run', id: 'r-1' });
     expect(routeOf(`${BASE}/runs/r-1/transcripts/lane.a`)).toEqual({
       name: 'transcript',

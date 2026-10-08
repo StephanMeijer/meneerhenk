@@ -263,6 +263,35 @@ above; `RunMessage` in `types.ts` is the union.
 curl -N -H "Cookie: henk_session=..." https://henk.example/dashboard/api/v1/runs/r-1/stream
 ```
 
+### `GET /runs/{id}/sessions/{session}/stream`
+
+One running session's conversation as it happens (#238), as Server-Sent
+Events; `SessionMessage` in `types.ts` is the union. The stored
+transcript (`GET /runs/{id}/transcripts/{session}`) is kept only when a
+session ends; this is the conversation until then.
+
+| Event | Data | When |
+|---|---|---|
+| `snapshot` | `LiveSnapshot`: `messages`, `cut` | First, and whenever the stream cannot replay what was missed |
+| `message` | `LiveMessage`: `seq`, `at`, `message` | The session appended a message: the opening (turn 0), an answer, tool results, a nudge |
+| `end` | `{"elsewhere": bool}` | The session ended, or does not run in this process; the stream closes |
+
+- A `message` is a `Message` as in a transcript, shown as text: what a
+  model or a tool said is data (§8.3).
+- Message ids are `<feed>-<seq>`, `seq` counting the session's messages
+  from 1. A client that reconnects with `Last-Event-ID` (or `?last=`)
+  gets the messages it missed while this process still holds them;
+  otherwise a new `snapshot`.
+- This process keeps the newest 200 messages or 512 KiB of each running
+  session, and a text part longer than 16 KiB is cut with a note. `cut`
+  says older messages were let go: the transcript has them once the
+  session ends. Nothing here is stored.
+- Messages are as the session appended them, before old tool results are
+  shortened for the model, so the stored transcript can show less.
+- A session that has ended gets `end` at once: its transcript takes
+  over. One that another Henk process runs gets `end` with `elsewhere:
+  true`; its tool calls still show on the run's stream.
+
 ### `GET /runs/stream`
 
 What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the
@@ -301,6 +330,29 @@ every day from `from` to `to` with:
   (`unverified`); improved comments are not new;
 - `drafts`: drafts the lanes wrote.
 
+### `GET /stats/lanes`
+
+How each lane and fact-check session of the recent reviews ended (#229).
+`last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
+3339) for every review started since then, the newest 1000 of them. Not
+both. Only reviews that ended on their own count: running ones are left
+out, and so are cancelled and superseded ones, whose lanes were cancelled
+for them by a person or for a newer commit.
+
+The answer has `reviews` (`run_id`, `started_at`), oldest first, and
+`lanes`: the review lanes by name, then the `check-N` sessions by number.
+Each lane has:
+
+- `kind`: `lane` or `check`; `models`: the models it ran, newest first;
+- `outcomes`: one per review in `reviews`, in the same order: `run_id`,
+  the `model` it ran there, `status` (`finished`, `timed_out`,
+  `did_not_finish`) and `reason`, or `null` where it did not run;
+- `ran`, `finished`, `timed_out`, `did_not_finish`: counts;
+- `reasons`: why it timed out or did not finish, counted: `time_limit`,
+  `rate_limit`, `provider_error`, `cancelled`, `declined` (the model
+  declined) and `stuck` (it kept repeating a call). The reason is read
+  from the error the lane ended with.
+
 ### `GET /quality`
 
 What the fact-check made of the lanes' drafts across runs (#205), one row
@@ -325,6 +377,19 @@ when nothing was judged. Grouped by `target`, a row also has `repo`,
   "not_checked": 0, "cancelled": 0, "failed": 0, "waiting": 2,
   "judged": 79, "rejection_rate": 0.911}]
 ```
+
+### `GET /quality/daily`
+
+The rejection rate per UTC day (#228), for the six largest groups of
+`/quality`'s query (same `group`, `repo`, `since`, `until`), largest
+first. Each has `key` and `days`: every day from `since` (or the first day
+with a draft, at most 90 days back) to today, each with `day`, `judged`,
+`rejected` and `rate` (rejected of judged, `null` on a day nothing was
+judged: a gap, not 0%).
+
+### `GET /drafts/count`
+
+How many drafts `/drafts`'s query matches over every page: `{"count": 72}`.
 
 ### `GET /drafts`
 
@@ -403,6 +468,12 @@ Inbound events newest first, each with what every listener did. Filter by
                           "run_id": "r-...", "at": "..."}]}],
  "next": null}
 ```
+
+### `GET /events/facets`
+
+The sources and kinds of the inbound events Henk has recorded, each sorted,
+for the events page's filters (#227):
+`{"sources": ["api", "dashboard", "github_webhook"], "kinds": ["pull_request", "..."]}`.
 
 ### `GET /events/{id}`
 

@@ -8,7 +8,7 @@ use henk_domain::run::EventId;
 use henk_store::{EventFilter, EventKey};
 use serde::Deserialize;
 
-use super::types::{EventDetail, EventItem, EventSummary, ListenerOutcome, Page};
+use super::types::{EventDetail, EventFacets, EventItem, EventSummary, ListenerOutcome, Page};
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor};
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -61,6 +61,18 @@ pub async fn list(
     Ok(Json(Page {
         items: listed.iter().map(EventItem::from).collect(),
         next,
+    }))
+}
+
+/// `GET /events/facets`: the sources and kinds recorded, for the filters.
+pub async fn facets(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+) -> ApiResult<EventFacets> {
+    let facets = dashboard.app.store.event_facets().await?;
+    Ok(Json(EventFacets {
+        sources: facets.sources,
+        kinds: facets.kinds,
     }))
 }
 

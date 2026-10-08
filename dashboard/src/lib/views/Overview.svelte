@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { health as loadHealth, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
+  import { health as loadHealth, laneStats, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import { serverNow } from '$lib/clock';
-  import type { Health, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
+  import type { Health, LaneStats, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
   import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
@@ -17,6 +17,7 @@
   import Problem from '$lib/ui/Problem.svelte';
   import Status from '$lib/ui/Status.svelte';
   import HealthTiles from './HealthTiles.svelte';
+  import LaneReliability from './LaneReliability.svelte';
   import Queued from './Queued.svelte';
   import RunsTable from './RunsTable.svelte';
   import StageStepper from './StageStepper.svelte';
@@ -32,6 +33,7 @@
     loadCount = runCount,
     loadHealth: health = loadHealth,
     loadStats = overviewStats,
+    loadLanes = laneStats,
     connect = connectEventSource,
     now = serverNow,
   }: {
@@ -41,6 +43,7 @@
     loadCount?: (query: string) => Promise<RunCount>;
     loadHealth?: () => Promise<Health>;
     loadStats?: () => Promise<OverviewStats>;
+    loadLanes?: (query: string) => Promise<LaneStats>;
     connect?: Connect;
     now?: () => Date;
   } = $props();
@@ -177,6 +180,8 @@
 </section>
 
 <Queued slots={running.slots} shown={shownIds} {now} />
+
+<LaneReliability load={loadLanes} />
 
 <section class="panel" aria-labelledby="runs-title">
   <div class="panel-head">

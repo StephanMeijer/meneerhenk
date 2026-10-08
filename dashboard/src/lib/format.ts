@@ -39,6 +39,16 @@ export function ratePercent(rate: number | null): string {
   return rate === null ? '-' : `${Math.round(rate * 100)}%`;
 }
 
+/** Why a lane did not finish (#229), as people say it. */
+export const LANE_REASONS: Record<string, string> = {
+  time_limit: 'time limit',
+  rate_limit: 'rate limit',
+  provider_error: 'provider error',
+  cancelled: 'cancelled',
+  declined: 'model declined',
+  stuck: 'stuck in a loop',
+};
+
 /** The periods the quality page offers, by query value. */
 export const PERIODS: Record<string, { label: string; days: number | null }> = {
   '7d': { label: 'last 7 days', days: 7 },
@@ -132,4 +142,17 @@ export function count(n: number): string {
 /** A share with its base: `96% of 75`; a dash of nothing. */
 export function share(part: number, whole: number): string {
   return whole === 0 ? '-' : `${Math.round((part / whole) * 100)}% of ${count(whole)}`;
+}
+
+/** A payload laid out to read: JSON parsed and printed again two spaces
+ * deep, anything else as it came (#227). Parsing changes values: integers
+ * past 2^53 lose precision, `1.0` reads `1`, a repeated key keeps its last
+ * value and escapes are decoded. So this is for reading only; what is
+ * copied is the payload as received. */
+export function prettyPayload(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
 }
