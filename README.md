@@ -268,8 +268,11 @@ names must not equal a model name. Another repository is one more entry in
 The `Dockerfile` builds one image with `henk`, the `github-mcp-server`
 binary from its official image, and `@zereight/mcp-gitlab` installed
 under `/opt/mcp-gitlab`, on Debian slim with `git` and CA certificates
-(Henk runs `git` itself for checkouts), running as user 65532. It cross-compiles, so `docker buildx build --platform
-linux/amd64,linux/arm64` works on an amd64 builder.
+(Henk runs `git` itself for checkouts), running as user 65532. It
+cross-compiles `henk`, so `docker buildx build --platform
+linux/amd64,linux/arm64` works on an amd64 builder; only the runtime
+stage's `apt-get install` runs under emulation, which needs QEMU
+(`docker run --privileged --rm tonistiigi/binfmt --install arm64`).
 
 ```sh
 docker build -t henk .

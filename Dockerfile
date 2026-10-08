@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
-# henk is cross-compiled on the build platform so that an arm64 image can be
-# produced on an amd64 builder without emulation. The two MCP servers Henk
-# starts as child processes ship in the same image: github-mcp-server from
-# its official image, @zereight/mcp-gitlab installed with npm. See README.
+# henk is cross-compiled on the build platform, so an arm64 image builds on
+# an amd64 builder with only the runtime stage's package install under
+# emulation (QEMU, binfmt_misc). The two MCP servers Henk starts as child
+# processes ship in the same image: github-mcp-server from its official
+# image, @zereight/mcp-gitlab installed with npm. See README.
 
 # The dashboard app (#199): static files, so built once on the build platform
 # for every target. build.rs embeds dashboard/dist in henk. Keep the Node
@@ -62,7 +63,7 @@ RUN --mount=type=cache,target=/root/.npm \
 FROM ghcr.io/github/github-mcp-server:v1.14.0@sha256:7aaeeec9ae4fe9a736d100c1ff0798f3c219b5009e05f5d3945fcacb13cc196b AS mcp-github
 
 # The target platform's Node binary, copied rather than installed. This stage
-# only serves COPY, so it needs no emulation on a cross builder.
+# only serves COPY, so it runs nothing on a cross builder.
 FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node-runtime
 
 # Debian slim with git and CA certificates (#254): Henk runs git itself to
@@ -70,6 +71,8 @@ FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce9
 # for an address run, so the runtime needs it. Distroless had no git, and
 # every checkout failed while the reviews still completed. Node's
 # libstdc++ is in the base. The user is uid and gid 65532, as before.
+# This RUN is the one step that runs on the target platform, so a cross
+# build needs QEMU for it; the slow compile stays native.
 FROM docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates tzdata \
