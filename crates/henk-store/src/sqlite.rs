@@ -1473,7 +1473,7 @@ const LANE_ENDINGS: &str = concat!(
      FROM (SELECT id, started_at, ",
     instant_of!("started_at"),
     " AS at FROM runs
-           WHERE kind = 'review' AND status NOT IN ('running', 'superseded')
+           WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
              AND (?1 IS NULL OR ",
     instant_of!("started_at"),
     " >= ?1)

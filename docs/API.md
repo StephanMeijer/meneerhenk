@@ -296,8 +296,9 @@ every day from `from` to `to` with:
 How each lane and fact-check session of the recent reviews ended (#229).
 `last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
 3339) for every review started since then, the newest 1000 of them. Not
-both. Only reviews that ended count: running ones are left out, and so
-are superseded ones, whose lanes were cancelled for a newer commit.
+both. Only reviews that ended on their own count: running ones are left
+out, and so are cancelled and superseded ones, whose lanes were cancelled
+for them by a person or for a newer commit.
 
 The answer has `reviews` (`run_id`, `started_at`), oldest first, and
 `lanes`: the review lanes by name, then the `check-N` sessions by number.

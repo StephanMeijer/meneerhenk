@@ -42,8 +42,8 @@
   <h1>Lanes</h1>
   <p class="intro">
     How each review lane and fact-check session ended. A review stands on the lanes that finished;
-    a lane that times out keeps what it drafted until then. Superseded reviews are left out: their
-    lanes were cancelled for a newer commit.
+    a lane that times out keeps what it drafted until then. Cancelled and superseded reviews are left
+    out: their lanes were stopped for them, by a person or for a newer commit.
   </p>
 </div>
 

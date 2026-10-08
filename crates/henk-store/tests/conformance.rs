@@ -1251,8 +1251,9 @@ async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
 }
 
 async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
-    // r-1 to r-3 are ended reviews, r-4 runs, r-5 was superseded, r-6 is a
-    // plan; each has a lane-a, and r-2 a lane-b and a check-1 too.
+    // r-1 and r-2 are ended reviews, r-3 was cancelled, r-4 runs, r-5 was
+    // superseded, r-6 is a plan; each has a lane-a, and r-2 a lane-b and a
+    // check-1 too.
     for (run, status, kind) in [
         ("r-1", Some(RunStatus::Finished), RunKind::Review),
         ("r-2", Some(RunStatus::Failed), RunKind::Review),
@@ -1317,13 +1318,12 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
     assert_eq!(
         seen,
         [
-            ("r-3", "lane-a", "m-1", LaneStatus::Finished),
             ("r-2", "check-1", "m-3", LaneStatus::TimedOut),
             ("r-2", "lane-a", "m-1", LaneStatus::Finished),
             ("r-2", "lane-b", "m-2", LaneStatus::DidNotFinish),
             ("r-1", "lane-a", "m-1", LaneStatus::Finished),
         ],
-        "running, superseded and plan runs are left out"
+        "running, cancelled, superseded and plan runs are left out"
     );
     let dropped = all.iter().find(|e| e.name == "lane-b").unwrap();
     assert_eq!(
@@ -1341,7 +1341,7 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
         .collect();
     assert_eq!(
         newest_two,
-        ["r-3", "r-2", "r-2", "r-2"],
+        ["r-2", "r-2", "r-2", "r-1"],
         "two reviews, not two lanes"
     );
 

@@ -552,7 +552,7 @@ impl RunStore for PgStore {
             .query(
                 "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
                  FROM (SELECT id, started_at FROM runs
-                       WHERE kind = 'review' AND status NOT IN ('running', 'superseded')
+                       WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
                          AND ($1::timestamptz IS NULL OR started_at >= $1)
                        ORDER BY started_at DESC, id DESC LIMIT $2) r
                  JOIN lanes l ON l.run_id = r.id

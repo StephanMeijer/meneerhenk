@@ -422,9 +422,10 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError>;
 
     /// How the lanes of the newest `reviews` reviews that ended (#229)
-    /// ended, the reviews started at or after `since` when given. Running
-    /// and superseded reviews are left out: a superseded review's lanes
-    /// were cancelled for it, not by their own failing. Newest review
+    /// ended, the reviews started at or after `since` when given. Running,
+    /// cancelled and superseded reviews are left out: the lanes of a
+    /// review someone cancelled or a newer commit replaced were cancelled
+    /// for it, not by their own failing. Newest review
     /// first, each review's lanes by name. `reviews` is capped at
     /// [`crate::MOST_LANE_REVIEWS`].
     ///
