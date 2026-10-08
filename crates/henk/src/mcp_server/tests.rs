@@ -270,9 +270,23 @@ async fn a_write_token_starts_a_review_as_its_own_requester_and_a_read_token_may
         text,
         "This token may only read: starting and cancelling need a write token."
     );
-    let (error, _, _) = call(&reader, "cancel_run", json!({ "run_id": run })).await;
-    assert!(error, "a read token may not cancel");
     henk.app.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_read_token_may_not_cancel_a_running_run() {
+    let henk = start_henk(ON, both()).await;
+    let run = seed_run(&henk.app, "r-4").await;
+    let token = tokio_util::sync::CancellationToken::new();
+    let _cancellable = henk.app.cancels.register(run, token.clone());
+    let reader = client(&henk, READ).await;
+    let (error, _, text) = call(&reader, "cancel_run", json!({ "run_id": "r-4" })).await;
+    assert!(error, "a read token may not cancel");
+    assert_eq!(
+        text,
+        "This token may only read: starting and cancelling need a write token."
+    );
+    assert!(!token.is_cancelled(), "the run is still running");
 }
 
 #[tokio::test]
