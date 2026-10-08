@@ -6,7 +6,6 @@
   import Dialog from '$lib/ui/Dialog.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Problem from '$lib/ui/Problem.svelte';
-  import Event from '$lib/views/Event.svelte';
   import Events from '$lib/views/Events.svelte';
   import Health from '$lib/views/Health.svelte';
   import NotFound from '$lib/views/NotFound.svelte';
@@ -118,7 +117,7 @@
     {:else if $route.name === 'events'}
       <Events query={$route.query} />
     {:else if $route.name === 'event'}
-      <Event id={$route.id} />
+      <Events query={$route.query} selected={$route.id} />
     {:else if $route.name === 'tools'}
       <Tools query={$route.query} />
     {:else if $route.name === 'quality'}

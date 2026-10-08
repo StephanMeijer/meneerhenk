@@ -17,7 +17,7 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord,
-    DraftVerdict, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
+    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
     MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
     RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite,
     ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, VerdictFilter,
@@ -80,6 +80,7 @@ macro_rules! for_each_scenario {
             lanes_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
             days_count_runs_findings_and_drafts,
+            event_facets_are_the_sources_and_kinds_seen,
             lanes_and_stages_of_many_runs_come_in_one_read,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
@@ -1153,6 +1154,31 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
         .await
         .unwrap();
     assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
+}
+
+async fn event_facets_are_the_sources_and_kinds_seen(store: &dyn RunStore) {
+    assert_eq!(store.event_facets().await.unwrap(), EventFacets::default());
+    for (id, source, kind) in [
+        ("e-1", "github_webhook", "pull_request"),
+        ("e-2", "dashboard", "review_requested"),
+        ("e-3", "github_webhook", "issue_comment"),
+        ("e-4", "api", "pull_request"),
+    ] {
+        store
+            .record_event(&InboundEvent {
+                source: source.into(),
+                kind: kind.into(),
+                ..inbound(id, "2026-10-07T10:00:00Z")
+            })
+            .await
+            .unwrap();
+    }
+    let facets = store.event_facets().await.unwrap();
+    assert_eq!(facets.sources, ["api", "dashboard", "github_webhook"]);
+    assert_eq!(
+        facets.kinds,
+        ["issue_comment", "pull_request", "review_requested"]
+    );
 }
 
 async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {

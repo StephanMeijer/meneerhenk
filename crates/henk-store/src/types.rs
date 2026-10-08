@@ -855,6 +855,16 @@ pub struct EventRecord {
     pub message: String,
 }
 
+/// The sources and kinds of the inbound events Henk has recorded, for the
+/// events page's filters (#227).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventFacets {
+    /// `github_webhook`, `api`, `dashboard`, and so on, sorted.
+    pub sources: Vec<String>,
+    /// `pull_request`, `review_requested`, and so on, sorted.
+    pub kinds: Vec<String>,
+}
+
 /// A recorded inbound event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundEvent {

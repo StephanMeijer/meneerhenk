@@ -133,3 +133,13 @@ export function count(n: number): string {
 export function share(part: number, whole: number): string {
   return whole === 0 ? '-' : `${Math.round((part / whole) * 100)}% of ${count(whole)}`;
 }
+
+/** A payload as received, laid out to read: JSON pretty-printed (only
+ * re-spaced, never interpreted), anything else as it came (#227). */
+export function prettyPayload(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}

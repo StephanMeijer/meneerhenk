@@ -6,6 +6,7 @@ import type {
   DraftItem,
   ErrorBody,
   EventDetail,
+  EventFacets,
   EventItem,
   Health,
   Me,
@@ -145,6 +146,11 @@ export function transcript(id: string, session: string): Promise<Transcript> {
 /** Inbound events, newest first; `query` is the `GET /events` query. */
 export function events(query = ''): Promise<Page<EventItem>> {
   return getJson<Page<EventItem>>(`/events${query === '' ? '' : `?${query}`}`);
+}
+
+/** The sources and kinds Henk has recorded, for the events filters. */
+export function eventFacets(): Promise<EventFacets> {
+  return getJson<EventFacets>('/events/facets');
 }
 
 /** One inbound event with its payload and outcomes. */

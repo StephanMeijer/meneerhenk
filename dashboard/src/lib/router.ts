@@ -10,7 +10,7 @@ export type Route =
   | { name: 'run'; id: string }
   | { name: 'transcript'; id: string; session: string }
   | { name: 'events'; query: URLSearchParams }
-  | { name: 'event'; id: string }
+  | { name: 'event'; id: string; query: URLSearchParams }
   | { name: 'health' }
   | { name: 'quality'; query: URLSearchParams }
   | { name: 'tools'; query: URLSearchParams }
@@ -42,7 +42,7 @@ export function routeOf(pathname: string, search = ''): Route {
   if (path === '/events') return { name: 'events', query };
   if (path === '/quality') return { name: 'quality', query };
   if (path === '/tools') return { name: 'tools', query };
-  if (parts.length === 2 && first === 'events' && second) return { name: 'event', id: second };
+  if (parts.length === 2 && first === 'events' && second) return { name: 'event', id: second, query };
   if (parts.length === 2 && first === 'runs' && second) return { name: 'run', id: second };
   if (parts.length === 4 && first === 'runs' && second && third === 'transcripts' && fourth) {
     return { name: 'transcript', id: second, session: fourth };
@@ -83,11 +83,12 @@ export function start(): () => void {
   return () => window.removeEventListener('popstate', update);
 }
 
-/** Goes to a path inside the app without a page load. */
-export function navigate(path: string): void {
+/** Goes to a path inside the app without a page load. `keepScroll` stays
+ * where the page is, for choosing something on it (#227). */
+export function navigate(path: string, { keepScroll = false }: { keepScroll?: boolean } = {}): void {
   window.history.pushState({}, '', href(path));
   route.set(here());
-  window.scrollTo?.(0, 0);
+  if (!keepScroll) window.scrollTo?.(0, 0);
 }
 
 /** Whether a location path is the app's, not the server's. */

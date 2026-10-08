@@ -17,13 +17,13 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
-    InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
-    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
-    kind_str, lane_dots, merge_days, platform_parse, platform_str, stage_dots, stage_records,
-    status_str, to_i64, to_u64,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
+    OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage,
+    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes,
+    draft_verdict, kind_parse, kind_str, lane_dots, merge_days, platform_parse, platform_str,
+    stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -1434,6 +1434,23 @@ impl RunStore for PgStore {
             .await?
             .map(|row| inbound_event(&row))
             .transpose()
+    }
+
+    async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+        let client = self.client().await?;
+        let mut facets = EventFacets::default();
+        for (column, values) in [("source", &mut facets.sources), ("kind", &mut facets.kinds)] {
+            *values = client
+                .query(
+                    &format!("SELECT DISTINCT {column} FROM inbound_events ORDER BY 1"),
+                    &[],
+                )
+                .await?
+                .iter()
+                .map(|row| row.try_get(0))
+                .collect::<Result<Vec<String>, _>>()?;
+        }
+        Ok(facets)
     }
 
     async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {

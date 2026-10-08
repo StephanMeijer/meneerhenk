@@ -891,6 +891,16 @@ payload: string | null,
  */
 outcomes: Array<ListenerOutcome>, };
 
+export type EventFacets = { 
+/**
+ * `github_webhook`, `api`, `dashboard`, and so on, sorted.
+ */
+sources: Array<string>, 
+/**
+ * `pull_request`, `review_requested`, and so on, sorted.
+ */
+kinds: Array<string>, };
+
 export type ListenerOutcome = { 
 /**
  * The listener.

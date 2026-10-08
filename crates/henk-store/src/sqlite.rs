@@ -14,13 +14,13 @@ use time::format_description::well_known::Rfc3339;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
-    InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
-    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
-    kind_str, lane_dots, merge_days, now, platform_parse, platform_str, stage_dots, stage_records,
-    status_str, to_i64, to_u64,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
+    OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage,
+    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes,
+    draft_verdict, kind_parse, kind_str, lane_dots, merge_days, now, platform_parse, platform_str,
+    stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -968,6 +968,24 @@ impl RunStore for SqliteStore {
             .optional()?
             .map(RawInbound::into_event)
             .transpose()
+        })
+    }
+
+    async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+        self.with(|c| {
+            let distinct = |column: &str| -> Result<Vec<String>, StoreError> {
+                let mut statement = c.prepare(&format!(
+                    "SELECT DISTINCT {column} FROM inbound_events ORDER BY 1"
+                ))?;
+                let values = statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<String>, _>>()?;
+                Ok(values)
+            };
+            Ok(EventFacets {
+                sources: distinct("source")?,
+                kinds: distinct("kind")?,
+            })
         })
     }
 

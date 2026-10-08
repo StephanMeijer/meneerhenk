@@ -349,6 +349,17 @@ pub struct DraftCount {
     pub count: u64,
 }
 
+/// The sources and kinds Henk has recorded, for the events page's filters
+/// (#227): `GET /events/facets`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct EventFacets {
+    /// `github_webhook`, `api`, `dashboard`, and so on, sorted.
+    pub sources: Vec<String>,
+    /// `pull_request`, `review_requested`, and so on, sorted.
+    pub kinds: Vec<String>,
+}
+
 /// What became of the drafts of one group: a model, a lane, a repository
 /// or a pull request (#205).
 #[derive(Debug, Serialize)]
