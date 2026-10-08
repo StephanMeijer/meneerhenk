@@ -1008,7 +1008,116 @@ async fn health_answers_and_no_response_holds_a_secret() {
     }
 }
 
-/// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
+/// The health row named `name`: its state and detail.
+async fn health_row(f: &Fixture, cookie: &str, name: &str) -> (String, String) {
+    let health = get(f, "/dashboard/api/v1/health", cookie).await.json();
+    let row = health["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} row: {health}"))
+        .clone();
+    (
+        row["state"].as_str().unwrap().to_owned(),
+        row["detail"].as_str().unwrap().to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn the_health_page_says_when_reviews_go_without_their_workspaces() {
+    let quiet = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&quiet);
+    assert_eq!(
+        health_row(&quiet, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "reviews run without workspaces: no profile has review = true".to_owned()
+        )
+    );
+    assert_eq!(health_row(&quiet, &cookie, "git").await.0, "ok");
+
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    for (run, checked_out) in [("r-1", true), ("r-2", false), ("r-3", false)] {
+        let id = RunId::parse(run).unwrap();
+        store
+            .create_run(&NewRun {
+                id: id.clone(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "opened".into(),
+                link: String::new(),
+            })
+            .await
+            .unwrap();
+        if checked_out {
+            store
+                .stage(
+                    &id,
+                    &henk_store::StageWrite::now(
+                        henk_store::Stage::Checkout,
+                        henk_store::StageState::Done,
+                        "",
+                    ),
+                )
+                .await
+                .unwrap();
+        } else {
+            store
+                .event(
+                    &id,
+                    "warn",
+                    "review workspaces: none, the reviewed commit could not be checked out: git could not run: No such file or directory (os error 2)",
+                )
+                .await
+                .unwrap();
+            store
+                .stage(
+                    &id,
+                    &henk_store::StageWrite::now(
+                        henk_store::Stage::Checkout,
+                        henk_store::StageState::Failed,
+                        "x",
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .finish_run(&id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "warn".to_owned(),
+            "1 of the last 3 reviews had one (checkout failed: git could not run: No such file or directory (os error 2))".to_owned()
+        )
+    );
+    let (state, detail) = health_row(&f, &cookie, "git").await;
+    assert_eq!(state, "ok", "git runs on the test machine: {detail}");
+    assert!(
+        detail.contains("needed for review workspaces (profile default)"),
+        "{detail}"
+    );
+}
+
+/// The SPA's TypeScript types, generated from the API's./// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
 /// writes them; otherwise a difference fails, so the checked-in file
 /// always matches the API.
 #[test]

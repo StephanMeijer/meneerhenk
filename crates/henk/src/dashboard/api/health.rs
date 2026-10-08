@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{Page, RunFilter};
+use henk_domain::run::RunKind;
+use henk_domain::workspace::EnvLane;
+use henk_store::{Page, RunFilter, RunRecord, RunStatus, Stage, StageState};
 
 use super::types::{Health, HealthCheck};
 use crate::dashboard::Dashboard;
@@ -60,6 +62,9 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
         "ok".to_owned(),
         reviews_line(&dashboard.coordinator.slots()),
     ));
+    rows.push(workspaces_row(dashboard).await);
+    let git = crate::doctor::check_git(settings, None).await;
+    rows.push(row(git));
     for check in check_secrets(settings) {
         let (verdict, text) = match check.verdict {
             Verdict::Ok(text) => ("ok", text),
@@ -84,6 +89,102 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
         settings.mcp.keys().cloned().collect::<Vec<_>>().join(", "),
     ));
     rows
+}
+
+/// A doctor check as a row.
+fn row(check: crate::doctor::Check) -> (String, String, String) {
+    let (state, text) = match check.verdict {
+        Verdict::Ok(text) => ("ok", text),
+        Verdict::Warn(text) => ("warn", text),
+        Verdict::Fail(text) => ("fail", text),
+    };
+    (check.name, state.to_owned(), text)
+}
+
+/// How many reviews to look back at for workspaces.
+const RECENT_REVIEWS: usize = 10;
+
+/// Whether the reviews configured for workspaces got them (#254): of the
+/// last ended ones, how many had their commit checked out, and why the
+/// newest that did not went without. A failing checkout leaves a review
+/// that still completes, so nothing else would say so.
+async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
+    let settings = &dashboard.app.settings;
+    let name = "workspaces".to_owned();
+    if !settings
+        .workspace
+        .named()
+        .any(|(_, profile)| profile.serves(EnvLane::Review))
+    {
+        let text = "reviews run without workspaces: no profile has review = true";
+        return (name, "ok".to_owned(), text.to_owned());
+    }
+    let store = &dashboard.app.store;
+    let filter = RunFilter {
+        kind: Some(RunKind::Review),
+        ..RunFilter::default()
+    };
+    let Ok(runs) = store.list_runs(&filter, Page::new(Page::MAX, 0)).await else {
+        return (
+            name,
+            "warn".to_owned(),
+            "could not read the reviews".to_owned(),
+        );
+    };
+    let wanted: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|run| run.status != RunStatus::Running && run.status != RunStatus::Superseded)
+        .filter(|run| {
+            settings
+                .workspace
+                .profile_for(&run.repo)
+                .serves(EnvLane::Review)
+        })
+        .take(RECENT_REVIEWS)
+        .collect();
+    if wanted.is_empty() {
+        let text = "no review with workspaces has ended yet";
+        return (name, "ok".to_owned(), text.to_owned());
+    }
+    let ids: Vec<_> = wanted.iter().map(|run| run.id.clone()).collect();
+    let stages = store.stages_of(&ids).await.unwrap_or_default();
+    let checked_out = |run: &RunRecord| {
+        stages.iter().any(|(id, stage, state)| {
+            *id == run.id && *stage == Stage::Checkout && *state == StageState::Done
+        })
+    };
+    let had = wanted.iter().filter(|run| checked_out(run)).count();
+    let line = format!("{had} of the last {} reviews had one", wanted.len());
+    let Some(without) = wanted.iter().find(|run| !checked_out(run)) else {
+        return (name, "ok".to_owned(), line);
+    };
+    let why = why_without(dashboard, without).await;
+    (name, "warn".to_owned(), format!("{line} ({why})"))
+}
+
+/// Why `run` went without workspaces, from the warning its checkout left.
+async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> String {
+    const CHECKOUT: &str = "could not be checked out: ";
+    let events = dashboard
+        .app
+        .store
+        .events(&run.id)
+        .await
+        .unwrap_or_default();
+    events
+        .iter()
+        .rev()
+        .find(|event| event.level == "warn" && event.message.starts_with("review workspaces:"))
+        .map_or_else(
+            || "no checkout recorded".to_owned(),
+            |event| match event.message.split_once(CHECKOUT) {
+                Some((_, error)) => format!("checkout failed: {error}"),
+                None => event
+                    .message
+                    .trim_start_matches("review workspaces: ")
+                    .to_owned(),
+            },
+        )
 }
 
 /// The review slots in words: `2 running, 1 waiting (limit 2)`.

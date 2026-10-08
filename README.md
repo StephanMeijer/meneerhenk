@@ -165,7 +165,7 @@ for `npx @zereight/mcp-gitlab`.
 ## Check a deployment
 
 ```sh
-henk doctor            # secrets, models, GitHub App token, MCP servers, database
+henk doctor            # secrets, models, GitHub App token, MCP servers, database, git
 henk doctor --probe    # also one short prompt to every model
 ```
 
@@ -589,7 +589,9 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - review quality: what the fact-check made of the lanes' drafts per model,
   lane, repository or pull request, the rejection rate, and the rejected
   drafts with the checker's reason;
-- a health page from configuration and the database;
+- a health page from configuration and the database, including whether
+  `git` runs where Henk does and how many recent reviews got the
+  workspaces their profile asks for;
 - a form that starts a review, plan or address run, and a button that
   cancels a running one.
 

@@ -29,7 +29,7 @@ use henk_store::{
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
-use tracing::warn;
+use tracing::{error, warn};
 
 /// How many changes a slow follower may fall behind before it is dropped;
 /// it then reconnects and catches up from the replay or a snapshot.
@@ -210,6 +210,17 @@ fn or_now(at: &str) -> String {
     if at.is_empty() { now() } else { at.to_owned() }
 }
 
+/// A run's warning or error, in Henk's log as well as on the run (#254): a
+/// run event alone could be neither searched nor alerted on, and a review
+/// went without its workspaces for days before a person read one run.
+fn mirror(run: &RunId, level: &str, message: &str) {
+    match level {
+        "warn" => warn!(run = %run, text = message, "run warning"),
+        "error" => error!(run = %run, text = message, "run error"),
+        _ => {}
+    }
+}
+
 /// A [`RunStore`] that announces what it writes on a [`Feed`]. Reads pass
 /// straight through. A write that fails announces nothing, and a failed
 /// read-back for an announcement is logged, never the write's failure.
@@ -303,6 +314,11 @@ impl RunStore for Announcing {
     async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.stage(run, write).await?;
+        if write.state == StageState::Failed {
+            // In the log too, where it can be searched and alerted on
+            // (#254), not only on the run.
+            warn!(run = %run, stage = write.stage.as_str(), detail = %write.detail, "a run's stage failed");
+        }
         self.announce_stages(run).await;
         Ok(())
     }
@@ -537,6 +553,7 @@ impl RunStore for Announcing {
     async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.event(run, level, message).await?;
+        mirror(run, level, message);
         self.feed.announce(
             run,
             ChangeKind::Event(EventRecord {
@@ -990,6 +1007,90 @@ mod tests {
         assert!(
             announced.iter().all(|c| c.seq <= seq),
             "what the snapshot holds is announced at or before its seq, so nothing repeats"
+        );
+    }
+
+    /// What is logged while the guard lives, as plain text.
+    #[derive(Clone, Default)]
+    struct Logged(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logged {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Logged {
+        fn start(&self) -> tracing::subscriber::DefaultGuard {
+            let sink = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_writer(move || sink.clone())
+                    .with_ansi(false)
+                    .finish(),
+            )
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_s_warnings_and_failed_stages_reach_the_log_too() {
+        let (store, _feed) = announcing();
+        store.create_run(&new_run("r-1")).await.unwrap();
+        let logged = Logged::default();
+        let _guard = logged.start();
+        store
+            .event(
+                &id("r-1"),
+                "warn",
+                "review workspaces: none, git could not run",
+            )
+            .await
+            .unwrap();
+        store
+            .event(&id("r-1"), "info", "lane-a: EndTurn")
+            .await
+            .unwrap();
+        store
+            .stage(
+                &id("r-1"),
+                &StageWrite::now(
+                    Stage::Checkout,
+                    StageState::Failed,
+                    "the commit could not be checked out",
+                ),
+            )
+            .await
+            .unwrap();
+        let text = logged.text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the warning and the failed stage, not the info: {text}"
+        );
+        assert!(
+            lines[0].contains("WARN") && lines[0].contains("run=r-1"),
+            "{text}"
+        );
+        assert!(
+            lines[0].contains("text=\"review workspaces: none, git could not run\""),
+            "{text}"
+        );
+        assert!(
+            lines[1].contains("stage=\"checkout\"") || lines[1].contains("stage=checkout"),
+            "{text}"
+        );
+        assert!(
+            lines[1].contains("the commit could not be checked out"),
+            "{text}"
         );
     }
 
