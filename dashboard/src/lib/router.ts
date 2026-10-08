@@ -99,8 +99,13 @@ export function isApp(pathname: string): boolean {
 }
 
 /** A Svelte action for links inside the app: no page load on a plain
- * click; a new tab or a download stays the browser's. */
-export function link(node: HTMLAnchorElement): { destroy: () => void } {
+ * click; a new tab or a download stays the browser's. `keepScroll` stays
+ * where the page is, as `navigate` does (#227). */
+export function link(
+  node: HTMLAnchorElement,
+  options: { keepScroll?: boolean } = {},
+): { update: (next?: { keepScroll?: boolean }) => void; destroy: () => void } {
+  let keepScroll = options.keepScroll ?? false;
   const click = (event: MouseEvent): void => {
     const url = new URL(node.href, window.location.href);
     const plain =
@@ -109,8 +114,13 @@ export function link(node: HTMLAnchorElement): { destroy: () => void } {
     event.preventDefault();
     window.history.pushState({}, '', url.pathname + url.search + url.hash);
     route.set(here());
-    window.scrollTo?.(0, 0);
+    if (!keepScroll) window.scrollTo?.(0, 0);
   };
   node.addEventListener('click', click);
-  return { destroy: () => node.removeEventListener('click', click) };
+  return {
+    update: (next = {}) => {
+      keepScroll = next.keepScroll ?? false;
+    },
+    destroy: () => node.removeEventListener('click', click),
+  };
 }

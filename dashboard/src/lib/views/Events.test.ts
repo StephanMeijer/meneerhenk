@@ -76,4 +76,19 @@ describe('Events', () => {
     expect(window.location.pathname + window.location.search).toBe('/dashboard/events/e-1?source=github_webhook');
     expect(scroll).not.toHaveBeenCalled();
   });
+
+  it('chooses an event by its id link, keeping the place on the page', async () => {
+    const scroll = vi.fn();
+    window.scrollTo = scroll;
+    window.history.replaceState({}, '', '/dashboard/events');
+    render(Events, { query: new URLSearchParams('kind=pull_request'), ...loaders() });
+    await settle();
+    const anchor = document.querySelectorAll<HTMLAnchorElement>('table.events tbody td:first-child a')[1];
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    anchor?.dispatchEvent(click);
+    await settle(1);
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.pathname + window.location.search).toBe('/dashboard/events/e-1?kind=pull_request');
+    expect(scroll).not.toHaveBeenCalled();
+  });
 });

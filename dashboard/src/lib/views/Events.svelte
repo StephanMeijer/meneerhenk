@@ -109,7 +109,7 @@
                   }}
                 >
                   <td>
-                    <a class="mono" href={href(withQuery(eventPath(item.event.id), kept))} use:link>{item.event.id}</a>
+                    <a class="mono" href={href(withQuery(eventPath(item.event.id), kept))} use:link={{ keepScroll: true }}>{item.event.id}</a>
                   </td>
                   <td class="nowrap"><Time iso={item.event.received_at} /></td>
                   <td>
