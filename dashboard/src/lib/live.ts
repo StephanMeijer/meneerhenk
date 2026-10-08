@@ -66,6 +66,10 @@ export function applyRun(detail: RunDetail, message: RunMessage): RunDetail {
       return detail.transcripts.some((t) => t.session === message.data.session)
         ? detail
         : { ...detail, transcripts: [...detail.transcripts, message.data] };
+    case 'stages':
+      return { ...detail, stages: message.data };
+    case 'heartbeat':
+      return { ...detail, heartbeat_at: message.data.at };
     case 'end':
       return detail;
   }

@@ -8,8 +8,8 @@ use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary,
+    StageRecord, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord,
+    ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -83,6 +83,29 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure.
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError>;
+
+    /// Records where a stage of a run stands (#226). The first write of a
+    /// stage sets when it started; a write that ends it sets when.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError>;
+
+    /// Ends every stage of `run` still running as failed, with `reason`:
+    /// for a run that ended while one was going.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError>;
+
+    /// A run's stages, in the order they come.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError>;
 
     /// Records a lane as running.
     ///

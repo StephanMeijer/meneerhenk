@@ -19,8 +19,8 @@ use henk_store::{
     DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord, DraftVerdict,
     EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
     OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SqliteStore, ToolCallFilter, ToolCallKey, ToolCallRecord,
-    TranscriptRecord, VerdictFilter,
+    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey,
+    ToolCallRecord, TranscriptRecord, VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -78,6 +78,7 @@ macro_rules! for_each_scenario {
             run_round_trips,
             a_superseded_run_names_the_run_that_replaced_it,
             lanes_that_timed_out_or_did_not_finish_say_so,
+            stages_come_back_in_order_and_keep_when_they_started,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             dropping_running_lanes_leaves_finished_ones_alone,
@@ -1027,6 +1028,95 @@ async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
         ]
     );
     assert_eq!(lanes[2].error.as_deref(), Some("rate limited"));
+}
+
+async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunStore) {
+    store.create_run(&new_run("r-1")).await.unwrap();
+    let run = id("r-1");
+    let submitted = OffsetDateTime::now_utc() - time::Duration::seconds(30);
+    let at = |text: &str| OffsetDateTime::parse(text, &Rfc3339).unwrap();
+    store
+        .stage(
+            &run,
+            &StageWrite {
+                stage: Stage::Queued,
+                state: StageState::Done,
+                detail: "waited for a review slot".into(),
+                started_at: Some(submitted),
+                ended_at: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .stage(
+            &run,
+            &StageWrite::now(Stage::Lanes, StageState::Running, ""),
+        )
+        .await
+        .unwrap();
+    store
+        .stage(&run, &StageWrite::now(Stage::Diff, StageState::Running, ""))
+        .await
+        .unwrap();
+    let first = store.stages(&run).await.unwrap();
+    let diff_started = first
+        .iter()
+        .find(|s| s.stage == Stage::Diff)
+        .unwrap()
+        .started_at
+        .clone();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    store
+        .stage(
+            &run,
+            &StageWrite::now(Stage::Diff, StageState::Done, "12 files, +340 -25"),
+        )
+        .await
+        .unwrap();
+
+    let stages = store.stages(&run).await.unwrap();
+    assert_eq!(
+        stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+        [Stage::Queued, Stage::Diff, Stage::Lanes],
+        "in the order the stages come, not as written"
+    );
+    let queued = &stages[0];
+    assert_eq!(queued.state, StageState::Done);
+    assert!((at(&queued.started_at) - submitted).abs() < time::Duration::seconds(1));
+    assert!(queued.ended_at.is_some(), "an ended stage says when");
+    let diff = &stages[1];
+    assert_eq!(diff.state, StageState::Done);
+    assert_eq!(diff.detail, "12 files, +340 -25");
+    assert_eq!(
+        at(&diff.started_at),
+        at(&diff_started),
+        "the first write keeps its start"
+    );
+    assert!(at(diff.ended_at.as_deref().unwrap()) >= at(&diff.started_at));
+    assert_eq!(stages[2].ended_at, None, "a running stage has not ended");
+
+    store
+        .fail_running_stages(&run, "interrupted")
+        .await
+        .unwrap();
+    let lanes = store.stages(&run).await.unwrap().pop().unwrap();
+    assert_eq!(
+        (lanes.state, lanes.detail.as_str()),
+        (StageState::Failed, "interrupted")
+    );
+    assert!(lanes.ended_at.is_some());
+    assert_eq!(store.stages(&id("r-none")).await.unwrap(), []);
+
+    store.start_lane(&run, "a", "m").await.unwrap();
+    let lane = &store.lanes(&run).await.unwrap()[0];
+    assert!(OffsetDateTime::parse(&lane.started_at, &Rfc3339).is_ok());
+    assert_eq!(lane.finished_at, None);
+    store
+        .finish_lane(&run, "a", LaneStatus::Finished, 1, 1, 1, None)
+        .await
+        .unwrap();
+    assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
 }
 
 async fn a_heartbeat_moves_and_a_check_id_is_kept(store: &dyn RunStore) {

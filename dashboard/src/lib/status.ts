@@ -55,6 +55,7 @@ const STATES: Record<string, Omit<Look, 'label'>> = {
   warn: look('warn', 'triangle'),
   refused: look('refused', 'shield'),
   waiting: look('neutral', 'clock'),
+  skipped: look('neutral', 'minus'),
 };
 
 /** What the fact-check decided about a draft. */

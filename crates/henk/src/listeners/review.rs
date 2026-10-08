@@ -99,6 +99,7 @@ impl Listener for ReviewListener {
                     requester: Some(sender.login.clone()),
                     acknowledge: None,
                     run: None,
+                    submitted_at: None,
                 };
                 self.submit(request, head.clone())
             }
@@ -134,6 +135,7 @@ impl Listener for ReviewListener {
                         matches!(kind, CommentKind::Review { .. }),
                     )),
                     run: None,
+                    submitted_at: None,
                 };
                 self.submit(request, head)
             }
@@ -159,6 +161,7 @@ impl Listener for ReviewListener {
                     requester: requester.clone(),
                     acknowledge: None,
                     run: None,
+                    submitted_at: None,
                 };
                 self.submit(request, head)
             }

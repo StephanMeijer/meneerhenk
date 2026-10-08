@@ -15,6 +15,7 @@
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
   import CallTimeline from './CallTimeline.svelte';
+  import Pipeline from './Pipeline.svelte';
 
   /** `who` is the viewer's id (`github:1234`), which a cancel names.
    * `load`, `cancel`, `connect`, `loadCalls`, `start` and `go` are
@@ -51,6 +52,8 @@
     'finding',
     'event',
     'transcript',
+    'stages',
+    'heartbeat',
     'end',
   ];
 
@@ -96,6 +99,41 @@
       following?.close();
     };
   });
+
+  /** The box selected in the pipeline: a stage, or `lane:<name>`. */
+  let selected: string | null = $state(null);
+
+  /** The timeline lines of what is selected: a lane's own lines, or the
+   * lines written while a stage was going. */
+  let shownEvents = $derived.by(() => {
+    if (d === null || selected === null) return d?.events ?? [];
+    const detail = d;
+    if (selected.startsWith('lane:')) {
+      const lane = selected.slice('lane:'.length);
+      return detail.events.filter((line) => line.message.startsWith(`${lane}:`));
+    }
+    const stage = detail.stages.find((s) => s.name === selected);
+    if (stage === undefined) return detail.events;
+    const from = Date.parse(stage.started_at);
+    const to = stage.ended_at === null ? Number.POSITIVE_INFINITY : Date.parse(stage.ended_at);
+    return detail.events.filter((line) => {
+      const at = Date.parse(line.at);
+      return at >= from - 1000 && at <= to + 1000;
+    });
+  });
+
+  function selectedName(key: string): string {
+    return key.startsWith('lane:') ? key.slice('lane:'.length) : key.replaceAll('_', ' ');
+  }
+
+  /** How the run's stages go, in a line, by kind. */
+  function pipelineNote(detail: RunDetail): string {
+    if (detail.run.kind === 'review') {
+      return 'Lanes review the same commit at once. The fact-check starts when every lane has ended.';
+    }
+    if (detail.run.kind === 'address') return 'One commit to the branch, then replies on the threads.';
+    return '';
+  }
 
   /** What a cancel does, by kind of run: the facts of `review.rs`,
    * `plan.rs`, `address.rs` and `cancel.rs` (#230). */
@@ -300,9 +338,46 @@
     </section>
   {/if}
 
-  {#if d.lanes.length > 0}
+  {#if d.stages.length > 0}
     <section class="panel">
-      <div class="panel-head"><h2>Lanes</h2></div>
+      <div class="panel-head">
+        <h2>Pipeline</h2>
+        <span class="note">{pipelineNote(d)} Select a box to open its log.</span>
+      </div>
+      <div class="panel-body"><Pipeline stages={d.stages} lanes={d.lanes} bind:selected /></div>
+    </section>
+  {/if}
+
+  {#if d.findings.length > 0}
+    <section class="list">
+      <div class="list-head"><h2>Findings <span class="count-badge">{d.findings.length}</span></h2></div>
+      <ul class="cards findings">
+        {#each d.findings as finding, index (index)}
+          {@const source = d.drafts.find((draft) => draft.decision?.comment_id === finding.comment_id && finding.comment_id !== '')}
+          <li>
+            <div class="meta">
+              <span class="mono">{finding.comment_id}</span>
+              <Status word={finding.action} vocabulary="action" kind="action" />
+              <span class="mono muted">{finding.lane}</span>
+              <code>{finding.path}:{finding.line}</code>
+              <span class="muted mono" title={utc(finding.at)}>{clockTime(finding.at)}</span>
+            </div>
+            {#if source}
+              <p class="text text-block">{draftWhat(source)}</p>
+              {#if source.decision && source.decision.reason !== ''}
+                <p class="reason text">{verdictText(source)} by {source.decision.checker}: {source.decision.reason}</p>
+              {/if}
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
+  {#if d.lanes.length > 0}
+    <section class="panel fold">
+      <details open={d.stages.length === 0}>
+        <summary class="panel-head"><h2>Lanes</h2><span class="count-badge">{d.lanes.length}</span></summary>
       <div class="scroll">
         <table>
           <thead>
@@ -338,34 +413,14 @@
           </tbody>
         </table>
       </div>
-    </section>
-  {/if}
-
-  {#if d.findings.length > 0}
-    <section class="panel">
-      <div class="panel-head"><h2>Findings</h2></div>
-      <div class="scroll">
-        <table>
-          <thead><tr><th>At</th><th>Lane</th><th>Where</th><th>Comment</th><th>What</th></tr></thead>
-          <tbody>
-            {#each d.findings as finding, index (index)}
-              <tr>
-                <td class="mono nowrap" title={utc(finding.at)}>{clockTime(finding.at)}</td>
-                <td class="mono">{finding.lane}</td>
-                <td><code>{finding.path}:{finding.line}</code></td>
-                <td class="mono">{finding.comment_id}</td>
-                <td><Status word={finding.action} vocabulary="action" kind="action" /></td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+      </details>
     </section>
   {/if}
 
   {#if d.drafts.length > 0}
-    <section class="panel">
-      <div class="panel-head"><h2>Drafts</h2></div>
+    <section class="panel fold">
+      <details open={d.stages.length === 0}>
+        <summary class="panel-head"><h2>Drafts</h2><span class="count-badge">{d.drafts.length}</span></summary>
       <div class="scroll">
         <table>
           <thead>
@@ -387,12 +442,14 @@
           </tbody>
         </table>
       </div>
+      </details>
     </section>
   {/if}
 
   {#if d.tool_usage.length > 0}
-    <section class="panel">
-      <div class="panel-head"><h2>Tool calls</h2></div>
+    <section class="panel fold">
+      <details open={false}>
+        <summary class="panel-head"><h2>Tool calls</h2><span class="count-badge">{d.tool_usage.length}</span></summary>
       <div class="scroll">
         <table>
           <thead>
@@ -429,17 +486,22 @@
           {/await}
         {/if}
       </div>
+      </details>
     </section>
   {/if}
 
   {#if d.events.length > 0}
-    <section class="panel">
-      <div class="panel-head"><h2>Timeline</h2></div>
+    <section class="panel fold">
+      <details open={selected !== null || d.stages.length === 0}>
+        <summary class="panel-head"><h2>Timeline</h2><span class="count-badge">{d.events.length}</span></summary>
+          {#if selected !== null}
+            <p class="filter-note">Showing the lines of {selectedName(selected)}: {shownEvents.length} of {d.events.length}. <button type="button" class="link" onclick={() => (selected = null)}>Show all</button></p>
+          {/if}
       <div class="scroll">
         <table>
           <thead><tr><th>At</th><th>Level</th><th>What</th></tr></thead>
           <tbody>
-            {#each d.events as line, index (index)}
+            {#each shownEvents as line, index (index)}
               <tr>
                 <td class="mono nowrap" title={utc(line.at)}>{clockTime(line.at)}</td>
                 <td><Status word={line.level} kind="level" /></td>
@@ -449,12 +511,14 @@
           </tbody>
         </table>
       </div>
+      </details>
     </section>
   {/if}
 
   {#if d.requests.length > 0}
-    <section class="panel">
-      <div class="panel-head"><h2>Events</h2></div>
+    <section class="panel fold">
+      <details open={false}>
+        <summary class="panel-head"><h2>Requests</h2><span class="count-badge">{d.requests.length}</span></summary>
       <div class="scroll">
         <table>
           <thead><tr><th>Event</th><th>Received</th><th>Source</th><th>Kind</th></tr></thead>
@@ -470,6 +534,7 @@
           </tbody>
         </table>
       </div>
+      </details>
     </section>
   {/if}
 {/if}
@@ -489,4 +554,20 @@
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: var(--space-2); }
   .label + .text-block { margin-bottom: var(--space-2); }
   .calls-body { padding-top: var(--space-3); border-top: 1px solid var(--line-soft); }
+  .fold summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+  }
+  .fold :global(.scroll) { overflow-x: auto; border-top: 1px solid var(--line-soft); }
+  .fold :global(.calls-body) { padding: var(--space-3) var(--space-4) var(--space-4); }
+  .fold summary::-webkit-details-marker { display: none; }
+  .fold summary::before { content: '\25B8'; color: var(--muted); }
+  .fold details[open] > summary::before { content: '\25BE'; }
+  .filter-note { margin: 0; padding: 0 var(--space-4) var(--space-2); color: var(--muted); font-size: 13px; }
+  .link { border: 0; background: none; color: var(--accent); padding: 0; min-height: 0; font-size: inherit; }
+  .list { display: flex; flex-direction: column; gap: var(--space-2); }
 </style>

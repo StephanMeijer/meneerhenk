@@ -16,10 +16,10 @@ use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
-    attach_outcomes, draft_verdict, kind_parse, kind_str, now, platform_parse, platform_str,
-    status_str, to_i64, to_u64,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str, now,
+    platform_parse, platform_str, stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -40,6 +40,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/008_transcripts.sql")),
         M::up(include_str!("../migrations/sqlite/009_drafts.sql")),
         M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
+        M::up(include_str!("../migrations/sqlite/011_stages.sql")),
     ])
 }
 
@@ -191,6 +192,68 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
+        let at = |time: Option<OffsetDateTime>| {
+            time.map_or_else(now, |t| t.format(&Rfc3339).unwrap_or_else(|_| now()))
+        };
+        let started = at(write.started_at);
+        let ended = write.state.ended().then(|| at(write.ended_at));
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO stages (run_id, stage, state, started_at, ended_at, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (run_id, stage) DO UPDATE SET
+                     state = excluded.state, ended_at = excluded.ended_at, detail = excluded.detail",
+                params![
+                    run.as_str(),
+                    write.stage.as_str(),
+                    write.state.as_str(),
+                    started,
+                    ended,
+                    write.detail
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE stages SET state = ?2, ended_at = ?3, detail = ?4
+                 WHERE run_id = ?1 AND state = ?5",
+                params![
+                    run.as_str(),
+                    StageState::Failed.as_str(),
+                    now(),
+                    reason,
+                    StageState::Running.as_str()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
+        self.with(|c| {
+            let mut statement = c.prepare(
+                "SELECT stage, state, started_at, ended_at, detail FROM stages WHERE run_id = ?1",
+            )?;
+            let rows = statement
+                .query_map(params![run.as_str()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            stage_records(rows)
+        })
+    }
+
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
@@ -250,7 +313,7 @@ impl RunStore for SqliteStore {
     async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error FROM lanes WHERE run_id = ?1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at FROM lanes WHERE run_id = ?1 ORDER BY name",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok((
@@ -261,11 +324,23 @@ impl RunStore for SqliteStore {
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })?;
             let mut lanes = Vec::new();
             for row in rows {
-                let (name, model, status, turns, input_tokens, output_tokens, error) = row?;
+                let (
+                    name,
+                    model,
+                    status,
+                    turns,
+                    input_tokens,
+                    output_tokens,
+                    error,
+                    started_at,
+                    finished_at,
+                ) = row?;
                 let status = LaneStatus::parse(&status)
                     .ok_or(StoreError::Corrupt { column: "lanes.status", value: status })?;
                 lanes.push(LaneRecord {
@@ -276,6 +351,8 @@ impl RunStore for SqliteStore {
                     input_tokens: to_u64("lanes.input_tokens", input_tokens)?,
                     output_tokens: to_u64("lanes.output_tokens", output_tokens)?,
                     error,
+                    started_at,
+                    finished_at,
                 });
             }
             Ok(lanes)

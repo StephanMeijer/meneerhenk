@@ -148,6 +148,7 @@ impl Coordinator {
         let request = ReviewRequest {
             commit: Some(commit),
             run: Some(run.clone()),
+            submitted_at: Some(time::OffsetDateTime::now_utc()),
             ..request
         };
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());

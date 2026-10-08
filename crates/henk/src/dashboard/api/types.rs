@@ -10,7 +10,7 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::RunKind;
 use henk_store::{
     DraftRecord, EventRecord, EventWithOutcomes, FindingRecord, InboundEvent, LaneRecord,
-    OutcomeRecord, RunRecord, ToolCallRecord, ToolUsage, TranscriptSummary,
+    OutcomeRecord, RunRecord, StageRecord, ToolCallRecord, ToolUsage, TranscriptSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +111,48 @@ pub struct RunDetail {
     pub events: Vec<RunEvent>,
     /// The requests that started or joined it.
     pub requests: Vec<EventSummary>,
+    /// Its stages, in the order they come (#226). Empty for a run from
+    /// before stages were kept.
+    pub stages: Vec<Stage>,
+}
+
+/// One stage of a run: a review goes `requested`, `queued`, `started`,
+/// `diff`, `checkout`, `lanes`, `fact_check`, `publish`, `done`; a plan or
+/// an address run goes through `workspace`, `session` and, for an address
+/// run, `commit`, `push` and `replies` instead.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Stage {
+    /// Which stage.
+    pub name: String,
+    /// `running`, `done`, `failed` or `skipped`.
+    pub state: String,
+    /// RFC 3339.
+    pub started_at: String,
+    /// RFC 3339, once it ended.
+    pub ended_at: Option<String>,
+    /// One line in Henk's own words: `12 files, +340 -25; 1 not reviewed`.
+    pub detail: String,
+}
+
+impl From<&StageRecord> for Stage {
+    fn from(stage: &StageRecord) -> Self {
+        Self {
+            name: stage.stage.as_str().to_owned(),
+            state: stage.state.as_str().to_owned(),
+            started_at: stage.started_at.clone(),
+            ended_at: stage.ended_at.clone(),
+            detail: stage.detail.clone(),
+        }
+    }
+}
+
+/// When a run's process last said it was alive.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Heartbeat {
+    /// RFC 3339.
+    pub at: String,
 }
 
 /// A run's own fields after it changed: started, ended, got its check.
@@ -159,6 +201,10 @@ pub enum RunMessage {
     Event(RunEvent),
     /// A session's conversation was kept.
     Transcript(TranscriptRef),
+    /// A stage began or ended: every stage of the run (#226).
+    Stages(Vec<Stage>),
+    /// The run's process said it is alive.
+    Heartbeat(Heartbeat),
     /// The run has ended; the stream closes.
     End,
 }
@@ -294,6 +340,10 @@ pub struct Lane {
     /// The turn of its latest tool call: how far a running lane has come,
     /// since turns and tokens are stored when it ends.
     pub last_call_turn: Option<u32>,
+    /// RFC 3339: when it started.
+    pub started_at: String,
+    /// RFC 3339: when it ended, once it has.
+    pub finished_at: Option<String>,
 }
 
 /// One thing done with a finding on the platform.
@@ -678,6 +728,8 @@ impl From<&LaneRecord> for Lane {
             output_tokens: lane.output_tokens,
             error: lane.error.clone(),
             last_call_turn: None,
+            started_at: lane.started_at.clone(),
+            finished_at: lane.finished_at.clone(),
         }
     }
 }

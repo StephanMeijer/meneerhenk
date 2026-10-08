@@ -24,13 +24,14 @@ use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Limits, Profile};
 use henk_platform::ReviewTarget;
 use henk_platform::address::AddressWriter;
-use henk_store::RunStore;
+use henk_store::{RunStore, Stage, StageState};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::app::App;
 use crate::git::{Checkout, ScratchDir};
+use crate::stages;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, WorkspaceProvider, for_lane, setup};
 
@@ -66,8 +67,11 @@ impl ReviewWorkspaces {
         let repo = target.repo.path();
         let profile = app.settings.workspace.profile_for(&repo);
         if !profile.serves(EnvLane::Review) {
+            checkout(app, run, StageState::Skipped, NO_WORKSPACES).await;
             return Self::default();
         }
+        let checking = format!("checking out {}", commit.short());
+        checkout(app, run, StageState::Running, checking).await;
         let mut names: Vec<String> = app
             .settings
             .lanes
@@ -87,6 +91,7 @@ impl ReviewWorkspaces {
                     &format!("review workspaces: none, the reviewed commit could not be checked out: {error:#}"),
                 )
                 .await;
+                checkout(app, run, StageState::Failed, NO_CHECKOUT).await;
                 return Self::default();
             }
         };
@@ -143,22 +148,13 @@ impl ReviewWorkspaces {
         }
         failed.sort();
         drop(checkout);
-        let ready = names.len() - failed.len();
-        let mut text = format!(
-            "review workspaces: {ready} of {} ready on {} at {}",
-            names.len(),
-            profile.backend,
-            commit.short()
-        );
-        for why in &failed {
-            text.push_str("\nno workspace for ");
-            text.push_str(why);
-        }
-        note(
+        report_ready(
             app,
             run,
-            if failed.is_empty() { "info" } else { "warn" },
-            &text,
+            names.len(),
+            &failed,
+            &profile.backend.to_string(),
+            commit,
         )
         .await;
         workspaces
@@ -341,6 +337,53 @@ async fn open_one(
             (name, Err(error))
         }
     }
+}
+
+/// The checkout stage when the profile gives reviews no workspaces.
+const NO_WORKSPACES: &str = "no workspaces: the lanes read through the platform";
+
+/// The checkout stage when the reviewed commit could not be checked out.
+const NO_CHECKOUT: &str =
+    "the commit could not be checked out; the lanes read through the platform";
+
+/// Records where the review's checkout stands (#226).
+async fn checkout(app: &App, run: &RunId, state: StageState, detail: impl Into<String>) {
+    stages::mark(&*app.store, run, Stage::Checkout, state, detail).await;
+}
+
+/// How many review workspaces opened: a line on the timeline, with why
+/// each missing one is missing, and the checkout stage (#226).
+async fn report_ready(
+    app: &App,
+    run: &RunId,
+    wanted: usize,
+    failed: &[String],
+    backend: &str,
+    commit: &CommitSha,
+) {
+    let ready = wanted - failed.len();
+    let mut text = format!(
+        "review workspaces: {ready} of {wanted} ready on {backend} at {}",
+        commit.short()
+    );
+    for why in failed {
+        text.push_str("\nno workspace for ");
+        text.push_str(why);
+    }
+    let level = if failed.is_empty() { "info" } else { "warn" };
+    note(app, run, level, &text).await;
+    let state = if ready == 0 {
+        StageState::Failed
+    } else {
+        StageState::Done
+    };
+    checkout(
+        app,
+        run,
+        state,
+        format!("{ready} of {wanted} workspaces ready"),
+    )
+    .await;
 }
 
 async fn note(app: &App, run: &RunId, level: &str, text: &str) {

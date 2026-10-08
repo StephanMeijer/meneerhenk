@@ -19,10 +19,10 @@ use crate::types::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, VerdictFilter,
-    attach_outcomes, draft_verdict, kind_parse, kind_str, platform_parse, platform_str, status_str,
-    to_i64, to_u64,
+    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    platform_parse, platform_str, stage_records, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -34,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/005_transcripts.sql"),
     include_str!("../migrations/postgres/006_drafts.sql"),
     include_str!("../migrations/postgres/007_superseded_by.sql"),
+    include_str!("../migrations/postgres/008_stages.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -462,6 +463,74 @@ impl RunStore for PgStore {
         Ok(())
     }
 
+    async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
+        let started = write.started_at.unwrap_or_else(now);
+        let ended = write
+            .state
+            .ended()
+            .then(|| write.ended_at.unwrap_or_else(now));
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO stages (run_id, stage, state, started_at, ended_at, detail)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (run_id, stage) DO UPDATE SET
+                     state = excluded.state, ended_at = excluded.ended_at, detail = excluded.detail",
+                &[
+                    &run.as_str(),
+                    &write.stage.as_str(),
+                    &write.state.as_str(),
+                    &started,
+                    &ended,
+                    &write.detail,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE stages SET state = $2, ended_at = $3, detail = $4
+                 WHERE run_id = $1 AND state = $5",
+                &[
+                    &run.as_str(),
+                    &StageState::Failed.as_str(),
+                    &now(),
+                    &reason,
+                    &StageState::Running.as_str(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT stage, state, started_at, ended_at, detail FROM stages WHERE run_id = $1",
+                &[&run.as_str()],
+            )
+            .await?;
+        let rows = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<_, String>(0)?,
+                    row.try_get::<_, String>(1)?,
+                    text(row.try_get(2)?),
+                    row.try_get::<_, Option<OffsetDateTime>>(3)?.map(text),
+                    row.try_get::<_, String>(4)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        stage_records(rows)
+    }
+
     async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
         self.client()
             .await?
@@ -516,7 +585,7 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error FROM lanes WHERE run_id = $1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at FROM lanes WHERE run_id = $1 ORDER BY name",
                 &[&run.as_str()],
             )
             .await?;
@@ -535,6 +604,8 @@ impl RunStore for PgStore {
                     input_tokens: to_u64("lanes.input_tokens", row.try_get(4)?)?,
                     output_tokens: to_u64("lanes.output_tokens", row.try_get(5)?)?,
                     error: row.try_get(6)?,
+                    started_at: text(row.try_get(7)?),
+                    finished_at: row.try_get::<_, Option<OffsetDateTime>>(8)?.map(text),
                 })
             })
             .collect()

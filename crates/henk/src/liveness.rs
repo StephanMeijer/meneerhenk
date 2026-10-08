@@ -151,6 +151,14 @@ pub(crate) async fn reap_silent_since(app: &App, cutoff: time::OffsetDateTime) -
         }
         let closed = match app.store.drop_running_lanes(&run.id, REAPED).await {
             Ok(()) => {
+                crate::stages::end(
+                    &*app.store,
+                    &run.id,
+                    henk_store::StageState::Failed,
+                    REAPED,
+                    REAPED,
+                )
+                .await;
                 app.store
                     .finish_run(&run.id, RunStatus::Failed, None, Some(REAPED))
                     .await

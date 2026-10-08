@@ -451,6 +451,8 @@ mod tests {
             input_tokens: 100,
             output_tokens: 20,
             error: Some("rate limited".into()),
+            started_at: "t0".into(),
+            finished_at: Some("t1".into()),
         }];
         let findings = vec![FindingRecord {
             at: "t".into(),
