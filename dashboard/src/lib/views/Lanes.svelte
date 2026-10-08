@@ -1,6 +1,7 @@
 <script lang="ts">
   import { laneStats } from '$lib/api/client';
   import type { LaneReasons, LaneRow, LaneStats } from '$lib/api/types';
+  import { serverNow } from '$lib/clock';
   import { LANE_REASONS, PERIODS, count, periodSince, ratePercent } from '$lib/format';
   import { withQuery } from '$lib/router';
   import Empty from '$lib/ui/Empty.svelte';
@@ -14,7 +15,7 @@
   let {
     query,
     load = laneStats,
-    now = () => new Date(),
+    now = serverNow,
   }: {
     query: URLSearchParams;
     load?: (query: string) => Promise<LaneStats>;

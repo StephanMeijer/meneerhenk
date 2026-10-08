@@ -240,6 +240,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     println!("{line}");
                 }
             }
+            // A setting that needs git where Henk runs is only as good as
+            // the git there (#254).
+            let git = doctor::check_git(&settings, None).await;
+            let rendered = doctor::render(std::slice::from_ref(&git));
+            println!("{}", rendered.lines().next().unwrap_or_default());
+            if git.is_failure() {
+                return Err(anyhow!(
+                    "git does not run here, and the configuration needs it"
+                ));
+            }
             Ok(())
         }
         Command::Config {

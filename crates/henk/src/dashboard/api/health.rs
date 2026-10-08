@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{Page, RunFilter};
+use henk_domain::run::RunKind;
+use henk_domain::workspace::EnvLane;
+use henk_store::{Page, RunFilter, RunRecord, RunStatus, Stage, StageState};
 
 use super::types::{Health, HealthCheck};
 use crate::app::App;
@@ -71,6 +73,9 @@ async fn health_rows(
         "ok".to_owned(),
         reviews_line(&coordinator.slots()),
     ));
+    rows.push(workspaces_row(dashboard).await);
+    let git = crate::doctor::check_git(settings, None).await;
+    rows.push(row(git));
     for check in check_secrets(settings) {
         let (verdict, text) = match check.verdict {
             Verdict::Ok(text) => ("ok", text),
@@ -95,6 +100,120 @@ async fn health_rows(
         settings.mcp.keys().cloned().collect::<Vec<_>>().join(", "),
     ));
     rows
+}
+
+/// A doctor check as a row.
+fn row(check: crate::doctor::Check) -> (String, String, String) {
+    let (state, text) = match check.verdict {
+        Verdict::Ok(text) => ("ok", text),
+        Verdict::Warn(text) => ("warn", text),
+        Verdict::Fail(text) => ("fail", text),
+    };
+    (check.name, state.to_owned(), text)
+}
+
+/// How many reviews to look back at for workspaces.
+const RECENT_REVIEWS: usize = 10;
+
+/// Whether the reviews configured for workspaces got them (#254): of the
+/// last ended ones that reached their checkout, how many had their commit
+/// checked out, and why the newest that did not went without. A failing
+/// checkout leaves a review that still completes, so nothing else would
+/// say so.
+async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
+    let settings = &dashboard.app.settings;
+    let name = "workspaces".to_owned();
+    if !settings
+        .workspace
+        .named()
+        .any(|(_, profile)| profile.serves(EnvLane::Review))
+    {
+        let text = "reviews run without workspaces: no profile has review = true";
+        return (name, "ok".to_owned(), text.to_owned());
+    }
+    let store = &dashboard.app.store;
+    let filter = RunFilter {
+        kind: Some(RunKind::Review),
+        ..RunFilter::default()
+    };
+    let Ok(runs) = store.list_runs(&filter, Page::new(Page::MAX, 0)).await else {
+        return (
+            name,
+            "warn".to_owned(),
+            "could not read the reviews".to_owned(),
+        );
+    };
+    let ended: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|run| run.status != RunStatus::Running && run.status != RunStatus::Superseded)
+        .filter(|run| {
+            settings
+                .workspace
+                .profile_for(&run.repo)
+                .serves(EnvLane::Review)
+        })
+        .collect();
+    let ids: Vec<_> = ended.iter().map(|run| run.id.clone()).collect();
+    let stages = store.stages_of(&ids).await.unwrap_or_default();
+    let checkout = |run: &RunRecord, wanted: StageState| {
+        stages.iter().any(|(id, stage, state)| {
+            *id == run.id && *stage == Stage::Checkout && *state == wanted
+        })
+    };
+    // Only a review whose checkout was tried and went wrong went without:
+    // one with nothing to review skips it, one cancelled in the queue or
+    // failed before its lanes never gets there, and one that ended while
+    // its checkout was running has the stage failed for it, without the
+    // warning a failed checkout leaves.
+    let mut counted = 0;
+    let mut had = 0;
+    let mut why = None;
+    for run in ended {
+        if counted == RECENT_REVIEWS {
+            break;
+        }
+        if checkout(run, StageState::Done) {
+            counted += 1;
+            had += 1;
+        } else if checkout(run, StageState::Failed)
+            && let Some(warning) = why_without(dashboard, run).await
+        {
+            counted += 1;
+            why.get_or_insert(warning);
+        }
+    }
+    if counted == 0 {
+        let text = "no review with workspaces has reached its checkout yet";
+        return (name, "ok".to_owned(), text.to_owned());
+    }
+    let line = format!("{had} of the last {counted} reviews had one");
+    match why {
+        None => (name, "ok".to_owned(), line),
+        Some(why) => (name, "warn".to_owned(), format!("{line} ({why})")),
+    }
+}
+
+/// Why `run` went without workspaces, from the warning its failed checkout
+/// left; none when the checkout did not fail on its own.
+async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> Option<String> {
+    const CHECKOUT: &str = "could not be checked out: ";
+    let events = dashboard
+        .app
+        .store
+        .events(&run.id)
+        .await
+        .unwrap_or_default();
+    events
+        .iter()
+        .rev()
+        .find(|event| event.level == "warn" && event.message.starts_with("review workspaces:"))
+        .map(|event| match event.message.split_once(CHECKOUT) {
+            Some((_, error)) => format!("checkout failed: {error}"),
+            None => event
+                .message
+                .trim_start_matches("review workspaces: ")
+                .to_owned(),
+        })
 }
 
 /// The review slots in words: `2 running, 1 waiting (limit 2)`.

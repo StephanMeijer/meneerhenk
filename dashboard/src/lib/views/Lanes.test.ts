@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { noteServerDate } from '$lib/clock';
 import type { LaneStats } from '$lib/api/types';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
 import Lanes from './Lanes.svelte';
@@ -46,5 +47,32 @@ describe('Lanes', () => {
     render(Lanes, { query: new URLSearchParams('period=forever'), load, now: () => NOW });
     await settle();
     expect(load).toHaveBeenLastCalledWith('since=2026-09-07T12%3A00%3A00.000Z');
+  });
+});
+
+/** The browser at noon, the server an hour ahead of it (#257). */
+const BROWSER = new Date('2026-10-07T12:00:00Z');
+const SERVER = new Date('2026-10-07T13:00:00Z');
+
+function serverAhead(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(BROWSER);
+  noteServerDate(SERVER.toUTCString());
+}
+
+function clocksAgree(): void {
+  vi.useRealTimers();
+  noteServerDate(new Date().toUTCString());
+}
+
+describe('Lanes on the server clock', () => {
+  afterEach(clocksAgree);
+
+  it('asks for the period by the server clock, not the browser one', async () => {
+    serverAhead();
+    const load = vi.fn(() => Promise.resolve(stats));
+    render(Lanes, { query: new URLSearchParams(), load });
+    await settle();
+    expect(load).toHaveBeenCalledWith('since=2026-09-07T13%3A00%3A00.000Z');
   });
 });

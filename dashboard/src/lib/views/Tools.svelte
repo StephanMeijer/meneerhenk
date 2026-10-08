@@ -1,6 +1,7 @@
 <script lang="ts">
   import { toolCalls as listCalls, toolSummary as loadSummary } from '$lib/api/client';
   import type { Page, ToolCallItem, ToolSummaryRow } from '$lib/api/types';
+  import { serverNow } from '$lib/clock';
   import { PERIODS, about, average, count, outcomeClass, periodSince, ratePercent } from '$lib/format';
   import { href, link, navigate, runPath, transcriptPath, withQuery } from '$lib/router';
   import Empty from '$lib/ui/Empty.svelte';
@@ -15,7 +16,7 @@
     query,
     loadSummary: summary = loadSummary,
     loadCalls = listCalls,
-    now = () => new Date(),
+    now = serverNow,
   }: {
     query: URLSearchParams;
     loadSummary?: (query: string) => Promise<ToolSummaryRow[]>;

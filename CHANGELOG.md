@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.21...v0.1.22) - 2026-10-08
+
+### Fixed
+
+- *(dashboard)* a checkout failed by the run ending does not count as going without
+- *(dashboard)* count only reviews that reached their checkout in the workspaces row
+
+### Other
+
+- Merge pull request #259 from StephanMeijer/fix/visible-checkout
+- Merge main into fix/visible-checkout
+
+## [0.1.21](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.20...v0.1.21) - 2026-10-08
+
+### Other
+
+- Merge main into feat/queued-section
+
 ## [0.1.20](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.19...v0.1.20) - 2026-10-08
 
 ### Added

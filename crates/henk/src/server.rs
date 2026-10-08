@@ -18,7 +18,7 @@ use secrecy::SecretString;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultOnRequest, OnRequest, TraceLayer};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
@@ -209,6 +209,18 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
                 Err(error) => warn!(%error, "could not sweep the sandbox host"),
             }
         });
+    }
+    // A configuration that needs git where Henk runs, without git (#254):
+    // said once and loudly, as every checkout would fail quietly after.
+    let needs = app.settings.needs_git();
+    if !needs.is_empty()
+        && let Err(problem) = crate::git::version(None).await
+    {
+        error!(
+            %problem,
+            needed_for = %needs.join(", "),
+            "git does not run here: install it in Henk's image, or runs go without the checkouts their configuration asks for"
+        );
     }
     // Events older than server.keep_events_days go; runs stay (#69).
     let pruner = crate::prune::spawn_pruner(Arc::clone(&app), cancel.clone());

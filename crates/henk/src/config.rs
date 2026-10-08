@@ -1825,6 +1825,29 @@ fn and_list(items: &[&str]) -> String {
 }
 
 impl Settings {
+    /// Why Henk's own process needs `git`, in words, one reason each; empty
+    /// when it does not (#254). Henk checks out the reviewed commit, copies
+    /// the planner's repository and clones for an address run itself, on
+    /// its own side, with the platform's credential (§8.4), whatever the
+    /// workspace backend.
+    #[must_use]
+    pub fn needs_git(&self) -> Vec<String> {
+        use henk_domain::workspace::EnvLane;
+        let mut reasons = Vec::new();
+        for (name, profile) in self.workspace.named() {
+            if profile.serves(EnvLane::Review) {
+                reasons.push(format!("review workspaces (profile {name})"));
+            }
+            if self.planning.is_some() && profile.serves(EnvLane::Plan) {
+                reasons.push(format!("the planner's copy (profile {name})"));
+            }
+        }
+        if self.address.is_some() {
+            reasons.push("address runs".to_owned());
+        }
+        reasons
+    }
+
     /// Public link of a run.
     #[must_use]
     pub fn run_link(&self, run: &henk_domain::run::RunId) -> String {
@@ -2429,6 +2452,33 @@ github_owners = ["docspec"]
             database(&format!("[mcp_server]\n{}", token("a", "admin"))).is_err(),
             "unknown scope"
         );
+    }
+
+    #[test]
+    fn git_is_needed_for_what_checks_out_a_repository_on_henk_s_side() {
+        assert!(
+            database("").unwrap().needs_git().is_empty(),
+            "nothing checks out"
+        );
+        let ssh = format!(
+            "[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            host_key_line()
+        );
+        let reviewed = database(&format!(
+            "[workspace.profiles.reviewed]\nbackend = \"ssh\"\nreview = true\n{ssh}"
+        ))
+        .unwrap();
+        assert_eq!(
+            reviewed.needs_git(),
+            ["review workspaces (profile reviewed)"]
+        );
+
+        let address = Config::parse(&format!(
+            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n"
+        ))
+        .and_then(Config::into_settings)
+        .unwrap();
+        assert_eq!(address.needs_git(), ["address runs"]);
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks.push(check_database(settings).await);
     checks.extend(check_sandbox(settings, probe_models).await);
     checks.extend(check_kubernetes(settings, probe_models).await);
+    checks.push(check_git(settings, None).await);
     checks
 }
 
@@ -156,6 +157,29 @@ pub async fn check_mcp_server(
         Err(_) => Check::fail(NAME, format!("{url} did not answer within 30s")),
     });
     checks
+}
+
+/// Whether `git` runs in Henk's own process, where reviews, the planner
+/// and address runs check out a repository (#254). Local and quick, so it
+/// runs without `--probe` too. `path` replaces `PATH`, for a test.
+pub async fn check_git(settings: &Settings, path: Option<&std::ffi::OsStr>) -> Check {
+    let needs = settings.needs_git();
+    if needs.is_empty() {
+        return Check::ok(
+            "git",
+            "not needed: no profile checks out a repository and address runs are off",
+        );
+    }
+    let why = needs.join(", ");
+    match crate::git::version(path).await {
+        Ok(version) => Check::ok("git", format!("{version}; needed for {why}")),
+        Err(error) => Check::fail(
+            "git",
+            format!(
+                "{error}: needed for {why}. Henk runs git itself to check out the repository; install git in Henk's image"
+            ),
+        ),
+    }
 }
 
 /// The `ssh` backend's sandbox host (#84): without `--probe`, only whether
@@ -686,6 +710,49 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    fn settings(extra: &str) -> Settings {
+        let text = format!(
+            "[discord]\nchannel_id = 1\nhenk_user_id = 2\nteam_lead_ids = [3]\n[mail]\naddress = \"henk@example.com\"\n[allowlist]\ngithub_owners = [\"docspec\"]\n{extra}"
+        );
+        crate::config::Config::parse(&text)
+            .and_then(crate::config::Config::into_settings)
+            .unwrap()
+    }
+
+    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n";
+
+    #[tokio::test]
+    async fn git_missing_from_henk_s_own_path_fails_and_says_why_it_is_needed() {
+        let nowhere = std::ffi::OsStr::new("/nonexistent/henk-doctor-test");
+        let check = check_git(&settings(ADDRESS), Some(nowhere)).await;
+        let Verdict::Fail(text) = &check.verdict else {
+            panic!("{check:?}")
+        };
+        assert_eq!(check.name, "git");
+        assert!(text.starts_with("git could not run: "), "{text}");
+        assert!(text.contains("needed for address runs"), "{text}");
+        assert!(text.contains("install git in Henk's image"), "{text}");
+        assert!(check.is_failure());
+    }
+
+    #[tokio::test]
+    async fn git_on_the_path_is_fine_and_unneeded_git_is_not_run() {
+        let check = check_git(&settings(ADDRESS), None).await;
+        let Verdict::Ok(text) = &check.verdict else {
+            panic!("git is on the test machine's PATH: {check:?}")
+        };
+        assert!(text.starts_with("git version "), "{text}");
+        let nowhere = std::ffi::OsStr::new("/nonexistent/henk-doctor-test");
+        let unneeded = check_git(&settings(""), Some(nowhere)).await;
+        assert_eq!(
+            unneeded.verdict,
+            Verdict::Ok(
+                "not needed: no profile checks out a repository and address runs are off"
+                    .to_owned()
+            )
+        );
+    }
 
     #[test]
     fn mise_is_wanted_on_the_sandbox_host_only_by_a_profile_there() {
