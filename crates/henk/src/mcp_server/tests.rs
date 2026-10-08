@@ -373,3 +373,44 @@ async fn no_mcp_without_a_good_token_and_none_when_it_is_off() {
 async fn henk_plain(mcp_server: &str) -> String {
     start_henk(mcp_server, Vec::new()).await.url
 }
+
+#[tokio::test]
+async fn doctor_says_which_tokens_are_set_and_probe_lists_the_tools() {
+    let henk = start_henk(ON, both()).await;
+    let mut settings = henk.app.settings.clone();
+    settings.server.public_base_url = henk.url.trim_end_matches("/mcp").to_owned();
+    let only_write = |name: &str| (name == "UNUSED_W").then(|| WRITE.to_owned());
+    let checks = crate::doctor::check_mcp_server(&settings, true, only_write).await;
+    let said: Vec<(String, bool)> = checks
+        .iter()
+        .map(|c| (format!("{}: {:?}", c.name, c.verdict), c.is_failure()))
+        .collect();
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert!(
+        said[0].0.contains("secret $UNUSED_W")
+            && said[0].0.contains("set; MCP client claude (write)")
+    );
+    assert!(
+        said[1]
+            .0
+            .contains("not set; MCP client reader cannot connect")
+    );
+    assert!(
+        said[2].0.contains("12 tools at http://127.0.0.1:"),
+        "{said:?}"
+    );
+    assert!(said[2].0.ends_with("as claude\")"), "{said:?}");
+    assert!(said.iter().all(|(_, failed)| !failed));
+
+    let none = crate::doctor::check_mcp_server(&settings, false, |_| None).await;
+    assert!(
+        none.last().unwrap().is_failure(),
+        "on with no token set fails"
+    );
+    let off = Config::parse(&config("[mcp_server]\nenabled = false\n"))
+        .and_then(Config::into_settings)
+        .unwrap();
+    let checks = crate::doctor::check_mcp_server(&off, true, |_| None).await;
+    assert_eq!(checks.len(), 1);
+    assert!(!checks[0].is_failure());
+}

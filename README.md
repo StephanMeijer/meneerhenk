@@ -648,6 +648,51 @@ Vite's dev server on the same host: it forwards the API and sign-in to
 cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
 ```
 
+### MCP server
+
+With `[mcp_server] enabled = true` and at least one token, `henk serve` also
+serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
+such as Claude Code can work with Henk:
+- `start_review`, `start_plan`, `start_address`: start work, exactly as
+  `POST /review`, `/plan` and `/address` do. The request becomes an event,
+  the listeners apply the allowlist and every refusal, and the tool answers
+  with the run id and link, or why nothing started;
+- `cancel_run`;
+- `list_runs`, `get_run`, `get_run_events`, `list_tool_calls`,
+  `get_transcript`, `get_event`: what the dashboard shows, as JSON;
+- `review_quality` and `health`.
+
+Each client has its own token, named in the configuration and kept in an
+environment variable; `scope = "read"` may only read, `"write"` may also
+start and cancel. What a client starts or cancels is asked by
+`mcp:<token name>`, on the event and the run, as the dashboard records
+`github:<user id>`. A request without a valid token gets 401 before any MCP
+handling; with the server off or no token set, `/mcp` answers 503. Requests
+must name the public host or loopback.
+
+```toml
+[mcp_server]
+enabled = true
+[[mcp_server.tokens]]
+name = "claude-code"
+env = "HENK_MCP_TOKEN_CLAUDE_CODE"
+scope = "write"
+```
+
+Connect Claude Code with:
+
+```sh
+claude mcp add --transport http henk https://henk.example.com/mcp \
+  --header "Authorization: Bearer $HENK_MCP_TOKEN_CLAUDE_CODE"
+```
+
+`henk config check` lists the tokens and whether each variable is set;
+`henk doctor --probe` connects to `{public_base_url}/mcp` with the first
+token that is set and lists the tools. Behind a reverse proxy, route `/mcp`
+to Henk like the rest; the server answers each request with JSON, and a
+proxy that buffers responses does no harm, though leaving it unbuffered
+keeps it ready for streaming.
+
 ## Decisions taken for this version
 
 These answer open questions of the spec provisionally; each becomes a
