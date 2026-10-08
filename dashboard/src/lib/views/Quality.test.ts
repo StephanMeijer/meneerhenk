@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { noteServerDate } from '$lib/clock';
 import type { DraftItem, Page, QualityRow, QualitySeries } from '$lib/api/types';
 import { draft } from '$lib/testing/fixtures';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
@@ -151,5 +152,35 @@ describe('Quality', () => {
     expect(hidden).toEqual(['2026-10-0575%', '2026-10-06nothing judged', '2026-10-0750%']);
     expect(document.querySelectorAll('.line-chart circle')).toHaveLength(2);
     expect(document.querySelector('.legend')?.textContent?.trim()).toBe('mistral');
+  });
+});
+
+/** The browser at noon, the server an hour ahead of it (#257). */
+const BROWSER = new Date('2026-10-07T12:00:00Z');
+const SERVER = new Date('2026-10-07T13:00:00Z');
+
+function serverAhead(): void {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(BROWSER);
+  noteServerDate(SERVER.toUTCString());
+}
+
+function clocksAgree(): void {
+  vi.useRealTimers();
+  noteServerDate(new Date().toUTCString());
+}
+
+describe('Quality on the server clock', () => {
+  afterEach(clocksAgree);
+
+  it('asks for the period and says how long ago by the server clock, not the browser one', async () => {
+    serverAhead();
+    const loadRates = vi.fn(() => Promise.resolve([]));
+    const twoMinutes = { ...rejectedItem, draft: { ...rejectedItem.draft, at: '2026-10-07T12:58:00Z' } };
+    const loadDrafts = vi.fn((): Promise<Page<DraftItem>> => Promise.resolve({ items: [twoMinutes], next: null }));
+    render(Quality, { query: new URLSearchParams(), loadRates, loadDrafts, ...more() });
+    await settle();
+    expect(loadRates).toHaveBeenCalledWith('group=model&since=2026-09-07T13%3A00%3A00.000Z');
+    expect(document.querySelector('ul.drafts time')?.textContent).toBe('2 min ago');
   });
 });

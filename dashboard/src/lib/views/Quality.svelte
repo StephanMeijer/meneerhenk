@@ -6,6 +6,7 @@
     qualityDaily as loadQualityDaily,
   } from '$lib/api/client';
   import type { DraftCount, DraftItem, Page, QualityRow, QualitySeries } from '$lib/api/types';
+  import { serverNow } from '$lib/clock';
   import { PERIODS, about, count, draftWhat, periodSince, ratePercent, verdictText } from '$lib/format';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
   import Empty from '$lib/ui/Empty.svelte';
@@ -24,7 +25,7 @@
     loadDaily = loadQualityDaily,
     loadDrafts = listDrafts,
     loadCount = loadDraftCount,
-    now = () => new Date(),
+    now = serverNow,
   }: {
     query: URLSearchParams;
     loadRates?: (query: string) => Promise<QualityRow[]>;
