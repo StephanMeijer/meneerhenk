@@ -371,6 +371,18 @@ async fn signing_in_through_github_lets_only_listed_ids_in() {
     )
     .await;
     assert_eq!(wrong.status, StatusCode::BAD_REQUEST);
+    assert!(
+        wrong.body.contains("<h1>Sign-in failed</h1>"),
+        "{}",
+        wrong.body
+    );
+    assert!(
+        wrong
+            .body
+            .contains("href=\"/dashboard/login\">Sign in with GitHub</a>"),
+        "a failed sign-in offers a fresh one: {}",
+        wrong.body
+    );
     let no_cookie = get(
         &f,
         &format!("/dashboard/auth/callback?code=good&state={state}"),
@@ -386,6 +398,34 @@ async fn signing_in_through_github_lets_only_listed_ids_in() {
     )
     .await;
     assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+    assert!(
+        stranger.body.contains("<h1>Not for you</h1>"),
+        "{}",
+        stranger.body
+    );
+    assert!(
+        stranger
+            .body
+            .contains("Signed in at GitHub as github:999. Ask an operator to add this id."),
+        "the refusal names the id to add: {}",
+        stranger.body
+    );
+    assert!(
+        !stranger.body.contains("mallory"),
+        "the id, never the login (2)"
+    );
+    assert!(
+        stranger
+            .body
+            .contains("href=\"/dashboard/login\">Sign in again</a>")
+    );
+    assert!(!stranger.body.contains("<script"));
+    assert!(
+        stranger.headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("script-src 'self'")
+    );
     assert!(
         set_cookies(&stranger)
             .iter()
