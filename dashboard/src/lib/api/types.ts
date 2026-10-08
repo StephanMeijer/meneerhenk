@@ -180,6 +180,40 @@ judged: number,
  */
 rejection_rate: number | null, };
 
+export type QualitySeries = { 
+/**
+ * The model, lane or repository; `owner/name #7` for a pull request.
+ */
+key: string, 
+/**
+ * Every day of the period, oldest first.
+ */
+days: Array<DayRate>, };
+
+export type DayRate = { 
+/**
+ * `YYYY-MM-DD`, UTC.
+ */
+day: string, 
+/**
+ * Drafts the check judged: confirmed, rejected and repeats.
+ */
+judged: number, 
+/**
+ * Of those, rejected.
+ */
+rejected: number, 
+/**
+ * Rejected of judged, from 0 to 1; `null` on a day it judged none.
+ */
+rate: number | null, };
+
+export type DraftCount = { 
+/**
+ * The number.
+ */
+count: number, };
+
 export type ToolSummaryRow = { 
 /**
  * The tool, as the model named it.

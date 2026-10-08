@@ -5,10 +5,10 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
+    InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
+    RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
     ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
@@ -202,6 +202,27 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         group: DraftGroup,
         filter: &DraftFilter,
     ) -> Result<Vec<DraftRates>, StoreError>;
+
+    /// What the check made of each group's drafts per UTC day (#228): how
+    /// many it judged and how many of those it rejected, for drafts that
+    /// match `filter` (its verdict and keyset are not used).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError>;
+
+    /// How many drafts the listing's `filter` matches, over every page
+    /// (its keyset is not used).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError>;
 
     /// Drafts across runs, newest first, by filter and page (#205).
     ///

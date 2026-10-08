@@ -1053,6 +1053,19 @@ pub struct DraftRates {
     pub waiting: u64,
 }
 
+/// What the check made of one group's drafts on one UTC day (#228).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayRates {
+    /// The model, lane or repository; `owner/name #7` for a target.
+    pub key: String,
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// Drafts a checker decided: confirmed, rejected or a repeat.
+    pub judged: u64,
+    /// Of those, the rejected ones.
+    pub rejected: u64,
+}
+
 /// A draft in a listing across runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftListing {

@@ -7,10 +7,15 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{DraftFilter, DraftGroup, DraftKey, DraftRates, DraftVerdict, VerdictFilter};
+use henk_store::{
+    DayRates, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftVerdict, VerdictFilter,
+};
 use serde::Deserialize;
+use time::{Date, Duration, OffsetDateTime};
 
-use super::types::{Draft, DraftItem, Page, QualityRow, link_to};
+use super::types::{
+    DayRate, Draft, DraftCount, DraftItem, Page, QualityRow, QualitySeries, link_to,
+};
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -137,6 +142,100 @@ fn row(settings: &crate::config::Settings, rates: DraftRates) -> QualityRow {
     }
 }
 
+/// The groups the rejection-rate chart draws: the largest of the period.
+const CHART_GROUPS: usize = 6;
+/// How far back the chart goes when the period is all time.
+const CHART_DAYS: i64 = 90;
+
+/// `GET /quality/daily`: the rejection rate per UTC day of the largest
+/// groups (#228), every day of the period, a day the check judged nothing
+/// `null`.
+pub async fn daily(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+    ApiQuery(query): ApiQuery<QualityQuery>,
+) -> ApiResult<Vec<QualitySeries>> {
+    let group = query.group()?;
+    let filter = DraftFilter {
+        verdict: None,
+        before: None,
+        ..query.filter()?
+    };
+    let store = &dashboard.app.store;
+    let largest: Vec<String> = store
+        .draft_rates(group, &filter)
+        .await?
+        .into_iter()
+        .take(CHART_GROUPS)
+        .map(|rates| rates.key)
+        .collect();
+    let rows = store.daily_draft_rates(group, &filter).await?;
+    let today = OffsetDateTime::now_utc().date();
+    let earliest = today - Duration::days(CHART_DAYS - 1);
+    let from = filter
+        .since
+        .as_deref()
+        .and_then(|since| {
+            OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .map(OffsetDateTime::date)
+        .or_else(|| rows.iter().filter_map(|r| day_of(&r.day)).min())
+        .map_or(today, |from| from.max(earliest));
+    Ok(Json(series(&largest, &rows, from, today)))
+}
+
+fn day_of(text: &str) -> Option<Date> {
+    Date::parse(
+        text,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .ok()
+}
+
+/// Each of `keys` over every day from `from` to `to`.
+fn series(keys: &[String], rows: &[DayRates], from: Date, to: Date) -> Vec<QualitySeries> {
+    let days = super::stats::dates(from, to);
+    keys.iter()
+        .map(|key| QualitySeries {
+            key: key.clone(),
+            days: days
+                .iter()
+                .map(|date| {
+                    let day = date.to_string();
+                    let found = rows.iter().find(|r| &r.key == key && r.day == day);
+                    let (judged, rejected) = found.map_or((0, 0), |r| (r.judged, r.rejected));
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "counts of drafts are far below 2^52"
+                    )]
+                    let rate = (judged > 0).then(|| rejected as f64 / judged as f64);
+                    DayRate {
+                        day,
+                        judged,
+                        rejected,
+                        rate,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// `GET /drafts/count`: how many drafts the filters of `GET /drafts`
+/// match, over every page.
+pub async fn count(
+    State(dashboard): State<Arc<Dashboard>>,
+    _viewer: ApiViewer,
+    ApiQuery(query): ApiQuery<QualityQuery>,
+) -> ApiResult<DraftCount> {
+    let filter = DraftFilter {
+        before: None,
+        ..query.filter()?
+    };
+    let count = dashboard.app.store.count_drafts(&filter).await?;
+    Ok(Json(DraftCount { count }))
+}
+
 /// `GET /drafts`: drafts across runs, newest first, a page at a time.
 pub async fn drafts(
     State(dashboard): State<Arc<Dashboard>>,
@@ -177,4 +276,49 @@ pub async fn drafts(
             .collect(),
         next,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::float_cmp)]
+
+    use time::Month;
+
+    use super::*;
+
+    #[test]
+    fn a_series_has_every_day_and_no_rate_on_a_day_nothing_was_judged() {
+        let from = Date::from_calendar_date(2026, Month::October, 5).unwrap();
+        let to = Date::from_calendar_date(2026, Month::October, 7).unwrap();
+        let rows = vec![
+            DayRates {
+                key: "m".into(),
+                day: "2026-10-05".into(),
+                judged: 4,
+                rejected: 1,
+            },
+            DayRates {
+                key: "m".into(),
+                day: "2026-10-07".into(),
+                judged: 0,
+                rejected: 0,
+            },
+            DayRates {
+                key: "other".into(),
+                day: "2026-10-06".into(),
+                judged: 2,
+                rejected: 2,
+            },
+        ];
+        let got = series(&["m".to_owned()], &rows, from, to);
+        assert_eq!(got.len(), 1);
+        let days = &got[0].days;
+        assert_eq!(
+            days.iter().map(|d| d.day.as_str()).collect::<Vec<_>>(),
+            ["2026-10-05", "2026-10-06", "2026-10-07"]
+        );
+        assert_eq!(days[0].rate, Some(0.25));
+        assert_eq!(days[1].rate, None, "a day without drafts");
+        assert_eq!(days[2].rate, None, "a day with drafts, none judged");
+    }
 }

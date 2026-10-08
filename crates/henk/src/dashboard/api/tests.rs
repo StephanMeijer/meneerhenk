@@ -1022,6 +1022,9 @@ fn api_types_are_current() {
         types::RunCount::decl(&cfg),
         types::RunUpdate::decl(&cfg),
         types::QualityRow::decl(&cfg),
+        types::QualitySeries::decl(&cfg),
+        types::DayRate::decl(&cfg),
+        types::DraftCount::decl(&cfg),
         types::ToolSummaryRow::decl(&cfg),
         types::ToolCallItem::decl(&cfg),
         types::DraftItem::decl(&cfg),
@@ -1763,6 +1766,59 @@ async fn quality_counts_drafts_per_group_with_the_rejection_rate() {
         let bad = get(&f, &format!("/dashboard/api/v1/quality?{query}"), &cookie).await;
         assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(bad.code(), "bad_request");
+    }
+}
+
+#[tokio::test]
+async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    seed_drafts(&f).await;
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie).await;
+    assert_eq!(daily.status, StatusCode::OK, "{}", daily.body);
+    let daily = daily.json();
+    let series = daily.as_array().unwrap();
+    assert_eq!(
+        series
+            .iter()
+            .map(|s| s["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mistral", "deepseek"],
+        "the largest group first"
+    );
+    let days = series[0]["days"].as_array().unwrap();
+    assert!(!days.is_empty());
+    let judged: u64 = days.iter().map(|d| d["judged"].as_u64().unwrap()).sum();
+    let rejected: u64 = days.iter().map(|d| d["rejected"].as_u64().unwrap()).sum();
+    assert_eq!((judged, rejected), (4, 3));
+    assert!(
+        days.iter()
+            .all(|d| d["rate"].is_null() == (d["judged"] == 0))
+    );
+    let bad = get(&f, "/dashboard/api/v1/quality/daily?group=colour", &cookie).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    for query in ["verdict=rejected", "model=deepseek", "verdict=waiting", ""] {
+        let counted = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts/count?{query}"),
+            &cookie,
+        )
+        .await
+        .json();
+        let listed = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts?{query}&limit=100"),
+            &cookie,
+        )
+        .await
+        .json();
+        assert_eq!(
+            counted["count"].as_u64().unwrap(),
+            listed["items"].as_array().unwrap().len() as u64,
+            "{query}"
+        );
     }
 }
 
