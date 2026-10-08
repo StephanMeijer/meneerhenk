@@ -6,10 +6,11 @@ use time::OffsetDateTime;
 
 use crate::types::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
-    InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
-    RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
+    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -360,6 +361,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError>;
+
+    /// The sources and kinds of the recorded inbound events, sorted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn event_facets(&self) -> Result<EventFacets, StoreError>;
 
     /// The outcomes of one event, in recording order.
     ///

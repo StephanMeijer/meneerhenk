@@ -167,6 +167,7 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/tool-calls/summary", get(tools::summary))
         .route("/tool-calls", get(tools::list))
         .route("/events", get(events::list))
+        .route("/events/facets", get(events::facets))
         .route("/events/{id}", get(events::detail))
         .route("/stats/overview", get(stats::overview))
         .fallback(not_found)

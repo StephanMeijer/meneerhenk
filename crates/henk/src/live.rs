@@ -22,10 +22,10 @@ use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
 use henk_store::{
     DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
-    InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
-    RunRecord, RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite, StoreError,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
+    FindingRecord, InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts,
+    RunFilter, RunRecord, RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary,
 };
 use time::OffsetDateTime;
@@ -581,6 +581,10 @@ impl RunStore for Announcing {
         self.inner.inbound_event(id).await
     }
 
+    async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+        self.inner.event_facets().await
+    }
+
     async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
         self.inner.outcomes(id).await
     }
@@ -889,6 +893,9 @@ mod tests {
         }
         async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
             self.inner.inbound_event(id).await
+        }
+        async fn event_facets(&self) -> Result<EventFacets, StoreError> {
+            self.inner.event_facets().await
         }
         async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
             self.inner.outcomes(id).await

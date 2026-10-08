@@ -1055,6 +1055,7 @@ fn api_types_are_current() {
         types::EventSummary::decl(&cfg),
         types::EventItem::decl(&cfg),
         types::EventDetail::decl(&cfg),
+        types::EventFacets::decl(&cfg),
         types::ListenerOutcome::decl(&cfg),
         types::Health::decl(&cfg),
         types::HealthCheck::decl(&cfg),
@@ -1640,6 +1641,31 @@ async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
         "{item}"
     );
     assert!(item["stages"].is_array());
+}
+
+#[tokio::test]
+async fn the_event_filters_are_the_sources_and_kinds_recorded() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let facets = get(&f, "/dashboard/api/v1/events/facets", &cookie).await;
+    assert_eq!(facets.status, StatusCode::OK, "{}", facets.body);
+    let facets = facets.json();
+    let sources = facets["sources"].as_array().unwrap();
+    assert!(!sources.is_empty());
+    let mut sorted = sources.clone();
+    sorted.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(*sources, sorted, "sorted");
+    assert!(facets["kinds"].is_array());
+    let refused = call(
+        &f,
+        Method::GET,
+        "/dashboard/api/v1/events/facets",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

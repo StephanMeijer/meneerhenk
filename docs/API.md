@@ -409,6 +409,12 @@ Inbound events newest first, each with what every listener did. Filter by
  "next": null}
 ```
 
+### `GET /events/facets`
+
+The sources and kinds of the inbound events Henk has recorded, each sorted,
+for the events page's filters (#227):
+`{"sources": ["api", "dashboard", "github_webhook"], "kinds": ["pull_request", "..."]}`.
+
 ### `GET /events/{id}`
 
 One event with its `payload` as received (text, or `null` when none was
