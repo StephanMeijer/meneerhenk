@@ -171,17 +171,22 @@ pub async fn daily(
         .collect();
     let rows = store.daily_draft_rates(group, &filter).await?;
     let today = OffsetDateTime::now_utc().date();
+    let from = first_day(filter.since.as_deref(), &rows, today);
+    Ok(Json(series(&largest, &rows, from, today)))
+}
+
+/// The first day the chart shows when it ends `today`: the day of `since`,
+/// or of the earliest row when there is none, but no more than
+/// [`CHART_DAYS`] back.
+fn first_day(since: Option<&str>, rows: &[DayRates], today: Date) -> Date {
     let earliest = today - Duration::days(CHART_DAYS - 1);
-    let from = filter
-        .since
-        .as_deref()
+    since
         .and_then(|since| {
             OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339).ok()
         })
         .map(OffsetDateTime::date)
         .or_else(|| rows.iter().filter_map(|r| day_of(&r.day)).min())
-        .map_or(today, |from| from.max(earliest));
-    Ok(Json(series(&largest, &rows, from, today)))
+        .map_or(today, |from| from.max(earliest))
 }
 
 fn day_of(text: &str) -> Option<Date> {
@@ -320,5 +325,35 @@ mod tests {
         assert_eq!(days[0].rate, Some(0.25));
         assert_eq!(days[1].rate, None, "a day without drafts");
         assert_eq!(days[2].rate, None, "a day with drafts, none judged");
+    }
+
+    #[test]
+    fn the_chart_starts_at_since_or_the_first_row_and_at_most_ninety_days_back() {
+        let day = |month, day| Date::from_calendar_date(2026, month, day).unwrap();
+        let today = day(Month::October, 8);
+        let rows = vec![DayRates {
+            key: "m".into(),
+            day: "2026-10-05".into(),
+            judged: 1,
+            rejected: 0,
+        }];
+        assert_eq!(first_day(None, &[], today), today, "nothing yet");
+        assert_eq!(first_day(None, &rows, today), day(Month::October, 5));
+        assert_eq!(
+            first_day(Some("2026-10-07T10:06:00Z"), &rows, today),
+            day(Month::October, 7),
+            "since wins over the rows"
+        );
+        let ninety_days = day(Month::July, 11);
+        assert_eq!(today - ninety_days, Duration::days(CHART_DAYS - 1));
+        assert_eq!(
+            first_day(Some("2020-01-01T00:00:00Z"), &rows, today),
+            ninety_days
+        );
+        let old = vec![DayRates {
+            day: "2025-01-01".into(),
+            ..rows[0].clone()
+        }];
+        assert_eq!(first_day(None, &old, today), ninety_days);
     }
 }

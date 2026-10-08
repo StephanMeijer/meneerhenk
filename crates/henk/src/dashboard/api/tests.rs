@@ -1619,8 +1619,13 @@ async fn no_stream_without_a_session() {
 
 /// Drafts on `r-review` and `r-plan` (seeded by `seed`): mistral rejected
 /// three times and confirmed once on r-review, deepseek confirmed once,
-/// repeated once and is waiting once on r-plan.
+/// repeated once and is waiting once on r-plan. All on 2026-10-07.
 async fn seed_drafts(f: &Fixture) {
+    seed_drafts_on(f, "2026-10-07").await;
+}
+
+/// The drafts of [`seed_drafts`] on `day` (`YYYY-MM-DD`).
+async fn seed_drafts_on(f: &Fixture, day: &str) {
     let store = &f.dashboard.app.store;
     let drafts: [(&str, &str, &str, &str, Option<DraftVerdict>); 7] = [
         (
@@ -1669,7 +1674,7 @@ async fn seed_drafts(f: &Fixture) {
     ];
     for (minute, (run, draft, lane, model, verdict)) in (0u32..).zip(drafts) {
         let run = RunId::parse(run).unwrap();
-        let at = format!("2026-10-07T10:{minute:02}:00Z");
+        let at = format!("{day}T10:{minute:02}:00Z");
         store
             .record_draft(
                 &run,
@@ -1773,7 +1778,10 @@ async fn quality_counts_drafts_per_group_with_the_rejection_rate() {
 async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
-    seed_drafts(&f).await;
+    // The chart ends today, so the drafts are seeded today and the test
+    // does not depend on the date it runs on.
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    seed_drafts_on(&f, &today).await;
     let (cookie, _) = viewer(&f);
     let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie).await;
     assert_eq!(daily.status, StatusCode::OK, "{}", daily.body);
@@ -1788,7 +1796,7 @@ async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
         "the largest group first"
     );
     let days = series[0]["days"].as_array().unwrap();
-    assert!(!days.is_empty());
+    assert_eq!(days[0]["day"], today.as_str(), "from the first drafted day");
     let judged: u64 = days.iter().map(|d| d["judged"].as_u64().unwrap()).sum();
     let rejected: u64 = days.iter().map(|d| d["rejected"].as_u64().unwrap()).sum();
     assert_eq!((judged, rejected), (4, 3));
