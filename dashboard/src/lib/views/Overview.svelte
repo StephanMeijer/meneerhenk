@@ -4,12 +4,11 @@
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Me, Page, RunningMessage, RunSummary } from '$lib/api/types';
   import { applyRunning, type Running } from '$lib/live';
-  import { navigate, route, withQuery } from '$lib/router';
+  import { navigate, withQuery } from '$lib/router';
   import Loading from '$lib/ui/Loading.svelte';
   import Pager from '$lib/ui/Pager.svelte';
   import Problem from '$lib/ui/Problem.svelte';
   import RunsTable from './RunsTable.svelte';
-  import StartForm from './StartForm.svelte';
 
   let {
     me,
@@ -47,16 +46,6 @@
     );
     return () => following.close();
   });
-  // "Start a run" in the header leads here (#230 makes it a dialog).
-  $effect(() => {
-    void $route;
-    if (window.location.hash !== '#start') return;
-    requestAnimationFrame(() => {
-      document.getElementById('start')?.scrollIntoView?.();
-      document.querySelector<HTMLInputElement>('#start input[name=url]')?.focus();
-    });
-  });
-
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -80,11 +69,6 @@
     Signed in as {me.login} <span class="who">github:{me.github_id}</span>. Times in UTC, hover for the exact time.
   </p>
 </div>
-
-<section class="panel" id="start" aria-labelledby="start-title">
-  <div class="panel-head"><h2 id="start-title">Start a run</h2></div>
-  <div class="panel-body"><StartForm startable={me.startable} /></div>
-</section>
 
 <section class="panel" aria-labelledby="running-title">
   <div class="panel-head">

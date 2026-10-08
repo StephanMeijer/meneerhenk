@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { me } from '$lib/api/client';
   import type { Me } from '$lib/api/types';
-  import { href, link, route, start, type Route } from '$lib/router';
+  import { href, link, navigate, route, start, type Route } from '$lib/router';
+  import Dialog from '$lib/ui/Dialog.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Problem from '$lib/ui/Problem.svelte';
   import Event from '$lib/views/Event.svelte';
@@ -13,10 +14,18 @@
   import Quality from '$lib/views/Quality.svelte';
   import Tools from '$lib/views/Tools.svelte';
   import Run from '$lib/views/Run.svelte';
+  import StartForm from '$lib/views/StartForm.svelte';
   import Transcript from '$lib/views/Transcript.svelte';
 
   let who: Promise<Me> = $state(new Promise(() => {}));
   let menuOpen = $state(false);
+  let starting = $state(false);
+
+  /** Where a start lands: the request's page, with the dialog closed. */
+  function landed(path: string): void {
+    starting = false;
+    navigate(path);
+  }
 
   /** The tabs, in groups: what happened, how well, how Henk is set up. */
   const TABS: { path: string; label: string; routes: Route['name'][] }[][] = [
@@ -70,8 +79,13 @@
         {/each}
       </nav>
       <div class="actions">
-        <a href={href('/#start')} use:link class="button primary"><Icon name="plus" />Start a run</a>
         {#await who then viewer}
+          {#if viewer.startable.length > 0}
+            <button type="button" class="primary" onclick={() => {
+              menuOpen = false;
+              starting = true;
+            }}><Icon name="plus" />Start a run</button>
+          {/if}
           <form class="signout" method="post" action="/dashboard/logout">
             <span class="viewer" title="github:{viewer.github_id}">{viewer.login}</span>
             <input type="hidden" name="csrf" value={viewer.csrf}>
@@ -83,6 +97,12 @@
   </div>
 </header>
 
+{#await who then viewer}
+  <Dialog bind:open={starting} title="Start a run">
+    <StartForm startable={viewer.startable} go={landed} />
+  </Dialog>
+{/await}
+
 <main>
   {#await who}
     <p class="muted" aria-busy="true">Loading.</p>
@@ -91,7 +111,7 @@
       <Overview me={viewer} query={$route.query} />
     {:else if $route.name === 'run'}
       {#key $route.id}
-        <Run id={$route.id} />
+        <Run id={$route.id} who="github:{viewer.github_id}" />
       {/key}
     {:else if $route.name === 'transcript'}
       <Transcript id={$route.id} session={$route.session} />

@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { ApiError, cancelRun, run as loadRun, runToolCalls } from '$lib/api/client';
+  import { ApiError, cancelRun, run as loadRun, runToolCalls, startRun } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
-  import type { Cancelled, RunDetail, RunMessage, ToolCall } from '$lib/api/types';
+  import type { Cancelled, RunDetail, RunMessage, StartRequest, Started, ToolCall } from '$lib/api/types';
   import { now } from '$lib/clock';
-  import { about, clockTime, count, draftWhat, kindText, runDuration, utc, verdictText } from '$lib/format';
+  import { about, clockTime, count, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
   import { applyRun, connectionAfter, type Connection } from '$lib/live';
-  import { eventPath, href, link, transcriptPath } from '$lib/router';
+  import { eventPath, href, link, navigate, runPath, transcriptPath } from '$lib/router';
   import Commit from '$lib/ui/Commit.svelte';
+  import Dialog from '$lib/ui/Dialog.svelte';
+  import Icon from '$lib/ui/Icon.svelte';
   import Live from '$lib/ui/Live.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Problem from '$lib/ui/Problem.svelte';
@@ -14,19 +16,27 @@
   import Time from '$lib/ui/Time.svelte';
   import CallTimeline from './CallTimeline.svelte';
 
-  /** `load`, `cancel` and `connect` are replaced in the tests. */
+  /** `who` is the viewer's id (`github:1234`), which a cancel names.
+   * `load`, `cancel`, `connect`, `loadCalls`, `start` and `go` are
+   * replaced in the tests. */
   let {
     id,
+    who = null,
     load = loadRun,
     cancel = cancelRun,
     connect = connectEventSource,
     loadCalls = runToolCalls,
+    start = startRun,
+    go = navigate,
   }: {
     id: string;
+    who?: string | null;
     load?: (id: string) => Promise<RunDetail>;
     cancel?: (id: string) => Promise<Cancelled>;
     connect?: Connect;
     loadCalls?: (id: string) => Promise<ToolCall[]>;
+    start?: (request: StartRequest) => Promise<Started>;
+    go?: (path: string) => void;
   } = $props();
 
   /** Every call of the run, once asked for (#203). */
@@ -49,6 +59,10 @@
   let connection: Connection = $state('connecting');
   let cancelling = $state(false);
   let cancelNote: string | null = $state(null);
+  let confirmingCancel = $state(false);
+  let confirmingAgain = $state(false);
+  let startingAgain = $state(false);
+  let againProblem: string | null = $state(null);
 
   // Loads the run; while it runs, follows its stream until it ends.
   $effect(() => {
@@ -83,7 +97,72 @@
     };
   });
 
+  /** What a cancel does, by kind of run: the facts of `review.rs`,
+   * `plan.rs`, `address.rs` and `cancel.rs` (#230). */
+  function cancelEffects(detail: RunDetail): string[] {
+    const you = who === null ? 'you' : `you, ${who}`;
+    const where = detail.run.platform === 'gitlab' ? 'merge request' : 'pull request';
+    if (detail.run.kind === 'review') {
+      return [
+        'All lanes stop now. Drafts still waiting are marked cancelled.',
+        `On the ${where}, one comment and the check say it was cancelled and name ${you}.`,
+        'Nothing already posted is removed.',
+      ];
+    }
+    if (detail.run.kind === 'plan') {
+      return ['The planner stops now.', `On the issue, one comment says it was cancelled and names ${you}.`];
+    }
+    if (detail.run.kind === 'address') {
+      return [
+        'The address run stops now. If it had not pushed yet, nothing is pushed.',
+        `On the ${where}, one comment says it was cancelled and names ${you}.`,
+      ];
+    }
+    return [`Henk stops now and says it was cancelled, naming ${you}.`];
+  }
+
+  /** The sessions still going, for the confirmation. */
+  function stillWorking(detail: RunDetail): string {
+    const names = detail.lanes.filter((lane) => lane.status === 'running').map((lane) => lane.name);
+    if (names.length === 0) return '';
+    return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} still working.`;
+  }
+
+  /** A finished review can be started again for its commit; a running one
+   * would only be joined, and a superseded one is behind a newer commit. */
+  function againable(detail: RunDetail): boolean {
+    const r = detail.run;
+    return (
+      r.kind === 'review' &&
+      r.status !== 'running' &&
+      r.status !== 'superseded' &&
+      r.target_url !== null &&
+      r.commit !== null
+    );
+  }
+
+  async function reviewAgain(detail: RunDetail): Promise<void> {
+    if (detail.run.target_url === null || detail.run.commit === null) return;
+    startingAgain = true;
+    againProblem = null;
+    try {
+      const started = await start({
+        kind: 'review',
+        url: detail.run.target_url,
+        commit: detail.run.commit,
+        note: null,
+      });
+      confirmingAgain = false;
+      go(eventPath(started.event_id));
+    } catch (error) {
+      againProblem = error instanceof ApiError ? error.message : 'The start did not go through.';
+    } finally {
+      startingAgain = false;
+    }
+  }
+
   async function stop(): Promise<void> {
+    confirmingCancel = false;
     cancelling = true;
     cancelNote = null;
     try {
@@ -111,9 +190,14 @@
         <h1>{kindText(d.run.kind)} <span class="mono id">{d.run.id}</span></h1>
         <Status word={d.run.status} />
         <Live connection={d.run.status === 'running' ? connection : 'ended'} />
-        {#if d.run.status === 'running'}
-          <button class="danger push" onclick={stop} disabled={cancelling}>Cancel this run</button>
-        {/if}
+        <span class="push actions">
+          {#if againable(d)}
+            <button type="button" onclick={() => { againProblem = null; confirmingAgain = true; }}><Icon name="undo" />Review again</button>
+          {/if}
+          {#if d.run.status === 'running'}
+            <button type="button" class="danger" onclick={() => (confirmingCancel = true)} disabled={cancelling}><Icon name="slash" />Cancel run</button>
+          {/if}
+        </span>
       </div>
       <dl class="facts">
         <div>
@@ -140,6 +224,12 @@
           <dt>Trigger</dt>
           <dd>{d.run.requester ? `${d.run.trigger} (asked by ${d.run.requester})` : d.run.trigger}</dd>
         </div>
+        {#if d.run.superseded_by}
+          <div>
+            <dt>Replaced by</dt>
+            <dd><a class="mono" href={href(runPath(d.run.superseded_by))} use:link>{d.run.superseded_by}</a></dd>
+          </div>
+        {/if}
         {#if d.check_id}
           <div>
             <dt>Check</dt>
@@ -158,6 +248,41 @@
       {/if}
     </div>
   </section>
+
+  <Dialog bind:open={confirmingCancel} title="Cancel this {kindText(d.run.kind)}?">
+    <p>
+      <code>{d.run.id}</code>
+      {#if d.run.repo}on <strong>{about(d.run.repo, d.run.target)}</strong>{/if}
+      has run for {runDuration(d.run, $now)}. {stillWorking(d)}
+    </p>
+    <ul class="effects">
+      {#each cancelEffects(d) as line (line)}
+        <li>{line}</li>
+      {/each}
+    </ul>
+    {#snippet actions()}
+      <button type="button" data-default onclick={() => (confirmingCancel = false)}>Keep running</button>
+      <button type="button" class="danger-solid" onclick={stop}>Cancel {kindText(d?.run.kind ?? 'run')}</button>
+    {/snippet}
+  </Dialog>
+
+  <Dialog bind:open={confirmingAgain} title="Review again">
+    <p><strong>A new run, not a retry of this one.</strong></p>
+    <p>
+      Henk starts a new review of <code>{shortCommit(d.run.commit ?? '')}</code> on
+      {about(d.run.repo, d.run.target)}. If a review of that commit is running, the request joins it
+      instead. This run stays as it is.
+    </p>
+    {#if againProblem !== null}
+      <p class="problem" role="alert"><strong>Not started.</strong> {againProblem}</p>
+    {/if}
+    {#snippet actions()}
+      <button type="button" onclick={() => (confirmingAgain = false)}>Not now</button>
+      <button type="button" class="primary" data-default disabled={startingAgain} onclick={() => d && reviewAgain(d)}>
+        {startingAgain ? 'Starting' : 'Start a new review'}
+      </button>
+    {/snippet}
+  </Dialog>
 
   {#if d.summary || d.error}
     <section class="panel">
@@ -359,6 +484,7 @@
   }
   .title-row .id { font-size: 22px; font-weight: 500; }
   .push { margin-left: auto; }
+  .actions { display: inline-flex; gap: var(--space-2); }
   .run-head .note { margin: var(--space-3) 0 0; }
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: var(--space-2); }
   .label + .text-block { margin-bottom: var(--space-2); }

@@ -1,7 +1,9 @@
+import { createRawSnippet } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { cleanup, render, settle } from '$lib/testing/render';
 import Commit from './Commit.svelte';
+import Dialog from './Dialog.svelte';
 import Live from './Live.svelte';
 import Problem from './Problem.svelte';
 import Status from './Status.svelte';
@@ -88,5 +90,26 @@ describe('Problem', () => {
     await settle(1);
     expect(document.querySelector('[role=alert]')?.textContent).toContain('Reload the page.');
     expect(document.body.textContent).not.toContain('x is undefined');
+  });
+});
+
+describe('Dialog', () => {
+  it('opens with focus on its default, closes on Escape and gives focus back', async () => {
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const children = createRawSnippet(() => ({ render: () => '<p>Sure?</p>' }));
+    const actions = createRawSnippet(() => ({ render: () => '<button data-default>Keep running</button>' }));
+    render(Dialog, { open: true, title: 'Cancel this review?', children, actions });
+    await settle(1);
+    const dialog = document.querySelector('dialog');
+    expect(dialog?.hasAttribute('open')).toBe(true);
+    expect(dialog?.getAttribute('aria-labelledby')).toBe(dialog?.querySelector('h2')?.id);
+    expect(document.activeElement?.textContent).toBe('Keep running');
+    dialog?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settle(1);
+    expect(dialog?.hasAttribute('open')).toBe(false);
+    expect(dialog?.querySelector('p')).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 });

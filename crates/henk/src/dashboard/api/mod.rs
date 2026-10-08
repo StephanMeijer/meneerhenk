@@ -70,6 +70,12 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
 
+    /// An action without its session's CSRF token: a reload gets a fresh
+    /// one, so the client can offer that (#230).
+    pub fn csrf(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "csrf", message)
+    }
+
     /// The request is not one the API understands.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
