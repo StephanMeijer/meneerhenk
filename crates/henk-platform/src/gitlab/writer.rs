@@ -347,6 +347,7 @@ impl PlatformWriter for GitLabWriter {
         target: &ReviewTarget,
         _commit: &CommitSha,
         _run_link: &str,
+        _queued: Option<&ReviewHandle>,
     ) -> Result<Option<ReviewHandle>, PlatformError> {
         let mut args = Self::base_args(target);
         args.insert("name".into(), json!("eyes"));

@@ -84,6 +84,13 @@ pub(crate) mod testing {
         pub finished: Mutex<Vec<ReviewOutcome>>,
         /// The check id each `finish_review` closed, in order.
         pub finished_checks: Mutex<Vec<Option<String>>>,
+        /// Each check `queue_review` opened: its id, title and summary
+        /// (#262). Ids are `queued-1`, `queued-2`, and so on.
+        pub queued: Mutex<Vec<(String, String, String)>>,
+        /// `queue_review` fails instead, as an unreachable platform would.
+        pub fail_queue: bool,
+        /// The queued check each `start_review` was given, in order.
+        pub started: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -103,13 +110,35 @@ pub(crate) mod testing {
             })
         }
 
+        async fn queue_review(
+            &self,
+            _: &ReviewTarget,
+            _: &CommitSha,
+            title: &str,
+            summary: &str,
+            _: &str,
+        ) -> Result<Option<ReviewHandle>, PlatformError> {
+            if self.fail_queue {
+                return Err(PlatformError::Decode("the platform is away".to_owned()));
+            }
+            let mut queued = self.queued.lock().unwrap();
+            let id = format!("queued-{}", queued.len() + 1);
+            queued.push((id.clone(), title.to_owned(), summary.to_owned()));
+            Ok(Some(ReviewHandle(id)))
+        }
+
         async fn start_review(
             &self,
             _: &ReviewTarget,
             _: &CommitSha,
             _: &str,
+            queued: Option<&ReviewHandle>,
         ) -> Result<Option<ReviewHandle>, PlatformError> {
-            Ok(None)
+            self.started
+                .lock()
+                .unwrap()
+                .push(queued.map(|h| h.0.clone()));
+            Ok(queued.cloned())
         }
 
         async fn acknowledge(

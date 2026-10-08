@@ -129,7 +129,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         .mount(&server)
         .await;
     let handle = writer
-        .start_review(&t, &commit, "https://henk/runs/r-1")
+        .start_review(&t, &commit, "https://henk/runs/r-1", None)
         .await
         .unwrap()
         .unwrap();
@@ -249,6 +249,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         open_findings: 1,
         nothing_to_review: false,
         stopped: None,
+        not_reviewed: None,
     };
     writer
         .finish_review(
@@ -883,4 +884,55 @@ async fn review_threads_and_their_comments_are_read_to_the_end() {
         findings[0].answered_by_person,
         "a reply past the first page of the thread counts"
     );
+}
+
+#[tokio::test]
+async fn a_queued_review_s_check_is_created_queued_then_started_in_place() {
+    let server = MockServer::start().await;
+    let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
+    let writer = GitHubWriter::new(api, "meneer-henk[bot]");
+    let t = target();
+    let commit = CommitSha::parse(SHA).unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/repos/docspec/app/check-runs"))
+        .and(body_partial_json(json!({
+            "name": "Meneer Henk",
+            "head_sha": SHA,
+            "status": "queued",
+            "details_url": "https://henk/dashboard/",
+            "output": {"title": "Queued", "summary": "Waiting for a review slot."},
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 777})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let queued = writer
+        .queue_review(
+            &t,
+            &commit,
+            "Queued",
+            "Waiting for a review slot.",
+            "https://henk/dashboard/",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.0, "777");
+
+    Mock::given(method("PATCH"))
+        .and(path("/repos/docspec/app/check-runs/777"))
+        .and(body_partial_json(
+            json!({"status": "in_progress", "details_url": "https://henk/runs/r-1"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 777})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let started = writer
+        .start_review(&t, &commit, "https://henk/runs/r-1", Some(&queued))
+        .await
+        .unwrap();
+    assert_eq!(started, Some(queued), "the same check, not a second one");
+    // The POST mock expects exactly one call: none was made for the start.
 }

@@ -6,6 +6,6 @@ pub mod app;
 pub mod issues;
 pub mod writer;
 
-pub use api::GitHubApi;
+pub use api::{GitHubApi, NewCheckRun};
 pub use app::{AppCredentials, GitHubAuth};
 pub use writer::GitHubWriter;

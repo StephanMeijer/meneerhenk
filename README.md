@@ -663,4 +663,6 @@ line in `docs/SPEC.md` once the team confirms it.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
 - §4 On GitHub, triage sets labels, type and links; priority, effort and
   target date are not set in this version.
-- Everywhere: the only rate limit is `review.max_concurrent`.
+- Everywhere: the only rate limit is `review.max_concurrent`. On GitHub, a
+  review waiting for a slot shows its check as *queued* until it starts
+  (§3.3).

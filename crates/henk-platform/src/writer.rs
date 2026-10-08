@@ -101,13 +101,32 @@ pub trait PlatformWriter: Send + Sync {
         base_ref: &str,
     ) -> Result<Vec<FilePatch>, PlatformError>;
 
+    /// Shows that a review waits for a slot (#262): GitHub, a check run
+    /// *queued*, the grey one, with `title` and `summary`, linked to `link`.
+    /// Returns its handle for `start_review` and `finish_review`. Nothing
+    /// by default: on GitLab a pending commit status could block a merge,
+    /// and Henk never blocks one (§8.2).
+    async fn queue_review(
+        &self,
+        _target: &ReviewTarget,
+        _commit: &CommitSha,
+        _title: &str,
+        _summary: &str,
+        _link: &str,
+    ) -> Result<Option<ReviewHandle>, PlatformError> {
+        Ok(None)
+    }
+
     /// Marks a review as started (GitHub: check run in progress; GitLab:
-    /// award emoji). Returns a handle for `finish_review` when there is one.
+    /// award emoji). `queued` is the check `queue_review` opened, which
+    /// then moves to in progress instead of a second one being made.
+    /// Returns a handle for `finish_review` when there is one.
     async fn start_review(
         &self,
         target: &ReviewTarget,
         commit: &CommitSha,
         run_link: &str,
+        queued: Option<&ReviewHandle>,
     ) -> Result<Option<ReviewHandle>, PlatformError>;
 
     /// Reacts 👀 to a comment (§3.1).

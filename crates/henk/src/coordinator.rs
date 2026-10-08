@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use henk_domain::allowlist::Platform;
 use henk_domain::queue::{Decision, decide};
-use henk_domain::review::CommitSha;
+use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::RunId;
-use henk_platform::{IssueTarget, ReviewTarget};
+use henk_platform::{IssueTarget, ReviewHandle, ReviewTarget};
 use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -139,7 +139,73 @@ fn leave(
     slots_changed.send_replace(());
 }
 
-/// Starts and tracks background runs.
+/// Opens the review's check as queued on the pull request (#262), when
+/// the platform has one and the review could run once it has a slot.
+/// Henk's failure to open it is logged; the review waits all the same.
+async fn queue_check(app: &App, request: &ReviewRequest) -> Option<ReviewHandle> {
+    let (Some(run), Some(commit)) = (&request.run, &request.commit) else {
+        return None;
+    };
+    if !app.settings.allowlist.allows(&request.target.repo) || app.settings.lanes.is_empty() {
+        return None;
+    }
+    let writer = app.writer(request.target.platform()).ok()?;
+    let limit = app.settings.review.max_concurrent.max(1);
+    let summary = format!(
+        "Waiting for a review slot: all {limit} are in use. Henk starts this review when one frees."
+    );
+    let link = app.settings.queue_link(run);
+    match writer
+        .queue_review(&request.target, commit, "Queued", &summary, &link)
+        .await
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            warn!(%error, run = %run, "could not show the review as queued");
+            None
+        }
+    }
+}
+
+/// A review that never got its slot: cancelled from the dashboard,
+/// superseded by a newer commit, or stopped with Henk. Its queued check,
+/// if it has one, is closed so nothing stays queued (#262).
+async fn ended_while_queued(app: &App, request: &ReviewRequest) {
+    let Some(run) = request.run.as_ref() else {
+        return;
+    };
+    if let Some(by) = app.cancels.cancelled_by(run) {
+        if let Err(error) = report_cancelled_while_queued(app, request, &by).await {
+            warn!(%error, "could not record the cancelled review");
+        }
+        return;
+    }
+    let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
+        info!("review stopped before it started");
+        return;
+    };
+    let outcome = if app.cancels.superseded_by(run).is_some() {
+        info!("review superseded before it started");
+        ReviewOutcome::superseded(commit.clone())
+    } else {
+        info!("review stopped with Henk before it started");
+        ReviewOutcome::interrupted(commit.clone())
+    };
+    let link = app.settings.queue_link(run);
+    match app.writer(request.target.platform()) {
+        Ok(writer) => {
+            if let Err(error) = writer
+                .finish_review(&request.target, commit, Some(handle), &outcome, &link)
+                .await
+            {
+                warn!(%error, "could not close the queued check");
+            }
+        }
+        Err(error) => warn!(%error, "could not close the queued check"),
+    }
+}
+
+/// Starts and tracks background runs./// Starts and tracks background runs.
 pub struct Coordinator {
     app: Arc<App>,
     active: Arc<Mutex<HashMap<Key, Active>>>,
@@ -329,30 +395,30 @@ impl Coordinator {
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
         tokio::spawn(async move {
             let _cancellable = cancellable;
-            // A review waiting for a slot still hears its token: a cancel
-            // ends it now, not once a slot frees.
-            let permit = tokio::select! {
-                biased;
-                () = cancel.cancelled() => None,
-                permit = slots.acquire_owned() => match permit {
-                    Ok(permit) => Some(permit),
-                    Err(_) => return,
-                },
+            let mut request = request;
+            // A free slot starts the review at once, as before. Otherwise
+            // the pull request shows it queued while it waits (#262).
+            let permit = match Arc::clone(&slots).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(tokio::sync::TryAcquireError::Closed) => return,
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    request.queued_check = queue_check(&app, &request).await;
+                    // A review waiting for a slot still hears its token: a
+                    // cancel ends it now, not once a slot frees.
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => None,
+                        permit = slots.acquire_owned() => match permit {
+                            Ok(permit) => Some(permit),
+                            Err(_) => return,
+                        },
+                    }
+                }
             };
             started.store(true, std::sync::atomic::Ordering::Relaxed);
             slots_changed.send_replace(());
             if cancel.is_cancelled() {
-                let by = request
-                    .run
-                    .as_ref()
-                    .and_then(|run| app.cancels.cancelled_by(run));
-                if let Some(by) = by {
-                    if let Err(error) = report_cancelled_while_queued(&app, &request, &by).await {
-                        warn!(%error, "could not record the cancelled review");
-                    }
-                } else {
-                    info!("review superseded before it started");
-                }
+                ended_while_queued(&app, &request).await;
             } else if let Err(error) = run_review(&app, request, cancel).await {
                 warn!(%error, "review ended with an error");
             }

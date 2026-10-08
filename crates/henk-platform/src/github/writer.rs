@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tracing::{debug, instrument};
 
 use crate::error::PlatformError;
-use crate::github::api::GitHubApi;
+use crate::github::api::{GitHubApi, NewCheckRun};
 use crate::writer::{
     DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
     PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
@@ -143,21 +143,63 @@ impl PlatformWriter for GitHubWriter {
     }
 
     #[instrument(skip_all, fields(repo = %target.repo.path(), number = target.number))]
-    async fn start_review(
+    async fn queue_review(
         &self,
         target: &ReviewTarget,
         commit: &CommitSha,
-        run_link: &str,
+        title: &str,
+        summary: &str,
+        link: &str,
     ) -> Result<Option<ReviewHandle>, PlatformError> {
         let id = self
             .api
             .create_check_run(
                 target.repo.owner(),
                 target.repo.name(),
-                CHECK_NAME,
-                commit.as_str(),
-                run_link,
-                run_link,
+                &NewCheckRun {
+                    name: CHECK_NAME,
+                    head_sha: commit.as_str(),
+                    status: "queued",
+                    details_url: link,
+                    external_id: link,
+                    output: Some((title, summary)),
+                },
+            )
+            .await?;
+        Ok(Some(ReviewHandle(id.to_string())))
+    }
+
+    #[instrument(skip_all, fields(repo = %target.repo.path(), number = target.number))]
+    async fn start_review(
+        &self,
+        target: &ReviewTarget,
+        commit: &CommitSha,
+        run_link: &str,
+        queued: Option<&ReviewHandle>,
+    ) -> Result<Option<ReviewHandle>, PlatformError> {
+        if let Some(handle) = queued {
+            let id: u64 = handle
+                .0
+                .parse()
+                .map_err(|_| PlatformError::Decode(format!("check run id {:?}", handle.0)))?;
+            self.api
+                .start_check_run(target.repo.owner(), target.repo.name(), id, run_link)
+                .await?;
+            return Ok(Some(handle.clone()));
+        }
+        let id = self
+            .api
+            .create_check_run(
+                target.repo.owner(),
+                target.repo.name(),
+                &NewCheckRun {
+                    name: CHECK_NAME,
+                    head_sha: commit.as_str(),
+                    status: "in_progress",
+                    details_url: run_link,
+                    external_id: run_link,
+                    output: None,
+                },
             )
             .await?;
         Ok(Some(ReviewHandle(id.to_string())))

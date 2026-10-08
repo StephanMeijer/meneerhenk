@@ -232,9 +232,12 @@ pub struct ReviewOutcome {
     /// Why the review stopped before it ended, if it did. A stopped review
     /// is not complete (§3.3).
     pub stopped: Option<Stopped>,
+    /// Why it was not reviewed, with [`Stopped::NotReviewed`] (#262): Henk's
+    /// own words, such as "pull request #7 is a draft".
+    pub not_reviewed: Option<String>,
 }
 
-/// Why a review stopped before it ended. The three exclude each other.
+/// Why a review stopped before it ended. They exclude each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
     /// A newer commit arrived; the review of the newer commit stands
@@ -245,43 +248,48 @@ pub enum Stopped {
     /// A person cancelled the review from the dashboard (#69). Not Henk's
     /// failure.
     Cancelled,
+    /// It waited for a slot with its check queued, and once it had one the
+    /// pull request could not be reviewed: closed, a draft, or the
+    /// configuration no longer allows it (#262). Not Henk's failure.
+    NotReviewed,
 }
 
 impl ReviewOutcome {
-    /// The outcome of a review stopped because a newer commit arrived.
-    #[must_use]
-    pub fn superseded(commit: CommitSha) -> Self {
+    /// A review that stopped before it ended, for `why`.
+    fn stopped_as(commit: CommitSha, why: Stopped, not_reviewed: Option<String>) -> Self {
         Self {
             commit,
             lanes: Vec::new(),
             open_findings: 0,
             nothing_to_review: false,
-            stopped: Some(Stopped::Superseded),
+            stopped: Some(why),
+            not_reviewed,
         }
+    }
+
+    /// The outcome of a review stopped because a newer commit arrived.
+    #[must_use]
+    pub fn superseded(commit: CommitSha) -> Self {
+        Self::stopped_as(commit, Stopped::Superseded, None)
     }
 
     /// The outcome of a review a person cancelled from the dashboard.
     #[must_use]
     pub fn cancelled(commit: CommitSha) -> Self {
-        Self {
-            commit,
-            lanes: Vec::new(),
-            open_findings: 0,
-            nothing_to_review: false,
-            stopped: Some(Stopped::Cancelled),
-        }
+        Self::stopped_as(commit, Stopped::Cancelled, None)
     }
 
     /// The outcome of a review Henk was stopped in the middle of.
     #[must_use]
     pub fn interrupted(commit: CommitSha) -> Self {
-        Self {
-            commit,
-            lanes: Vec::new(),
-            open_findings: 0,
-            nothing_to_review: false,
-            stopped: Some(Stopped::Interrupted),
-        }
+        Self::stopped_as(commit, Stopped::Interrupted, None)
+    }
+
+    /// The outcome of a review that waited for a slot and then could not
+    /// run, for `reason` in Henk's own words (#262).
+    #[must_use]
+    pub fn not_reviewed(commit: CommitSha, reason: impl Into<String>) -> Self {
+        Self::stopped_as(commit, Stopped::NotReviewed, Some(reason.into()))
     }
 
     /// Whether the review completed: at least one lane finished, or there
@@ -314,7 +322,10 @@ impl ReviewOutcome {
     /// The GitHub check conclusion.
     #[must_use]
     pub fn check_conclusion(&self) -> CheckConclusion {
-        if matches!(self.stopped, Some(Stopped::Superseded | Stopped::Cancelled)) {
+        if matches!(
+            self.stopped,
+            Some(Stopped::Superseded | Stopped::Cancelled | Stopped::NotReviewed)
+        ) {
             // Stopped on purpose: neither a pass nor Henk's failure (§8.2).
             CheckConclusion::Neutral
         } else if !self.completed() {
@@ -341,6 +352,10 @@ impl ReviewOutcome {
             Some(Stopped::Superseded) => return "Superseded by a newer commit.".to_owned(),
             Some(Stopped::Interrupted) => return "Review interrupted.".to_owned(),
             Some(Stopped::Cancelled) => return "Cancelled from the dashboard.".to_owned(),
+            Some(Stopped::NotReviewed) => {
+                let why = self.not_reviewed.as_deref().unwrap_or("it could not run");
+                return format!("Not reviewed: {why}.");
+            }
             None => {}
         }
         if !self.completed() {
@@ -410,6 +425,7 @@ mod tests {
             open_findings,
             nothing_to_review: false,
             stopped: None,
+            not_reviewed: None,
         }
     }
 
@@ -540,6 +556,19 @@ mod tests {
             "Cancelled from the dashboard."
         );
         assert!(crate::text::is_in_style(&cancelled.summary()));
+    }
+
+    #[test]
+    fn a_review_that_could_not_run_after_waiting_is_neutral_and_says_why() {
+        let draft =
+            ReviewOutcome::not_reviewed(outcome(&[], 0).commit, "pull request #7 is a draft");
+        assert!(!draft.completed());
+        assert_eq!(draft.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(
+            draft.headline(),
+            "Not reviewed: pull request #7 is a draft."
+        );
+        assert!(crate::text::is_in_style(&draft.summary()));
     }
 
     #[test]

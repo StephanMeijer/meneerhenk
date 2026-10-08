@@ -117,10 +117,11 @@ change against the target branch.
 
 | Moment | GitHub | GitLab |
 |---|---|---|
-| Review starts | A check "Meneer Henk", *in progress*, linked to the run | Henk's award emoji on the MR *(in development)* |
+| Review waits for a slot | The check "Meneer Henk", *queued* (grey), "Waiting for a review slot", linked to the dashboard's overview, which lists it. A review that gets a slot at once skips this | Nothing: a pending commit status could block a merge where pipelines must succeed |
+| Review starts | The check "Meneer Henk", *in progress*, linked to the run: the queued one moves on, or a new one | Henk's award emoji on the MR *(in development)* |
 | During | Line comments appear one by one | Diff discussions appear one by one |
 | Review ends | A **summary comment**: "No issues found" or "N issues found", and which lanes did not finish | A **summary note** with the same content |
-| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). A review superseded by a newer commit completes neutral, "Superseded by a newer commit.", and posts no comment | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
+| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). A review superseded by a newer commit completes neutral, "Superseded by a newer commit.", and posts no comment. A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
 - **Only the latest summary counts.** When he posts a new summary, his
   earlier summaries and failure comments are folded as outdated, and so are his comments in
