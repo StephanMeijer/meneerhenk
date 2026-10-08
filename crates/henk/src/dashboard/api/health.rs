@@ -9,13 +9,20 @@ use axum::extract::State;
 use henk_store::{Page, RunFilter};
 
 use super::types::{Health, HealthCheck};
+use crate::app::App;
+use crate::coordinator::Coordinator;
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
 use crate::doctor::{Verdict, check_secrets};
 
 /// `GET /health`.
 pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: ApiViewer) -> Json<Health> {
-    let checks = health_rows(&dashboard)
+    Json(health_of(&dashboard.app, &dashboard.coordinator, &dashboard.listeners).await)
+}
+
+/// What the service has: `GET /health` and the MCP server's `health`.
+pub(crate) async fn health_of(app: &App, coordinator: &Coordinator, listeners: &[&str]) -> Health {
+    let checks = health_rows(app, coordinator, listeners)
         .await
         .into_iter()
         .map(|(name, state, detail)| HealthCheck {
@@ -24,13 +31,17 @@ pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: ApiViewer)
             detail,
         })
         .collect();
-    Json(Health { checks })
+    Health { checks }
 }
 
 /// What was checked, `ok`, `warn` or `fail`, and the detail.
-async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
-    let settings = &dashboard.app.settings;
-    let store = &dashboard.app.store;
+async fn health_rows(
+    app: &App,
+    coordinator: &Coordinator,
+    listeners: &[&str],
+) -> Vec<(String, String, String)> {
+    let settings = &app.settings;
+    let store = &app.store;
     let mut rows: Vec<(String, String, String)> = Vec::new();
     let store_ok = store
         .list_runs(&RunFilter::default(), Page::new(1, 0))
@@ -53,12 +64,12 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
     rows.push((
         "listeners".to_owned(),
         "ok".to_owned(),
-        dashboard.listeners.join(", "),
+        listeners.join(", "),
     ));
     rows.push((
         "reviews".to_owned(),
         "ok".to_owned(),
-        reviews_line(&dashboard.coordinator.slots()),
+        reviews_line(&coordinator.slots()),
     ));
     for check in check_secrets(settings) {
         let (verdict, text) = match check.verdict {
