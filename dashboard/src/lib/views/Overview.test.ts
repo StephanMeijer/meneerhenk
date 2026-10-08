@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DayStats, Health, OverviewStats, Page, RunSummary } from '$lib/api/types';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
-import { me, runSummary } from '$lib/testing/fixtures';
+import { me, runSummary, waitingReview } from '$lib/testing/fixtures';
 import { fakeConnect, firstOf } from '$lib/testing/source';
 import Overview from './Overview.svelte';
 
@@ -62,10 +62,11 @@ describe('Overview', () => {
     firstOf(sources).push('snapshot', {
       runs: [runSummary('r-9', 'running')],
       count: 3,
-      slots: { limit: 2, in_use: 2, waiting: [{ repo: 'docspec/app', target: 9, since: '2026-10-07T11:59:22Z' }] },
+      slots: { limit: 2, in_use: 2, waiting: [waitingReview('r-q9', 9, 1, { since: '2026-10-07T11:59:22Z' })] },
     });
     await settle(1);
     expect(document.body.textContent).toContain('Running now (3)');
+    expect(document.querySelector('#running-title + .note')?.textContent).toContain('3 running, 1 queued');
     expect(document.body.textContent).toContain('And 2 more not shown.');
     expect(runningIds()).toEqual(['r-9']);
     expect(rows('table.runs tbody tr').map((row) => row[1])).toEqual(['r-2', 'r-1']);
@@ -95,7 +96,7 @@ describe('Overview', () => {
     firstOf(sources).push('snapshot', {
       runs: [],
       count: 0,
-      slots: { limit: 2, in_use: 2, waiting: [{ repo: 'docspec/app', target: 9, since: '2026-10-07T11:59:22Z' }] },
+      slots: { limit: 2, in_use: 2, waiting: [waitingReview('r-q9', 9, 1, { since: '2026-10-07T11:59:22Z' })] },
     });
     await settle(1);
     const tiles = [...document.querySelectorAll('.tiles .tile')].map((t) => [
@@ -114,11 +115,39 @@ describe('Overview', () => {
       '8 from 31 drafts',
       '2 of 2 in use, 1 waiting',
     ]);
-    expect(document.querySelector('.stats .waiting')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
-      'docspec/app #9 0m 38s, no free slot',
-    );
+    expect(document.querySelector('.stats .waiting'), 'the Queued section lists them now').toBeNull();
+    const queued = document.querySelector('ol.queued li');
+    expect(queued?.querySelector('.when strong')?.textContent).toBe('0m 38s');
+    expect(queued?.querySelector('.why')?.textContent).toBe('no free slot (2 of 2 in use)');
     const runsTable = [...document.querySelectorAll('.stats figure')][0]?.querySelectorAll('tr');
     expect([...(runsTable ?? [])].map((r) => r.textContent)).toEqual(['2026-10-0510', '2026-10-0641', '2026-10-073']);
+  });
+});
+
+describe('Queued', () => {
+  it('follows what waits for a slot live, and drops one once it runs', async () => {
+    const { connect, sources } = fakeConnect();
+    render(Overview, { me, query: new URLSearchParams(), connect, ...loaders() });
+    await settle();
+    const source = firstOf(sources);
+    source.push('snapshot', { runs: [], count: 0, slots: { limit: 1, in_use: 0, waiting: [] } });
+    await settle(1);
+    expect(document.querySelector('[aria-labelledby="queued-title"]')?.textContent).toContain('Nothing is waiting.');
+
+    source.push('slots', { limit: 1, in_use: 1, waiting: [waitingReview('r-a', 8, 1), waitingReview('r-b', 9, 2)] });
+    await settle(1);
+    const ids = () => [...document.querySelectorAll('ol.queued li .who-what .mono')].map((n) => n.textContent);
+    expect(ids()).toEqual(['r-a', 'r-b']);
+    expect(document.querySelector('#queued-title')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Queued (2)');
+
+    // r-a takes the slot: its run comes a moment before the slots that drop it.
+    source.push('run', runSummary('r-a', 'running'));
+    await settle(1);
+    expect(ids(), 'not shown twice').toEqual(['r-b']);
+    expect(document.querySelector('#running-title + .note')?.textContent).toContain('1 running, 1 queued');
+    source.push('slots', { limit: 1, in_use: 1, waiting: [waitingReview('r-b', 9, 1)] });
+    await settle(1);
+    expect(ids()).toEqual(['r-b']);
   });
 });
 

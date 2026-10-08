@@ -16,6 +16,7 @@
   import Problem from '$lib/ui/Problem.svelte';
   import Status from '$lib/ui/Status.svelte';
   import HealthTiles from './HealthTiles.svelte';
+  import Queued from './Queued.svelte';
   import RunsTable from './RunsTable.svelte';
   import StageStepper from './StageStepper.svelte';
   import StatTiles from './StatTiles.svelte';
@@ -82,6 +83,13 @@
     return () => following.close();
   });
 
+  /** The runs "Running now" lists, so a review that just took its slot is
+   * not also shown as queued. */
+  let shownIds = $derived(running.runs.map((run) => run.id));
+  let queuedCount = $derived(
+    (running.slots?.waiting ?? []).filter((entry) => !shownIds.includes(entry.run_id)).length,
+  );
+
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -124,12 +132,12 @@
 
 <HealthTiles load={health} />
 
-<StatTiles slots={running.slots} {now} load={loadStats} />
+<StatTiles slots={running.slots} load={loadStats} />
 
 <section class="panel" aria-labelledby="running-title">
   <div class="panel-head">
     <h2 id="running-title">Running now <span class="count-badge">({running.count})</span></h2>
-    <span class="note">Updates as runs start and end</span>
+    <span class="note">{running.count} running, {queuedCount} queued · Updates as runs start and end</span>
   </div>
   {#if running.runs.length === 0}
     <Empty why="Nothing runs right now." />
@@ -164,6 +172,8 @@
     <div class="panel-foot">And {running.count - running.runs.length} more not shown.</div>
   {/if}
 </section>
+
+<Queued slots={running.slots} shown={shownIds} {now} />
 
 <section class="panel" aria-labelledby="runs-title">
   <div class="panel-head">

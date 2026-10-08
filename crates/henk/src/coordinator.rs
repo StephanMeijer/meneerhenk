@@ -46,6 +46,9 @@ struct Active {
     since: time::OffsetDateTime,
     /// Whether it holds a review slot yet (#225).
     started: Arc<std::sync::atomic::AtomicBool>,
+    /// What started it and who asked, for the queue (#251).
+    trigger: String,
+    requester: Option<String>,
 }
 
 /// The review slots: how many there are, how many are taken, and what
@@ -56,19 +59,68 @@ pub struct Slots {
     pub limit: usize,
     /// Slots a review holds now.
     pub in_use: usize,
-    /// Reviews waiting for a slot, longest waiting first.
+    /// Reviews waiting for a slot, in the order they will start.
     pub waiting: Vec<Waiting>,
+}
+
+/// Why a review waits (#251).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// Every review slot is taken. A review never waits behind another of
+    /// the same pull request: a new commit supersedes it, the same commit
+    /// joins it.
+    NoSlot,
+}
+
+impl Reason {
+    /// The API's word for it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSlot => "no_slot",
+        }
+    }
 }
 
 /// A review waiting for a slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
+    /// The run it will be; no record exists until it starts.
+    pub run: RunId,
+    /// Where the pull or merge request is.
+    pub platform: Platform,
     /// `owner/name`.
     pub repo: String,
     /// The pull or merge request.
     pub number: u64,
+    /// The commit it will review.
+    pub commit: CommitSha,
+    /// What started it.
+    pub trigger: String,
+    /// Who asked, as a stable id, when someone did.
+    pub requester: Option<String>,
     /// When the coordinator took it.
     pub since: time::OffsetDateTime,
+    /// Its place in the queue, from 1.
+    pub position: usize,
+    /// Why it waits.
+    pub reason: Reason,
+}
+
+/// A waiting review as the queue shows it; its position is set by the caller.
+fn waiting(key: &Key, active: &Active) -> Waiting {
+    Waiting {
+        run: active.run.clone(),
+        platform: key.platform,
+        repo: key.repo.clone(),
+        number: key.number,
+        commit: active.commit.clone(),
+        trigger: active.trigger.clone(),
+        requester: active.requester.clone(),
+        since: active.since,
+        position: 0,
+        reason: Reason::NoSlot,
+    }
 }
 
 /// A review of `generation` leaves the queue, unless a newer one took its
@@ -126,10 +178,32 @@ impl Coordinator {
         &self.app
     }
 
-    /// Reviews running or waiting for a slot right now.
+    /// Reviews running or waiting for a slot right now: what a shutdown
+    /// waits for, as both hear its token.
     #[must_use]
-    pub fn active_reviews(&self) -> usize {
+    pub fn tracked_reviews(&self) -> usize {
         self.active.lock().map_or(0, |m| m.len())
+    }
+
+    /// Reviews that hold a slot right now (#251: a waiting one does not
+    /// count as running).
+    #[must_use]
+    pub fn running_reviews(&self) -> usize {
+        self.active.lock().map_or(0, |m| {
+            m.values()
+                .filter(|a| a.started.load(std::sync::atomic::Ordering::Relaxed))
+                .count()
+        })
+    }
+
+    /// Reviews waiting for a slot right now.
+    #[must_use]
+    pub fn queued_reviews(&self) -> usize {
+        self.active.lock().map_or(0, |m| {
+            m.values()
+                .filter(|a| !a.started.load(std::sync::atomic::Ordering::Relaxed))
+                .count()
+        })
     }
 
     /// The review slots and what waits for one.
@@ -137,26 +211,39 @@ impl Coordinator {
     pub fn slots(&self) -> Slots {
         let limit = self.app.settings.review.max_concurrent.max(1);
         let in_use = limit.saturating_sub(self.review_slots.available_permits());
-        let mut waiting: Vec<Waiting> = self.active.lock().map_or_else(
+        // In the order they were taken. The slot semaphore is fair, so that
+        // is the order they start in, short of two requests within the same
+        // scheduler tick asking for a slot the other way round.
+        let mut queued: Vec<(u64, Waiting)> = self.active.lock().map_or_else(
             |_| Vec::new(),
             |active| {
                 active
                     .iter()
                     .filter(|(_, a)| !a.started.load(std::sync::atomic::Ordering::Relaxed))
-                    .map(|(key, a)| Waiting {
-                        repo: key.repo.clone(),
-                        number: key.number,
-                        since: a.since,
-                    })
+                    .map(|(key, a)| (a.generation, waiting(key, a)))
                     .collect()
             },
         );
-        waiting.sort_by_key(|w| w.since);
+        queued.sort_by_key(|(generation, _)| *generation);
+        let waiting = queued
+            .into_iter()
+            .enumerate()
+            .map(|(at, (_, entry))| Waiting {
+                position: at + 1,
+                ..entry
+            })
+            .collect();
         Slots {
             limit,
             in_use,
             waiting,
         }
+    }
+
+    /// Takes a review slot as a review would, so a test can fill them.
+    #[cfg(test)]
+    pub(crate) fn take_a_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.review_slots).try_acquire_owned().ok()
     }
 
     /// Wakes when a review starts waiting, takes or frees a slot, or leaves
@@ -221,6 +308,8 @@ impl Coordinator {
                     generation,
                     since: time::OffsetDateTime::now_utc(),
                     started: Arc::clone(&started),
+                    trigger: request.trigger.clone(),
+                    requester: request.requester.clone(),
                 },
             );
             (decision, cancel, started)

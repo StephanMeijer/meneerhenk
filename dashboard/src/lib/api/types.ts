@@ -395,6 +395,18 @@ waiting: Array<WaitingReview>, };
 
 export type WaitingReview = { 
 /**
+ * The run it will be; cancel it with `POST /runs/{id}/cancel`.
+ */
+run_id: string, 
+/**
+ * `review`; plans and address runs join the queue with #79.
+ */
+kind: string, 
+/**
+ * `github` or `gitlab`.
+ */
+platform: string, 
+/**
  * `owner/name`.
  */
 repo: string, 
@@ -403,9 +415,33 @@ repo: string,
  */
 target: number, 
 /**
- * RFC 3339: since when it waits.
+ * A link to it, when one can be made.
  */
-since: string, };
+target_url: string | null, 
+/**
+ * The commit it will review.
+ */
+commit: string, 
+/**
+ * What started it.
+ */
+trigger: string, 
+/**
+ * Who asked, as a stable id, when someone did.
+ */
+requester: string | null, 
+/**
+ * RFC 3339: since when it waits, the time it was requested.
+ */
+since: string, 
+/**
+ * Its place in the queue, from 1: the order it starts in.
+ */
+position: number, 
+/**
+ * Why it waits: `no_slot`, every review slot is taken.
+ */
+reason: string, };
 
 export type OverviewStats = { 
 /**

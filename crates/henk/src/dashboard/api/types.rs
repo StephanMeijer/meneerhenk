@@ -125,16 +125,67 @@ pub struct Slots {
     pub waiting: Vec<WaitingReview>,
 }
 
-/// A review waiting for a slot.
+/// A review waiting for a slot (#251). It has its run id, but no run
+/// record until it starts.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WaitingReview {
+    /// The run it will be; cancel it with `POST /runs/{id}/cancel`.
+    pub run_id: String,
+    /// `review`; plans and address runs join the queue with #79.
+    pub kind: String,
+    /// `github` or `gitlab`.
+    pub platform: String,
     /// `owner/name`.
     pub repo: String,
     /// The pull or merge request.
     pub target: u64,
-    /// RFC 3339: since when it waits.
+    /// A link to it, when one can be made.
+    pub target_url: Option<String>,
+    /// The commit it will review.
+    pub commit: String,
+    /// What started it.
+    pub trigger: String,
+    /// Who asked, as a stable id, when someone did.
+    pub requester: Option<String>,
+    /// RFC 3339: since when it waits, the time it was requested.
     pub since: String,
+    /// Its place in the queue, from 1: the order it starts in.
+    pub position: u64,
+    /// Why it waits: `no_slot`, every review slot is taken.
+    pub reason: String,
+}
+
+impl WaitingReview {
+    pub(super) fn from_waiting(settings: &Settings, waiting: crate::coordinator::Waiting) -> Self {
+        Self {
+            run_id: waiting.run.as_str().to_owned(),
+            kind: kind_name(RunKind::Review).to_owned(),
+            platform: match waiting.platform {
+                Platform::GitHub => "github",
+                Platform::GitLab => "gitlab",
+            }
+            .to_owned(),
+            target_url: link_to(
+                settings,
+                waiting.platform,
+                &waiting.repo,
+                waiting.number,
+                false,
+            ),
+            repo: waiting.repo,
+            target: waiting.number,
+            commit: waiting.commit.as_str().to_owned(),
+            trigger: waiting.trigger,
+            requester: waiting.requester,
+            since: waiting
+                .since
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+            position: u64::try_from(waiting.position).unwrap_or(u64::MAX),
+            reason: waiting.reason.as_str().to_owned(),
+        }
+    }
 }
 
 /// What happened per UTC day (#225): `GET /stats/overview`.

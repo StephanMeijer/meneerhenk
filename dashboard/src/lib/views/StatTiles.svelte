@@ -1,7 +1,7 @@
 <script lang="ts">
   import { overviewStats } from '$lib/api/client';
   import type { DayStats, OverviewStats, Slots } from '$lib/api/types';
-  import { count, duration } from '$lib/format';
+  import { count } from '$lib/format';
   import Problem from '$lib/ui/Problem.svelte';
   import Spark from '$lib/ui/Spark.svelte';
 
@@ -10,11 +10,9 @@
    * still counting. */
   let {
     slots,
-    now = () => new Date(),
     load = overviewStats,
   }: {
     slots: Slots | null;
-    now?: () => Date;
     load?: () => Promise<OverviewStats>;
   } = $props();
 
@@ -27,7 +25,6 @@
     days.map((d) => (d.finished + d.failed === 0 ? 0 : (d.failed / (d.finished + d.failed)) * 100));
   const percent = (part: number, whole: number): string =>
     whole === 0 ? '-' : `${(Math.round((part / whole) * 1000) / 10).toString()}%`;
-  const waited = (since: string): string => duration(now().getTime() - Date.parse(since));
 </script>
 
 {#await stats then result}
@@ -78,13 +75,6 @@
             <rect class:used={i < slots.in_use} x={i * 10 + 0.5} y="0" width="9" height="6" rx="1.5" />
           {/each}
         </svg>
-        {#if slots.waiting.length > 0}
-          <ul class="waiting">
-            {#each slots.waiting as review (`${review.repo}#${review.target}`)}
-              <li><span class="mono">{review.repo} #{review.target}</span> <span class="muted">{waited(review.since)}, no free slot</span></li>
-            {/each}
-          </ul>
-        {/if}
       {/if}
     </li>
   </ul>
@@ -117,5 +107,4 @@
   .slot-bars { width: 100%; height: 8px; }
   .slot-bars rect { fill: var(--sunk); }
   .slot-bars rect.used { fill: var(--accent); }
-  .waiting { list-style: none; margin: 0; padding: 0; font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
 </style>

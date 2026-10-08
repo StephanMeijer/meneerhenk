@@ -1,5 +1,5 @@
 // Shapes the API returns, for the view tests.
-import type { Draft, Me, RunDetail, RunSummary, Stage } from '$lib/api/types';
+import type { Draft, Me, RunDetail, RunSummary, Stage, WaitingReview } from '$lib/api/types';
 
 export const me: Me = { github_id: 1234, login: 'alice', csrf: 'tok', startable: ['review', 'plan'] };
 
@@ -86,4 +86,23 @@ export function reviewStages(): Stage[] {
     stage('publish', 'done', '1 line comment and the summary', 5, 5),
     stage('done', 'done', 'check 4711 closed', 5, 5),
   ];
+}
+
+/** A review waiting for a slot (#251). */
+export function waitingReview(runId: string, target: number, position: number, overrides: Partial<WaitingReview> = {}): WaitingReview {
+  return {
+    run_id: runId,
+    kind: 'review',
+    platform: 'github',
+    repo: 'docspec/app',
+    target,
+    target_url: `https://github.com/docspec/app/pull/${target}`,
+    commit: '9f31c0d8e2a1b4c5d6e7f8091a2b3c4d5e6f7081',
+    trigger: 'new commits',
+    requester: null,
+    since: '2026-10-07T11:50:00Z',
+    position,
+    reason: 'no_slot',
+    ...overrides,
+  };
 }

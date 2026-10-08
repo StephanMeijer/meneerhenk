@@ -276,8 +276,16 @@ frees a slot, or leaves the queue. `RunningMessage` in
 `types.ts` is the union.
 
 `slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:
-the reviews waiting for a slot (`repo`, `target`, `since`), longest
-waiting first. A waiting review has no run yet.
+the reviews waiting for a slot, in the order they will start (#251). Each
+has `run_id`, `kind` (`review`), `platform`, `repo`, `target`,
+`target_url`, `commit`, `trigger`, `requester`, `since` (when it was
+requested), `position` (from 1) and `reason` (`no_slot`: every slot is
+taken; a review never waits behind another of the same pull request, as a
+new commit supersedes it and the same commit joins it). A waiting review
+has its run id but no run record until it starts; `POST
+/runs/{id}/cancel` cancels it, and it then ends as cancelled while
+queued. Every `slots` message holds the whole list, so a client replaces
+what it had.
 
 ### `GET /stats/overview`
 

@@ -332,14 +332,7 @@ fn slots(dashboard: &Dashboard) -> Slots {
         waiting: now
             .waiting
             .into_iter()
-            .map(|w| WaitingReview {
-                repo: w.repo,
-                target: w.number,
-                since: w
-                    .since
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .unwrap_or_default(),
-            })
+            .map(|w| WaitingReview::from_waiting(&dashboard.app.settings, w))
             .collect(),
     }
 }
