@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.19...v0.1.20) - 2026-10-08
+
+### Added
+
+- *(dashboard)* review quality with the check funnel and rate over time
+- *(dashboard)* a lane's conversation as it happens
+- *(dashboard)* lane reliability on the overview, and a page to compare lanes
+- *(dashboard)* events as a list with an inspector beside it
+
+### Fixed
+
+- *(dashboard)* the daily quality chart picks its groups from the days it draws
+- *(store)* leave cancelled reviews out of lane reliability
+
+### Other
+
+- Merge pull request #253 from StephanMeijer/feat/live-lane
+- Merge pull request #246 from StephanMeijer/feat/lane-reliability
+- Merge pull request #244 from StephanMeijer/feat/notice-pages
+- Merge pull request #243 from StephanMeijer/feat/events-inspector
+- Merge pull request #242 from StephanMeijer/feat/quality-flow
+- *(dashboard)* the daily quality chart test no longer depends on the date
+
 ## [0.1.19](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.18...v0.1.19) - 2026-10-08
 
 ### Added
