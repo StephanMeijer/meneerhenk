@@ -118,6 +118,17 @@ pub enum McpScope {
     Write,
 }
 
+impl McpScope {
+    /// The scope's word.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
 /// Checks the ways in besides the hooks: the dashboard and the MCP server.
 fn validate_ways_in(
     dashboard: Option<&DashboardConfig>,
@@ -1854,6 +1865,23 @@ impl Settings {
                 "Dashboard:       /dashboard for {} GitHub account(s), sign-in via ${}",
                 dashboard.allowed_github_ids.len(),
                 dashboard.client_id_env
+            );
+        }
+        if let Some(mcp) = &self.mcp_server {
+            let tokens: Vec<String> = mcp
+                .tokens
+                .iter()
+                .map(|t| format!("{} ({}, ${})", t.name, t.scope.as_str(), t.env))
+                .collect();
+            let _ = writeln!(
+                out,
+                "MCP server:      /mcp {}, tokens: {}",
+                if mcp.enabled { "on" } else { "off" },
+                if tokens.is_empty() {
+                    "none".to_owned()
+                } else {
+                    tokens.join(", ")
+                }
             );
         }
     }

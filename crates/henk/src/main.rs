@@ -228,7 +228,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Config {
             command: ConfigCommand::Check,
         } => {
-            println!("{}", load_settings(&cli.config)?.describe());
+            let settings = load_settings(&cli.config)?;
+            println!("{}", settings.describe());
+            // Whether each MCP client's token is set (#250); --probe is
+            // doctor's.
+            let mcp = doctor::check_mcp_server(&settings, false, app::env_var).await;
+            if !mcp.is_empty() {
+                let rendered = doctor::render(&mcp);
+                // The checks' lines, without doctor's count at the end.
+                for line in rendered.lines().filter(|line| line.starts_with('[')) {
+                    println!("{line}");
+                }
+            }
             Ok(())
         }
         Command::Config {
