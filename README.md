@@ -267,8 +267,8 @@ names must not equal a model name. Another repository is one more entry in
 
 The `Dockerfile` builds one image with `henk`, the `github-mcp-server`
 binary from its official image, and `@zereight/mcp-gitlab` installed
-under `/opt/mcp-gitlab`, on a distroless Node base, running as user
-65532. It cross-compiles, so `docker buildx build --platform
+under `/opt/mcp-gitlab`, on Debian slim with `git` and CA certificates
+(Henk runs `git` itself for checkouts), running as user 65532. It cross-compiles, so `docker buildx build --platform
 linux/amd64,linux/arm64` works on an amd64 builder.
 
 ```sh
@@ -283,8 +283,8 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
 
 `deploy/henk.container.example.toml` is the example config with the
 container's paths: the GitLab servers are started as `node
-/opt/mcp-gitlab/.../build/index.js` because distroless has no
-`/usr/bin/env`. The only writable path is `/var/lib/henk`.
+/opt/mcp-gitlab/.../build/index.js` so they do not depend on the
+package's shebang. The only writable path is `/var/lib/henk`.
 
 Released images are on `ghcr.io/stephanmeijer/meneerhenk` (`:X.Y.Z`,
 `:X.Y`, `:latest`), signed with cosign and carrying SLSA provenance; each
