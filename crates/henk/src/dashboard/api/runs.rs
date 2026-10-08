@@ -16,7 +16,7 @@ use tracing::{info, warn};
 
 use super::types::{
     Cancelled, Draft, EventSummary, Finding, Lane, Page, RunCount, RunDetail, RunEvent, RunSummary,
-    StartRequest, Started, ToolCall, ToolUsageRow, Transcript, TranscriptRef,
+    Stage, StartRequest, Started, ToolCall, ToolUsageRow, Transcript, TranscriptRef,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
@@ -214,6 +214,12 @@ pub(super) async fn run_detail(
             .await?
             .iter()
             .map(EventSummary::from)
+            .collect(),
+        stages: store
+            .stages(&run.id)
+            .await?
+            .iter()
+            .map(Stage::from)
             .collect(),
         run: RunSummary::from_record(&dashboard.app.settings, run),
     })

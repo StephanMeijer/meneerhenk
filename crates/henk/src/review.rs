@@ -1,5 +1,6 @@
 //! The review orchestrator (§3).
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use henk_llm::ChatMessage;
 use henk_mcp::McpSession;
 use henk_platform::{PlatformWriter, PullRequestState, ReviewHandle, ReviewTarget};
 use henk_session::{SessionSpec, model_id, platform_tools, run_session};
-use henk_store::{NewRun, RunStatus};
+use henk_store::{FindingAction, NewRun, RunStatus, Stage, StageState};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -31,6 +32,7 @@ use crate::review_tools::{
     DiffFiles, GetFileDiff, ImproveFinding, LaneContext, ListChangedFiles, ListExistingFindings,
     PostFinding, ReadFile, WithdrawFinding, lane_continuation,
 };
+use crate::stages;
 
 /// The review was cancelled because a newer commit arrived.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -103,6 +105,9 @@ pub struct ReviewRequest {
     pub acknowledge: Option<(String, bool)>,
     /// The run id to use, when the caller already announced one.
     pub run: Option<RunId>,
+    /// When the coordinator took the request, so the run can show how long
+    /// it waited for a slot (#226). `None` outside the coordinator.
+    pub submitted_at: Option<time::OffsetDateTime>,
 }
 
 /// How a review ended, for the caller.
@@ -146,6 +151,7 @@ pub async fn run_review(
         .await?;
     info!(run = %run, commit = %commit.short(), "review started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
+    request_stages(app, &run, &request).await;
 
     if let Some((comment_id, is_review_comment)) = &request.acknowledge
         && let Err(error) = writer
@@ -169,6 +175,7 @@ pub async fn run_review(
             None
         }
     };
+    started_stage(app, &run, handle.as_ref(), &commit).await;
 
     let review = ReviewRun {
         app,
@@ -187,12 +194,14 @@ pub async fn run_review(
             } else {
                 RunStatus::Failed
             };
-            if let Err(error) = writer
+            let closed = writer
                 .finish_review(&request.target, &commit, handle.as_ref(), &outcome, &link)
-                .await
-            {
+                .await;
+            if let Err(error) = &closed {
                 error!(%error, "could not finish the check");
             }
+            let completed = outcome.completed();
+            end_stages(app, &run, closed.is_ok(), handle.as_ref(), completed).await;
             app.store
                 .finish_run(&run, status, Some(&summary), None)
                 .await?;
@@ -283,6 +292,18 @@ async fn report_superseded(
         error!(%finish_error, "could not finish the check of a superseded review");
     }
     let reason = Superseded.to_string();
+    let newer = app.cancels.superseded_by(run).map_or_else(
+        || "superseded by a newer commit".to_owned(),
+        |by| format!("superseded by {by}"),
+    );
+    stages::end(
+        &*app.store,
+        run,
+        StageState::Skipped,
+        &newer,
+        "a newer commit arrived",
+    )
+    .await;
     match app.cancels.superseded_by(run) {
         Some(by) => app.store.supersede_run(run, &by, &reason).await?,
         None => {
@@ -330,6 +351,15 @@ async fn report_cancelled(
     {
         error!(%finish_error, "could not finish the check of a cancelled review");
     }
+    let cancelled = format!("cancelled by {by}");
+    stages::end(
+        &*app.store,
+        run,
+        StageState::Skipped,
+        &cancelled,
+        &cancelled,
+    )
+    .await;
     app.store
         .finish_run(
             run,
@@ -371,6 +401,36 @@ pub async fn report_cancelled_while_queued(
         })
         .await?;
     info!(run = %run, by, "review cancelled from the dashboard before it started");
+    stages::request(
+        &*app.store,
+        &run,
+        request.submitted_at,
+        &request.trigger,
+        request.requester.as_deref(),
+    )
+    .await;
+    let cancelled = format!("cancelled by {by} while waiting for a slot");
+    // It never got a slot: the queue stage ends skipped, not done.
+    stages::mark_span(
+        &*app.store,
+        &run,
+        Stage::Queued,
+        StageState::Skipped,
+        &cancelled,
+        request
+            .submitted_at
+            .unwrap_or_else(time::OffsetDateTime::now_utc),
+        None,
+    )
+    .await;
+    stages::end(
+        &*app.store,
+        &run,
+        StageState::Skipped,
+        &cancelled,
+        &cancelled,
+    )
+    .await;
     match app.writer(platform) {
         Ok(writer) => {
             let body = Marker {
@@ -423,6 +483,14 @@ async fn report_interrupted(
     {
         error!(%finish_error, "could not finish the check of an interrupted review");
     }
+    stages::end(
+        &*app.store,
+        run,
+        StageState::Failed,
+        "interrupted",
+        "interrupted",
+    )
+    .await;
     app.store
         .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))
         .await?;
@@ -471,6 +539,7 @@ async fn report_failure(
     {
         error!(%finish_error, "could not finish the check after failure");
     }
+    stages::failed(&*app.store, run).await;
     app.store
         .finish_run(run, RunStatus::Failed, None, Some(&message))
         .await?;
@@ -512,11 +581,16 @@ async fn review_body(
         },
     ))));
 
+    let store = &*review.app.store;
+    stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
     let diff = fetch_diff(review, base_ref).await?;
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
     let results = if nothing_to_review {
+        for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
+            stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
+        }
         Vec::new()
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
@@ -562,11 +636,86 @@ async fn review_body(
         withdrawn: None,
     }
     .attach(&format!("{summary_text}\n\nRun: {link}"));
+    stages::mark(store, run, Stage::Publish, StageState::Running, "").await;
     writer
         .post_comment(target, &body)
         .await
         .context("posting the summary")?;
+    let published = published_line(store, run).await;
+    stages::mark(store, run, Stage::Publish, StageState::Done, published).await;
     Ok((outcome, summary_text))
+}
+
+/// The review's request and queue stages, from the coordinator's submit time.
+async fn request_stages(app: &App, run: &RunId, request: &ReviewRequest) {
+    let requester = request.requester.as_deref();
+    let submitted = request.submitted_at;
+    stages::requested(&*app.store, run, submitted, &request.trigger, requester).await;
+}
+
+/// The started stage: the check it opened, when it did.
+async fn started_stage(app: &App, run: &RunId, handle: Option<&ReviewHandle>, commit: &CommitSha) {
+    let started = match handle {
+        Some(ReviewHandle(check_id)) => format!("check {check_id} opened"),
+        None => format!("review of {} started", commit.short()),
+    };
+    stages::mark(&*app.store, run, Stage::Started, StageState::Done, started).await;
+}
+
+/// The done stage of a review that ran to its end: the check closed (or
+/// not), done when the review completed and failed when it did not.
+async fn end_stages(
+    app: &App,
+    run: &RunId,
+    closed: bool,
+    handle: Option<&ReviewHandle>,
+    completed: bool,
+) {
+    let done = match (closed, handle) {
+        (false, _) => "the check could not be closed".to_owned(),
+        (true, Some(ReviewHandle(check_id))) => format!("check {check_id} closed"),
+        (true, None) => "ended".to_owned(),
+    };
+    let state = if completed {
+        StageState::Done
+    } else {
+        StageState::Failed
+    };
+    stages::end(&*app.store, run, state, &done, "the review ended first").await;
+}
+
+/// What the review wrote on the pull request, in a line: `2 line comments,
+/// 1 improved, and the summary`.
+async fn published_line(store: &dyn henk_store::RunStore, run: &RunId) -> String {
+    let findings = store.findings(run).await.unwrap_or_default();
+    let count = |action: FindingAction| {
+        findings
+            .iter()
+            .filter(|f| f.action == action.as_str())
+            .count()
+    };
+    let mut parts = Vec::new();
+    let posted = count(FindingAction::Posted);
+    if posted > 0 {
+        parts.push(format!(
+            "{posted} line {}",
+            if posted == 1 { "comment" } else { "comments" }
+        ));
+    }
+    for (action, word) in [
+        (FindingAction::Improved, "improved"),
+        (FindingAction::Withdrawn, "withdrawn"),
+    ] {
+        let n = count(action);
+        if n > 0 {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    if parts.is_empty() {
+        "the summary".to_owned()
+    } else {
+        format!("{} and the summary", parts.join(", "))
+    }
 }
 
 /// Runs every configured lane on the diff, sharing one read session, and
@@ -616,6 +765,19 @@ async fn run_lanes(
     let mut workspaces = ReviewWorkspaces::open(app, target, commit, run, cancel).await;
     lanes.limits = workspaces.limits();
     let fact_check = build_fact_check(review, &lanes, workspaces.fact_check()).await?;
+    let store = &*app.store;
+    let configured = app.settings.lanes.len();
+    stages::mark(
+        store,
+        run,
+        Stage::Lanes,
+        StageState::Running,
+        format!(
+            "{configured} {}",
+            if configured == 1 { "lane" } else { "lanes" }
+        ),
+    )
+    .await;
     let mut set = spawn_lanes(review, &lanes, &mut workspaces).await?;
 
     let mut results = Vec::new();
@@ -631,6 +793,14 @@ async fn run_lanes(
             }
         }
     }
+    stages::mark(
+        store,
+        run,
+        Stage::Lanes,
+        lanes_state(&results),
+        lanes_line(&results),
+    )
+    .await;
     // Every lane has ended: check what they drafted, together, and write
     // what holds (#189). Nothing was written before this.
     let book = lanes
@@ -646,30 +816,111 @@ async fn run_lanes(
         store: Arc::clone(&app.store),
         registry: Arc::clone(&lanes.registry),
     };
-    if !book.is_empty() {
-        let verdicts = match &fact_check {
-            _ if cancel.is_cancelled() => None,
-            Some(checker) => Some(
-                checker
-                    .check_all(&book, &crate::drafts::open_findings(&lanes.registry))
-                    .await,
-            ),
-            None => Some(
-                book.iter()
-                    .map(|d| (d.id, henk_domain::draft::Verdict::NoCheck))
-                    .collect(),
-            ),
-        };
-        match verdicts {
-            Some(verdicts) if !cancel.is_cancelled() => {
-                crate::drafts::write_all(&writes, &book, &verdicts).await;
-            }
-            _ => crate::drafts::cancel_all(&writes, &book).await,
-        }
-    }
+    check_and_write(
+        review,
+        fact_check.as_ref(),
+        &book,
+        &lanes.registry,
+        &writes,
+        cancel,
+    )
+    .await;
     workspaces.close_all().await;
     results.sort_by(|a, b| a.lane.as_str().cmp(b.lane.as_str()));
     Ok(results)
+}
+
+/// Checks the lanes' drafts, together, and writes what holds (#189), with
+/// the fact-check and publish stages (#226). Nothing was written before.
+async fn check_and_write(
+    review: ReviewRun<'_>,
+    fact_check: Option<&FactChecker>,
+    book: &henk_domain::draft::DraftBook,
+    registry: &Arc<Mutex<FindingRegistry>>,
+    writes: &crate::drafts::ReviewWrites,
+    cancel: &CancellationToken,
+) {
+    let (store, run) = (&*review.app.store, review.run);
+    if book.is_empty() {
+        stages::mark(
+            store,
+            run,
+            Stage::FactCheck,
+            StageState::Skipped,
+            "no drafts",
+        )
+        .await;
+    } else {
+        let verdicts = match fact_check {
+            _ if cancel.is_cancelled() => None,
+            Some(checker) => {
+                stages::mark(store, run, Stage::FactCheck, StageState::Running, "").await;
+                let verdicts = checker
+                    .check_all(book, &crate::drafts::open_findings(registry))
+                    .await;
+                stages::mark(
+                    store,
+                    run,
+                    Stage::FactCheck,
+                    StageState::Done,
+                    stages::fact_check_line(&verdicts),
+                )
+                .await;
+                Some(verdicts)
+            }
+            None => {
+                stages::mark(
+                    store,
+                    run,
+                    Stage::FactCheck,
+                    StageState::Skipped,
+                    "no fact-check configured",
+                )
+                .await;
+                Some(
+                    book.iter()
+                        .map(|d| (d.id, henk_domain::draft::Verdict::NoCheck))
+                        .collect(),
+                )
+            }
+        };
+        match verdicts {
+            Some(verdicts) if !cancel.is_cancelled() => {
+                stages::mark(store, run, Stage::Publish, StageState::Running, "").await;
+                crate::drafts::write_all(writes, book, &verdicts).await;
+            }
+            _ => crate::drafts::cancel_all(writes, book).await,
+        }
+    }
+}
+
+/// How the lanes ended, in a line: `2 of 3 finished, 1 did not finish`.
+fn lanes_line(results: &[LaneResult]) -> String {
+    let count = |outcome: LaneOutcome| results.iter().filter(|r| r.outcome == outcome).count();
+    let mut line = format!(
+        "{} of {} finished",
+        count(LaneOutcome::Finished),
+        results.len()
+    );
+    let stopped = count(LaneOutcome::Stopped);
+    if stopped > 0 {
+        let _ = write!(line, ", {stopped} timed out");
+    }
+    let dropped = count(LaneOutcome::Dropped);
+    if dropped > 0 {
+        let _ = write!(line, ", {dropped} did not finish");
+    }
+    line
+}
+
+/// The lanes stage failed only when no lane ran to an end: the review then
+/// stands on nothing.
+fn lanes_state(results: &[LaneResult]) -> StageState {
+    if results.iter().any(|r| r.outcome != LaneOutcome::Dropped) {
+        StageState::Done
+    } else {
+        StageState::Failed
+    }
 }
 
 /// Server tools the lanes should not see on this repository. GitHub code
@@ -738,18 +989,16 @@ async fn fetch_diff(review: ReviewRun<'_>, base_ref: &str) -> anyhow::Result<Arc
         .files()
         .iter()
         .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
+    let numbers = format!(
+        "{} files, +{additions} -{deletions}; {} not reviewed",
+        diff.files().len(),
+        diff.ignored().len()
+    );
     let _ = app
         .store
-        .event(
-            run,
-            "info",
-            &format!(
-                "diff: {} files, +{additions} -{deletions}; {} not reviewed (review.ignore)",
-                diff.files().len(),
-                diff.ignored().len()
-            ),
-        )
+        .event(run, "info", &format!("diff: {numbers} (review.ignore)"))
         .await;
+    stages::mark(&*app.store, run, Stage::Diff, StageState::Done, numbers).await;
     Ok(Arc::new(diff))
 }
 
@@ -1238,6 +1487,7 @@ lanes = [{ name = "lane-a", model = "m" }]
             requester: None,
             acknowledge: None,
             run: Some(run.clone()),
+            submitted_at: None,
         }
     }
 
@@ -1250,6 +1500,79 @@ lanes = [{ name = "lane-a", model = "m" }]
             .iter()
             .map(|r| Marker::parse(&r.body).and_then(|m| m.kind))
             .collect()
+    }
+
+    /// The run's stages as (stage, state, detail), in order (#226).
+    async fn stage_list(app: &App, run: &RunId) -> Vec<(henk_store::Stage, StageState, String)> {
+        app.store
+            .stages(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.stage, s.state, s.detail))
+            .collect()
+    }
+
+    /// Whatever way a review ends, no stage of it is left running.
+    async fn assert_no_stage_running(app: &App, run: &RunId) {
+        let stages = stage_list(app, run).await;
+        assert!(
+            stages
+                .iter()
+                .all(|(_, state, _)| *state != StageState::Running),
+            "{stages:?}"
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|(stage, _, _)| *stage == henk_store::Stage::Done),
+            "{stages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_review_goes_through_its_stages_in_order() {
+        use henk_store::Stage;
+        let f = fixture(DIFF, ScriptedClient::new("scripted", [done(), done()])).await;
+        let run = RunId::parse("r-stages").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let stages = stage_list(&f.app, &run).await;
+        let order: Vec<_> = stages.iter().map(|(s, state, _)| (*s, *state)).collect();
+        assert_eq!(
+            order,
+            [
+                (Stage::Requested, StageState::Done),
+                (Stage::Started, StageState::Done),
+                (Stage::Diff, StageState::Done),
+                (Stage::Checkout, StageState::Skipped),
+                (Stage::Lanes, StageState::Done),
+                (Stage::FactCheck, StageState::Skipped),
+                (Stage::Publish, StageState::Done),
+                (Stage::Done, StageState::Done),
+            ],
+            "{stages:?}"
+        );
+        let detail = |stage: Stage| {
+            stages
+                .iter()
+                .find(|(s, _, _)| *s == stage)
+                .map(|(_, _, d)| d.clone())
+                .unwrap()
+        };
+        assert_eq!(detail(Stage::Requested), "test");
+        assert!(
+            detail(Stage::Diff).ends_with("0 not reviewed"),
+            "{}",
+            detail(Stage::Diff)
+        );
+        assert_eq!(detail(Stage::Lanes), "1 of 1 finished");
+        assert_eq!(detail(Stage::FactCheck), "no drafts");
+        assert_eq!(detail(Stage::Publish), "the summary");
+        for (_, _, line) in &stages {
+            assert!(henk_domain::text::is_in_style(line), "{line}");
+        }
     }
 
     #[tokio::test]
@@ -1322,6 +1645,16 @@ lanes = [{ name = "lane-a", model = "m" }]
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert!(record.error.unwrap().contains("diff is empty"));
+        assert_no_stage_running(&f.app, &run).await;
+        let stages = stage_list(&f.app, &run).await;
+        assert!(
+            stages.contains(&(
+                henk_store::Stage::Diff,
+                StageState::Failed,
+                "did not complete".into()
+            )),
+            "{stages:?}"
+        );
     }
 
     /// A review cancelled while its lane waits on the model.
@@ -1370,6 +1703,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         for lane in f.app.store.lanes(&run).await.unwrap() {
             assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
         }
+        assert_no_stage_running(&f.app, &run).await;
     }
 
     /// #7: Ctrl-C or a shutdown closes the check as interrupted, posts
@@ -1673,7 +2007,23 @@ lanes = [{ name = "lane-a", model = "m" }]
         }
         let record = record.unwrap();
         assert_eq!(record.status, RunStatus::Superseded);
-        assert_eq!(record.superseded_by, Some(new));
+        assert_eq!(record.superseded_by, Some(new.clone()));
+        assert_no_stage_running(&app, &old).await;
+        let stages = stage_list(&app, &old).await;
+        assert!(
+            stages
+                .iter()
+                .any(|(s, state, _)| *s == henk_store::Stage::Queued && *state == StageState::Done),
+            "the coordinator's submit time gives the wait: {stages:?}"
+        );
+        assert!(
+            stages.contains(&(
+                henk_store::Stage::Done,
+                StageState::Skipped,
+                format!("superseded by {new}")
+            )),
+            "{stages:?}"
+        );
         app.shutdown.cancel();
     }
 
@@ -1739,6 +2089,21 @@ lanes = [{ name = "lane-a", model = "m" }]
             .filter(|r| Marker::parse(&r.body).is_some_and(|m| m.run == queued))
             .map(|r| r.body.clone())
             .collect();
+        let stages = stage_list(&app, &queued).await;
+        let cancelled = "cancelled by github:1234 while waiting for a slot".to_owned();
+        assert!(
+            stages.contains(&(
+                henk_store::Stage::Queued,
+                StageState::Skipped,
+                cancelled.clone()
+            )),
+            "it never got a slot, so the queue is not done: {stages:?}"
+        );
+        assert!(
+            stages.contains(&(henk_store::Stage::Done, StageState::Skipped, cancelled)),
+            "{stages:?}"
+        );
+        assert_no_stage_running(&app, &queued).await;
         assert_eq!(notices.len(), 1, "one comment: {notices:?}");
         assert!(
             notices[0].contains("Cancelled from the dashboard by GitHub account 1234."),
@@ -2505,6 +2870,15 @@ lanes = [{ name = "lane-a", model = "m" }]
             .await
             .unwrap();
         assert!(f.writer.posts.lock().unwrap().is_empty());
+        let stages = stage_list(&f.app, &run).await;
+        assert!(
+            stages.contains(&(
+                henk_store::Stage::FactCheck,
+                StageState::Done,
+                "1 draft: 0 confirmed, 1 rejected".into()
+            )),
+            "{stages:?}"
+        );
         assert_eq!(
             decisions(&f, &run).await,
             [(

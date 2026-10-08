@@ -22,7 +22,7 @@ use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
 use henk_platform::address::{AddressWriter, CommitIdentity, GitCredential, OpenThread};
 use henk_session::{SessionSpec, model_id, run_session};
-use henk_store::{NewRun, RunStatus};
+use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
@@ -34,6 +34,7 @@ use crate::config::AddressConfig;
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
+use crate::stages;
 use crate::workspace::setup;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, checked_changeset};
@@ -127,6 +128,8 @@ pub async fn run_address(
         .await?;
     info!(run = %run, "address run started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
+    let store = &*app.store;
+    begin_stages(store, &run, &request, facts.head.short()).await;
     let model = app.model(&config.model)?;
     let model_id = model_id(model.as_ref());
 
@@ -143,6 +146,7 @@ pub async fn run_address(
     match session.work(&facts, cancel).await {
         Ok(report) => {
             let summary = summary_line(&report);
+            stages::finished(store, &run, "replied").await;
             app.store
                 .finish_run(&run, RunStatus::Finished, Some(&summary), None)
                 .await?;
@@ -162,6 +166,7 @@ pub async fn run_address(
                 error!(%post_error, "could not post that the address run was cancelled");
             }
             let reason = format!("cancelled from the dashboard by {by}");
+            stages::cancelled(store, &run, &by, "; nothing was pushed").await;
             app.store
                 .finish_run(&run, RunStatus::Cancelled, None, Some(&reason))
                 .await?;
@@ -176,12 +181,32 @@ pub async fn run_address(
             if let Err(post_error) = writer.post_comment(&request.target, &body).await {
                 error!(%post_error, "could not post the failure comment");
             }
+            stages::failed(store, &run).await;
             app.store
                 .finish_run(&run, RunStatus::Failed, None, Some(&reason))
                 .await?;
             Err(anyhow!("address run failed: {reason}"))
         }
     }
+}
+
+/// The first stages of an address run: who asked, and what it addresses.
+async fn begin_stages(
+    store: &dyn henk_store::RunStore,
+    run: &RunId,
+    request: &AddressRequest,
+    head: &str,
+) {
+    stages::requested(
+        store,
+        run,
+        None,
+        &request.trigger,
+        request.requester.as_deref(),
+    )
+    .await;
+    let what = format!("addressing #{} at {head}", request.target.number);
+    stages::mark(store, run, Stage::Started, StageState::Done, what).await;
 }
 
 /// Stops the run when its token fired. Checked where the run would
@@ -236,6 +261,20 @@ struct Session<'a> {
 impl Session<'_> {
     /// Everything up to and including the push may fail; the replies after it
     /// do not.
+    /// The commit and push stages once Henk pushed `sha`.
+    async fn record_pushed(&self, sha: &str) {
+        let short: String = sha.chars().take(7).collect();
+        self.stage(Stage::Commit, StageState::Done, format!("commit {short}"))
+            .await;
+        let pushed = format!("pushed {short} to the pull request's branch");
+        self.stage(Stage::Push, StageState::Done, pushed).await;
+    }
+
+    /// Records where a stage of this run stands (#226).
+    async fn stage(&self, which: Stage, state: StageState, detail: impl Into<String>) {
+        stages::mark(&*self.app.store, self.run, which, state, detail).await;
+    }
+
     async fn work(
         &self,
         facts: &henk_platform::address::PullFacts,
@@ -248,6 +287,10 @@ impl Session<'_> {
             .await
             .context("reading the review threads")?;
         if threads.is_empty() {
+            for stage in [Stage::Workspace, Stage::Session, Stage::Commit, Stage::Push] {
+                self.stage(stage, StageState::Skipped, "no open review threads")
+                    .await;
+            }
             let report = AddressReport {
                 run: self.run.clone(),
                 commit: None,
@@ -270,7 +313,16 @@ impl Session<'_> {
             .git_credential()
             .await
             .context("getting a credential for git")?;
+        self.stage(Stage::Workspace, StageState::Running, "").await;
         let workspace = self.import(facts, credential.clone()).await?;
+        self.stage(
+            Stage::Workspace,
+            StageState::Done,
+            format!("ready at {}", facts.head.short()),
+        )
+        .await;
+        let open = stages::count(threads.len(), "open thread", "open threads");
+        self.stage(Stage::Session, StageState::Running, open).await;
         // Closed on every path; a run future that is dropped instead drops
         // the workspace, and every backend destroys itself then too.
         let worked = self
@@ -279,8 +331,18 @@ impl Session<'_> {
         workspace.close().await;
         drop(workspace);
         let (settled, changes, checks_text) = worked?;
+        let made = if changes.is_empty() {
+            "no changes"
+        } else {
+            "changes ready"
+        };
+        self.stage(Stage::Session, StageState::Done, made).await;
 
         let commit = if changes.is_empty() {
+            for stage in [Stage::Commit, Stage::Push] {
+                self.stage(stage, StageState::Skipped, "nothing to push")
+                    .await;
+            }
             None
         } else {
             // A cancel that came after the session ended stops the run here.
@@ -298,15 +360,24 @@ impl Session<'_> {
             )
             .await
             .context("checking out the pull request to push")?;
-            Some(
-                self.commit_and_push(&checkout, facts, &threads, &settled, &changes, &cancel)
-                    .await?,
-            )
+            self.stage(Stage::Push, StageState::Running, "").await;
+            let pushed = self
+                .commit_and_push(&checkout, facts, &threads, &settled, &changes, &cancel)
+                .await?;
+            self.record_pushed(&pushed).await;
+            Some(pushed)
         };
 
-        Ok(self
+        self.stage(Stage::Replies, StageState::Running, "").await;
+        let report = self
             .reply_all(&threads, &settled, commit, &checks_text)
-            .await)
+            .await;
+        let replied = format!(
+            "{} fixed, {} declined, {} questions",
+            report.fixed, report.declined, report.questions
+        );
+        self.stage(Stage::Replies, StageState::Done, replied).await;
+        Ok(report)
     }
 
     /// Clones the pull request at the head Henk read and imports its files

@@ -1,5 +1,5 @@
 // Shapes the API returns, for the view tests.
-import type { Draft, Me, RunDetail, RunSummary } from '$lib/api/types';
+import type { Draft, Me, RunDetail, RunSummary, Stage } from '$lib/api/types';
 
 export const me: Me = { github_id: 1234, login: 'alice', csrf: 'tok', startable: ['review', 'plan'] };
 
@@ -45,8 +45,8 @@ export function runDetail(status = 'finished'): RunDetail {
     check_id: '4711',
     heartbeat_at: null,
     lanes: [
-      { name: 'lane-a', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, error: null, last_call_turn: null },
-      { name: 'lane-b', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, error: 'gave up', last_call_turn: null },
+      { name: 'lane-a', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
+      { name: 'lane-b', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
     ],
     findings: [{ at: '2026-10-07T10:02:00Z', lane: 'lane-a', path: 'src/a.rs', line: 4, comment_id: 'c-77', action: 'posted' }],
     drafts: [
@@ -62,6 +62,26 @@ export function runDetail(status = 'finished'): RunDetail {
     transcripts: [{ at: '', session: 'lane-a', model: 'model-x', stop: 'EndTurn', turns: 3, bytes: 100 }],
     tool_usage: [{ session: 'lane-a', tool: 'read_file', calls: 2, errors: 0, refusals: 1, other: 0, total_ms: 9 }],
     events: [{ at: '2026-10-07T10:03:00Z', level: 'info', message: '<script>alert(1)</script>' }],
+    stages: [],
     requests: [{ id: 'e-1', received_at: '', source: 'github_webhook', kind: 'pull_request', repo: 'docspec/app', target: 7, requester: null }],
   };
+}
+
+/** A finished review's stages, as Henk records them (#226). */
+export function reviewStages(): Stage[] {
+  const at = (s: number): string => `2026-10-07T10:0${s}:00Z`;
+  const stage = (name: string, state: string, detail: string, from: number, to: number | null): Stage => ({
+    name, state, detail, started_at: at(from), ended_at: to === null ? null : at(to),
+  });
+  return [
+    stage('requested', 'done', 'requested, github:1234', 0, 0),
+    stage('queued', 'done', 'waited for a review slot', 0, 1),
+    stage('started', 'done', 'check 4711 opened', 1, 1),
+    stage('diff', 'done', '12 files, +340 -25; 1 not reviewed', 1, 1),
+    stage('checkout', 'skipped', 'no workspaces: the lanes read through the platform', 1, 1),
+    stage('lanes', 'done', '1 of 2 finished, 1 did not finish', 1, 4),
+    stage('fact_check', 'done', '2 drafts: 1 confirmed, 0 rejected, 1 repeat', 4, 5),
+    stage('publish', 'done', '1 line comment and the summary', 5, 5),
+    stage('done', 'done', 'check 4711 closed', 5, 5),
+  ];
 }

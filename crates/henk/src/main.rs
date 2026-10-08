@@ -37,6 +37,7 @@ mod runs;
 mod server;
 mod skill_tools;
 mod skills;
+mod stages;
 mod urls;
 mod web_fetch;
 mod workspace;
@@ -345,6 +346,7 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
             requester: requester.clone(),
             acknowledge: None,
             run: Some(run.clone()),
+            submitted_at: None,
         };
         async move {
             review::run_review(&app, request, app.shutdown.child_token())

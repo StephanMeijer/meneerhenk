@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
-import { draft, runDetail } from '$lib/testing/fixtures';
+import { draft, reviewStages, runDetail } from '$lib/testing/fixtures';
 import type { ToolCall } from '$lib/api/types';
 import { fakeConnect, firstOf } from '$lib/testing/source';
 import Run from './Run.svelte';
@@ -46,13 +46,19 @@ describe('Run', () => {
     ]);
     expect(section('Timeline')[0]).toEqual(['10:03:00 UTC', 'info', '<script>alert(1)</script>']);
     expect(section('Tool calls')[0]).toEqual(['lane-a', 'read_file', '2', '0', '1', '0', '9']);
-    expect(section('Findings')[0]).toEqual(['10:02:00 UTC', 'lane-a', 'src/a.rs:4', 'c-77', 'posted']);
+    const card = document.querySelector('ul.findings li');
+    expect(card?.querySelector('.meta')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'c-77 posted lane-a src/a.rs:4 10:02:00 UTC',
+    );
+    expect(card?.querySelector('.text')?.textContent).toBe('The loop never ends.');
+    expect(card?.querySelector('.reason')?.textContent).toBe('confirmed by opus: src/a.rs:4 loops.');
     const lanes = section('Lanes');
     expect(lanes.map((row) => row[0])).toEqual(['lane-a', 'lane-b']);
     const transcriptLink = document.querySelector<HTMLAnchorElement>('a[title="The whole conversation"]');
     expect(transcriptLink?.getAttribute('href')).toBe('/dashboard/runs/r-1/transcripts/lane-a');
     expect(document.querySelectorAll('a[title="The whole conversation"]')).toHaveLength(1);
-    expect(section('Events')[0]?.[0]).toBe('e-1');
+    expect(section('Requests')[0]?.[0]).toBe('e-1');
+    expect(document.querySelector('ol.pipeline')).toBeNull();
     expect(cancelButton()).toBeUndefined();
   });
 
@@ -180,6 +186,56 @@ describe('Run', () => {
     const facts = [...document.querySelectorAll('.facts div')];
     const replaced = facts.find((f) => f.querySelector('dt')?.textContent === 'Replaced by');
     expect(replaced?.querySelector('a')?.getAttribute('href')).toBe('/dashboard/runs/r-2');
+  });
+
+  it('shows the review as its stages, the lanes inside theirs', async () => {
+    const detail = { ...runDetail(), stages: reviewStages() };
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
+    await settle();
+    const boxes = [...document.querySelectorAll('ol.pipeline > li')];
+    expect(boxes.map((b) => b.querySelector('.name')?.textContent)).toEqual([
+      'Requested', 'Queued', 'Started', 'Diff', 'Checkout', 'Lanes', 'Fact-check', 'Publish', 'Done',
+    ]);
+    const diff = boxes[3];
+    expect(diff?.querySelector('.detail')?.textContent).toBe('12 files, +340 -25; 1 not reviewed');
+    expect(diff?.querySelector('.time')?.textContent).toBe('10:01:00');
+    expect(boxes[5]?.querySelector('.time')?.textContent).toBe('3m 00s');
+    expect(boxes[4]?.classList.contains('skipped')).toBe(true);
+    const lanes = [...(boxes[5]?.querySelectorAll('.lanes li') ?? [])].map((l) => l.textContent?.replace(/\s+/g, ' ').trim());
+    expect(lanes).toEqual(['lane-a model-x finished 3m 55s', 'lane-b model-y did not finish 0m 55s']);
+    const fold = (title: string) =>
+      [...document.querySelectorAll('details')].find((x) => x.querySelector('h2')?.textContent === title);
+    expect(fold('Lanes')?.open, 'with a pipeline the tables are folded').toBe(false);
+  });
+
+  it('opens the log of the box selected, and lets go when it is selected again', async () => {
+    const detail = {
+      ...runDetail(),
+      stages: reviewStages(),
+      events: [
+        { at: '2026-10-07T10:01:00Z', level: 'info', message: 'diff: 12 files' },
+        { at: '2026-10-07T10:03:00Z', level: 'warn', message: 'lane-b: rate limited' },
+        { at: '2026-10-07T10:03:30Z', level: 'info', message: 'lane-a: EndTurn after 3 turns' },
+      ],
+    };
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
+    await settle();
+    const timeline = () => section('Timeline').map((row) => row[2]);
+    const timelineOpen = () =>
+      [...document.querySelectorAll('details')].find((x) => x.querySelector('h2')?.textContent === 'Timeline')?.open;
+    expect(timelineOpen()).toBe(false);
+
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-b'))?.click();
+    await settle(1);
+    expect(timeline()).toEqual(['lane-b: rate limited']);
+    expect(timelineOpen()).toBe(true);
+
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.box')].find((b) => b.textContent?.includes('Diff'))?.click();
+    await settle(1);
+    expect(timeline()).toEqual(['diff: 12 files']);
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.box')].find((b) => b.textContent?.includes('Diff'))?.click();
+    await settle(1);
+    expect(timeline()).toHaveLength(3);
   });
 
   it('shows a missing run as a problem', async () => {

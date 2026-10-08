@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolCall } from './api/types';
 import { applyRun, applyRunning, connectionAfter } from './live';
-import { draft, runDetail, runSummary } from './testing/fixtures';
+import { draft, reviewStages, runDetail, runSummary } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
   at: '',
@@ -75,6 +75,18 @@ describe('applyRun', () => {
     const fresh = runDetail('finished');
     expect(applyRun(d, { kind: 'snapshot', data: fresh })).toBe(fresh);
     expect(applyRun(d, { kind: 'end' })).toBe(d);
+  });
+});
+
+describe('stages and heartbeats', () => {
+  it('replaces the stages and moves the heartbeat on', () => {
+    const before = runDetail('running');
+    const stages = reviewStages().slice(0, 3);
+    const after = applyRun(before, { kind: 'stages', data: stages });
+    expect(after.stages).toEqual(stages);
+    const later = applyRun(after, { kind: 'heartbeat', data: { at: '2026-10-07T10:09:00Z' } });
+    expect(later.heartbeat_at).toBe('2026-10-07T10:09:00Z');
+    expect(later.stages).toEqual(stages);
   });
 });
 

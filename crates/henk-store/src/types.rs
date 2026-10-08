@@ -534,8 +534,202 @@ pub struct LaneRecord {
     pub input_tokens: u64,
     /// Tokens out.
     pub output_tokens: u64,
-    /// The error, when dropped.
+    /// The error, when it did not finish.
     pub error: Option<String>,
+    /// RFC 3339: when it started.
+    pub started_at: String,
+    /// RFC 3339: when it ended, once it has.
+    pub finished_at: Option<String>,
+}
+
+/// One stage of a run (#226): the steps a review, plan or address run goes
+/// through, in the order they come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Stage {
+    /// The request arrived.
+    Requested,
+    /// It waited for a review slot.
+    Queued,
+    /// The run started, and a review its check.
+    Started,
+    /// The diff was read.
+    Diff,
+    /// The review's workspaces were checked out.
+    Checkout,
+    /// The planner's or address run's workspace was set up.
+    Workspace,
+    /// The review lanes ran.
+    Lanes,
+    /// The planner's or address run's session ran.
+    Session,
+    /// The drafts were checked.
+    FactCheck,
+    /// The address run's commit was made.
+    Commit,
+    /// The address run's commit was pushed.
+    Push,
+    /// What came of it was written on the platform.
+    Publish,
+    /// The address run replied to the threads.
+    Replies,
+    /// The run ended.
+    Done,
+}
+
+impl Stage {
+    /// The stored text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Queued => "queued",
+            Self::Started => "started",
+            Self::Diff => "diff",
+            Self::Checkout => "checkout",
+            Self::Workspace => "workspace",
+            Self::Lanes => "lanes",
+            Self::Session => "session",
+            Self::FactCheck => "fact_check",
+            Self::Commit => "commit",
+            Self::Push => "push",
+            Self::Publish => "publish",
+            Self::Replies => "replies",
+            Self::Done => "done",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "requested" => Self::Requested,
+            "queued" => Self::Queued,
+            "started" => Self::Started,
+            "diff" => Self::Diff,
+            "checkout" => Self::Checkout,
+            "workspace" => Self::Workspace,
+            "lanes" => Self::Lanes,
+            "session" => Self::Session,
+            "fact_check" => Self::FactCheck,
+            "commit" => Self::Commit,
+            "push" => Self::Push,
+            "publish" => Self::Publish,
+            "replies" => Self::Replies,
+            "done" => Self::Done,
+            _ => return None,
+        })
+    }
+}
+
+/// Where a stage stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageState {
+    /// Going now.
+    Running,
+    /// Done.
+    Done,
+    /// Broke off; the detail says why.
+    Failed,
+    /// Not needed, or not reached because the run ended first.
+    Skipped,
+}
+
+impl StageState {
+    /// The stored text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "skipped" => Self::Skipped,
+            _ => return None,
+        })
+    }
+
+    /// Whether the stage is over.
+    #[must_use]
+    pub fn ended(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+/// A stage as a run moves through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageWrite {
+    /// Which stage.
+    pub stage: Stage,
+    /// Where it stands now.
+    pub state: StageState,
+    /// One line in Henk's own words, never other people's text.
+    pub detail: String,
+    /// When it started, when not now (the time a review was submitted).
+    /// Kept from the first write of the stage.
+    pub started_at: Option<time::OffsetDateTime>,
+    /// When it ended, when it has and not now.
+    pub ended_at: Option<time::OffsetDateTime>,
+}
+
+impl StageWrite {
+    /// The stage as it is now, timed now.
+    #[must_use]
+    pub fn now(which: Stage, state: StageState, detail: impl Into<String>) -> Self {
+        Self {
+            stage: which,
+            state,
+            detail: detail.into(),
+            started_at: None,
+            ended_at: None,
+        }
+    }
+}
+
+/// A stored stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageRecord {
+    /// Which stage.
+    pub stage: Stage,
+    /// Where it stands.
+    pub state: StageState,
+    /// RFC 3339.
+    pub started_at: String,
+    /// RFC 3339, once it ended.
+    pub ended_at: Option<String>,
+    /// One line in Henk's own words.
+    pub detail: String,
+}
+
+/// Stored stage rows as records, in the order the stages come.
+pub(crate) fn stage_records(
+    rows: Vec<(String, String, String, Option<String>, String)>,
+) -> Result<Vec<StageRecord>, StoreError> {
+    let mut records = rows
+        .into_iter()
+        .map(|(stage, state, started_at, ended_at, detail)| {
+            Ok(StageRecord {
+                stage: Stage::parse(&stage).ok_or(StoreError::Corrupt {
+                    column: "stages.stage",
+                    value: stage,
+                })?,
+                state: StageState::parse(&state).ok_or(StoreError::Corrupt {
+                    column: "stages.state",
+                    value: state,
+                })?,
+                started_at,
+                ended_at,
+                detail,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    records.sort_by_key(|record| record.stage);
+    Ok(records)
 }
 
 /// One recorded finding action.

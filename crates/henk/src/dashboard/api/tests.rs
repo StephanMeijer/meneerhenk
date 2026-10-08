@@ -408,10 +408,30 @@ async fn a_superseded_run_says_so_and_names_its_replacement_and_lanes_say_how_th
     assert_eq!(listed["items"][0]["status"], "superseded");
     assert_eq!(listed["items"][0]["superseded_by"], "r-new");
 
+    store
+        .stage(
+            &old,
+            &henk_store::StageWrite::now(
+                henk_store::Stage::Diff,
+                henk_store::StageState::Done,
+                "3 files, +4 -1; 0 not reviewed",
+            ),
+        )
+        .await
+        .unwrap();
     let detail = get(&f, "/dashboard/api/v1/runs/r-old", &cookie)
         .await
         .json();
     assert_eq!(detail["run"]["superseded_by"], "r-new");
+    assert_eq!(detail["stages"][0]["name"], "diff");
+    assert_eq!(detail["stages"][0]["state"], "done");
+    assert_eq!(
+        detail["stages"][0]["detail"],
+        "3 files, +4 -1; 0 not reviewed"
+    );
+    assert!(detail["stages"][0]["ended_at"].is_string());
+    assert!(detail["lanes"][0]["started_at"].is_string());
+    assert!(detail["lanes"][0]["finished_at"].is_string());
     assert_eq!(detail["lanes"][0]["status"], "timed_out");
     assert_eq!(detail["lanes"][0]["error"], Value::Null);
     assert_eq!(detail["lanes"][1]["status"], "did_not_finish");
@@ -1009,6 +1029,8 @@ fn api_types_are_current() {
         types::RunMessage::decl(&cfg),
         types::RunningMessage::decl(&cfg),
         types::RunDetail::decl(&cfg),
+        types::Stage::decl(&cfg),
+        types::Heartbeat::decl(&cfg),
         types::Lane::decl(&cfg),
         types::Finding::decl(&cfg),
         types::Draft::decl(&cfg),

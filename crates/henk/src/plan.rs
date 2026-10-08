@@ -13,7 +13,7 @@ use henk_llm::ChatMessage;
 use henk_mcp::McpSession;
 use henk_platform::{IssueTarget, IssueUpdate};
 use henk_session::{SessionSpec, model_id, platform_tools, run_session};
-use henk_store::{NewRun, RunStatus};
+use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
@@ -27,6 +27,7 @@ use crate::plan_tools::{
     SetFields, SetIssueType, SetTitle, WritePlan,
 };
 use crate::review::Interrupted;
+use crate::stages;
 use crate::web_fetch::WebFetch;
 
 /// A request to plan one issue.
@@ -119,7 +120,6 @@ pub async fn run_plan(
         .await?;
     info!(run = %run, "planning started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
-
     let model = app.model(&planning.model)?;
     let context = Arc::new(PlanContext {
         run: run.clone(),
@@ -136,7 +136,6 @@ pub async fn run_plan(
         }),
         sub_issue_cap: planning.sub_issue_cap,
     });
-
     let result = plan_body(
         app,
         &request,
@@ -231,6 +230,24 @@ async fn finish_plan(
                     warn!(%error, "could not append the session entry");
                 }
             }
+            let store = &*app.store;
+            stages::mark(
+                store,
+                run,
+                Stage::Session,
+                StageState::Done,
+                "the plan is ready",
+            )
+            .await;
+            stages::mark(
+                store,
+                run,
+                Stage::Publish,
+                StageState::Done,
+                "plan written on the issue",
+            )
+            .await;
+            stages::finished(store, run, "plan written").await;
             app.store
                 .finish_run(run, RunStatus::Finished, Some("plan written"), None)
                 .await?;
@@ -261,6 +278,7 @@ async fn finish_plan(
             if let Err(post_error) = writer.comment(&request.target, &body).await {
                 error!(%post_error, "could not post the failure comment");
             }
+            stages::failed(&*app.store, run).await;
             app.store
                 .finish_run(run, RunStatus::Failed, None, Some(&reason))
                 .await?;
@@ -318,16 +336,55 @@ async fn end_cancelled(
         error!(%post_error, "could not post that planning was cancelled");
     }
     let reason = format!("cancelled from the dashboard by {by}");
+    let cancelled = format!("cancelled by {by}");
+    stages::end(
+        &*app.store,
+        run,
+        StageState::Skipped,
+        &cancelled,
+        &cancelled,
+    )
+    .await;
     app.store
         .finish_run(run, RunStatus::Cancelled, None, Some(&reason))
         .await?;
     Err(anyhow!(reason))
 }
 
+/// The first stages of a plan run: who asked, what it plans, and the
+/// planner's session starting.
+async fn begin_stages(
+    store: &dyn henk_store::RunStore,
+    run: &RunId,
+    request: &PlanRequest,
+    model: &str,
+) {
+    stages::requested(
+        store,
+        run,
+        None,
+        &request.trigger,
+        request.requester.as_deref(),
+    )
+    .await;
+    let what = format!("planning #{}", request.target.number);
+    stages::mark(store, run, Stage::Started, StageState::Done, what).await;
+    let session = format!("planner, {model}");
+    stages::mark(store, run, Stage::Session, StageState::Running, session).await;
+}
+
 /// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
 /// posted; the run ends with the reason (#7).
 async fn end_interrupted(app: &App, run: &RunId) -> anyhow::Result<PlanReport> {
     warn!(run = %run, "planning interrupted");
+    stages::end(
+        &*app.store,
+        run,
+        StageState::Failed,
+        "interrupted",
+        "interrupted",
+    )
+    .await;
     app.store
         .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))
         .await?;
@@ -383,6 +440,7 @@ async fn plan_body(
     model: Arc<dyn henk_llm::ModelClient>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    begin_stages(&*app.store, &context.run, request, context.model.as_str()).await;
     // The planner's own copy of the default branch, when the profile says
     // so; closed on every path out of here.
     let workspace = open_for_plan(app, &request.target.repo, &context.run, &cancel).await;

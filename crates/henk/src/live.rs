@@ -24,8 +24,8 @@ use henk_store::{
     DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
     LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    RunStore, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary,
+    RunStore, StageRecord, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord,
+    ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
@@ -67,6 +67,10 @@ pub enum ChangeKind {
     Event(EventRecord),
     /// A session's conversation was kept.
     Transcript(TranscriptSummary),
+    /// A stage began or ended (#226): every stage of the run.
+    Stages(Vec<StageRecord>),
+    /// The run's process said it is alive, at this time (RFC 3339).
+    Heartbeat(String),
 }
 
 #[derive(Debug)]
@@ -238,6 +242,14 @@ impl Announcing {
         }
     }
 
+    async fn announce_stages(&self, id: &RunId) {
+        let _order = self.read_back.lock().await;
+        match self.inner.stages(id).await {
+            Ok(stages) => self.feed.announce(id, ChangeKind::Stages(stages)),
+            Err(error) => warn!(%error, run = %id, "could not read stages back to announce them"),
+        }
+    }
+
     async fn announce_lanes(&self, id: &RunId) {
         let _order = self.read_back.lock().await;
         match self.inner.lanes(id).await {
@@ -281,7 +293,29 @@ impl RunStore for Announcing {
     }
 
     async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
-        self.inner.heartbeat(id).await
+        let _writing = self.feed.writing().await;
+        self.inner.heartbeat(id).await?;
+        // So a run page's "heartbeat 12 s ago" stays true (#226).
+        self.feed.announce(id, ChangeKind::Heartbeat(now()));
+        Ok(())
+    }
+
+    async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.stage(run, write).await?;
+        self.announce_stages(run).await;
+        Ok(())
+    }
+
+    async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.fail_running_stages(run, reason).await?;
+        self.announce_stages(run).await;
+        Ok(())
+    }
+
+    async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
+        self.inner.stages(run).await
     }
 
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
@@ -656,6 +690,15 @@ mod tests {
         async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
             self.inner.heartbeat(id).await
         }
+        async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
+            self.inner.stage(run, write).await
+        }
+        async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+            self.inner.fail_running_stages(run, reason).await
+        }
+        async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
+            self.inner.stages(run).await
+        }
         async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
             self.inner.set_check(id, check_id).await
         }
@@ -934,6 +977,8 @@ mod tests {
                 ChangeKind::Finding(_) => "finding",
                 ChangeKind::Event(_) => "event",
                 ChangeKind::Transcript(_) => "transcript",
+                ChangeKind::Stages(_) => "stages",
+                ChangeKind::Heartbeat(_) => "heartbeat",
             })
             .collect()
     }
@@ -997,6 +1042,17 @@ mod tests {
             .unwrap();
         store.event(&run, "info", "a line").await.unwrap();
         store
+            .stage(
+                &run,
+                &StageWrite::now(
+                    henk_store::Stage::Lanes,
+                    henk_store::StageState::Done,
+                    "1 of 1 finished",
+                ),
+            )
+            .await
+            .unwrap();
+        store
             .finish_lane(&run, "lane-a", LaneStatus::Finished, 3, 10, 2, None)
             .await
             .unwrap();
@@ -1017,14 +1073,15 @@ mod tests {
                 "draft",
                 "finding",
                 "event",
+                "stages",
                 "lanes",
-                "run"
+                "run",
+                "heartbeat"
             ],
-            "a heartbeat is not announced"
         );
         assert_eq!(
             all.iter().map(|c| c.seq).collect::<Vec<_>>(),
-            (1..=9).collect::<Vec<_>>()
+            (1..=11).collect::<Vec<_>>()
         );
         let ChangeKind::Draft(decided) = &all[4].kind else {
             panic!()
@@ -1033,7 +1090,14 @@ mod tests {
             decided.decision.as_ref().unwrap().verdict,
             DraftVerdict::Confirmed
         );
-        let ChangeKind::Lanes(lanes) = &all[7].kind else {
+        let ChangeKind::Stages(stages) = &all[7].kind else {
+            panic!()
+        };
+        assert_eq!(
+            stages[0].detail, "1 of 1 finished",
+            "read back as the store holds it"
+        );
+        let ChangeKind::Lanes(lanes) = &all[8].kind else {
             panic!()
         };
         assert_eq!(lanes[0].turns, 3, "read back as the store holds it");
@@ -1041,10 +1105,14 @@ mod tests {
             panic!()
         };
         assert!(!call.at.is_empty(), "a time the store chose is filled in");
-        let ChangeKind::Run(ended) = &all[8].kind else {
+        let ChangeKind::Run(ended) = &all[9].kind else {
             panic!()
         };
         assert_eq!(ended.summary.as_deref(), Some("Not bad."));
+        let ChangeKind::Heartbeat(at) = &all[10].kind else {
+            panic!()
+        };
+        assert!(!at.is_empty(), "a heartbeat says when");
     }
 
     #[tokio::test]

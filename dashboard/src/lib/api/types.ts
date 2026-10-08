@@ -272,7 +272,7 @@ runs: Array<RunSummary>,
  */
 count: number, };
 
-export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "end" };
+export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
 export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary };
 
@@ -324,7 +324,40 @@ events: Array<RunEvent>,
 /**
  * The requests that started or joined it.
  */
-requests: Array<EventSummary>, };
+requests: Array<EventSummary>, 
+/**
+ * Its stages, in the order they come (#226). Empty for a run from
+ * before stages were kept.
+ */
+stages: Array<Stage>, };
+
+export type Stage = { 
+/**
+ * Which stage.
+ */
+name: string, 
+/**
+ * `running`, `done`, `failed` or `skipped`.
+ */
+state: string, 
+/**
+ * RFC 3339.
+ */
+started_at: string, 
+/**
+ * RFC 3339, once it ended.
+ */
+ended_at: string | null, 
+/**
+ * One line in Henk's own words: `12 files, +340 -25; 1 not reviewed`.
+ */
+detail: string, };
+
+export type Heartbeat = { 
+/**
+ * RFC 3339.
+ */
+at: string, };
 
 export type Lane = { 
 /**
@@ -360,7 +393,15 @@ error: string | null,
  * The turn of its latest tool call: how far a running lane has come,
  * since turns and tokens are stored when it ends.
  */
-last_call_turn: number | null, };
+last_call_turn: number | null, 
+/**
+ * RFC 3339: when it started.
+ */
+started_at: string, 
+/**
+ * RFC 3339: when it ended, once it has.
+ */
+finished_at: string | null, };
 
 export type Finding = { 
 /**

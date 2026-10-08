@@ -150,7 +150,18 @@ One run with everything the run record holds about it:
 - `transcripts`: the sessions whose conversation is kept (#191);
 - `tool_usage`: calls per session and tool (#190);
 - `events`: the timeline;
-- `requests`: the inbound events that started or joined it.
+- `requests`: the inbound events that started or joined it;
+- `stages`: where the run is (#226), in the order the stages come. Each
+  has `name`, `state` (`running`, `done`, `failed` or `skipped`),
+  `started_at`, `ended_at` and `detail`, one line in Henk's own words
+  (`12 files, +340 -25; 1 not reviewed`). A review goes `requested`,
+  `queued` (the wait for a review slot), `started`, `diff`, `checkout`,
+  `lanes`, `fact_check`, `publish`, `done`; a plan goes `requested`,
+  `started`, `session`, `publish`, `done`; an address run `requested`,
+  `started`, `workspace`, `session`, `commit`, `push`, `replies`, `done`.
+  Runs from before stages were kept have none.
+
+Each lane also has `started_at` and `finished_at`.
 
 ```json
 {
@@ -225,6 +236,8 @@ above; `RunMessage` in `types.ts` is the union.
 | `finding` | `Finding` | Something was done with a finding |
 | `event` | `RunEvent` | A line on the timeline |
 | `transcript` | `TranscriptRef` | A session's conversation was kept |
+| `stages` | `Stage[]`, every stage | A stage began or ended |
+| `heartbeat` | `{"at": "..."}` | The run's process said it is alive (every 30 seconds) |
 | `end` | `{}` | The run has ended; the stream closes |
 
 - Message ids are `<feed>-<seq>`, with the feed named per Henk process. A
