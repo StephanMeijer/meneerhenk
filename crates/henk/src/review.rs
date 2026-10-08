@@ -260,7 +260,8 @@ async fn preflight(
 }
 
 /// A newer commit arrived: no comment, a neutral check, and the run ends
-/// `failed` with the reason (§3.3). Not Henk's failure, so nothing says it is.
+/// `superseded`, naming the run that replaced it when that is known, with
+/// the reason (§3.3, #231). Not Henk's failure, so nothing says it is.
 async fn report_superseded(
     review: ReviewRun<'_>,
     handle: Option<&henk_platform::ReviewHandle>,
@@ -281,9 +282,15 @@ async fn report_superseded(
     {
         error!(%finish_error, "could not finish the check of a superseded review");
     }
-    app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&Superseded.to_string()))
-        .await?;
+    let reason = Superseded.to_string();
+    match app.cancels.superseded_by(run) {
+        Some(by) => app.store.supersede_run(run, &by, &reason).await?,
+        None => {
+            app.store
+                .finish_run(run, RunStatus::Superseded, None, Some(&reason))
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -1289,7 +1296,7 @@ lanes = [{ name = "lane-a", model = "m" }]
             assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
         }
         let lanes = f.app.store.lanes(&run).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::Dropped);
+        assert_eq!(lanes[0].status, LaneStatus::DidNotFinish);
         assert_eq!(
             lanes[0].error.as_deref(),
             Some("the model declined (content_filter)")
@@ -1432,7 +1439,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         assert_eq!(
             f.app.store.lanes(&dead).await.unwrap()[0].status,
-            LaneStatus::Dropped
+            LaneStatus::DidNotFinish
         );
         assert_eq!(
             *f.writer.finished_checks.lock().unwrap(),
@@ -1500,7 +1507,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
         assert_eq!(
             app.store.lanes(&crashed).await.unwrap()[0].status,
-            LaneStatus::Dropped
+            LaneStatus::DidNotFinish
         );
         assert_eq!(
             *writer.finished_checks.lock().unwrap(),
@@ -1632,6 +1639,45 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_review_of_a_newer_commit_supersedes_the_running_one_and_is_named_by_it() {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let app = Arc::new(fixture(DIFF, model).await.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, old) =
+            coordinator.submit_review(request(&placeholder), CommitSha::parse(SHA).unwrap());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&old).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the first review started");
+
+        let newer = CommitSha::parse("fedcba9876543210fedcba9876543210fedcba98").unwrap();
+        let (decision, new) = coordinator.submit_review(request(&placeholder), newer);
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        let mut record = None;
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            record = app.store.run(&old).await.unwrap();
+            if record
+                .as_ref()
+                .is_some_and(|r| r.status != RunStatus::Running)
+            {
+                break;
+            }
+        }
+        let record = record.unwrap();
+        assert_eq!(record.status, RunStatus::Superseded);
+        assert_eq!(record.superseded_by, Some(new));
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn a_review_cancelled_while_it_waits_for_a_slot_ends_cancelled_at_once() {
         let model =
             ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
@@ -1721,10 +1767,14 @@ lanes = [{ name = "lane-a", model = "m" }]
             assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
         }
         let record = f.app.store.run(&run).await.unwrap().unwrap();
-        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(record.status, RunStatus::Superseded);
         assert_eq!(
             record.error.as_deref(),
             Some("superseded by a review of a newer commit")
+        );
+        assert_eq!(
+            record.superseded_by, None,
+            "no coordinator named a newer run"
         );
     }
 

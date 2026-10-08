@@ -37,6 +37,14 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         error: Option<&str>,
     ) -> Result<(), StoreError>;
 
+    /// Ends a review as superseded by `by`, the review of a newer commit
+    /// that replaced it (#231), with the reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError>;
+
     /// Reads a run.
     ///
     /// # Errors

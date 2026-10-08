@@ -77,16 +77,17 @@ pub struct SessionOutcome {
     pub final_text: String,
     /// The lane status recorded in the store.
     pub status: LaneStatus,
-    /// The error recorded, when dropped.
+    /// The error recorded, when it did not finish.
     pub error: Option<String>,
 }
 
 impl SessionOutcome {
-    /// Whether the session finished on its own terms (end of turn or the
-    /// turn limit), as opposed to timing out, being cancelled or failing.
+    /// Whether the session ran to an end: the end of its turn, its turn
+    /// limit or its time limit, as opposed to being cancelled or failing.
+    /// What it drafted stands either way.
     #[must_use]
     pub fn finished(&self) -> bool {
-        self.status == LaneStatus::Finished
+        matches!(self.status, LaneStatus::Finished | LaneStatus::TimedOut)
     }
 }
 
@@ -155,25 +156,25 @@ pub async fn run_session(
         }
     }
 
-    // The lane row records whether the session ran to an end (finished) or
-    // broke off (dropped). A session that reaches its time limit ran to an
-    // end: what it posted stands and it posts nothing more, so the row says
-    // finished. How a caller presents that is the caller's business, read
-    // from `stop`: the review reports such a lane as stopped at the time
-    // limit in its summary, the planner treats it as a failed plan.
+    // The lane row records how the session ended (#231): it ran to an end
+    // (finished), reached its time limit (timed out: what it drafted until
+    // then stands, it drafts nothing more), or broke off (did not finish,
+    // with why). How a caller presents a time limit is the caller's
+    // business: the review reports such a lane as stopped at the time limit
+    // in its summary, the planner treats it as a failed plan.
     let (status, error) = match &outcome.stop {
-        StopCause::EndTurn | StopCause::MaxTurns | StopCause::Timeout => {
-            (LaneStatus::Finished, None)
-        }
-        StopCause::Cancelled => (LaneStatus::Dropped, Some("cancelled".to_owned())),
-        StopCause::ModelError(e) => (LaneStatus::Dropped, Some(e.to_string())),
+        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
+        StopCause::Timeout => (LaneStatus::TimedOut, None),
+        StopCause::Cancelled => (LaneStatus::DidNotFinish, Some("cancelled".to_owned())),
+        StopCause::ModelError(e) => (LaneStatus::DidNotFinish, Some(e.to_string())),
         StopCause::Refused(why) => (
-            LaneStatus::Dropped,
+            LaneStatus::DidNotFinish,
             Some(format!("the model declined ({why})")),
         ),
-        StopCause::Stuck { tool, .. } => {
-            (LaneStatus::Dropped, Some(format!("stuck repeating {tool}")))
-        }
+        StopCause::Stuck { tool, .. } => (
+            LaneStatus::DidNotFinish,
+            Some(format!("stuck repeating {tool}")),
+        ),
     };
     if let Err(store_error) = store
         .finish_lane(
@@ -722,7 +723,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_time_limit_finishes_the_session_instead_of_dropping_it() {
+    async fn a_time_limit_ends_the_session_as_timed_out_not_as_dropped() {
         let store = store_with_run().await;
         let model: Arc<dyn ModelClient> =
             Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
@@ -733,7 +734,8 @@ mod tests {
         assert!(outcome.finished());
         assert_eq!(outcome.error, None);
         let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::Finished);
+        assert_eq!(lanes[0].status, LaneStatus::TimedOut);
+        assert_eq!(lanes[0].error, None);
         let events = store.events(&run_id()).await.unwrap();
         assert_eq!(events[0].level, "warn");
         assert!(
@@ -755,10 +757,10 @@ mod tests {
         ));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
         assert!(!outcome.finished());
-        assert_eq!(outcome.status, LaneStatus::Dropped);
+        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
         assert!(outcome.error.as_deref().unwrap_or("").contains("401"));
         let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::Dropped);
+        assert_eq!(lanes[0].status, LaneStatus::DidNotFinish);
     }
 
     #[tokio::test]
@@ -774,13 +776,13 @@ mod tests {
         ));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
         assert!(!outcome.finished(), "a refusal is not a finished lane");
-        assert_eq!(outcome.status, LaneStatus::Dropped);
+        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
         assert_eq!(
             outcome.error.as_deref(),
             Some("the model declined (refusal)")
         );
         let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::Dropped);
+        assert_eq!(lanes[0].status, LaneStatus::DidNotFinish);
         assert_eq!(
             lanes[0].error.as_deref(),
             Some("the model declined (refusal)")
@@ -815,7 +817,7 @@ mod tests {
         spec.limits.max_repeated_calls = 1;
         let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
         assert!(matches!(&outcome.stop, StopCause::Stuck { tool, repeats: 3 } if tool == "read"));
-        assert_eq!(outcome.status, LaneStatus::Dropped);
+        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
         assert_eq!(outcome.error.as_deref(), Some("stuck repeating read"));
         let lanes = store.lanes(&run_id()).await.unwrap();
         assert_eq!(lanes[0].error.as_deref(), Some("stuck repeating read"));

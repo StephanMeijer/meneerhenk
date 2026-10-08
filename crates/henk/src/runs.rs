@@ -273,25 +273,26 @@ fn drafts_section(drafts: &[DraftRecord]) -> String {
     out
 }
 
-/// Renders one run with its lanes, tool calls, transcripts, drafts,
-/// findings and timeline.
-#[must_use]
-pub fn render(
-    run: &RunRecord,
-    lanes: &[LaneRecord],
-    tools: &[ToolUsage],
-    transcripts: &[TranscriptSummary],
-    drafts: &[DraftRecord],
-    findings: &[FindingRecord],
-    events: &[EventRecord],
-) -> String {
-    let mut out = String::new();
+/// A stored status as people say it: `did not finish`.
+fn words(status: &str) -> String {
+    status.replace('_', " ")
+}
+
+/// The run's own lines: what, where, when, and how it ended.
+fn render_run(out: &mut String, run: &RunRecord) {
     let _ = writeln!(out, "run {}", run.id);
     let _ = writeln!(
         out,
-        "  {:?} of {} {} #{} ({:?})",
-        run.kind, run.platform, run.repo, run.target, run.status
+        "  {:?} of {} {} #{} ({})",
+        run.kind,
+        run.platform,
+        run.repo,
+        run.target,
+        words(run.status.as_str())
     );
+    if let Some(by) = &run.superseded_by {
+        let _ = writeln!(out, "  superseded by {by}");
+    }
     if let Some(commit) = &run.commit {
         let _ = writeln!(out, "  commit     {commit}");
     }
@@ -314,14 +315,30 @@ pub fn render(
     if let Some(error) = &run.error {
         let _ = writeln!(out, "  error      {error}");
     }
+}
+
+/// Renders one run with its lanes, tool calls, transcripts, drafts,
+/// findings and timeline.
+#[must_use]
+pub fn render(
+    run: &RunRecord,
+    lanes: &[LaneRecord],
+    tools: &[ToolUsage],
+    transcripts: &[TranscriptSummary],
+    drafts: &[DraftRecord],
+    findings: &[FindingRecord],
+    events: &[EventRecord],
+) -> String {
+    let mut out = String::new();
+    render_run(&mut out, run);
 
     let _ = writeln!(out, "\nlanes ({})", lanes.len());
     for lane in lanes {
         let _ = write!(
             out,
-            "  {:<12} {:<9} {:<10} turns {:>3}  tokens in {:>7} out {:>6}",
+            "  {:<12} {:<14} {:<10} turns {:>3}  tokens in {:>7} out {:>6}",
             lane.name,
-            format!("{:?}", lane.status).to_lowercase(),
+            words(lane.status.as_str()),
             lane.model,
             lane.turns,
             lane.input_tokens,
@@ -424,15 +441,16 @@ mod tests {
             error: None,
             heartbeat_at: None,
             check_id: None,
+            superseded_by: None,
         };
         let lanes = vec![LaneRecord {
             name: "lane-a".into(),
             model: "m".into(),
-            status: LaneStatus::Dropped,
+            status: LaneStatus::DidNotFinish,
             turns: 3,
             input_tokens: 100,
             output_tokens: 20,
-            error: Some("timed out".into()),
+            error: Some("rate limited".into()),
         }];
         let findings = vec![FindingRecord {
             at: "t".into(),
@@ -506,8 +524,9 @@ mod tests {
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
         assert!(text.contains("lanes (1)"));
-        assert!(text.contains("lane-a       dropped"));
-        assert!(text.contains("timed out"));
+        assert!(text.contains("(finished)"), "{text}");
+        assert!(text.contains("lane-a       did not finish m"), "{text}");
+        assert!(text.contains("rate limited"));
         assert!(text.contains("src/x.rs:12 comment c1"));
         assert!(text.contains("timeline (1)"));
         assert!(text.contains("warn  lane-a: could not post"));
@@ -605,6 +624,7 @@ mod tests {
             error: Some("e\u{1b}[1A".into()),
             heartbeat_at: None,
             check_id: None,
+            superseded_by: None,
         };
         let text = render(&run, &[], &[], &[], &[], &[], &events);
         assert!(

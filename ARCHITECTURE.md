@@ -303,17 +303,18 @@ stateDiagram-v2
         [*] --> Lanes
         Lanes --> Summarising: every lane Finished, Stopped or Dropped
     }
-    Running --> Cancelled: a newer commit arrived
+    Running --> Superseded: a newer commit arrived
     Summarising --> Finished: at least one lane finished or stopped
     Summarising --> Failed: no lane finished, or a platform write failed
-    Cancelled --> [*]: check closed, no comment
+    Superseded --> [*]: check neutral, no comment, names the run that replaced it
     Finished --> [*]: summary posted, check success or neutral
     Failed --> [*]: failure comment, check failure
 ```
 
 The decision between Start, Join and Supersede is the pure function
 `henk_domain::queue::decide`; the coordinator applies it under a lock and
-cancels the superseded run's token. On GitHub, `Finished` with zero open
+cancels the superseded run's token, telling it which run replaced it; the
+old run ends `superseded` with that run's id (#231). On GitHub, `Finished` with zero open
 findings concludes the check `success`, with findings `neutral`, and only
 `Failed` concludes `failure`, which is Henk's failure, not the code's (§3.3).
 On GitLab the commit status is always `success` with the count in its
@@ -497,7 +498,8 @@ erDiagram
         text commit_sha
         text requester "stable id, when known"
         text trigger
-        text status "running, finished, failed, cancelled"
+        text status "running, finished, failed, cancelled, superseded"
+        text superseded_by "the run that replaced it"
         text started_at
         text finished_at
         text link "public_base_url/runs/id"
@@ -508,7 +510,7 @@ erDiagram
         text run_id FK
         text name
         text model
-        text status "running, finished, dropped"
+        text status "running, finished, timed_out, did_not_finish"
         int turns
         int input_tokens
         int output_tokens

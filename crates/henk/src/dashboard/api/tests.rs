@@ -14,8 +14,8 @@ use axum::http::{Method, Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, NewRun, RunStatus, ToolCallRecord,
-    TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, LaneStatus, NewRun, RunStatus,
+    ToolCallRecord, TranscriptRecord,
 };
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
@@ -354,6 +354,65 @@ async fn seed_review_record(f: &Fixture) {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_superseded_run_says_so_and_names_its_replacement_and_lanes_say_how_they_ended() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    for id in ["r-old", "r-new"] {
+        store
+            .create_run(&NewRun {
+                id: RunId::parse(id).unwrap(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "new commits".into(),
+                link: format!("{ORIGIN}/runs/{id}"),
+            })
+            .await
+            .unwrap();
+    }
+    let (old, new) = (
+        RunId::parse("r-old").unwrap(),
+        RunId::parse("r-new").unwrap(),
+    );
+    for lane in ["lane-a", "lane-b"] {
+        store.start_lane(&old, lane, "m").await.unwrap();
+    }
+    store
+        .finish_lane(&old, "lane-a", LaneStatus::TimedOut, 30, 1, 1, None)
+        .await
+        .unwrap();
+    store.drop_running_lanes(&old, "cancelled").await.unwrap();
+    store
+        .supersede_run(&old, &new, "superseded by a review of a newer commit")
+        .await
+        .unwrap();
+
+    let listed = get(&f, "/dashboard/api/v1/runs?status=superseded", &cookie).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let listed = listed.json();
+    assert_eq!(ids(&listed), ["r-old"]);
+    assert_eq!(listed["items"][0]["status"], "superseded");
+    assert_eq!(listed["items"][0]["superseded_by"], "r-new");
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-old", &cookie)
+        .await
+        .json();
+    assert_eq!(detail["run"]["superseded_by"], "r-new");
+    assert_eq!(detail["lanes"][0]["status"], "timed_out");
+    assert_eq!(detail["lanes"][0]["error"], Value::Null);
+    assert_eq!(detail["lanes"][1]["status"], "did_not_finish");
+    assert_eq!(detail["lanes"][1]["error"], "cancelled");
+    let replacing = get(&f, "/dashboard/api/v1/runs/r-new", &cookie)
+        .await
+        .json();
+    assert_eq!(replacing["run"]["superseded_by"], Value::Null);
 }
 
 #[tokio::test]

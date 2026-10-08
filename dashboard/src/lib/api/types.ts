@@ -60,7 +60,8 @@ target_url: string | null,
  */
 commit: string | null, 
 /**
- * `running`, `finished`, `failed` or `cancelled`.
+ * `running`, `finished`, `failed`, `cancelled` or `superseded` (a
+ * review replaced by a review of a newer commit, #231).
  */
 status: string, 
 /**
@@ -78,7 +79,11 @@ started_at: string,
 /**
  * RFC 3339, once ended.
  */
-finished_at: string | null, };
+finished_at: string | null, 
+/**
+ * The run that replaced it, when it was superseded.
+ */
+superseded_by: string | null, };
 
 export type RunCount = { 
 /**
@@ -331,7 +336,8 @@ name: string,
  */
 model: string, 
 /**
- * `running`, `finished` or `dropped`.
+ * `running`, `finished`, `timed_out` (stopped at its time limit; what
+ * it drafted counts) or `did_not_finish` (see `error`), #231.
  */
 status: string, 
 /**
@@ -347,7 +353,7 @@ input_tokens: number,
  */
 output_tokens: number, 
 /**
- * Why it was dropped.
+ * Why it did not finish.
  */
 error: string | null, 
 /**

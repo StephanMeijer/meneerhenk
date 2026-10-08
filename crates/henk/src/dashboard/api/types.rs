@@ -60,7 +60,8 @@ pub struct RunSummary {
     pub target_url: Option<String>,
     /// The reviewed commit, for reviews.
     pub commit: Option<String>,
-    /// `running`, `finished`, `failed` or `cancelled`.
+    /// `running`, `finished`, `failed`, `cancelled` or `superseded` (a
+    /// review replaced by a review of a newer commit, #231).
     pub status: String,
     /// What started it.
     pub trigger: String,
@@ -70,6 +71,8 @@ pub struct RunSummary {
     pub started_at: String,
     /// RFC 3339, once ended.
     pub finished_at: Option<String>,
+    /// The run that replaced it, when it was superseded.
+    pub superseded_by: Option<String>,
 }
 
 /// How many runs a filter matches, over every page.
@@ -277,7 +280,8 @@ pub struct Lane {
     pub name: String,
     /// The model.
     pub model: String,
-    /// `running`, `finished` or `dropped`.
+    /// `running`, `finished`, `timed_out` (stopped at its time limit; what
+    /// it drafted counts) or `did_not_finish` (see `error`), #231.
     pub status: String,
     /// Model calls made.
     pub turns: u64,
@@ -285,7 +289,7 @@ pub struct Lane {
     pub input_tokens: u64,
     /// Tokens out.
     pub output_tokens: u64,
-    /// Why it was dropped.
+    /// Why it did not finish.
     pub error: Option<String>,
     /// The turn of its latest tool call: how far a running lane has come,
     /// since turns and tokens are stored when it ends.
@@ -658,6 +662,7 @@ impl RunSummary {
             requester: run.requester.clone(),
             started_at: run.started_at.clone(),
             finished_at: run.finished_at.clone(),
+            superseded_by: run.superseded_by.as_ref().map(|by| by.as_str().to_owned()),
         }
     }
 }

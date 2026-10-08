@@ -2,7 +2,9 @@
 //! its cancellation token is registered here under its run id. Someone
 //! signed in to the dashboard cancels it by id; the run then sees who did,
 //! ends as `Cancelled` and says so in one comment, instead of reading the
-//! cancellation as a supersede, a shutdown or its own failure.
+//! cancellation as a supersede, a shutdown or its own failure. A review
+//! superseded by a review of a newer commit learns here which run replaced
+//! it (#231).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,6 +20,7 @@ pub struct Cancels(Arc<Mutex<HashMap<RunId, Entry>>>);
 struct Entry {
     token: CancellationToken,
     by: Option<String>,
+    superseded_by: Option<RunId>,
 }
 
 impl Cancels {
@@ -27,7 +30,14 @@ impl Cancels {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(run.clone(), Entry { token, by: None });
+            .insert(
+                run.clone(),
+                Entry {
+                    token,
+                    by: None,
+                    superseded_by: None,
+                },
+            );
         Registered {
             cancels: self.clone(),
             run,
@@ -46,6 +56,29 @@ impl Cancels {
         entry.by.get_or_insert(by);
         entry.token.cancel();
         true
+    }
+
+    /// Cancels `run` because `by`, a review of a newer commit, replaces it.
+    /// False when `run` is not registered here.
+    pub fn supersede(&self, run: &RunId, by: &RunId) -> bool {
+        let mut runs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = runs.get_mut(run) else {
+            return false;
+        };
+        // Set before the token fires, so the run sees it.
+        entry.superseded_by.get_or_insert_with(|| by.clone());
+        entry.token.cancel();
+        true
+    }
+
+    /// The run that replaced `run`, when it was superseded.
+    #[must_use]
+    pub fn superseded_by(&self, run: &RunId) -> Option<RunId> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run)
+            .and_then(|entry| entry.superseded_by.clone())
     }
 
     /// Who cancelled `run`, when a person did.
@@ -134,6 +167,28 @@ mod tests {
         drop(registered);
         assert!(!cancels.cancel(&run, "github:1234".to_owned()), "ended");
         assert_eq!(cancels.cancelled_by(&run), None);
+    }
+
+    #[test]
+    fn a_superseded_run_learns_which_run_replaced_it_and_no_person_did() {
+        let cancels = Cancels::default();
+        let (old, new) = (
+            RunId::parse("r-old").unwrap(),
+            RunId::parse("r-new").unwrap(),
+        );
+        let token = CancellationToken::new();
+        let registered = cancels.register(old.clone(), token.clone());
+        assert_eq!(cancels.superseded_by(&old), None);
+        assert!(cancels.supersede(&old, &new));
+        assert!(token.is_cancelled());
+        assert_eq!(cancels.superseded_by(&old), Some(new.clone()));
+        assert_eq!(
+            cancels.cancelled_by(&old),
+            None,
+            "a supersede is not a person's cancel"
+        );
+        drop(registered);
+        assert!(!cancels.supersede(&old, &new), "ended");
     }
 
     #[test]

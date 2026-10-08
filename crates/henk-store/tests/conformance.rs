@@ -76,6 +76,8 @@ macro_rules! for_each_scenario {
     ($tests:ident) => {
         $tests!(
             run_round_trips,
+            a_superseded_run_names_the_run_that_replaced_it,
+            lanes_that_timed_out_or_did_not_finish_say_so,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             dropping_running_lanes_leaves_finished_ones_alone,
@@ -951,6 +953,82 @@ async fn run_round_trips(store: &dyn RunStore) {
     assert!(store.run(&id("nope")).await.unwrap().is_none());
 }
 
+async fn a_superseded_run_names_the_run_that_replaced_it(store: &dyn RunStore) {
+    store.create_run(&new_run("r-old")).await.unwrap();
+    store.create_run(&new_run("r-new")).await.unwrap();
+    store
+        .supersede_run(
+            &id("r-old"),
+            &id("r-new"),
+            "superseded by a review of a newer commit",
+        )
+        .await
+        .unwrap();
+    let old = store.run(&id("r-old")).await.unwrap().unwrap();
+    assert_eq!(old.status, RunStatus::Superseded);
+    assert_eq!(old.superseded_by, Some(id("r-new")));
+    assert_eq!(
+        old.error.as_deref(),
+        Some("superseded by a review of a newer commit")
+    );
+    assert!(old.finished_at.is_some());
+    let new = store.run(&id("r-new")).await.unwrap().unwrap();
+    assert_eq!(new.superseded_by, None);
+    assert_eq!(new.status, RunStatus::Running);
+
+    let superseded = RunFilter {
+        status: Some(RunStatus::Superseded),
+        ..RunFilter::default()
+    };
+    let listed = store
+        .list_runs(&superseded, Page::new(50, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.iter().map(|r| r.id.to_string()).collect::<Vec<_>>(),
+        ["r-old"]
+    );
+    assert_eq!(listed[0].superseded_by, Some(id("r-new")));
+}
+
+async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
+    store.create_run(&new_run("r-1")).await.unwrap();
+    for lane in ["a", "b", "c"] {
+        store.start_lane(&id("r-1"), lane, "m").await.unwrap();
+    }
+    store
+        .finish_lane(&id("r-1"), "a", LaneStatus::Finished, 9, 1, 1, None)
+        .await
+        .unwrap();
+    store
+        .finish_lane(&id("r-1"), "b", LaneStatus::TimedOut, 30, 1, 1, None)
+        .await
+        .unwrap();
+    store
+        .finish_lane(
+            &id("r-1"),
+            "c",
+            LaneStatus::DidNotFinish,
+            2,
+            1,
+            1,
+            Some("rate limited"),
+        )
+        .await
+        .unwrap();
+    let lanes = store.lanes(&id("r-1")).await.unwrap();
+    let statuses: Vec<_> = lanes.iter().map(|l| (l.name.as_str(), l.status)).collect();
+    assert_eq!(
+        statuses,
+        [
+            ("a", LaneStatus::Finished),
+            ("b", LaneStatus::TimedOut),
+            ("c", LaneStatus::DidNotFinish),
+        ]
+    );
+    assert_eq!(lanes[2].error.as_deref(), Some("rate limited"));
+}
+
 async fn a_heartbeat_moves_and_a_check_id_is_kept(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
     let first = store.run(&id("r-1")).await.unwrap().unwrap();
@@ -1007,7 +1085,7 @@ async fn dropping_running_lanes_leaves_finished_ones_alone(store: &dyn RunStore)
     let b = lanes.iter().find(|l| l.name == "b").unwrap();
     assert_eq!(a.status, LaneStatus::Finished);
     assert_eq!(a.error, None);
-    assert_eq!(b.status, LaneStatus::Dropped);
+    assert_eq!(b.status, LaneStatus::DidNotFinish);
     assert_eq!(b.error.as_deref(), Some("interrupted"));
 }
 
@@ -1021,7 +1099,15 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(&run.id, "b", LaneStatus::Dropped, 1, 10, 0, Some("timeout"))
+        .finish_lane(
+            &run.id,
+            "b",
+            LaneStatus::DidNotFinish,
+            1,
+            10,
+            0,
+            Some("rate limited"),
+        )
         .await
         .unwrap();
     store
@@ -1048,7 +1134,7 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
         ),
         (4, 1000, 200)
     );
-    assert_eq!(lanes[1].error.as_deref(), Some("timeout"));
+    assert_eq!(lanes[1].error.as_deref(), Some("rate limited"));
 
     let events = store.events(&run.id).await.unwrap();
     let messages: Vec<_> = events.iter().map(|e| e.message.as_str()).collect();

@@ -39,6 +39,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/007_tool_calls.sql")),
         M::up(include_str!("../migrations/sqlite/008_transcripts.sql")),
         M::up(include_str!("../migrations/sqlite/009_drafts.sql")),
+        M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
     ])
 }
 
@@ -121,6 +122,22 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE runs SET status = ?2, finished_at = ?3, error = ?4, superseded_by = ?5 WHERE id = ?1",
+                params![
+                    id.as_str(),
+                    RunStatus::Superseded.as_str(),
+                    now(),
+                    reason,
+                    by.as_str()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
         self.with(|c| {
             c.query_row(
@@ -181,7 +198,7 @@ impl RunStore for SqliteStore {
                  WHERE run_id = ?1 AND status = ?5",
                 params![
                     run.as_str(),
-                    LaneStatus::Dropped.as_str(),
+                    LaneStatus::DidNotFinish.as_str(),
                     now(),
                     reason,
                     LaneStatus::Running.as_str()
@@ -1314,7 +1331,7 @@ fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
 }
 
 /// The columns [`raw_run`] reads, in order.
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id";
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by";
 
 fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
     Ok(RawRun {
@@ -1334,6 +1351,7 @@ fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
         error: row.get(13)?,
         heartbeat_at: row.get(14)?,
         check_id: row.get(15)?,
+        superseded_by: row.get(16)?,
     })
 }
 
@@ -1377,6 +1395,26 @@ mod tests {
         let orphans = store.orphaned_runs(an_hour_ago).await.unwrap();
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans.first().unwrap().id.as_str(), "r-silent");
+    }
+
+    #[tokio::test]
+    async fn a_lane_stored_as_dropped_before_231_reads_as_did_not_finish() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.create_run(&new_run("r-old")).await.unwrap();
+        let run = RunId::parse("r-old").unwrap();
+        store.start_lane(&run, "a", "m").await.unwrap();
+        store
+            .with(|c| {
+                c.execute(
+                    "UPDATE lanes SET status = 'dropped', error = 'gave up' WHERE run_id = 'r-old'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let lanes = store.lanes(&run).await.unwrap();
+        assert_eq!(lanes.first().unwrap().status, LaneStatus::DidNotFinish);
+        assert_eq!(lanes.first().unwrap().error.as_deref(), Some("gave up"));
     }
 
     #[tokio::test]

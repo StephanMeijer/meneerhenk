@@ -74,13 +74,16 @@ pub enum RunStatus {
     Finished,
     /// Ended because something broke.
     Failed,
-    /// Ended because a person cancelled it from the dashboard (#69). A
-    /// review superseded by a newer commit ends `Failed`, with the reason.
+    /// Ended because a person cancelled it from the dashboard (#69).
     Cancelled,
+    /// A review ended because a review of a newer commit replaced it
+    /// (#231). Not a failure: the check is neutral and nothing is posted.
+    Superseded,
 }
 
 impl RunStatus {
-    /// The stored text: `running`, `finished`, `failed` or `cancelled`.
+    /// The stored text: `running`, `finished`, `failed`, `cancelled` or
+    /// `superseded`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -88,6 +91,7 @@ impl RunStatus {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Superseded => "superseded",
         }
     }
 
@@ -97,6 +101,7 @@ impl RunStatus {
             "finished" => Self::Finished,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "superseded" => Self::Superseded,
             _ => return None,
         })
     }
@@ -107,28 +112,36 @@ impl RunStatus {
 pub enum LaneStatus {
     /// Still going.
     Running,
-    /// Finished cleanly.
+    /// Ran to its end: the model was done, or used its turns.
     Finished,
-    /// Dropped after failure, timeout or cancellation.
-    Dropped,
+    /// Stopped at its time limit (#231). What it drafted until then counts.
+    TimedOut,
+    /// Did not finish: a model error, a refusal, a stuck loop or a cancel;
+    /// the lane's error says which.
+    DidNotFinish,
 }
 
 impl LaneStatus {
-    /// The stored text: `running`, `finished` or `dropped`.
+    /// The stored text: `running`, `finished`, `timed_out` or
+    /// `did_not_finish`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Finished => "finished",
-            Self::Dropped => "dropped",
+            Self::TimedOut => "timed_out",
+            Self::DidNotFinish => "did_not_finish",
         }
     }
 
+    /// Reads the stored text; `dropped`, what lanes that did not finish
+    /// were stored as before #231, still reads.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "running" => Self::Running,
             "finished" => Self::Finished,
-            "dropped" => Self::Dropped,
+            "timed_out" => Self::TimedOut,
+            "did_not_finish" | "dropped" => Self::DidNotFinish,
             _ => return None,
         })
     }
@@ -502,6 +515,8 @@ pub struct RunRecord {
     pub heartbeat_at: Option<String>,
     /// The platform's id for the review's check, once it has one.
     pub check_id: Option<String>,
+    /// The run that replaced it, when it was superseded (#231).
+    pub superseded_by: Option<RunId>,
 }
 
 /// A stored lane.
@@ -1004,6 +1019,7 @@ pub(crate) struct RawRun {
     pub(crate) error: Option<String>,
     pub(crate) heartbeat_at: Option<String>,
     pub(crate) check_id: Option<String>,
+    pub(crate) superseded_by: Option<String>,
 }
 
 impl RawRun {
@@ -1025,6 +1041,15 @@ impl RawRun {
             column: "runs.status",
             value: self.status,
         })?;
+        let superseded_by = self
+            .superseded_by
+            .map(|by| {
+                RunId::parse(by.clone()).map_err(|_| StoreError::Corrupt {
+                    column: "runs.superseded_by",
+                    value: by,
+                })
+            })
+            .transpose()?;
         Ok(RunRecord {
             id,
             kind,
@@ -1042,6 +1067,7 @@ impl RawRun {
             error: self.error,
             heartbeat_at: self.heartbeat_at,
             check_id: self.check_id,
+            superseded_by,
         })
     }
 }

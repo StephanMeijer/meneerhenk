@@ -120,7 +120,10 @@ impl Coordinator {
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
                         warn!(repo = %key.repo, number = key.number, old = %old.commit.short(), new = %commit.short(), "superseding a running review");
-                        old.cancel.cancel();
+                        // The old run learns which run replaced it (#231).
+                        if !self.app.cancels.supersede(&old.run, &run) {
+                            old.cancel.cancel();
+                        }
                     }
                 }
                 Decision::Start => {}
