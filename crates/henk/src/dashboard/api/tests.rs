@@ -1831,6 +1831,75 @@ async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
 }
 
 #[tokio::test]
+async fn quality_daily_picks_the_largest_groups_of_the_days_it_draws() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-review").unwrap();
+    let today = time::OffsetDateTime::now_utc().date();
+    let long_ago = today - time::Duration::days(100);
+    // Seven busy models before the 90 days the chart draws, one quiet
+    // model inside them.
+    let mut drafts = Vec::new();
+    for model in 0..7 {
+        for _ in 0..3 {
+            drafts.push((long_ago, format!("retired-{model}")));
+        }
+    }
+    drafts.push((today, "recent".to_owned()));
+    for (n, (day, model)) in drafts.into_iter().enumerate() {
+        let at = format!("{day}T10:00:00Z");
+        let draft = format!("d{n}");
+        store
+            .record_draft(
+                &run,
+                &DraftRecord {
+                    at: at.clone(),
+                    draft: draft.clone(),
+                    lane: "lane-a".into(),
+                    model,
+                    kind: "finding".into(),
+                    path: "src/a.rs".into(),
+                    line: 4,
+                    target: String::new(),
+                    body: "a finding".into(),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .decide_draft(
+                &run,
+                &draft,
+                &DraftDecision {
+                    at,
+                    verdict: DraftVerdict::Rejected,
+                    checker: "opus".into(),
+                    reason: "src/a.rs:4 says otherwise.".into(),
+                    same_as: String::new(),
+                    comment_id: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie)
+        .await
+        .json();
+    let keys: Vec<&str> = daily
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["recent"], "nothing the chart does not draw");
+    assert_eq!(daily[0]["days"][0]["day"], today.to_string().as_str());
+    assert_eq!(daily[0]["days"][0]["rejected"], 1);
+}
+
+#[tokio::test]
 async fn drafts_list_across_runs_by_verdict_model_and_lane_a_page_at_a_time() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;

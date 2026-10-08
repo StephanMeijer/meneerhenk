@@ -11,6 +11,7 @@ use henk_store::{
     DayRates, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftVerdict, VerdictFilter,
 };
 use serde::Deserialize;
+use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, OffsetDateTime};
 
 use super::types::{
@@ -156,10 +157,16 @@ pub async fn daily(
     ApiQuery(query): ApiQuery<QualityQuery>,
 ) -> ApiResult<Vec<QualitySeries>> {
     let group = query.group()?;
+    let asked = query.filter()?;
+    let asked_since = asked.since.clone();
+    let today = OffsetDateTime::now_utc().date();
+    // The groups are chosen, and the days counted, over the days the chart
+    // draws, so a group busy only before them takes no slot.
     let filter = DraftFilter {
         verdict: None,
         before: None,
-        ..query.filter()?
+        since: chart_since(asked_since.as_deref(), today),
+        ..asked
     };
     let store = &dashboard.app.store;
     let largest: Vec<String> = store
@@ -170,9 +177,24 @@ pub async fn daily(
         .map(|rates| rates.key)
         .collect();
     let rows = store.daily_draft_rates(group, &filter).await?;
-    let today = OffsetDateTime::now_utc().date();
-    let from = first_day(filter.since.as_deref(), &rows, today);
+    let from = first_day(asked_since.as_deref(), &rows, today);
     Ok(Json(series(&largest, &rows, from, today)))
+}
+
+/// The `since` the chart's queries take when it ends `today`: the later of
+/// the caller's `since` and the start of the first day it can draw.
+fn chart_since(since: Option<&str>, today: Date) -> Option<String> {
+    let start = (today - Duration::days(CHART_DAYS - 1))
+        .midnight()
+        .assume_utc();
+    let asked = since.and_then(|since| OffsetDateTime::parse(since, &Rfc3339).ok());
+    match asked {
+        Some(asked) if asked >= start => since.map(str::to_owned),
+        _ => start
+            .format(&Rfc3339)
+            .ok()
+            .or_else(|| since.map(str::to_owned)),
+    }
 }
 
 /// The first day the chart shows when it ends `today`: the day of `since`,
@@ -181,9 +203,7 @@ pub async fn daily(
 fn first_day(since: Option<&str>, rows: &[DayRates], today: Date) -> Date {
     let earliest = today - Duration::days(CHART_DAYS - 1);
     since
-        .and_then(|since| {
-            OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339).ok()
-        })
+        .and_then(|since| OffsetDateTime::parse(since, &Rfc3339).ok())
         .map(OffsetDateTime::date)
         .or_else(|| rows.iter().filter_map(|r| day_of(&r.day)).min())
         .map_or(today, |from| from.max(earliest))
@@ -355,5 +375,18 @@ mod tests {
             ..rows[0].clone()
         }];
         assert_eq!(first_day(None, &old, today), ninety_days);
+    }
+
+    #[test]
+    fn the_chart_queries_only_the_days_it_draws() {
+        let today = Date::from_calendar_date(2026, Month::October, 8).unwrap();
+        let start = Some("2026-07-11T00:00:00Z".to_owned());
+        assert_eq!(chart_since(None, today), start, "all time");
+        assert_eq!(chart_since(Some("2020-01-01T00:00:00Z"), today), start);
+        assert_eq!(
+            chart_since(Some("2026-10-07T10:06:00Z"), today).as_deref(),
+            Some("2026-10-07T10:06:00Z"),
+            "a later since is kept"
+        );
     }
 }
