@@ -10,7 +10,8 @@
   import Outcomes from './Outcomes.svelte';
 
   /** One event beside the list (#227): its facts, what each listener did,
-   * and the payload as received. While no listener has answered, it is
+   * and the payload: laid out to read when it is JSON, as received on
+   * request, and copied as received. While no listener has answered, it is
    * read again every `every` ms, for at most `patience` ms. */
   let {
     id,
@@ -29,6 +30,7 @@
   let detail: EventDetail | null = $state(null);
   let problem: unknown = $state(null);
   let copied = $state(false);
+  let asReceived = $state(false);
 
   $effect(() => {
     const wanted = id;
@@ -38,6 +40,7 @@
     detail = null;
     problem = null;
     copied = false;
+    asReceived = false;
     const read = async (): Promise<void> => {
       try {
         const got = await load(wanted);
@@ -103,15 +106,30 @@
       {/if}
 
       {#if detail.payload !== null}
-        {@const text = prettyPayload(detail.payload)}
+        {@const raw = detail.payload}
+        {@const pretty = prettyPayload(raw)}
+        {@const laidOut = pretty !== raw && !asReceived}
         <div class="payload-head">
-          <h3>Payload as received <span class="data-note">Other people's text, shown as data</span></h3>
-          <button type="button" class="icon-button" onclick={() => copyPayload(text)} title="Copy the payload">
-            <Icon name={copied ? 'check' : 'copy'} size={14} /><span class="visually-hidden">Copy the payload</span>
-          </button>
+          <h3>
+            {laidOut ? 'Payload, laid out to read' : 'Payload as received'}
+            <span class="data-note">Other people's text, shown as data</span>
+          </h3>
+          <div class="payload-actions">
+            {#if pretty !== raw}
+              <button type="button" class="payload-view" onclick={() => (asReceived = !asReceived)}>
+                {asReceived ? 'Lay out' : 'As received'}
+              </button>
+            {/if}
+            <button type="button" class="icon-button" onclick={() => copyPayload(raw)} title="Copy the payload">
+              <Icon name={copied ? 'check' : 'copy'} size={14} /><span class="visually-hidden">Copy the payload</span>
+            </button>
+          </div>
           {#if copied}<span class="visually-hidden" role="status">Copied.</span>{/if}
         </div>
-        <pre class="payload">{text}</pre>
+        {#if laidOut}
+          <p class="muted note">Parsed and printed again: big numbers, number forms, repeated keys and escapes can differ from what came. Copy gives the payload as received.</p>
+        {/if}
+        <pre class="payload">{laidOut ? pretty : raw}</pre>
       {:else}
         <p class="muted">No payload was kept.</p>
       {/if}
@@ -125,6 +143,9 @@
   h3 { font-size: 14px; margin: var(--space-4) 0 var(--space-2); }
   .payload-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
   .payload { max-height: 32rem; }
+  .payload-actions { display: flex; align-items: center; gap: var(--space-2); }
+  .payload-view { font-size: 12.5px; padding: 2px var(--space-2); }
+  .note { font-size: 12.5px; margin: 0 0 var(--space-2); }
 
   @media (max-width: 960px) {
     .inspector { position: static; max-height: none; }

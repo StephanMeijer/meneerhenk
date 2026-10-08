@@ -53,4 +53,22 @@ describe('EventInspector', () => {
     const facts = [...document.querySelectorAll('.facts dd')].map((dd) => dd.textContent?.trim());
     expect(facts.at(-1)).toBe('github:1234');
   });
+
+  it('copies the payload as received, not as laid out, and shows either', async () => {
+    const copy = vi.fn(() => Promise.resolve());
+    const raw = '{"id":12345678901234567890,"ratio":1.0,"tag":"\\u003cb\\u003e"}';
+    const big = { ...event([]), payload: raw };
+    render(EventInspector, { id: 'e-1', load: () => Promise.resolve(big), copy, patience: 0 });
+    await settle();
+    const pre = (): string | null | undefined => document.querySelector('pre')?.textContent;
+    expect(document.querySelector('.payload-head h3')?.textContent).toContain('laid out to read');
+    expect(pre()).not.toBe(raw);
+    document.querySelector<HTMLButtonElement>('button[title="Copy the payload"]')?.click();
+    await settle();
+    expect(copy).toHaveBeenCalledWith(raw);
+    document.querySelector<HTMLButtonElement>('button.payload-view')?.click();
+    await settle();
+    expect(document.querySelector('.payload-head h3')?.textContent).toContain('Payload as received');
+    expect(pre()).toBe(raw);
+  });
 });

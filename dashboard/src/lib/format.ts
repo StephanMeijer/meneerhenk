@@ -134,8 +134,11 @@ export function share(part: number, whole: number): string {
   return whole === 0 ? '-' : `${Math.round((part / whole) * 100)}% of ${count(whole)}`;
 }
 
-/** A payload as received, laid out to read: JSON pretty-printed (only
- * re-spaced, never interpreted), anything else as it came (#227). */
+/** A payload laid out to read: JSON parsed and printed again two spaces
+ * deep, anything else as it came (#227). Parsing changes values: integers
+ * past 2^53 lose precision, `1.0` reads `1`, a repeated key keeps its last
+ * value and escapes are decoded. So this is for reading only; what is
+ * copied is the payload as received. */
 export function prettyPayload(text: string): string {
   try {
     return JSON.stringify(JSON.parse(text), null, 2);
