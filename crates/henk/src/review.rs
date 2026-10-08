@@ -401,7 +401,7 @@ pub async fn report_cancelled_while_queued(
         })
         .await?;
     info!(run = %run, by, "review cancelled from the dashboard before it started");
-    stages::requested(
+    stages::request(
         &*app.store,
         &run,
         request.submitted_at,
@@ -410,6 +410,19 @@ pub async fn report_cancelled_while_queued(
     )
     .await;
     let cancelled = format!("cancelled by {by} while waiting for a slot");
+    // It never got a slot: the queue stage ends skipped, not done.
+    stages::mark_span(
+        &*app.store,
+        &run,
+        Stage::Queued,
+        StageState::Skipped,
+        &cancelled,
+        request
+            .submitted_at
+            .unwrap_or_else(time::OffsetDateTime::now_utc),
+        None,
+    )
+    .await;
     stages::end(
         &*app.store,
         &run,
@@ -2076,6 +2089,21 @@ lanes = [{ name = "lane-a", model = "m" }]
             .filter(|r| Marker::parse(&r.body).is_some_and(|m| m.run == queued))
             .map(|r| r.body.clone())
             .collect();
+        let stages = stage_list(&app, &queued).await;
+        let cancelled = "cancelled by github:1234 while waiting for a slot".to_owned();
+        assert!(
+            stages.contains(&(
+                henk_store::Stage::Queued,
+                StageState::Skipped,
+                cancelled.clone()
+            )),
+            "it never got a slot, so the queue is not done: {stages:?}"
+        );
+        assert!(
+            stages.contains(&(henk_store::Stage::Done, StageState::Skipped, cancelled)),
+            "{stages:?}"
+        );
+        assert_no_stage_running(&app, &queued).await;
         assert_eq!(notices.len(), 1, "one comment: {notices:?}");
         assert!(
             notices[0].contains("Cancelled from the dashboard by GitHub account 1234."),

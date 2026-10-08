@@ -88,6 +88,32 @@ pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// The request's stage alone: when it came and who asked.
+pub async fn request(
+    store: &dyn RunStore,
+    run: &RunId,
+    submitted: Option<OffsetDateTime>,
+    trigger: &str,
+    requester: Option<&str>,
+) {
+    let who = requester.map_or_else(|| trigger.to_owned(), |by| format!("{trigger}, {by}"));
+    match submitted {
+        Some(at) => {
+            mark_span(
+                store,
+                run,
+                Stage::Requested,
+                StageState::Done,
+                who,
+                at,
+                Some(at),
+            )
+            .await;
+        }
+        None => mark(store, run, Stage::Requested, StageState::Done, who).await,
+    }
+}
+
 /// The request's stage: when it came and who asked; and, when the run
 /// waited for a slot, how long.
 pub async fn requested(
@@ -97,21 +123,10 @@ pub async fn requested(
     trigger: &str,
     requester: Option<&str>,
 ) {
-    let who = requester.map_or_else(|| trigger.to_owned(), |by| format!("{trigger}, {by}"));
+    request(store, run, submitted, trigger, requester).await;
     let Some(submitted) = submitted else {
-        mark(store, run, Stage::Requested, StageState::Done, who).await;
         return;
     };
-    mark_span(
-        store,
-        run,
-        Stage::Requested,
-        StageState::Done,
-        who,
-        submitted,
-        Some(submitted),
-    )
-    .await;
     let waited = OffsetDateTime::now_utc() - submitted;
     let detail = if waited >= time::Duration::seconds(1) {
         "waited for a review slot"
