@@ -13,6 +13,7 @@ export type Route =
   | { name: 'event'; id: string; query: URLSearchParams }
   | { name: 'health' }
   | { name: 'quality'; query: URLSearchParams }
+  | { name: 'lanes'; query: URLSearchParams }
   | { name: 'tools'; query: URLSearchParams }
   | { name: 'not_found'; path: string };
 
@@ -41,6 +42,7 @@ export function routeOf(pathname: string, search = ''): Route {
   if (path === '/health') return { name: 'health' };
   if (path === '/events') return { name: 'events', query };
   if (path === '/quality') return { name: 'quality', query };
+  if (path === '/lanes') return { name: 'lanes', query };
   if (path === '/tools') return { name: 'tools', query };
   if (parts.length === 2 && first === 'events' && second) return { name: 'event', id: second, query };
   if (parts.length === 2 && first === 'runs' && second) return { name: 'run', id: second };

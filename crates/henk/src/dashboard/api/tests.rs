@@ -1039,6 +1039,11 @@ fn api_types_are_current() {
         types::WaitingReview::decl(&cfg),
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),
+        types::LaneStats::decl(&cfg),
+        types::ReviewMark::decl(&cfg),
+        types::LaneRow::decl(&cfg),
+        types::LaneOutcome::decl(&cfg),
+        types::LaneReasons::decl(&cfg),
         types::Stage::decl(&cfg),
         types::Heartbeat::decl(&cfg),
         types::Lane::decl(&cfg),
@@ -1600,6 +1605,84 @@ async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
         "{item}"
     );
     assert!(item["stages"].is_array());
+}
+
+#[tokio::test]
+async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
+    let f = fixture("https://127.0.0.1:9");
+    let store = &f.dashboard.app.store;
+    for (run, lane_status, error) in [
+        ("r-1", LaneStatus::Finished, None),
+        (
+            "r-2",
+            LaneStatus::DidNotFinish,
+            Some("rate limited by the model endpoint"),
+        ),
+    ] {
+        let id = RunId::parse(run).unwrap();
+        store
+            .create_run(&NewRun {
+                id: id.clone(),
+                kind: RunKind::Review,
+                platform: Platform::GitHub,
+                repo: "docspec/app".into(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "opened".into(),
+                link: format!("https://henk.example/runs/{run}"),
+            })
+            .await
+            .unwrap();
+        store.start_lane(&id, "lane-a", "m").await.unwrap();
+        store
+            .finish_lane(&id, "lane-a", lane_status, 1, 1, 1, error)
+            .await
+            .unwrap();
+        store
+            .finish_run(&id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let (cookie, _) = viewer(&f);
+    let answer = get(&f, "/dashboard/api/v1/stats/lanes", &cookie).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let stats = answer.json();
+    assert_eq!(stats["reviews"][0]["run_id"], "r-1", "oldest first");
+    let lane = &stats["lanes"][0];
+    assert_eq!(lane["name"], "lane-a");
+    assert_eq!(lane["did_not_finish"], 1);
+    assert_eq!(lane["reasons"]["rate_limit"], 1);
+    assert_eq!(lane["outcomes"][1]["status"], "did_not_finish");
+    assert_eq!(lane["outcomes"][1]["reason"], "rate_limit");
+    assert_eq!(lane["outcomes"][0]["reason"], Value::Null);
+
+    let newest = get(&f, "/dashboard/api/v1/stats/lanes?last=1", &cookie)
+        .await
+        .json();
+    assert_eq!(newest["reviews"].as_array().unwrap().len(), 1);
+    assert_eq!(newest["reviews"][0]["run_id"], "r-2");
+    let since = get(
+        &f,
+        "/dashboard/api/v1/stats/lanes?since=2000-01-01T00:00:00Z",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(since["reviews"].as_array().unwrap().len(), 2);
+    for bad in [
+        "last=0",
+        "last=201",
+        "last=x",
+        "since=yesterday",
+        "last=5&since=2000-01-01T00:00:00Z",
+    ] {
+        let answer = get(&f, &format!("/dashboard/api/v1/stats/lanes?{bad}"), &cookie).await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let refused = call(&f, Method::GET, "/dashboard/api/v1/stats/lanes", &[], None).await;
+    assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

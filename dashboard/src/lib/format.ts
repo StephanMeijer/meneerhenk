@@ -39,6 +39,16 @@ export function ratePercent(rate: number | null): string {
   return rate === null ? '-' : `${Math.round(rate * 100)}%`;
 }
 
+/** Why a lane did not finish (#229), as people say it. */
+export const LANE_REASONS: Record<string, string> = {
+  time_limit: 'time limit',
+  rate_limit: 'rate limit',
+  provider_error: 'provider error',
+  cancelled: 'cancelled',
+  declined: 'model declined',
+  stuck: 'stuck in a loop',
+};
+
 /** The periods the quality page offers, by query value. */
 export const PERIODS: Record<string, { label: string; days: number | null }> = {
   '7d': { label: 'last 7 days', days: 7 },

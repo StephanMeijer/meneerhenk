@@ -14,6 +14,7 @@ describe('routeOf', () => {
       query: new URLSearchParams('source=api'),
     });
     expect(routeOf(`${BASE}/quality`, '?group=lane')).toMatchObject({ name: 'quality' });
+    expect(routeOf(`${BASE}/lanes`, '?period=7d')).toMatchObject({ name: 'lanes' });
     expect(routeOf(`${BASE}/runs/r-1`)).toEqual({ name: 'run', id: 'r-1' });
     expect(routeOf(`${BASE}/runs/r-1/transcripts/lane.a`)).toEqual({
       name: 'transcript',

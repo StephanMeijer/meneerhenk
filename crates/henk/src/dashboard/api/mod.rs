@@ -7,6 +7,7 @@
 
 mod events;
 mod health;
+mod lanes;
 mod quality;
 mod runs;
 mod stats;
@@ -170,6 +171,7 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/events/facets", get(events::facets))
         .route("/events/{id}", get(events::detail))
         .route("/stats/overview", get(stats::overview))
+        .route("/stats/lanes", get(lanes::lanes))
         .fallback(not_found)
         .layer(middleware::map_response(no_store))
         .with_state(dashboard)

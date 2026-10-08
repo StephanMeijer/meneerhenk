@@ -756,6 +756,53 @@ pub(crate) fn merge_days(
     days.into_values().collect()
 }
 
+/// How one lane or fact-check session of a review ended (#229).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneEnding {
+    /// The review.
+    pub run_id: RunId,
+    /// When the review started, RFC 3339.
+    pub started_at: String,
+    /// The lane's name: `lane-a`, `check-1`.
+    pub name: String,
+    /// The model it ran.
+    pub model: String,
+    /// How it ended.
+    pub status: LaneStatus,
+    /// Why it did not finish, when it did not.
+    pub error: Option<String>,
+}
+
+/// The most reviews [`crate::RunStore::lane_endings`] reads at once.
+pub const MOST_LANE_REVIEWS: u32 = 1000;
+
+/// A stored lane ending: (run, started at, name, model, status, error).
+pub(crate) type LaneEndingRow = (String, String, String, String, String, Option<String>);
+
+/// Stored lane endings, checked.
+pub(crate) fn lane_endings(rows: Vec<LaneEndingRow>) -> Result<Vec<LaneEnding>, StoreError> {
+    rows.into_iter()
+        .map(|(run, started_at, name, model, status, error)| {
+            let run_id = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
+                column: "lanes.run_id",
+                value: run,
+            })?;
+            let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
+                column: "lanes.status",
+                value: status,
+            })?;
+            Ok(LaneEnding {
+                run_id,
+                started_at,
+                name,
+                model,
+                status,
+                error,
+            })
+        })
+        .collect()
+}
+
 /// Stored (run, lane, status) rows, checked.
 pub(crate) fn lane_dots(
     rows: Vec<(String, String, String)>,
