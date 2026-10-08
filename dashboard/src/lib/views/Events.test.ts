@@ -89,6 +89,26 @@ describe('Events', () => {
     expect(window.location.pathname + window.location.search).toBe('/dashboard/events?source=api&kind=pull_request&repo=c%2Fd');
   });
 
+  it('shows a filter value the facets no longer know, and keeps it on the next send', async () => {
+    window.scrollTo = vi.fn();
+    render(Events, { query: new URLSearchParams('kind=gone&repo=a/b'), ...loaders() });
+    await settle();
+    expect(document.querySelector<HTMLSelectElement>('select[name=kind]')?.value).toBe('gone');
+    expect(document.querySelector<HTMLSelectElement>('select[name=source]')?.value).toBe('');
+    document.querySelector('form.filters')?.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle(1);
+    expect(window.location.pathname + window.location.search).toBe('/dashboard/events?kind=gone&repo=a%2Fb');
+  });
+
+  it('filters the list by the value the form shows when the query repeats a key', async () => {
+    const load = loaders();
+    render(Events, { query: new URLSearchParams('kind=pull_request&kind=push&repo=&repo=a/b'), ...load });
+    await settle();
+    expect(document.querySelector<HTMLSelectElement>('select[name=kind]')?.value).toBe('pull_request');
+    expect(document.querySelector<HTMLInputElement>('input[name=repo]')?.value).toBe('');
+    expect(load.load).toHaveBeenCalledWith('kind=pull_request');
+  });
+
   it('chooses an event by its id link, keeping the place on the page', async () => {
     const scroll = vi.fn();
     window.scrollTo = scroll;

@@ -30,14 +30,22 @@
 
   const KEYS = ['source', 'kind', 'repo', 'cursor'];
 
+  /** The page's own query, one value a key: the first, as the form shows
+   * it, so the list, the form and the links agree on a repeated key. */
+  let kept = $derived(Object.fromEntries(KEYS.map((key) => [key, query.get(key) ?? ''])));
+
   let listQuery = $derived(
-    new URLSearchParams([...query.entries()].filter(([key, value]) => KEYS.includes(key) && value !== '')).toString(),
+    new URLSearchParams(Object.entries(kept).filter(([, value]) => value !== '')).toString(),
   );
   let page = $derived(load(listQuery));
   let facets = $derived(loadFacets());
 
-  /** The page's own query, to keep when choosing an event. */
-  let kept = $derived(Object.fromEntries([...query.entries()].filter(([key]) => KEYS.includes(key))));
+  /** A select's options: the facets, and the current value when they no
+   * longer know it (pruned, or typed), so the form shows the filter that
+   * is applied and sends it again. */
+  function choices(known: string[], current: string): string[] {
+    return current === '' || known.includes(current) ? known : [current, ...known];
+  }
 
   function filter(event: SubmitEvent): void {
     event.preventDefault();
@@ -66,7 +74,7 @@
         <!-- While the facets load, or if they fail: the same fields as text,
              so a filter sent meanwhile keeps the source and kind. -->
         {#each ['source', 'kind'] as name (name)}
-          <label>{name} <input {name} value={query.get(name) ?? ''}></label>
+          <label>{name} <input {name} value={kept[name]}></label>
         {/each}
       {/snippet}
       {#await facets}
@@ -75,9 +83,9 @@
         {#each [['source', known.sources], ['kind', known.kinds]] as const as [name, options] (name)}
           <label>
             {name}
-            <select {name} value={query.get(name) ?? ''}>
+            <select {name} value={kept[name]}>
               <option value="">any</option>
-              {#each options as option (option)}
+              {#each choices(options, kept[name] ?? '') as option (option)}
                 <option value={option}>{option}</option>
               {/each}
             </select>
@@ -86,7 +94,7 @@
       {:catch}
         {@render typed()}
       {/await}
-      <label>repository <input name="repo" value={query.get('repo') ?? ''} placeholder="owner/name"></label>
+      <label>repository <input name="repo" value={kept.repo} placeholder="owner/name"></label>
       <button>Show</button>
     </form>
   </div>
