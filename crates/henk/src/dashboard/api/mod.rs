@@ -5,11 +5,11 @@
 //! ([`ApiAct`](super::auth::ApiAct)). Errors are JSON too, and nothing redirects. Nothing here
 //! returns a secret. `docs/API.md` lists the routes.
 
-mod events;
-mod health;
+pub(crate) mod events;
+pub(crate) mod health;
 mod lanes;
-mod quality;
-mod runs;
+pub(crate) mod quality;
+pub(crate) mod runs;
 mod session_stream;
 mod stats;
 mod stream;

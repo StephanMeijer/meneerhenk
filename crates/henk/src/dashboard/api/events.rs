@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use super::types::{EventDetail, EventFacets, EventItem, EventSummary, ListenerOutcome, Page};
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor};
+use crate::app::App;
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
 
@@ -82,16 +83,22 @@ pub async fn detail(
     _viewer: ApiViewer,
     Path(id): Path<String>,
 ) -> ApiResult<EventDetail> {
+    Ok(Json(event_detail(&dashboard.app, id).await?))
+}
+
+/// One event with its payload and what each listener did with it: `GET
+/// /events/{id}`, and how the MCP server's start tools learn the run.
+pub(crate) async fn event_detail(app: &App, id: String) -> Result<EventDetail, ApiError> {
     let id = EventId::parse(id).map_err(|_| ApiError::bad_request("That is not an event id."))?;
-    let store = &dashboard.app.store;
+    let store = &app.store;
     let event = store
         .inbound_event(&id)
         .await?
         .ok_or_else(|| ApiError::not_found("No such event."))?;
     let outcomes = store.outcomes(&id).await?;
-    Ok(Json(EventDetail {
+    Ok(EventDetail {
         event: EventSummary::from(&event),
         payload: event.payload,
         outcomes: outcomes.iter().map(ListenerOutcome::from).collect(),
-    }))
+    })
 }

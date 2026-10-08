@@ -31,7 +31,7 @@ pub async fn session_stream(
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let run = run_of(&dashboard, id).await?;
+    let run = run_of(&dashboard.app, id).await?;
     let last = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())

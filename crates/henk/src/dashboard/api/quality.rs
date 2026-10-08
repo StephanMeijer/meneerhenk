@@ -18,21 +18,22 @@ use super::types::{
     DayRate, Draft, DraftCount, DraftItem, Page, QualityRow, QualitySeries, link_to,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
+use crate::app::App;
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
 
 /// What `GET /quality` and `GET /drafts` take. Every filter is optional.
 #[derive(Debug, Default, Deserialize)]
-pub struct QualityQuery {
-    group: Option<String>,
-    verdict: Option<String>,
-    model: Option<String>,
-    lane: Option<String>,
-    repo: Option<String>,
-    since: Option<String>,
-    until: Option<String>,
-    limit: Option<u32>,
-    cursor: Option<String>,
+pub(crate) struct QualityQuery {
+    pub(crate) group: Option<String>,
+    pub(crate) verdict: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) lane: Option<String>,
+    pub(crate) repo: Option<String>,
+    pub(crate) since: Option<String>,
+    pub(crate) until: Option<String>,
+    pub(crate) limit: Option<u32>,
+    pub(crate) cursor: Option<String>,
 }
 
 fn given(value: Option<&String>) -> Option<String> {
@@ -99,13 +100,20 @@ pub async fn rates(
     _viewer: ApiViewer,
     ApiQuery(query): ApiQuery<QualityQuery>,
 ) -> ApiResult<Vec<QualityRow>> {
+    Ok(Json(quality_rates(&dashboard.app, &query).await?))
+}
+
+/// What became of the drafts per group, the largest group first: `GET
+/// /quality` and the MCP server's `review_quality`.
+pub(crate) async fn quality_rates(
+    app: &App,
+    query: &QualityQuery,
+) -> Result<Vec<QualityRow>, ApiError> {
     let group = query.group()?;
     let filter = query.filter()?;
-    let rows = dashboard.app.store.draft_rates(group, &filter).await?;
-    let settings = &dashboard.app.settings;
-    Ok(Json(
-        rows.into_iter().map(|rates| row(settings, rates)).collect(),
-    ))
+    let rows = app.store.draft_rates(group, &filter).await?;
+    let settings = &app.settings;
+    Ok(rows.into_iter().map(|rates| row(settings, rates)).collect())
 }
 
 fn row(settings: &crate::config::Settings, rates: DraftRates) -> QualityRow {
