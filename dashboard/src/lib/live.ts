@@ -1,6 +1,6 @@
 // Applying stream messages to what a page shows (#202). Pure: each takes
 // the state and a message and returns the new state.
-import type { RunDetail, RunMessage, RunningMessage, RunSummary, ToolCall } from './api/types';
+import type { RunDetail, RunMessage, RunningMessage, RunSummary, Slots, ToolCall } from './api/types';
 
 const REFUSED = new Set(['refused_scope', 'refused_repeat']);
 
@@ -76,22 +76,37 @@ export function applyRun(detail: RunDetail, message: RunMessage): RunDetail {
 }
 
 /** What runs now: the newest running runs and how many run in all. */
-export type Running = { runs: RunSummary[]; count: number };
+export type Running = { runs: RunSummary[]; count: number; slots: Slots | null };
 
 /** "Running now" after one message of `/runs/stream`. */
 export function applyRunning(state: Running, message: RunningMessage): Running {
   if (message.kind === 'snapshot') {
-    return { runs: message.data.runs, count: message.data.count };
+    return { runs: message.data.runs, count: message.data.count, slots: message.data.slots };
+  }
+  if (message.kind === 'progress') {
+    const { run_id, lanes, stages } = message.data;
+    return {
+      ...state,
+      runs: state.runs.map((r) =>
+        r.id === run_id ? { ...r, lanes: lanes ?? r.lanes, stages: stages ?? r.stages } : r,
+      ),
+    };
   }
   const run = message.data;
-  const known = state.runs.some((r) => r.id === run.id);
+  const known = state.runs.find((r) => r.id === run.id);
   if (run.status === 'running') {
+    // A `run` message carries no lanes or stages: keep the ones known.
     return known
-      ? { ...state, runs: state.runs.map((r) => (r.id === run.id ? run : r)) }
-      : { runs: [run, ...state.runs], count: state.count + 1 };
+      ? {
+          ...state,
+          runs: state.runs.map((r) =>
+            r.id === run.id ? { ...run, lanes: r.lanes, stages: r.stages } : r,
+          ),
+        }
+      : { ...state, runs: [run, ...state.runs], count: state.count + 1 };
   }
   return known
-    ? { runs: state.runs.filter((r) => r.id !== run.id), count: Math.max(0, state.count - 1) }
+    ? { ...state, runs: state.runs.filter((r) => r.id !== run.id), count: Math.max(0, state.count - 1) }
     : state;
 }
 

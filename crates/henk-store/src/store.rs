@@ -5,11 +5,11 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
-    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    StageRecord, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord,
-    ToolUsage, TranscriptRecord, TranscriptSummary,
+    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
+    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
+    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -371,6 +371,36 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn list_runs(&self, filter: &RunFilter, page: Page)
     -> Result<Vec<RunRecord>, StoreError>;
+
+    /// What happened per UTC day since `since` (#225): runs started,
+    /// finished and failed, findings posted and drafts written. Oldest day
+    /// first; days with nothing are left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError>;
+
+    /// The lanes of each of `runs` as (run, lane, status), for lists that
+    /// show where each run's lanes stand, in one read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn lanes_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError>;
+
+    /// The stages of each of `runs` as (run, stage, state), in one read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn stages_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError>;
 
     /// How many runs match `filter`, across every page.
     ///

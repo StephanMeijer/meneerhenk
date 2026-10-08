@@ -79,6 +79,8 @@ macro_rules! for_each_scenario {
             a_superseded_run_names_the_run_that_replaced_it,
             lanes_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
+            days_count_runs_findings_and_drafts,
+            lanes_and_stages_of_many_runs_come_in_one_read,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             dropping_running_lanes_leaves_finished_ones_alone,
@@ -1117,6 +1119,133 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
         .await
         .unwrap();
     assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
+}
+
+async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
+    for (run, status) in [
+        ("r-1", Some(RunStatus::Finished)),
+        ("r-2", Some(RunStatus::Failed)),
+        ("r-3", Some(RunStatus::Cancelled)),
+        ("r-4", Some(RunStatus::Superseded)),
+        ("r-5", None),
+    ] {
+        store.create_run(&new_run(run)).await.unwrap();
+        if let Some(status) = status {
+            store
+                .finish_run(&id(run), status, None, None)
+                .await
+                .unwrap();
+        }
+    }
+    for (action, comment) in [
+        (FindingAction::Posted, "c1"),
+        (FindingAction::Unverified, "c2"),
+        (FindingAction::Improved, "c3"),
+        (FindingAction::Rejected, "c4"),
+    ] {
+        store
+            .record_finding(&id("r-1"), "a", "x.rs", 1, comment, action)
+            .await
+            .unwrap();
+    }
+    for draft in ["d1", "d2", "d3"] {
+        store
+            .record_draft(
+                &id("r-1"),
+                &DraftRecord {
+                    at: String::new(),
+                    draft: draft.into(),
+                    lane: "a".into(),
+                    model: "m".into(),
+                    kind: "finding".into(),
+                    path: "x.rs".into(),
+                    line: 1,
+                    target: String::new(),
+                    body: "Wrong.".into(),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let yesterday = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let days = store.daily_stats(yesterday).await.unwrap();
+    // One UTC day, or two if the test ran across midnight.
+    assert!(!days.is_empty() && days.len() <= 2, "{days:?}");
+    assert!(
+        days.iter()
+            .all(|d| d.day.len() == 10 && d.day.as_bytes()[4] == b'-')
+    );
+    let sum = |f: fn(&henk_store::DayCounts) -> u64| days.iter().map(f).sum::<u64>();
+    assert_eq!(sum(|d| d.runs), 5);
+    assert_eq!(
+        (sum(|d| d.finished), sum(|d| d.failed)),
+        (1, 1),
+        "cancelled, superseded and running runs are in neither"
+    );
+    assert_eq!(sum(|d| d.findings_posted), 2, "posted and unverified");
+    assert_eq!(sum(|d| d.drafts), 3);
+    let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    assert!(store.daily_stats(later).await.unwrap().is_empty());
+}
+
+async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
+    for run in ["r-1", "r-2", "r-3"] {
+        store.create_run(&new_run(run)).await.unwrap();
+    }
+    store.start_lane(&id("r-1"), "b", "m").await.unwrap();
+    store.start_lane(&id("r-1"), "a", "m").await.unwrap();
+    store.start_lane(&id("r-2"), "a", "m").await.unwrap();
+    store
+        .finish_lane(&id("r-2"), "a", LaneStatus::TimedOut, 1, 1, 1, None)
+        .await
+        .unwrap();
+    store
+        .stage(
+            &id("r-1"),
+            &StageWrite::now(Stage::Lanes, StageState::Running, ""),
+        )
+        .await
+        .unwrap();
+    store
+        .stage(
+            &id("r-1"),
+            &StageWrite::now(Stage::Diff, StageState::Done, ""),
+        )
+        .await
+        .unwrap();
+
+    let lanes = store
+        .lanes_of(&[id("r-1"), id("r-2"), id("r-3")])
+        .await
+        .unwrap();
+    let lanes: Vec<_> = lanes
+        .iter()
+        .map(|(run, name, status)| (run.as_str(), name.as_str(), *status))
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            ("r-1", "a", LaneStatus::Running),
+            ("r-1", "b", LaneStatus::Running),
+            ("r-2", "a", LaneStatus::TimedOut),
+        ]
+    );
+    let stages = store.stages_of(&[id("r-1"), id("r-2")]).await.unwrap();
+    let stages: Vec<_> = stages
+        .iter()
+        .map(|(run, stage, state)| (run.as_str(), *stage, *state))
+        .collect();
+    assert_eq!(
+        stages,
+        [
+            ("r-1", Stage::Diff, StageState::Done),
+            ("r-1", Stage::Lanes, StageState::Running)
+        ],
+        "each run's stages in the order they come"
+    );
+    assert!(store.lanes_of(&[]).await.unwrap().is_empty());
+    assert!(store.stages_of(&[]).await.unwrap().is_empty());
 }
 
 async fn a_heartbeat_moves_and_a_check_id_is_kept(store: &dyn RunStore) {

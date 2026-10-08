@@ -18,6 +18,8 @@ export function runSummary(id: string, status = 'finished'): RunSummary {
     started_at: '2026-10-07T10:00:00Z',
     finished_at: status === 'running' ? null : '2026-10-07T10:05:00Z',
     superseded_by: null,
+    lanes: [],
+    stages: [],
   };
 }
 

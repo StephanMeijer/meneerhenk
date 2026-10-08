@@ -16,13 +16,14 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
-    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StageRecord, StageState, StageWrite,
-    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
-    platform_parse, platform_str, stage_records, status_str, to_i64, to_u64,
+    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow,
+    Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState,
+    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
+    kind_str, lane_dots, merge_days, platform_parse, platform_str, stage_dots, stage_records,
+    status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -35,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/006_drafts.sql"),
     include_str!("../migrations/postgres/007_superseded_by.sql"),
     include_str!("../migrations/postgres/008_stages.sql"),
+    include_str!("../migrations/postgres/009_stats.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -461,6 +463,102 @@ impl RunStore for PgStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
+        let client = self.client().await?;
+        let day = |column: &str| format!("to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD')");
+        let runs = client
+            .query(
+                &format!(
+                    "SELECT {}, COUNT(*), COUNT(*) FILTER (WHERE status = 'finished'),
+                        COUNT(*) FILTER (WHERE status = 'failed')
+                     FROM runs WHERE started_at >= $1 GROUP BY 1",
+                    day("started_at")
+                ),
+                &[&since],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let findings = client
+            .query(
+                &format!(
+                    "SELECT {}, COUNT(*) FROM findings
+                     WHERE action IN ('posted', 'unverified') AND created_at >= $1 GROUP BY 1",
+                    day("created_at")
+                ),
+                &[&since],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let drafts = client
+            .query(
+                &format!(
+                    "SELECT {}, COUNT(*) FROM drafts WHERE created_at >= $1 GROUP BY 1",
+                    day("created_at")
+                ),
+                &[&since],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(merge_days(runs, findings, drafts))
+    }
+
+    async fn lanes_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<&str> = runs.iter().map(RunId::as_str).collect();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT run_id, name, status FROM lanes WHERE run_id = ANY($1) ORDER BY run_id, name",
+                &[&ids],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        lane_dots(rows)
+    }
+
+    async fn stages_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<&str> = runs.iter().map(RunId::as_str).collect();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT run_id, stage, state FROM stages WHERE run_id = ANY($1)",
+                &[&ids],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        stage_dots(rows)
     }
 
     async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {

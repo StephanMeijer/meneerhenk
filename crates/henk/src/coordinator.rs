@@ -42,6 +42,33 @@ struct Active {
     commit: CommitSha,
     cancel: CancellationToken,
     generation: u64,
+    /// When the coordinator took it.
+    since: time::OffsetDateTime,
+    /// Whether it holds a review slot yet (#225).
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The review slots: how many there are, how many are taken, and what
+/// waits for one (#225).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slots {
+    /// `review.max_concurrent`.
+    pub limit: usize,
+    /// Slots a review holds now.
+    pub in_use: usize,
+    /// Reviews waiting for a slot, longest waiting first.
+    pub waiting: Vec<Waiting>,
+}
+
+/// A review waiting for a slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    /// `owner/name`.
+    pub repo: String,
+    /// The pull or merge request.
+    pub number: u64,
+    /// When the coordinator took it.
+    pub since: time::OffsetDateTime,
 }
 
 /// Starts and tracks background runs.
@@ -79,10 +106,37 @@ impl Coordinator {
         &self.app
     }
 
-    /// Reviews running right now.
+    /// Reviews running or waiting for a slot right now.
     #[must_use]
     pub fn active_reviews(&self) -> usize {
         self.active.lock().map_or(0, |m| m.len())
+    }
+
+    /// The review slots and what waits for one.
+    #[must_use]
+    pub fn slots(&self) -> Slots {
+        let limit = self.app.settings.review.max_concurrent.max(1);
+        let in_use = limit.saturating_sub(self.review_slots.available_permits());
+        let mut waiting: Vec<Waiting> = self.active.lock().map_or_else(
+            |_| Vec::new(),
+            |active| {
+                active
+                    .iter()
+                    .filter(|(_, a)| !a.started.load(std::sync::atomic::Ordering::Relaxed))
+                    .map(|(key, a)| Waiting {
+                        repo: key.repo.clone(),
+                        number: key.number,
+                        since: a.since,
+                    })
+                    .collect()
+            },
+        );
+        waiting.sort_by_key(|w| w.since);
+        Slots {
+            limit,
+            in_use,
+            waiting,
+        }
     }
 
     /// Decides what to do with a review request for `commit` and acts on it.
@@ -97,7 +151,7 @@ impl Coordinator {
             *counter
         };
         let run = new_run_id();
-        let (decision, cancel) = {
+        let (decision, cancel, started) = {
             let Ok(mut active) = self.active.lock() else {
                 error!("coordinator lock poisoned");
                 return (Decision::Start, run);
@@ -130,6 +184,7 @@ impl Coordinator {
             }
             // A child of the shutdown token: a shutdown reaches it too.
             let cancel = self.app.shutdown.child_token();
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
             active.insert(
                 key.clone(),
                 Active {
@@ -137,9 +192,11 @@ impl Coordinator {
                     commit: commit.clone(),
                     cancel: cancel.clone(),
                     generation,
+                    since: time::OffsetDateTime::now_utc(),
+                    started: Arc::clone(&started),
                 },
             );
-            (decision, cancel)
+            (decision, cancel, started)
         };
 
         let app = Arc::clone(&self.app);
@@ -164,6 +221,7 @@ impl Coordinator {
                     Err(_) => return,
                 },
             };
+            started.store(true, std::sync::atomic::Ordering::Relaxed);
             if cancel.is_cancelled() {
                 let by = request
                     .run

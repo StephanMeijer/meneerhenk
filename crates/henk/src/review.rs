@@ -2048,6 +2048,17 @@ lanes = [{ name = "lane-a", model = "m" }]
             app.store.run(&queued).await.unwrap().is_none(),
             "the second review waits for the slot"
         );
+        let slots = coordinator.slots();
+        assert_eq!((slots.limit, slots.in_use), (1, 1));
+        assert_eq!(
+            slots
+                .waiting
+                .iter()
+                .map(|w| (w.repo.as_str(), w.number))
+                .collect::<Vec<_>>(),
+            [("o/r", 8)],
+            "the waiting review, not the running one"
+        );
 
         assert!(coordinator.cancel(&queued, "github:1234".to_owned()));
         let mut record = None;
