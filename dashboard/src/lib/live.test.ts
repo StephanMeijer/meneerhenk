@@ -97,6 +97,17 @@ describe('running runs moving on', () => {
     expect(state.runs[0]?.stages).toHaveLength(1);
     expect(applyRunning(state, { kind: 'progress', data: { run_id: 'r-x', lanes: [], stages: null } })).toEqual(state);
   });
+
+  it('takes the slots from a slots message between snapshots, keeping the runs', () => {
+    const before = applyRunning({ runs: [], count: 0, slots: null }, {
+      kind: 'snapshot',
+      data: { runs: [runSummary('r-1', 'running')], count: 1, slots: { limit: 1, in_use: 0, waiting: [] } },
+    });
+    const slots = { limit: 1, in_use: 1, waiting: [{ repo: 'o/r', target: 8, since: '2026-10-07T10:00:00Z' }] };
+    const after = applyRunning(before, { kind: 'slots', data: slots });
+    expect(after.slots).toEqual(slots);
+    expect([after.runs, after.count]).toEqual([before.runs, before.count]);
+  });
 });
 
 describe('stages and heartbeats', () => {

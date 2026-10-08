@@ -381,15 +381,22 @@ fn progress(change: &Change) -> Option<Progress> {
 
 /// Feeds the overview's stream: a snapshot now and every
 /// [`Dashboard::refresh`] times six (runs of other processes, and any
-/// drift), and every run that starts or ends here in between.
+/// drift), and every run that starts or ends here in between, and the
+/// slots each time they change.
 async fn follow_running(
     dashboard: Arc<Dashboard>,
     mut changes: broadcast::Receiver<Arc<Change>>,
     out: mpsc::Sender<Event>,
 ) {
     let mut every = tokio::time::interval(dashboard.refresh.saturating_mul(6));
+    let mut slots_changed = dashboard.coordinator.watch_slots();
     loop {
         tokio::select! {
+            Ok(()) = slots_changed.changed() => {
+                if !send(&out, &RunningMessage::Slots(slots(&dashboard)), None).await {
+                    return;
+                }
+            }
             _ = every.tick() => {
                 let Some(snapshot) = running_now(&dashboard).await else { return };
                 if !send(&out, &RunningMessage::Snapshot(snapshot), None).await {

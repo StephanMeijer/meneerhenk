@@ -315,6 +315,8 @@ pub enum RunningMessage {
     Run(Box<RunSummary>),
     /// A running run's lanes or stages moved on.
     Progress(Progress),
+    /// A review started waiting, took or freed a slot, or left the queue.
+    Slots(Slots),
 }
 
 /// What became of the drafts of one group: a model, a lane, a repository

@@ -287,7 +287,7 @@ slots: Slots, };
 
 export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
-export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress };
+export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots };
 
 export type RunDetail = { 
 /**

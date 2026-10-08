@@ -270,7 +270,9 @@ newest running runs, at most 100, how many run, and the review `slots`)
 on connect and every 30 seconds, a `run` message (`RunSummary`) whenever
 a run of this process starts or ends, and a `progress` message (`run_id`
 with its `lanes` or its `stages` as dots, the other `null`) whenever a
-running run's lanes or stages move on (#225). `RunningMessage` in
+running run's lanes or stages move on (#225), and a `slots` message
+(`Slots`) whenever a review of this process starts waiting, takes or
+frees a slot, or leaves the queue. `RunningMessage` in
 `types.ts` is the union.
 
 `slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:

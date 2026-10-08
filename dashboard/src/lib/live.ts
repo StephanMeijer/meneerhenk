@@ -83,6 +83,9 @@ export function applyRunning(state: Running, message: RunningMessage): Running {
   if (message.kind === 'snapshot') {
     return { runs: message.data.runs, count: message.data.count, slots: message.data.slots };
   }
+  if (message.kind === 'slots') {
+    return { ...state, slots: message.data };
+  }
   if (message.kind === 'progress') {
     const { run_id, lanes, stages } = message.data;
     return {

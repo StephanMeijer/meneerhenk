@@ -1545,6 +1545,47 @@ async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on(
 }
 
 #[tokio::test]
+async fn the_running_stream_sends_the_slots_when_they_change_not_only_in_snapshots() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+
+    let request = crate::review::ReviewRequest {
+        target: henk_platform::ReviewTarget {
+            repo: henk_domain::allowlist::RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+            number: 8,
+        },
+        commit: None,
+        trigger: "test".to_owned(),
+        requester: None,
+        acknowledge: None,
+        run: None,
+        submitted_at: None,
+    };
+    let commit =
+        henk_domain::review::CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let _ = f.dashboard.coordinator.submit_review(request, commit);
+    // The review cannot reach a platform and ends at once: its slot is
+    // taken and freed, and the stream says so without a snapshot.
+    let freed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = events.next().await.unwrap();
+            if message.event == "slots"
+                && message.data["in_use"] == 0
+                && message.data["waiting"] == json!([])
+            {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("a slots message after the review freed its slot");
+    assert!(freed.data["limit"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
 async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;

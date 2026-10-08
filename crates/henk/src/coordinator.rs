@@ -9,7 +9,7 @@ use henk_domain::queue::{Decision, decide};
 use henk_domain::review::CommitSha;
 use henk_domain::run::RunId;
 use henk_platform::{IssueTarget, ReviewTarget};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -71,6 +71,22 @@ pub struct Waiting {
     pub since: time::OffsetDateTime,
 }
 
+/// A review of `generation` leaves the queue, unless a newer one took its
+/// place; the overview hears that its slot is free.
+fn leave(
+    active: &Mutex<HashMap<Key, Active>>,
+    key: &Key,
+    generation: u64,
+    slots_changed: &watch::Sender<()>,
+) {
+    if let Ok(mut map) = active.lock()
+        && map.get(key).is_some_and(|a| a.generation == generation)
+    {
+        map.remove(key);
+    }
+    slots_changed.send_replace(());
+}
+
 /// Starts and tracks background runs.
 pub struct Coordinator {
     app: Arc<App>,
@@ -78,6 +94,9 @@ pub struct Coordinator {
     review_slots: Arc<Semaphore>,
     generation: Mutex<u64>,
     addressing: Arc<Mutex<std::collections::HashSet<Key>>>,
+    /// Marked whenever [`Coordinator::slots`] may read differently, so the
+    /// overview's stream need not wait for its next snapshot.
+    slots_changed: Arc<watch::Sender<()>>,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -97,6 +116,7 @@ impl Coordinator {
             review_slots: Arc::new(Semaphore::new(slots)),
             generation: Mutex::new(0),
             addressing: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            slots_changed: Arc::new(watch::Sender::new(())),
         }
     }
 
@@ -137,6 +157,13 @@ impl Coordinator {
             in_use,
             waiting,
         }
+    }
+
+    /// Wakes when a review starts waiting, takes or frees a slot, or leaves
+    /// the queue; [`Coordinator::slots`] then says how things stand.
+    #[must_use]
+    pub fn watch_slots(&self) -> watch::Receiver<()> {
+        self.slots_changed.subscribe()
     }
 
     /// Decides what to do with a review request for `commit` and acts on it.
@@ -198,10 +225,12 @@ impl Coordinator {
             );
             (decision, cancel, started)
         };
+        self.slots_changed.send_replace(());
 
         let app = Arc::clone(&self.app);
         let slots = Arc::clone(&self.review_slots);
         let active = Arc::clone(&self.active);
+        let slots_changed = Arc::clone(&self.slots_changed);
         let request = ReviewRequest {
             commit: Some(commit),
             run: Some(run.clone()),
@@ -213,7 +242,7 @@ impl Coordinator {
             let _cancellable = cancellable;
             // A review waiting for a slot still hears its token: a cancel
             // ends it now, not once a slot frees.
-            let _permit = tokio::select! {
+            let permit = tokio::select! {
                 biased;
                 () = cancel.cancelled() => None,
                 permit = slots.acquire_owned() => match permit {
@@ -222,6 +251,7 @@ impl Coordinator {
                 },
             };
             started.store(true, std::sync::atomic::Ordering::Relaxed);
+            slots_changed.send_replace(());
             if cancel.is_cancelled() {
                 let by = request
                     .run
@@ -237,11 +267,8 @@ impl Coordinator {
             } else if let Err(error) = run_review(&app, request, cancel).await {
                 warn!(%error, "review ended with an error");
             }
-            if let Ok(mut map) = active.lock()
-                && map.get(&key).is_some_and(|a| a.generation == generation)
-            {
-                map.remove(&key);
-            }
+            drop(permit);
+            leave(&active, &key, generation, &slots_changed);
         });
         (decision, run)
     }
@@ -257,6 +284,7 @@ impl Coordinator {
         if let Ok(mut active) = self.active.lock() {
             active.retain(|_, a| a.run != *run);
         }
+        self.slots_changed.send_replace(());
         true
     }
 

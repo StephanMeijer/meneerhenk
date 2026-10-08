@@ -74,7 +74,7 @@
   onMount(() => {
     const following = follow<RunningMessage>(
       '/runs/stream',
-      ['snapshot', 'run', 'progress'],
+      ['snapshot', 'run', 'progress', 'slots'],
       (message) => (running = applyRunning(running, message)),
       (open) => (connection = connectionAfter(connection, open)),
       connect,
