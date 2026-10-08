@@ -4,9 +4,10 @@
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Me, Page, RunningMessage, RunSummary } from '$lib/api/types';
   import { applyRunning, type Running } from '$lib/live';
-  import { navigate, withQuery } from '$lib/router';
-  import Pager from './Pager.svelte';
-  import Problem from './Problem.svelte';
+  import { navigate, route, withQuery } from '$lib/router';
+  import Loading from '$lib/ui/Loading.svelte';
+  import Pager from '$lib/ui/Pager.svelte';
+  import Problem from '$lib/ui/Problem.svelte';
   import RunsTable from './RunsTable.svelte';
   import StartForm from './StartForm.svelte';
 
@@ -46,6 +47,16 @@
     );
     return () => following.close();
   });
+  // "Start a run" in the header leads here (#230 makes it a dialog).
+  $effect(() => {
+    void $route;
+    if (window.location.hash !== '#start') return;
+    requestAnimationFrame(() => {
+      document.getElementById('start')?.scrollIntoView?.();
+      document.querySelector<HTMLInputElement>('#start input[name=url]')?.focus();
+    });
+  });
+
   function filter(event: SubmitEvent): void {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -61,39 +72,59 @@
   }
 </script>
 
-<h1>Meneer Henk</h1>
-<p class="muted">Signed in as {me.login}.</p>
+<div class="page-head">
+  <div class="row">
+    <h1>Overview</h1>
+  </div>
+  <p class="intro">
+    Signed in as {me.login} <span class="who">github:{me.github_id}</span>. Times in UTC, hover for the exact time.
+  </p>
+</div>
 
-<h2>Start</h2>
-<StartForm startable={me.startable} />
+<section class="panel" id="start" aria-labelledby="start-title">
+  <div class="panel-head"><h2 id="start-title">Start a run</h2></div>
+  <div class="panel-body"><StartForm startable={me.startable} /></div>
+</section>
 
-<h2>Running now ({running.count})</h2>
-<RunsTable runs={running.runs} />
-{#if running.count > running.runs.length}
-  <p class="muted">And {running.count - running.runs.length} more not shown.</p>
-{/if}
+<section class="panel" aria-labelledby="running-title">
+  <div class="panel-head">
+    <h2 id="running-title">Running now <span class="count-badge">({running.count})</span></h2>
+    <span class="note">Updates as runs start and end</span>
+  </div>
+  <RunsTable runs={running.runs} why="Nothing runs right now." />
+  {#if running.count > running.runs.length}
+    <div class="panel-foot">And {running.count - running.runs.length} more not shown.</div>
+  {/if}
+</section>
 
-<h2>Runs</h2>
-<form class="filters" onsubmit={filter}>
-  {#each [['kind', KINDS], ['status', STATUSES], ['platform', PLATFORMS]] as const as [name, options] (name)}
-    <label>
-      {name}
-      <select {name} value={query.get(name) ?? ''}>
-        <option value="">any</option>
-        {#each options as option (option)}
-          <option value={option}>{option}</option>
-        {/each}
-      </select>
-    </label>
-  {/each}
-  <label>repo <input name="repo" value={query.get('repo') ?? ''} placeholder="owner/name"></label>
-  <button>Show</button>
-</form>
-{#await page}
-  <p class="muted" aria-busy="true">Loading.</p>
-{:then result}
-  <RunsTable runs={result.items} />
-  <Pager path="/" {query} next={result.next} />
-{:catch error}
-  <Problem {error} />
-{/await}
+<section class="panel" aria-labelledby="runs-title">
+  <div class="panel-head">
+    <h2 id="runs-title">Recent runs</h2>
+    <form class="filters" onsubmit={filter}>
+      {#each [['kind', KINDS], ['status', STATUSES], ['platform', PLATFORMS]] as const as [name, options] (name)}
+        <label>
+          {name}
+          <select {name} value={query.get(name) ?? ''}>
+            <option value="">any</option>
+            {#each options as option (option)}
+              <option value={option}>{option.replaceAll('_', ' ')}</option>
+            {/each}
+          </select>
+        </label>
+      {/each}
+      <label>repository <input name="repo" value={query.get('repo') ?? ''} placeholder="owner/name"></label>
+      <button>Show</button>
+    </form>
+  </div>
+  {#await page}
+    <Loading />
+  {:then result}
+    <RunsTable runs={result.items} why="No runs match these filters." />
+    <div class="panel-foot">
+      <span>Newest first.</span>
+      <Pager path="/" {query} next={result.next} />
+    </div>
+  {:catch error}
+    <Problem {error} />
+  {/await}
+</section>

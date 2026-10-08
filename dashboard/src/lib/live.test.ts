@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolCall } from './api/types';
-import { applyRun, applyRunning } from './live';
+import { applyRun, applyRunning, connectionAfter } from './live';
 import { draft, runDetail, runSummary } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
@@ -92,5 +92,15 @@ describe('applyRunning', () => {
     expect([state.runs.map((r) => r.id), state.count]).toEqual([['r-2'], 5]);
     state = applyRunning(state, { kind: 'run', data: runSummary('r-9', 'failed') });
     expect(state.count).toBe(5);
+  });
+});
+
+describe('the live connection', () => {
+  it('connects, goes live, reconnects and stays ended', () => {
+    expect(connectionAfter('connecting', false)).toBe('connecting');
+    expect(connectionAfter('connecting', true)).toBe('live');
+    expect(connectionAfter('live', false)).toBe('reconnecting');
+    expect(connectionAfter('reconnecting', true)).toBe('live');
+    expect(connectionAfter('ended', true)).toBe('ended');
   });
 });

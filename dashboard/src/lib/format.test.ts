@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { about, average, draftWhat, kindText, lineCount, outcomeClass, periodSince, ratePercent, verdictText } from './format';
+import {
+  about,
+  ago,
+  average,
+  clockTime,
+  count,
+  draftWhat,
+  duration,
+  kindText,
+  lineCount,
+  outcomeClass,
+  periodSince,
+  ratePercent,
+  runDuration,
+  share,
+  shortCommit,
+  utc,
+  verdictText,
+} from './format';
 import { draft } from './testing/fixtures';
 
 describe('format', () => {
@@ -56,5 +74,37 @@ describe('tool helpers', () => {
   it('give the time per call', () => {
     expect(average(100, 3)).toBe('33 ms');
     expect(average(0, 0)).toBe('-');
+  });
+
+  it('says how long ago, and the exact time', () => {
+    const now = new Date('2026-10-07T10:08:11Z');
+    expect(ago('2026-10-07T10:08:00Z', now)).toBe('just now');
+    expect(ago('2026-10-07T10:09:00Z', now)).toBe('just now');
+    expect(ago('2026-10-07T10:02:11Z', now)).toBe('6 min ago');
+    expect(ago('2026-10-07T08:00:00Z', now)).toBe('2 h ago');
+    expect(ago('2026-10-04T10:08:11Z', now)).toBe('3 d ago');
+    expect(ago('not a time', now)).toBe('not a time');
+    expect(utc('2026-10-07T12:02:11.345+02:00')).toBe('2026-10-07T10:02:11Z');
+    expect(clockTime('2026-10-07T10:02:11Z')).toBe('10:02:11 UTC');
+  });
+
+  it('says how long something took', () => {
+    expect(duration(0)).toBe('0m 00s');
+    expect(duration(41_000)).toBe('0m 41s');
+    expect(duration(192_000)).toBe('3m 12s');
+    expect(duration(3_600_000)).toBe('1h 00m');
+    expect(duration(3_840_000)).toBe('1h 04m');
+    expect(duration(-5)).toBe('0m 00s');
+    const run = { started_at: '2026-10-07T10:00:00Z', finished_at: null };
+    expect(runDuration(run, new Date('2026-10-07T10:06:12Z'))).toBe('6m 12s');
+    expect(runDuration({ ...run, finished_at: '2026-10-07T10:00:18Z' })).toBe('0m 18s');
+  });
+
+  it('shortens commits and counts with separators', () => {
+    expect(shortCommit('abc1234def5678')).toBe('abc1234');
+    expect(shortCommit('abc')).toBe('abc');
+    expect(count(1284)).toBe('1,284');
+    expect(share(72, 75)).toBe('96% of 75');
+    expect(share(0, 0)).toBe('-');
   });
 });

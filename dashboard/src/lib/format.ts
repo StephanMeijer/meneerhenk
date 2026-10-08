@@ -64,3 +64,72 @@ export function outcomeClass(outcome: string): 'ok' | 'error' | 'refused' | 'oth
 export function average(totalMs: number, calls: number): string {
   return calls === 0 ? '-' : `${Math.round(totalMs / calls)} ms`;
 }
+
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/** How long ago `iso` was, as people say it: `just now`, `6 min ago`,
+ * `2 h ago`, `3 d ago`. A time in the future (a clock ahead) is `just now`. */
+export function ago(iso: string, now: Date = new Date()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  const past = now.getTime() - then;
+  if (past < MINUTE) return 'just now';
+  if (past < HOUR) return `${Math.floor(past / MINUTE)} min ago`;
+  if (past < DAY) return `${Math.floor(past / HOUR)} h ago`;
+  return `${Math.floor(past / DAY)} d ago`;
+}
+
+/** The exact time in UTC, to the second: `2026-10-07T10:02:11Z`. */
+export function utc(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return iso;
+  return new Date(then).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/** The clock time in UTC: `10:02:11 UTC`. */
+export function clockTime(iso: string): string {
+  const exact = utc(iso);
+  const time = /T(\d{2}:\d{2}:\d{2})Z$/.exec(exact)?.[1];
+  return time === undefined ? exact : `${time} UTC`;
+}
+
+/** A length of time: `0m 41s`, `3m 12s`, `1h 04m`. */
+export function duration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / SECOND));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+/** How long a run took, or has been going while it runs. */
+export function runDuration(
+  run: { started_at: string; finished_at: string | null },
+  now: Date = new Date(),
+): string {
+  const start = Date.parse(run.started_at);
+  const end = run.finished_at === null ? now.getTime() : Date.parse(run.finished_at);
+  if (Number.isNaN(start) || Number.isNaN(end)) return '';
+  return duration(end - start);
+}
+
+/** A commit as people show it: its first 7 characters. */
+export function shortCommit(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+const NUMBER = new Intl.NumberFormat('en-US');
+
+/** A count with thousands separators: `1,284`. */
+export function count(n: number): string {
+  return NUMBER.format(n);
+}
+
+/** A share with its base: `96% of 75`; a dash of nothing. */
+export function share(part: number, whole: number): string {
+  return whole === 0 ? '-' : `${Math.round((part / whole) * 100)}% of ${count(whole)}`;
+}

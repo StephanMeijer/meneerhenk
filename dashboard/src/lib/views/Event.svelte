@@ -1,9 +1,13 @@
 <script lang="ts">
   import { event as loadEvent } from '$lib/api/client';
   import type { EventDetail } from '$lib/api/types';
-  import { about } from '$lib/format';
+  import { about, clockTime } from '$lib/format';
+  import { href, link } from '$lib/router';
+  import Loading from '$lib/ui/Loading.svelte';
+  import Problem from '$lib/ui/Problem.svelte';
+  import Status from '$lib/ui/Status.svelte';
+  import Time from '$lib/ui/Time.svelte';
   import Outcomes from './Outcomes.svelte';
-  import Problem from './Problem.svelte';
 
   /** While no listener has answered, the event is read again every
    * `every` ms, for at most `patience` ms. */
@@ -52,33 +56,48 @@
 {#if problem !== null}
   <Problem error={problem} />
 {:else if detail === null}
-  <p class="muted" aria-busy="true">Loading.</p>
+  <Loading />
 {:else}
-  <h1>Event {detail.event.id}</h1>
-  <dl class="facts">
-    <dt>Received</dt>
-    <dd>{detail.event.received_at}</dd>
-    <dt>Source</dt>
-    <dd>{detail.event.source}</dd>
-    <dt>Kind</dt>
-    <dd>{detail.event.kind}</dd>
-    {#if detail.event.repo}
-      <dt>About</dt>
-      <dd>{about(detail.event.repo, detail.event.target)}</dd>
-    {/if}
-    {#if detail.event.requester}
-      <dt>Asked by</dt>
-      <dd>{detail.event.requester}</dd>
-    {/if}
-  </dl>
-  <h2>What the listeners did</h2>
-  {#if detail.outcomes.length === 0}
-    <p class="muted" aria-busy="true">No listener has answered yet.</p>
-  {:else}
-    <Outcomes outcomes={detail.outcomes} />
-  {/if}
+  <div class="page-head">
+    <span class="crumbs"><a href={href('/events')} use:link>Events</a> / <code>{detail.event.id}</code></span>
+    <h1>Event <span class="mono">{detail.event.id}</span></h1>
+  </div>
+  <section class="panel">
+    <div class="panel-body">
+      <dl class="facts">
+        <div>
+          <dt>Received</dt>
+          <dd><Time iso={detail.event.received_at} /> <span class="muted mono">{clockTime(detail.event.received_at)}</span></dd>
+        </div>
+        <div><dt>Source</dt><dd class="mono">{detail.event.source}</dd></div>
+        <div><dt>Kind</dt><dd class="mono">{detail.event.kind}</dd></div>
+        <div>
+          <dt>About</dt>
+          <dd>{#if detail.event.repo}{about(detail.event.repo, detail.event.target)}{:else}<span class="muted">no repository</span>{/if}</dd>
+        </div>
+        <div>
+          <dt>Asked by</dt>
+          <dd>{#if detail.event.requester}<span class="mono">{detail.event.requester}</span>{:else}<span class="muted">not known</span>{/if}</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>What the listeners did</h2></div>
+    <div class="panel-body">
+      {#if detail.outcomes.length === 0}
+        <p class="muted" aria-busy="true"><Status word="waiting" /> No listener has answered yet.</p>
+      {:else}
+        <Outcomes outcomes={detail.outcomes} />
+      {/if}
+    </div>
+  </section>
   {#if detail.payload !== null}
-    <h2>Payload as received</h2>
-    <pre>{detail.payload}</pre>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Payload as received <span class="data-note">Other people's text, shown as data</span></h2>
+      </div>
+      <div class="panel-body"><pre>{detail.payload}</pre></div>
+    </section>
   {/if}
 {/if}

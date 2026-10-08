@@ -68,7 +68,7 @@
     note
     <input name="note" bind:value={note} placeholder="plan or address only">
   </label>
-  <button disabled={sending}>{sending ? 'Starting' : 'Start'}</button>
+  <button class="primary" disabled={sending}>{sending ? 'Starting' : 'Start'}</button>
 </form>
 {#if problem !== null}
   <p class="problem" role="alert">Not started. {problem}</p>

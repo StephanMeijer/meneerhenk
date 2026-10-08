@@ -28,7 +28,7 @@ describe('Overview', () => {
     await settle(1);
     expect(document.body.textContent).toContain('Running now (3)');
     expect(document.body.textContent).toContain('And 2 more not shown.');
-    expect(rows().map((row) => row[0])).toEqual(['r-9', 'r-2', 'r-1']);
+    expect(rows().map((row) => row[1])).toEqual(['r-9', 'r-2', 'r-1']);
     const pager = [...document.querySelectorAll('.pager a')].map((a) => [a.textContent, a.getAttribute('href')]);
     expect(pager).toEqual([
       ['Newest', '/dashboard/?kind=review&repo=docspec%2Fapp&junk=x'],
@@ -49,10 +49,13 @@ describe('Running now', () => {
     source.push('run', runSummary('r-5', 'running'));
     await settle(1);
     expect(document.body.textContent).toContain('Running now (1)');
-    expect(rows().map((row) => row[0])).toEqual(['r-5']);
+    expect(rows().map((row) => row[1])).toEqual(['r-5']);
+    source.push('run', { ...runSummary('r-6', 'running'), trigger: 'requested', requester: 'github:1234' });
+    await settle(1);
+    expect(rows().find((row) => row[1] === 'r-6')?.[5]).toBe('requested github:1234');
     source.push('run', runSummary('r-5', 'finished'));
     await settle(1);
-    expect(document.body.textContent).toContain('Running now (0)');
+    expect(document.body.textContent).toContain('Running now (1)');
     expect(loadRuns).toHaveBeenCalledTimes(1);
   });
 });

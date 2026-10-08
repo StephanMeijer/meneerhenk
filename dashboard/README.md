@@ -19,12 +19,23 @@ serves it at `/dashboard` behind the dashboard's sign-in.
   overview (`/`), `/runs/{id}`, `/runs/{id}/transcripts/{session}`,
   `/events`, `/events/{id}` and `/health`, the paths the server-rendered
   pages had.
-- `src/lib/format.ts`: small text helpers the views share.
+- `src/lib/format.ts`: small text helpers the views share: times
+  (`6 min ago`, the exact UTC time), durations, commits, counts.
+- `src/lib/status.ts`: the status vocabulary (#224): every status word the
+  API sends, with its tone and icon. One status, one colour, one icon,
+  everywhere; the word is always shown too.
+- `src/lib/clock.ts`: the time relative times are shown against, ticking.
+- `src/lib/ui/`: the parts every page uses: `Status` (a pill), `Time`,
+  `Commit`, `Live` (a stream's connection), `Icon` (inline SVG),
+  `Loading`, `Empty`, `Problem`, `Pager`.
 - `src/lib/views/`: one component per page, and the parts they share. A
   view takes its loaders as props with the client's as defaults, so tests
   give it fixtures.
 - `src/lib/testing/`: rendering into jsdom and fixtures, for the tests.
-- `src/App.svelte`: the shell: navigation, who is signed in, sign-out.
+- `src/App.svelte`: the shell: the tabs, "Start a run", who is signed in,
+  sign-out; at phone width the tabs fold behind a menu.
+- `src/app.css`: the visual language: colour tokens for light and dark,
+  type, panels, tables, buttons, chips, pills and states.
 - `public/`: files copied as they are, such as the favicon.
 
 ## Rules
@@ -34,6 +45,8 @@ serves it at `/dashboard` behind the dashboard's sign-in.
   `insertAdjacentHTML` are lint errors.
 - The page's policy allows no inline script or style and no `data:` URLs:
   no `style=` attributes, no Svelte transitions, no inlined assets.
+  Icons are inline `<svg>` elements; a bar's length is a `<meter>` or an
+  SVG attribute. No web fonts: the system's sans and monospace.
 
 ## Commands
 
