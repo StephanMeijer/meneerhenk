@@ -106,8 +106,9 @@ const RECENT_REVIEWS: usize = 10;
 
 /// Whether the reviews configured for workspaces got them (#254): of the
 /// last ended ones that reached their checkout, how many had their commit
-/// checked out, and why the newest that did not went without. A failing checkout leaves a review
-/// that still completes, so nothing else would say so.
+/// checked out, and why the newest that did not went without. A failing
+/// checkout leaves a review that still completes, so nothing else would
+/// say so.
 async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
     let settings = &dashboard.app.settings;
     let name = "workspaces".to_owned();
@@ -148,30 +149,42 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
             *id == run.id && *stage == Stage::Checkout && *state == wanted
         })
     };
-    let checked_out = |run: &RunRecord| checkout(run, StageState::Done);
-    // Only a review that reached its checkout wanted one: one with nothing
-    // to review skips it, and one cancelled in the queue or failed before
-    // its lanes never gets there.
-    let wanted: Vec<&RunRecord> = ended
-        .into_iter()
-        .filter(|run| checked_out(run) || checkout(run, StageState::Failed))
-        .take(RECENT_REVIEWS)
-        .collect();
-    if wanted.is_empty() {
+    // Only a review whose checkout was tried and went wrong went without:
+    // one with nothing to review skips it, one cancelled in the queue or
+    // failed before its lanes never gets there, and one that ended while
+    // its checkout was running has the stage failed for it, without the
+    // warning a failed checkout leaves.
+    let mut counted = 0;
+    let mut had = 0;
+    let mut why = None;
+    for run in ended {
+        if counted == RECENT_REVIEWS {
+            break;
+        }
+        if checkout(run, StageState::Done) {
+            counted += 1;
+            had += 1;
+        } else if checkout(run, StageState::Failed)
+            && let Some(warning) = why_without(dashboard, run).await
+        {
+            counted += 1;
+            why.get_or_insert(warning);
+        }
+    }
+    if counted == 0 {
         let text = "no review with workspaces has reached its checkout yet";
         return (name, "ok".to_owned(), text.to_owned());
     }
-    let had = wanted.iter().filter(|run| checked_out(run)).count();
-    let line = format!("{had} of the last {} reviews had one", wanted.len());
-    let Some(without) = wanted.iter().find(|run| !checked_out(run)) else {
-        return (name, "ok".to_owned(), line);
-    };
-    let why = why_without(dashboard, without).await;
-    (name, "warn".to_owned(), format!("{line} ({why})"))
+    let line = format!("{had} of the last {counted} reviews had one");
+    match why {
+        None => (name, "ok".to_owned(), line),
+        Some(why) => (name, "warn".to_owned(), format!("{line} ({why})")),
+    }
 }
 
-/// Why `run` went without workspaces, from the warning its checkout left.
-async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> String {
+/// Why `run` went without workspaces, from the warning its failed checkout
+/// left; none when the checkout did not fail on its own.
+async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> Option<String> {
     const CHECKOUT: &str = "could not be checked out: ";
     let events = dashboard
         .app
@@ -183,16 +196,13 @@ async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> String {
         .iter()
         .rev()
         .find(|event| event.level == "warn" && event.message.starts_with("review workspaces:"))
-        .map_or_else(
-            || "no checkout recorded".to_owned(),
-            |event| match event.message.split_once(CHECKOUT) {
-                Some((_, error)) => format!("checkout failed: {error}"),
-                None => event
-                    .message
-                    .trim_start_matches("review workspaces: ")
-                    .to_owned(),
-            },
-        )
+        .map(|event| match event.message.split_once(CHECKOUT) {
+            Some((_, error)) => format!("checkout failed: {error}"),
+            None => event
+                .message
+                .trim_start_matches("review workspaces: ")
+                .to_owned(),
+        })
 }
 
 /// The review slots in words: `2 running, 1 waiting (limit 2)`.

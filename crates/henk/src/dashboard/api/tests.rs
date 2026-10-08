@@ -1221,7 +1221,65 @@ async fn reviews_that_never_reach_their_checkout_do_not_count_as_going_without()
     );
 }
 
-/// The SPA's TypeScript types, generated from the API's./// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
+#[tokio::test]
+async fn a_review_cancelled_during_its_checkout_does_not_count_as_going_without() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let id = RunId::parse("r-1").unwrap();
+    store
+        .create_run(&NewRun {
+            id: id.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "opened".into(),
+            link: String::new(),
+        })
+        .await
+        .unwrap();
+    crate::stages::mark(
+        &**store,
+        &id,
+        henk_store::Stage::Checkout,
+        henk_store::StageState::Running,
+        "checking out abc1234",
+    )
+    .await;
+    crate::stages::cancelled(&**store, &id, "someone", "").await;
+    store
+        .finish_run(&id, RunStatus::Cancelled, None, None)
+        .await
+        .unwrap();
+    let stages = store.stages_of(std::slice::from_ref(&id)).await.unwrap();
+    assert!(
+        stages.contains(&(
+            id.clone(),
+            henk_store::Stage::Checkout,
+            henk_store::StageState::Failed
+        )),
+        "cancelling fails the running checkout: {stages:?}"
+    );
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "no review with workspaces has reached its checkout yet".to_owned()
+        )
+    );
+}
+
+/// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
 /// writes them; otherwise a difference fails, so the checked-in file
 /// always matches the API.
 #[test]
