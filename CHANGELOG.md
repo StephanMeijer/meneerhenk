@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.18...v0.1.19) - 2026-10-08
+
+### Added
+
+- *(dashboard)* the overview as a status board
+
+### Fixed
+
+- *(dashboard)* send the review slots on the running stream when they change
+
+### Other
+
+- Merge pull request #241 from StephanMeijer/feat/overview
+
 ## [0.1.18](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.17...v0.1.18) - 2026-10-08
 
 ### Added
