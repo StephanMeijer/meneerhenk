@@ -77,6 +77,18 @@ describe('Events', () => {
     expect(scroll).not.toHaveBeenCalled();
   });
 
+  it('keeps the source and kind filters when the form is sent before the facets answer', async () => {
+    window.scrollTo = vi.fn();
+    const load = { ...loaders(), loadFacets: vi.fn(() => new Promise<never>(() => {})) };
+    render(Events, { query: new URLSearchParams('source=api&kind=pull_request&repo=a/b'), ...load });
+    await settle();
+    const repo = document.querySelector<HTMLInputElement>('input[name=repo]');
+    if (repo) repo.value = 'c/d';
+    document.querySelector('form.filters')?.dispatchEvent(new SubmitEvent('submit', { bubbles: true, cancelable: true }));
+    await settle(1);
+    expect(window.location.pathname + window.location.search).toBe('/dashboard/events?source=api&kind=pull_request&repo=c%2Fd');
+  });
+
   it('chooses an event by its id link, keeping the place on the page', async () => {
     const scroll = vi.fn();
     window.scrollTo = scroll;

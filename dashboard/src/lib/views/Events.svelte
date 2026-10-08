@@ -62,7 +62,16 @@
 <section class="panel">
   <div class="panel-head">
     <form class="filters" onsubmit={filter}>
-      {#await facets then known}
+      {#snippet typed()}
+        <!-- While the facets load, or if they fail: the same fields as text,
+             so a filter sent meanwhile keeps the source and kind. -->
+        {#each ['source', 'kind'] as name (name)}
+          <label>{name} <input {name} value={query.get(name) ?? ''}></label>
+        {/each}
+      {/snippet}
+      {#await facets}
+        {@render typed()}
+      {:then known}
         {#each [['source', known.sources], ['kind', known.kinds]] as const as [name, options] (name)}
           <label>
             {name}
@@ -75,9 +84,7 @@
           </label>
         {/each}
       {:catch}
-        {#each ['source', 'kind'] as name (name)}
-          <label>{name} <input {name} value={query.get(name) ?? ''}></label>
-        {/each}
+        {@render typed()}
       {/await}
       <label>repository <input name="repo" value={query.get('repo') ?? ''} placeholder="owner/name"></label>
       <button>Show</button>
