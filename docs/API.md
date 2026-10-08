@@ -318,6 +318,19 @@ when nothing was judged. Grouped by `target`, a row also has `repo`,
   "judged": 79, "rejection_rate": 0.911}]
 ```
 
+### `GET /quality/daily`
+
+The rejection rate per UTC day (#228), for the six largest groups of
+`/quality`'s query (same `group`, `repo`, `since`, `until`), largest
+first. Each has `key` and `days`: every day from `since` (or the first day
+with a draft, at most 90 days back) to today, each with `day`, `judged`,
+`rejected` and `rate` (rejected of judged, `null` on a day nothing was
+judged: a gap, not 0%).
+
+### `GET /drafts/count`
+
+How many drafts `/drafts`'s query matches over every page: `{"count": 72}`.
+
 ### `GET /drafts`
 
 Drafts across runs, newest first, a page at a time: each with its run,

@@ -319,6 +319,38 @@ pub enum RunningMessage {
     Slots(Slots),
 }
 
+/// One group's rejection rate per UTC day (#228): `GET /quality/daily`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct QualitySeries {
+    /// The model, lane or repository; `owner/name #7` for a pull request.
+    pub key: String,
+    /// Every day of the period, oldest first.
+    pub days: Vec<DayRate>,
+}
+
+/// What the check made of one group's drafts on one day.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DayRate {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// Drafts the check judged: confirmed, rejected and repeats.
+    pub judged: u64,
+    /// Of those, rejected.
+    pub rejected: u64,
+    /// Rejected of judged, from 0 to 1; `null` on a day it judged none.
+    pub rate: Option<f64>,
+}
+
+/// How many drafts a filter matches, over every page.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DraftCount {
+    /// The number.
+    pub count: u64,
+}
+
 /// What became of the drafts of one group: a model, a lane, a repository
 /// or a pull request (#205).
 #[derive(Debug, Serialize)]

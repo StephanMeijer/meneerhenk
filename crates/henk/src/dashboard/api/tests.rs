@@ -1022,6 +1022,9 @@ fn api_types_are_current() {
         types::RunCount::decl(&cfg),
         types::RunUpdate::decl(&cfg),
         types::QualityRow::decl(&cfg),
+        types::QualitySeries::decl(&cfg),
+        types::DayRate::decl(&cfg),
+        types::DraftCount::decl(&cfg),
         types::ToolSummaryRow::decl(&cfg),
         types::ToolCallItem::decl(&cfg),
         types::DraftItem::decl(&cfg),
@@ -1657,8 +1660,13 @@ async fn no_stream_without_a_session() {
 
 /// Drafts on `r-review` and `r-plan` (seeded by `seed`): mistral rejected
 /// three times and confirmed once on r-review, deepseek confirmed once,
-/// repeated once and is waiting once on r-plan.
+/// repeated once and is waiting once on r-plan. All on 2026-10-07.
 async fn seed_drafts(f: &Fixture) {
+    seed_drafts_on(f, "2026-10-07").await;
+}
+
+/// The drafts of [`seed_drafts`] on `day` (`YYYY-MM-DD`).
+async fn seed_drafts_on(f: &Fixture, day: &str) {
     let store = &f.dashboard.app.store;
     let drafts: [(&str, &str, &str, &str, Option<DraftVerdict>); 7] = [
         (
@@ -1707,7 +1715,7 @@ async fn seed_drafts(f: &Fixture) {
     ];
     for (minute, (run, draft, lane, model, verdict)) in (0u32..).zip(drafts) {
         let run = RunId::parse(run).unwrap();
-        let at = format!("2026-10-07T10:{minute:02}:00Z");
+        let at = format!("{day}T10:{minute:02}:00Z");
         store
             .record_draft(
                 &run,
@@ -1805,6 +1813,131 @@ async fn quality_counts_drafts_per_group_with_the_rejection_rate() {
         assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(bad.code(), "bad_request");
     }
+}
+
+#[tokio::test]
+async fn quality_has_a_rate_per_day_for_the_largest_groups_and_counts_drafts() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    // The chart ends today, so the drafts are seeded today and the test
+    // does not depend on the date it runs on.
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    seed_drafts_on(&f, &today).await;
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie).await;
+    assert_eq!(daily.status, StatusCode::OK, "{}", daily.body);
+    let daily = daily.json();
+    let series = daily.as_array().unwrap();
+    assert_eq!(
+        series
+            .iter()
+            .map(|s| s["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["mistral", "deepseek"],
+        "the largest group first"
+    );
+    let days = series[0]["days"].as_array().unwrap();
+    assert_eq!(days[0]["day"], today.as_str(), "from the first drafted day");
+    let judged: u64 = days.iter().map(|d| d["judged"].as_u64().unwrap()).sum();
+    let rejected: u64 = days.iter().map(|d| d["rejected"].as_u64().unwrap()).sum();
+    assert_eq!((judged, rejected), (4, 3));
+    assert!(
+        days.iter()
+            .all(|d| d["rate"].is_null() == (d["judged"] == 0))
+    );
+    let bad = get(&f, "/dashboard/api/v1/quality/daily?group=colour", &cookie).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    for query in ["verdict=rejected", "model=deepseek", "verdict=waiting", ""] {
+        let counted = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts/count?{query}"),
+            &cookie,
+        )
+        .await
+        .json();
+        let listed = get(
+            &f,
+            &format!("/dashboard/api/v1/drafts?{query}&limit=100"),
+            &cookie,
+        )
+        .await
+        .json();
+        assert_eq!(
+            counted["count"].as_u64().unwrap(),
+            listed["items"].as_array().unwrap().len() as u64,
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn quality_daily_picks_the_largest_groups_of_the_days_it_draws() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-review").unwrap();
+    let today = time::OffsetDateTime::now_utc().date();
+    let long_ago = today - time::Duration::days(100);
+    // Seven busy models before the 90 days the chart draws, one quiet
+    // model inside them.
+    let mut drafts = Vec::new();
+    for model in 0..7 {
+        for _ in 0..3 {
+            drafts.push((long_ago, format!("retired-{model}")));
+        }
+    }
+    drafts.push((today, "recent".to_owned()));
+    for (n, (day, model)) in drafts.into_iter().enumerate() {
+        let at = format!("{day}T10:00:00Z");
+        let draft = format!("d{n}");
+        store
+            .record_draft(
+                &run,
+                &DraftRecord {
+                    at: at.clone(),
+                    draft: draft.clone(),
+                    lane: "lane-a".into(),
+                    model,
+                    kind: "finding".into(),
+                    path: "src/a.rs".into(),
+                    line: 4,
+                    target: String::new(),
+                    body: "a finding".into(),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .decide_draft(
+                &run,
+                &draft,
+                &DraftDecision {
+                    at,
+                    verdict: DraftVerdict::Rejected,
+                    checker: "opus".into(),
+                    reason: "src/a.rs:4 says otherwise.".into(),
+                    same_as: String::new(),
+                    comment_id: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let (cookie, _) = viewer(&f);
+    let daily = get(&f, "/dashboard/api/v1/quality/daily?group=model", &cookie)
+        .await
+        .json();
+    let keys: Vec<&str> = daily
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["recent"], "nothing the chart does not draw");
+    assert_eq!(daily[0]["days"][0]["day"], today.to_string().as_str());
+    assert_eq!(daily[0]["days"][0]["rejected"], 1);
 }
 
 #[tokio::test]

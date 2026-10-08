@@ -16,11 +16,11 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow,
-    Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState,
-    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
+    InboundEvent, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
+    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
     TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
     kind_str, lane_dots, merge_days, platform_parse, platform_str, stage_dots, stage_records,
     status_str, to_i64, to_u64,
@@ -888,6 +888,68 @@ impl RunStore for PgStore {
                 })
             })
             .collect()
+    }
+
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let key = match group {
+            DraftGroup::Model => "d.model",
+            DraftGroup::Lane => "d.lane",
+            DraftGroup::Repo => "r.repo",
+            DraftGroup::Target => "r.repo || ' #' || r.target::text",
+        };
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {key}, to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
+                            COUNT(*) FILTER (WHERE d.verdict IN ('confirmed', 'rejected', 'same_as')),
+                            COUNT(*) FILTER (WHERE d.verdict = 'rejected')
+                     FROM drafts d JOIN runs r ON r.id = d.run_id
+                     WHERE {DRAFT_FILTER}
+                     GROUP BY 1, 2 ORDER BY 1, 2"
+                ),
+                &[&filter.model, &filter.lane, &filter.repo, &since, &until],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let count = |i: usize| -> Result<u64, StoreError> {
+                    let n: i64 = row.try_get(i)?;
+                    Ok(u64::try_from(n).unwrap_or_default())
+                };
+                Ok(DayRates {
+                    key: row.try_get(0)?,
+                    day: row.try_get(1)?,
+                    judged: count(2)?,
+                    rejected: count(3)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let verdict = VerdictFilter::param(filter.verdict);
+        let count: i64 = self
+            .client()
+            .await?
+            .query_one(
+                &format!(
+                    "SELECT COUNT(*) FROM drafts d JOIN runs r ON r.id = d.run_id
+                     WHERE {DRAFT_FILTER}
+                       AND ($6::text IS NULL OR ($6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = $6)"
+                ),
+                &[&filter.model, &filter.lane, &filter.repo, &since, &until, &verdict],
+            )
+            .await?
+            .try_get(0)?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 
     async fn list_drafts(

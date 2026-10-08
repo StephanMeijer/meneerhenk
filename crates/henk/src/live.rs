@@ -21,11 +21,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
 use henk_store::{
-    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
-    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
-    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
-    RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
+    DraftRecord, EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord,
+    InboundEvent, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter,
+    RunRecord, RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
@@ -320,6 +321,18 @@ impl RunStore for Announcing {
 
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
         self.inner.daily_stats(since).await
+    }
+
+    async fn daily_draft_rates(
+        &self,
+        group: DraftGroup,
+        filter: &DraftFilter,
+    ) -> Result<Vec<DayRates>, StoreError> {
+        self.inner.daily_draft_rates(group, filter).await
+    }
+
+    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
+        self.inner.count_drafts(filter).await
     }
 
     async fn lanes_of(
@@ -719,6 +732,16 @@ mod tests {
         }
         async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
             self.inner.daily_stats(since).await
+        }
+        async fn daily_draft_rates(
+            &self,
+            group: DraftGroup,
+            filter: &DraftFilter,
+        ) -> Result<Vec<DayRates>, StoreError> {
+            self.inner.daily_draft_rates(group, filter).await
+        }
+        async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
+            self.inner.count_drafts(filter).await
         }
         async fn lanes_of(
             &self,

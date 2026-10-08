@@ -16,11 +16,11 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord, DraftVerdict,
-    EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey,
-    ToolCallRecord, TranscriptRecord, VerdictFilter,
+    DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord,
+    DraftVerdict, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
+    MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
+    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite,
+    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -557,12 +557,46 @@ async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore
             .collect::<Vec<_>>(),
         [("o/a", 6), ("o/b", 3)]
     );
+    let daily = store
+        .daily_draft_rates(DraftGroup::Model, &all)
+        .await
+        .unwrap();
+    assert_eq!(
+        daily,
+        [
+            DayRates {
+                key: "deepseek".into(),
+                day: "2026-10-07".into(),
+                judged: 1,
+                rejected: 0,
+            },
+            DayRates {
+                key: "mistral".into(),
+                day: "2026-10-07".into(),
+                judged: 5,
+                rejected: 3,
+            },
+        ],
+        "judged is confirmed, rejected and repeats; unchecked, not checked and waiting are not"
+    );
     let window = DraftFilter {
         since: Some("2026-10-07T10:02:00Z".into()),
         until: Some("2026-10-07T10:07:00Z".into()),
         repo: Some("o/a".into()),
         ..DraftFilter::default()
     };
+    assert_eq!(store.count_drafts(&window).await.unwrap(), 5);
+    let rejected = DraftFilter {
+        verdict: Some(VerdictFilter::Is(DraftVerdict::Rejected)),
+        ..DraftFilter::default()
+    };
+    assert_eq!(store.count_drafts(&rejected).await.unwrap(), 3);
+    let waiting = DraftFilter {
+        verdict: Some(VerdictFilter::Waiting),
+        model: Some("deepseek".into()),
+        ..DraftFilter::default()
+    };
+    assert_eq!(store.count_drafts(&waiting).await.unwrap(), 1);
     let by_lane = store.draft_rates(DraftGroup::Lane, &window).await.unwrap();
     assert_eq!(
         by_lane

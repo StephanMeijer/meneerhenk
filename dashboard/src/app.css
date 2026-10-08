@@ -376,7 +376,7 @@ summary { cursor: pointer; color: var(--muted); }
 /* Rates: a meter and its number */
 
 .rates td { white-space: nowrap; }
-.rates td:first-child { white-space: normal; overflow-wrap: anywhere; max-width: 20rem; }
+.rates td:first-child { white-space: nowrap; overflow-wrap: normal; }
 .rate-cell { display: inline-flex; gap: var(--space-2); align-items: center; }
 meter {
   width: 6rem;
