@@ -408,10 +408,15 @@ impl Coordinator {
                     tokio::select! {
                         biased;
                         () = cancel.cancelled() => None,
-                        permit = slots.acquire_owned() => match permit {
-                            Ok(permit) => Some(permit),
-                            Err(_) => return,
-                        },
+                        permit = slots.acquire_owned() => {
+                            let Ok(permit) = permit else {
+                                // The slots closed under it: its queued
+                                // check still closes (#262).
+                                ended_while_queued(&app, &request).await;
+                                return;
+                            };
+                            Some(permit)
+                        }
                     }
                 }
             };
