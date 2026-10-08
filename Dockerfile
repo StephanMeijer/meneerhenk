@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
-# henk is cross-compiled on the build platform so that an arm64 image can be
-# produced on an amd64 builder without emulation. The two MCP servers Henk
-# starts as child processes ship in the same image: github-mcp-server from
-# its official image, @zereight/mcp-gitlab installed with npm. See README.
+# henk is cross-compiled on the build platform, so an arm64 image builds on
+# an amd64 builder with only the runtime stage's package install under
+# emulation (QEMU, binfmt_misc). The two MCP servers Henk starts as child
+# processes ship in the same image: github-mcp-server from its official
+# image, @zereight/mcp-gitlab installed with npm. See README.
 
 # The dashboard app (#199): static files, so built once on the build platform
 # for every target. build.rs embeds dashboard/dist in henk. Keep the Node
@@ -62,13 +63,22 @@ RUN --mount=type=cache,target=/root/.npm \
 FROM ghcr.io/github/github-mcp-server:v1.14.0@sha256:7aaeeec9ae4fe9a736d100c1ff0798f3c219b5009e05f5d3945fcacb13cc196b AS mcp-github
 
 # The target platform's Node binary, copied rather than installed. This stage
-# only serves COPY, so it needs no emulation on a cross builder.
+# only serves COPY, so it runs nothing on a cross builder.
 FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node-runtime
 
-# Distroless cc: glibc, libstdc++ (Node needs it), CA certificates, tzdata and
-# a non-root user, nothing else. Chosen over distroless/nodejs because its
-# Debian packages are newer and Node brings its own OpenSSL anyway.
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS runtime
+# Debian slim with git and CA certificates (#254): Henk runs git itself to
+# check out the reviewed commit, copy the planner's repository and clone
+# for an address run, so the runtime needs it. Distroless had no git, and
+# every checkout failed while the reviews still completed. Node's
+# libstdc++ is in the base. The user is uid and gid 65532, as before.
+# This RUN is the one step that runs on the target platform, so a cross
+# build needs QEMU for it; the slow compile stays native.
+FROM docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 nonroot \
+    && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /var/lib/henk --shell /usr/sbin/nologin nonroot
 LABEL org.opencontainers.image.source="https://github.com/StephanMeijer/meneerhenk" \
       org.opencontainers.image.title="Meneer Henk" \
       org.opencontainers.image.description="Advisory code reviewer and issue planner for GitHub and GitLab"
@@ -76,10 +86,10 @@ COPY --from=build /out/ /
 COPY --from=node-runtime /usr/local/bin/node /nodejs/bin/node
 COPY --from=mcp-github /server/github-mcp-server /usr/local/bin/github-mcp-server
 COPY --from=mcp-gitlab /opt/mcp-gitlab /opt/mcp-gitlab
-# Child servers are found on PATH; the GitLab server is started as
-# `node /opt/mcp-gitlab/lib/node_modules/@zereight/mcp-gitlab/build/index.js`
-# because distroless has no /usr/bin/env for the package's shebang.
-ENV PATH=/usr/local/bin:/nodejs/bin \
+# Child servers and git are found on PATH. The GitLab server is started as
+# `node /opt/mcp-gitlab/lib/node_modules/@zereight/mcp-gitlab/build/index.js`,
+# which works with or without /usr/bin/env for the package's shebang.
+ENV PATH=/usr/local/bin:/nodejs/bin:/usr/bin:/bin \
     HENK_LOG_JSON=1
 WORKDIR /var/lib/henk
 EXPOSE 8080
