@@ -63,6 +63,11 @@ pub enum EventSource {
         /// Who asked: `github:<user id>`, never a display name (§2).
         requester: String,
     },
+    /// Henk's MCP server, by a client with a write token (#249).
+    Mcp {
+        /// Who asked: `mcp:<token name>`.
+        requester: String,
+    },
 }
 
 impl EventSource {
@@ -74,6 +79,7 @@ impl EventSource {
             Self::GitLabWebhook { .. } => "gitlab_webhook",
             Self::Api { .. } => "api",
             Self::Dashboard { .. } => "dashboard",
+            Self::Mcp { .. } => "mcp",
         }
     }
 
@@ -83,7 +89,7 @@ impl EventSource {
     pub fn requester(&self) -> Option<&str> {
         match self {
             Self::Api { requester } => requester.as_deref(),
-            Self::Dashboard { requester } => Some(requester),
+            Self::Dashboard { requester } | Self::Mcp { requester } => Some(requester),
             Self::GitHubWebhook { .. } | Self::GitLabWebhook { .. } => None,
         }
     }

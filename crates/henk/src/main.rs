@@ -26,6 +26,7 @@ mod listeners;
 mod live;
 mod live_session;
 mod liveness;
+mod mcp_server;
 mod pages;
 mod plan;
 mod plan_tools;

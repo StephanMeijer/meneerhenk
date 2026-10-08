@@ -39,6 +39,10 @@ tar = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 regex = { workspace = true }
+# Henk's own MCP server at /mcp (#248): the server side, its tool macros and
+# the Streamable HTTP transport, a tower service mounted in axum. The rest is
+# already in the tree through the client side; rmcp-macros is new.
+rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subtle = { workspace = true }
