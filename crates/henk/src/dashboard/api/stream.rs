@@ -26,8 +26,9 @@ use tokio::sync::{broadcast, mpsc};
 use super::ApiError;
 use super::runs::{run_detail, run_of};
 use super::types::{
-    Draft, Finding, Heartbeat, Lane, RunDetail, RunEvent, RunMessage, RunSummary, RunUpdate,
-    RunningMessage, RunningSnapshot, Stage, ToolCall, TranscriptRef,
+    Draft, Finding, Heartbeat, Lane, LaneDot, Progress, RunDetail, RunEvent, RunMessage,
+    RunSummary, RunUpdate, RunningMessage, RunningSnapshot, Slots, Stage, StageDot, ToolCall,
+    TranscriptRef, WaitingReview,
 };
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -313,27 +314,89 @@ async fn running_now(dashboard: &Dashboard) -> Option<RunningSnapshot> {
         .await
         .ok()?;
     let count = store.count_runs(&filter).await.ok()?;
-    let settings = &dashboard.app.settings;
+    let summaries = super::runs::summaries(dashboard, &runs).await.ok()?;
     Some(RunningSnapshot {
         count: count.max(u64::try_from(runs.len()).unwrap_or(u64::MAX)),
-        runs: runs
-            .iter()
-            .map(|run| RunSummary::from_record(settings, run))
-            .collect(),
+        runs: summaries,
+        slots: slots(dashboard),
     })
+}
+
+/// The coordinator's review slots, as the overview shows them.
+fn slots(dashboard: &Dashboard) -> Slots {
+    let now = dashboard.coordinator.slots();
+    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    Slots {
+        limit: count(now.limit),
+        in_use: count(now.in_use),
+        waiting: now
+            .waiting
+            .into_iter()
+            .map(|w| WaitingReview {
+                repo: w.repo,
+                target: w.number,
+                since: w
+                    .since
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    }
+}
+
+/// A running run's lanes or stages as the overview's dots, from a change
+/// on the feed: no store read.
+fn progress(change: &Change) -> Option<Progress> {
+    let run_id = change.run.as_str().to_owned();
+    match &change.kind {
+        ChangeKind::Lanes(lanes) => Some(Progress {
+            run_id,
+            lanes: Some(
+                lanes
+                    .iter()
+                    .map(|lane| LaneDot {
+                        name: lane.name.clone(),
+                        status: lane.status.as_str().to_owned(),
+                    })
+                    .collect(),
+            ),
+            stages: None,
+        }),
+        ChangeKind::Stages(stages) => Some(Progress {
+            run_id,
+            lanes: None,
+            stages: Some(
+                stages
+                    .iter()
+                    .map(|stage| StageDot {
+                        name: stage.stage.as_str().to_owned(),
+                        state: stage.state.as_str().to_owned(),
+                    })
+                    .collect(),
+            ),
+        }),
+        _ => None,
+    }
 }
 
 /// Feeds the overview's stream: a snapshot now and every
 /// [`Dashboard::refresh`] times six (runs of other processes, and any
-/// drift), and every run that starts or ends here in between.
+/// drift), and every run that starts or ends here in between, and the
+/// slots each time they change.
 async fn follow_running(
     dashboard: Arc<Dashboard>,
     mut changes: broadcast::Receiver<Arc<Change>>,
     out: mpsc::Sender<Event>,
 ) {
     let mut every = tokio::time::interval(dashboard.refresh.saturating_mul(6));
+    let mut slots_changed = dashboard.coordinator.watch_slots();
     loop {
         tokio::select! {
+            Ok(()) = slots_changed.changed() => {
+                if !send(&out, &RunningMessage::Slots(slots(&dashboard)), None).await {
+                    return;
+                }
+            }
             _ = every.tick() => {
                 let Some(snapshot) = running_now(&dashboard).await else { return };
                 if !send(&out, &RunningMessage::Snapshot(snapshot), None).await {
@@ -347,6 +410,10 @@ async fn follow_running(
                     if !send(&out, &RunningMessage::Run(Box::new(summary)), None).await {
                         return;
                     }
+                } else if let Some(moved) = progress(&change)
+                    && !send(&out, &RunningMessage::Progress(moved), None).await
+                {
+                    return;
                 }
             }
         }

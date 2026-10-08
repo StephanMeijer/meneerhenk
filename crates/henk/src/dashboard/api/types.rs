@@ -73,6 +73,99 @@ pub struct RunSummary {
     pub finished_at: Option<String>,
     /// The run that replaced it, when it was superseded.
     pub superseded_by: Option<String>,
+    /// Where each of its lanes stands, for lists (#225). Empty where the
+    /// whole run is sent with its lanes, and on a `run` stream message.
+    pub lanes: Vec<LaneDot>,
+    /// Where each of its stages stands, for lists (#225). Empty as `lanes`.
+    pub stages: Vec<StageDot>,
+}
+
+/// A lane as a list shows it: its name and status.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LaneDot {
+    /// `lane-a`, `check-1`, `planner`.
+    pub name: String,
+    /// `running`, `finished`, `timed_out` or `did_not_finish`.
+    pub status: String,
+}
+
+/// A stage as a list shows it: its name and state.
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct StageDot {
+    /// `diff`, `lanes`, `fact_check`, and so on.
+    pub name: String,
+    /// `running`, `done`, `failed` or `skipped`.
+    pub state: String,
+}
+
+/// The lanes and stages of one run moved on: a message of `/runs/stream`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Progress {
+    /// Which run.
+    pub run_id: String,
+    /// Every lane, when lanes moved; `null` when only stages did.
+    pub lanes: Option<Vec<LaneDot>>,
+    /// Every stage, when stages moved; `null` when only lanes did.
+    pub stages: Option<Vec<StageDot>>,
+}
+
+/// The review slots (#225).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Slots {
+    /// `review.max_concurrent`.
+    pub limit: u64,
+    /// Slots a review holds now.
+    pub in_use: u64,
+    /// Reviews waiting for a slot, longest waiting first. They have no run
+    /// yet.
+    pub waiting: Vec<WaitingReview>,
+}
+
+/// A review waiting for a slot.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct WaitingReview {
+    /// `owner/name`.
+    pub repo: String,
+    /// The pull or merge request.
+    pub target: u64,
+    /// RFC 3339: since when it waits.
+    pub since: String,
+}
+
+/// What happened per UTC day (#225): `GET /stats/overview`.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct OverviewStats {
+    /// The first day, `YYYY-MM-DD`.
+    pub from: String,
+    /// The last day, today.
+    pub to: String,
+    /// Every day from `from` to `to`, oldest first; a quiet day is zeros.
+    pub days: Vec<DayStats>,
+}
+
+/// One UTC day.
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct DayStats {
+    /// `YYYY-MM-DD`.
+    pub day: String,
+    /// Runs started.
+    pub runs: u64,
+    /// Of those, finished.
+    pub finished: u64,
+    /// Of those, failed: what did not complete. Cancelled, superseded and
+    /// running runs are in neither.
+    pub failed: u64,
+    /// Findings posted: new comments, checked or not.
+    pub findings_posted: u64,
+    /// Drafts the lanes wrote.
+    pub drafts: u64,
 }
 
 /// How many runs a filter matches, over every page.
@@ -177,6 +270,8 @@ pub struct RunningSnapshot {
     pub runs: Vec<RunSummary>,
     /// How many run, beyond those too.
     pub count: u64,
+    /// The review slots and what waits for one.
+    pub slots: Slots,
 }
 
 /// One message of `/runs/{id}/stream`: its SSE event name is `kind`, its
@@ -218,6 +313,10 @@ pub enum RunningMessage {
     Snapshot(RunningSnapshot),
     /// A run started or ended.
     Run(Box<RunSummary>),
+    /// A running run's lanes or stages moved on.
+    Progress(Progress),
+    /// A review started waiting, took or freed a slot, or left the queue.
+    Slots(Slots),
 }
 
 /// What became of the drafts of one group: a model, a lane, a repository
@@ -713,6 +812,8 @@ impl RunSummary {
             started_at: run.started_at.clone(),
             finished_at: run.finished_at.clone(),
             superseded_by: run.superseded_by.as_ref().map(|by| by.as_str().to_owned()),
+            lanes: Vec::new(),
+            stages: Vec::new(),
         }
     }
 }

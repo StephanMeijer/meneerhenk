@@ -9,6 +9,7 @@ mod events;
 mod health;
 mod quality;
 mod runs;
+mod stats;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -165,6 +166,7 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/tool-calls", get(tools::list))
         .route("/events", get(events::list))
         .route("/events/{id}", get(events::detail))
+        .route("/stats/overview", get(stats::overview))
         .fallback(not_found)
         .layer(middleware::map_response(no_store))
         .with_state(dashboard)

@@ -83,7 +83,16 @@ finished_at: string | null,
 /**
  * The run that replaced it, when it was superseded.
  */
-superseded_by: string | null, };
+superseded_by: string | null, 
+/**
+ * Where each of its lanes stands, for lists (#225). Empty where the
+ * whole run is sent with its lanes, and on a `run` stream message.
+ */
+lanes: Array<LaneDot>, 
+/**
+ * Where each of its stages stands, for lists (#225). Empty as `lanes`.
+ */
+stages: Array<StageDot>, };
 
 export type RunCount = { 
 /**
@@ -270,11 +279,15 @@ runs: Array<RunSummary>,
 /**
  * How many run, beyond those too.
  */
-count: number, };
+count: number, 
+/**
+ * The review slots and what waits for one.
+ */
+slots: Slots, };
 
 export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
-export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary };
+export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots };
 
 export type RunDetail = { 
 /**
@@ -330,6 +343,110 @@ requests: Array<EventSummary>,
  * before stages were kept.
  */
 stages: Array<Stage>, };
+
+export type LaneDot = { 
+/**
+ * `lane-a`, `check-1`, `planner`.
+ */
+name: string, 
+/**
+ * `running`, `finished`, `timed_out` or `did_not_finish`.
+ */
+status: string, };
+
+export type StageDot = { 
+/**
+ * `diff`, `lanes`, `fact_check`, and so on.
+ */
+name: string, 
+/**
+ * `running`, `done`, `failed` or `skipped`.
+ */
+state: string, };
+
+export type Progress = { 
+/**
+ * Which run.
+ */
+run_id: string, 
+/**
+ * Every lane, when lanes moved; `null` when only stages did.
+ */
+lanes: Array<LaneDot> | null, 
+/**
+ * Every stage, when stages moved; `null` when only lanes did.
+ */
+stages: Array<StageDot> | null, };
+
+export type Slots = { 
+/**
+ * `review.max_concurrent`.
+ */
+limit: number, 
+/**
+ * Slots a review holds now.
+ */
+in_use: number, 
+/**
+ * Reviews waiting for a slot, longest waiting first. They have no run
+ * yet.
+ */
+waiting: Array<WaitingReview>, };
+
+export type WaitingReview = { 
+/**
+ * `owner/name`.
+ */
+repo: string, 
+/**
+ * The pull or merge request.
+ */
+target: number, 
+/**
+ * RFC 3339: since when it waits.
+ */
+since: string, };
+
+export type OverviewStats = { 
+/**
+ * The first day, `YYYY-MM-DD`.
+ */
+from: string, 
+/**
+ * The last day, today.
+ */
+to: string, 
+/**
+ * Every day from `from` to `to`, oldest first; a quiet day is zeros.
+ */
+days: Array<DayStats>, };
+
+export type DayStats = { 
+/**
+ * `YYYY-MM-DD`.
+ */
+day: string, 
+/**
+ * Runs started.
+ */
+runs: number, 
+/**
+ * Of those, finished.
+ */
+finished: number, 
+/**
+ * Of those, failed: what did not complete. Cancelled, superseded and
+ * running runs are in neither.
+ */
+failed: number, 
+/**
+ * Findings posted: new comments, checked or not.
+ */
+findings_posted: number, 
+/**
+ * Drafts the lanes wrote.
+ */
+drafts: number, };
 
 export type Stage = { 
 /**

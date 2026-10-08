@@ -98,7 +98,8 @@ calling a model or an MCP server (that is `henk doctor --probe`).
 
 ### `GET /runs`
 
-Runs, newest first. Every filter is optional:
+Runs, newest first, each with its `lanes` (`name`, `status`) and `stages`
+(`name`, `state`) as dots for lists (#225). Every filter is optional:
 
 | Query | Meaning |
 |---|---|
@@ -265,9 +266,32 @@ curl -N -H "Cookie: henk_session=..." https://henk.example/dashboard/api/v1/runs
 ### `GET /runs/stream`
 
 What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the
-newest running runs, at most 100, and how many run) on connect and every
-30 seconds, and a `run` message (`RunSummary`) whenever a run of this
-process starts or ends. `RunningMessage` in `types.ts` is the union.
+newest running runs, at most 100, how many run, and the review `slots`)
+on connect and every 30 seconds, a `run` message (`RunSummary`) whenever
+a run of this process starts or ends, and a `progress` message (`run_id`
+with its `lanes` or its `stages` as dots, the other `null`) whenever a
+running run's lanes or stages move on (#225), and a `slots` message
+(`Slots`) whenever a review of this process starts waiting, takes or
+frees a slot, or leaves the queue. `RunningMessage` in
+`types.ts` is the union.
+
+`slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:
+the reviews waiting for a slot (`repo`, `target`, `since`), longest
+waiting first. A waiting review has no run yet.
+
+### `GET /stats/overview`
+
+What happened per UTC day, for the overview's tiles (#225). `days` (1 to
+90, default 14) counts today. The answer has `from`, `to` and `days`,
+every day from `from` to `to` with:
+
+- `runs`: runs started that day;
+- `finished` and `failed`: of those, how many finished and how many
+  failed. Cancelled, superseded and running runs are in neither, so
+  `failed` of `finished + failed` is the share that did not complete;
+- `findings_posted`: new comments, checked (`posted`) or not
+  (`unverified`); improved comments are not new;
+- `drafts`: drafts the lanes wrote.
 
 ### `GET /quality`
 

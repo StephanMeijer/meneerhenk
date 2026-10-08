@@ -21,11 +21,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
 use henk_store::{
-    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
-    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    RunStore, StageRecord, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord,
-    ToolUsage, TranscriptRecord, TranscriptSummary,
+    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord,
+    RunStatus, RunStore, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
+    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
@@ -316,6 +316,24 @@ impl RunStore for Announcing {
 
     async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
         self.inner.stages(run).await
+    }
+
+    async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
+        self.inner.daily_stats(since).await
+    }
+
+    async fn lanes_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+        self.inner.lanes_of(runs).await
+    }
+
+    async fn stages_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
+        self.inner.stages_of(runs).await
     }
 
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
@@ -698,6 +716,21 @@ mod tests {
         }
         async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
             self.inner.stages(run).await
+        }
+        async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
+            self.inner.daily_stats(since).await
+        }
+        async fn lanes_of(
+            &self,
+            runs: &[RunId],
+        ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+            self.inner.lanes_of(runs).await
+        }
+        async fn stages_of(
+            &self,
+            runs: &[RunId],
+        ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
+            self.inner.stages_of(runs).await
         }
         async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
             self.inner.set_check(id, check_id).await

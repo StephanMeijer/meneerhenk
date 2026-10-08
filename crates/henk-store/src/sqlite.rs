@@ -13,13 +13,14 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::store::RunStore;
 use crate::types::{
-    DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord, EventFilter,
-    EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page,
-    PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, StageRecord, StageState, StageWrite,
-    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str, now,
-    platform_parse, platform_str, stage_records, status_str, to_i64, to_u64,
+    DayCounts, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates, DraftRecord,
+    EventFilter, EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent,
+    LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow,
+    Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState,
+    StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse,
+    kind_str, lane_dots, merge_days, now, platform_parse, platform_str, stage_dots, stage_records,
+    status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -41,6 +42,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/009_drafts.sql")),
         M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
         M::up(include_str!("../migrations/sqlite/011_stages.sql")),
+        M::up(include_str!("../migrations/sqlite/012_stats.sql")),
     ])
 }
 
@@ -1010,6 +1012,71 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
+        let since = instant("since", &since.format(&Rfc3339).unwrap_or_default())?;
+        self.with(|c| {
+            let runs = c
+                .prepare(DAY_RUNS)?
+                .query_map(params![since], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            let findings = c
+                .prepare(DAY_FINDINGS)?
+                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let drafts = c
+                .prepare(DAY_DRAFTS)?
+                .query_map(params![since], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(merge_days(runs, findings, drafts))
+        })
+    }
+
+    async fn lanes_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; runs.len()].join(", ");
+        self.with(|c| {
+            let rows = c
+                .prepare(&format!(
+                    "SELECT run_id, name, status FROM lanes WHERE run_id IN ({marks}) ORDER BY run_id, name"
+                ))?
+                .query_map(
+                    rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            lane_dots(rows)
+        })
+    }
+
+    async fn stages_of(
+        &self,
+        runs: &[RunId],
+    ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; runs.len()].join(", ");
+        self.with(|c| {
+            let rows = c
+                .prepare(&format!(
+                    "SELECT run_id, stage, state FROM stages WHERE run_id IN ({marks})"
+                ))?
+                .query_map(
+                    rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            stage_dots(rows)
+        })
+    }
+
     async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
         let kind = filter.kind.map(kind_str);
         let status = filter.status.map(status_str);
@@ -1284,6 +1351,34 @@ fn window(
     let until = until.map(|v| instant("until", v)).transpose()?;
     Ok((since, until))
 }
+
+/// Per-UTC-day counts for the overview (#225); stored times are UTC
+/// RFC 3339, so the first ten characters are the day.
+const DAY_RUNS: &str = concat!(
+    "SELECT substr(started_at, 1, 10), COUNT(*),
+     SUM(CASE WHEN status = 'finished' THEN 1 ELSE 0 END),
+     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
+     FROM runs WHERE ",
+    instant_of!("started_at"),
+    " >= ?1 GROUP BY 1"
+);
+
+/// Per-UTC-day counts for the overview (#225); stored times are UTC
+/// RFC 3339, so the first ten characters are the day.
+const DAY_FINDINGS: &str = concat!(
+    "SELECT substr(created_at, 1, 10), COUNT(*) FROM findings
+     WHERE action IN ('posted', 'unverified') AND ",
+    instant_of!("created_at"),
+    " >= ?1 GROUP BY 1"
+);
+
+/// Per-UTC-day counts for the overview (#225); stored times are UTC
+/// RFC 3339, so the first ten characters are the day.
+const DAY_DRAFTS: &str = concat!(
+    "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
+    instant_of!("created_at"),
+    " >= ?1 GROUP BY 1"
+);
 
 /// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
 /// parameters 1 to 5: tool, model, kind of session, since and until, the

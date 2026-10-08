@@ -1029,6 +1029,13 @@ fn api_types_are_current() {
         types::RunMessage::decl(&cfg),
         types::RunningMessage::decl(&cfg),
         types::RunDetail::decl(&cfg),
+        types::LaneDot::decl(&cfg),
+        types::StageDot::decl(&cfg),
+        types::Progress::decl(&cfg),
+        types::Slots::decl(&cfg),
+        types::WaitingReview::decl(&cfg),
+        types::OverviewStats::decl(&cfg),
+        types::DayStats::decl(&cfg),
         types::Stage::decl(&cfg),
         types::Heartbeat::decl(&cfg),
         types::Lane::decl(&cfg),
@@ -1488,6 +1495,148 @@ async fn the_running_stream_says_what_runs_and_what_starts_and_ends() {
     }
     assert_eq!(ended.data["id"], "r-new");
     assert_eq!(ended.data["status"], "finished");
+}
+
+#[tokio::test]
+async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let review = RunId::parse("r-review").unwrap();
+    let store = &f.dashboard.app.store;
+    store.start_lane(&review, "lane-x", "m").await.unwrap();
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    assert!(snapshot.data["slots"]["limit"].as_u64().unwrap() >= 1);
+    assert_eq!(snapshot.data["slots"]["waiting"], json!([]));
+    let lanes = &snapshot.data["runs"][0]["lanes"];
+    assert!(
+        lanes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "lane-x" && l["status"] == "running"),
+        "{lanes}"
+    );
+
+    store
+        .stage(
+            &review,
+            &henk_store::StageWrite::now(
+                henk_store::Stage::Diff,
+                henk_store::StageState::Done,
+                "1 file",
+            ),
+        )
+        .await
+        .unwrap();
+    let mut moved = events.next().await.unwrap();
+    while moved.event == "snapshot" {
+        moved = events.next().await.unwrap();
+    }
+    assert_eq!(moved.event, "progress");
+    assert_eq!(moved.data["run_id"], "r-review");
+    assert_eq!(moved.data["lanes"], Value::Null);
+    assert_eq!(
+        moved.data["stages"],
+        json!([{"name": "diff", "state": "done"}])
+    );
+}
+
+#[tokio::test]
+async fn the_running_stream_sends_the_slots_when_they_change_not_only_in_snapshots() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+
+    let request = crate::review::ReviewRequest {
+        target: henk_platform::ReviewTarget {
+            repo: henk_domain::allowlist::RepoRef::parse(Platform::GitHub, "o/r").unwrap(),
+            number: 8,
+        },
+        commit: None,
+        trigger: "test".to_owned(),
+        requester: None,
+        acknowledge: None,
+        run: None,
+        submitted_at: None,
+    };
+    let commit =
+        henk_domain::review::CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let _ = f.dashboard.coordinator.submit_review(request, commit);
+    // The review cannot reach a platform and ends at once: its slot is
+    // taken and freed, and the stream says so without a snapshot.
+    let freed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = events.next().await.unwrap();
+            if message.event == "slots"
+                && message.data["in_use"] == 0
+                && message.data["waiting"] == json!([])
+            {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("a slots message after the review freed its slot");
+    assert!(freed.data["limit"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
+    let f = fixture("https://127.0.0.1:9");
+    seed(&f).await;
+    let (cookie, _) = viewer(&f);
+    let stats = get(&f, "/dashboard/api/v1/stats/overview?days=3", &cookie).await;
+    assert_eq!(stats.status, StatusCode::OK, "{}", stats.body);
+    let stats = stats.json();
+    let days = stats["days"].as_array().unwrap();
+    assert_eq!(days.len(), 3);
+    assert_eq!(days[2]["day"], stats["to"]);
+    assert_eq!(days[0]["day"], stats["from"]);
+    let runs: u64 = days.iter().map(|d| d["runs"].as_u64().unwrap()).sum();
+    assert_eq!(runs, 2, "the two seeded runs started today");
+    for bad in ["0", "91", "x"] {
+        let answer = get(
+            &f,
+            &format!("/dashboard/api/v1/stats/overview?days={bad}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let default = get(&f, "/dashboard/api/v1/stats/overview", &cookie)
+        .await
+        .json();
+    assert_eq!(default["days"].as_array().unwrap().len(), 14);
+
+    let review = RunId::parse("r-review").unwrap();
+    f.dashboard
+        .app
+        .store
+        .start_lane(&review, "lane-x", "m")
+        .await
+        .unwrap();
+    let listed = get(&f, "/dashboard/api/v1/runs", &cookie).await.json();
+    let item = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == "r-review")
+        .unwrap()
+        .clone();
+    assert!(
+        item["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["name"] == "lane-x"),
+        "{item}"
+    );
+    assert!(item["stages"].is_array());
 }
 
 #[tokio::test]

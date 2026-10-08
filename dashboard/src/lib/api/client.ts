@@ -9,6 +9,7 @@ import type {
   EventItem,
   Health,
   Me,
+  OverviewStats,
   Page,
   QualityRow,
   RunCount,
@@ -110,6 +111,11 @@ export async function me(): Promise<Me> {
 /** What the service has. */
 export function health(): Promise<Health> {
   return getJson<Health>('/health');
+}
+
+/** What happened per day over the last `days`, for the overview (#225). */
+export function overviewStats(days = 14): Promise<OverviewStats> {
+  return getJson<OverviewStats>(`/stats/overview?days=${days}`);
 }
 
 /** Runs, newest first; `query` is the `GET /runs` query. */

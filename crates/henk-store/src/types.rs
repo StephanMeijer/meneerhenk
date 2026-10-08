@@ -706,6 +706,101 @@ pub struct StageRecord {
     pub detail: String,
 }
 
+/// What happened on one UTC day (#225): runs started, of them finished and
+/// failed, findings posted (new comments, checked or not) and drafts
+/// written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DayCounts {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// Runs started that day.
+    pub runs: u64,
+    /// Of those, the ones that finished.
+    pub finished: u64,
+    /// Of those, the ones that failed. Cancelled, superseded and running
+    /// runs are in neither count.
+    pub failed: u64,
+    /// Findings posted that day: `posted` and `unverified` comments.
+    pub findings_posted: u64,
+    /// Drafts the lanes wrote that day.
+    pub drafts: u64,
+}
+
+/// Merges per-day rows from the three counting queries into
+/// [`DayCounts`], oldest day first. Days with nothing are left out.
+pub(crate) fn merge_days(
+    runs: Vec<(String, i64, i64, i64)>,
+    findings: Vec<(String, i64)>,
+    drafts: Vec<(String, i64)>,
+) -> Vec<DayCounts> {
+    let n = |v: i64| u64::try_from(v).unwrap_or_default();
+    let mut days: std::collections::BTreeMap<String, DayCounts> = std::collections::BTreeMap::new();
+    let at = |day: String| DayCounts {
+        day,
+        ..DayCounts::default()
+    };
+    for (day, all, finished, failed) in runs {
+        let entry = days.entry(day.clone()).or_insert_with(|| at(day));
+        entry.runs += n(all);
+        entry.finished += n(finished);
+        entry.failed += n(failed);
+    }
+    for (day, posted) in findings {
+        days.entry(day.clone())
+            .or_insert_with(|| at(day))
+            .findings_posted += n(posted);
+    }
+    for (day, written) in drafts {
+        days.entry(day.clone()).or_insert_with(|| at(day)).drafts += n(written);
+    }
+    days.into_values().collect()
+}
+
+/// Stored (run, lane, status) rows, checked.
+pub(crate) fn lane_dots(
+    rows: Vec<(String, String, String)>,
+) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+    rows.into_iter()
+        .map(|(run, name, status)| {
+            let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
+                column: "lanes.run_id",
+                value: run,
+            })?;
+            let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
+                column: "lanes.status",
+                value: status,
+            })?;
+            Ok((run, name, status))
+        })
+        .collect()
+}
+
+/// Stored (run, stage, state) rows, checked, each run's in stage order.
+pub(crate) fn stage_dots(
+    rows: Vec<(String, String, String)>,
+) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
+    let mut dots = rows
+        .into_iter()
+        .map(|(run, which, where_at)| {
+            let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
+                column: "stages.run_id",
+                value: run,
+            })?;
+            let which = Stage::parse(&which).ok_or(StoreError::Corrupt {
+                column: "stages.stage",
+                value: which,
+            })?;
+            let where_at = StageState::parse(&where_at).ok_or(StoreError::Corrupt {
+                column: "stages.state",
+                value: where_at,
+            })?;
+            Ok((run, which, where_at))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    dots.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
+    Ok(dots)
+}
+
 /// Stored stage rows as records, in the order the stages come.
 pub(crate) fn stage_records(
     rows: Vec<(String, String, String, Option<String>, String)>,

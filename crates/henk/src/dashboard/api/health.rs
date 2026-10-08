@@ -58,7 +58,7 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
     rows.push((
         "reviews".to_owned(),
         "ok".to_owned(),
-        format!("{} running", dashboard.coordinator.active_reviews()),
+        reviews_line(&dashboard.coordinator.slots()),
     ));
     for check in check_secrets(settings) {
         let (verdict, text) = match check.verdict {
@@ -84,4 +84,14 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
         settings.mcp.keys().cloned().collect::<Vec<_>>().join(", "),
     ));
     rows
+}
+
+/// The review slots in words: `2 running, 1 waiting (limit 2)`.
+fn reviews_line(slots: &crate::coordinator::Slots) -> String {
+    format!(
+        "{} running, {} waiting (limit {})",
+        slots.in_use,
+        slots.waiting.len(),
+        slots.limit
+    )
 }

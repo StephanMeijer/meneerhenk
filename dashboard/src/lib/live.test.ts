@@ -78,6 +78,38 @@ describe('applyRun', () => {
   });
 });
 
+describe('running runs moving on', () => {
+  it('takes a run\'s lanes and stages from progress, and keeps them through a run message', () => {
+    const run = { ...runSummary('r-1', 'running'), lanes: [{ name: 'lane-a', status: 'running' }] };
+    let state = applyRunning({ runs: [], count: 0, slots: null }, {
+      kind: 'snapshot',
+      data: { runs: [run], count: 1, slots: { limit: 2, in_use: 1, waiting: [] } },
+    });
+    expect(state.slots?.limit).toBe(2);
+    state = applyRunning(state, {
+      kind: 'progress',
+      data: { run_id: 'r-1', lanes: null, stages: [{ name: 'diff', state: 'done' }] },
+    });
+    expect(state.runs[0]?.stages).toEqual([{ name: 'diff', state: 'done' }]);
+    expect(state.runs[0]?.lanes).toEqual([{ name: 'lane-a', status: 'running' }]);
+    state = applyRunning(state, { kind: 'run', data: { ...runSummary('r-1', 'running'), trigger: 'again' } });
+    expect(state.runs[0]?.trigger).toBe('again');
+    expect(state.runs[0]?.stages).toHaveLength(1);
+    expect(applyRunning(state, { kind: 'progress', data: { run_id: 'r-x', lanes: [], stages: null } })).toEqual(state);
+  });
+
+  it('takes the slots from a slots message between snapshots, keeping the runs', () => {
+    const before = applyRunning({ runs: [], count: 0, slots: null }, {
+      kind: 'snapshot',
+      data: { runs: [runSummary('r-1', 'running')], count: 1, slots: { limit: 1, in_use: 0, waiting: [] } },
+    });
+    const slots = { limit: 1, in_use: 1, waiting: [{ repo: 'o/r', target: 8, since: '2026-10-07T10:00:00Z' }] };
+    const after = applyRunning(before, { kind: 'slots', data: slots });
+    expect(after.slots).toEqual(slots);
+    expect([after.runs, after.count]).toEqual([before.runs, before.count]);
+  });
+});
+
 describe('stages and heartbeats', () => {
   it('replaces the stages and moves the heartbeat on', () => {
     const before = runDetail('running');
@@ -92,9 +124,9 @@ describe('stages and heartbeats', () => {
 
 describe('applyRunning', () => {
   it('follows runs starting and ending, and keeps the count', () => {
-    let state = applyRunning({ runs: [], count: 0 }, {
+    let state = applyRunning({ runs: [], count: 0, slots: null }, {
       kind: 'snapshot',
-      data: { runs: [runSummary('r-1', 'running')], count: 5 },
+      data: { runs: [runSummary('r-1', 'running')], count: 5, slots: { limit: 3, in_use: 1, waiting: [] } },
     });
     state = applyRunning(state, { kind: 'run', data: runSummary('r-2', 'running') });
     expect([state.runs.map((r) => r.id), state.count]).toEqual([['r-2', 'r-1'], 6]);

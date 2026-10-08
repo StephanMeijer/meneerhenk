@@ -10,13 +10,16 @@ use axum::response::{IntoResponse, Response};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
 use henk_events::EventSource;
-use henk_store::{InboundEvent, OutcomeRecord, RunFilter, RunKey, RunRecord, RunStatus, ToolUsage};
+use henk_store::{
+    InboundEvent, OutcomeRecord, RunFilter, RunKey, RunRecord, RunStatus, StoreError, ToolUsage,
+};
 use serde::Deserialize;
 use tracing::{info, warn};
 
 use super::types::{
-    Cancelled, Draft, EventSummary, Finding, Lane, Page, RunCount, RunDetail, RunEvent, RunSummary,
-    Stage, StartRequest, Started, ToolCall, ToolUsageRow, Transcript, TranscriptRef,
+    Cancelled, Draft, EventSummary, Finding, Lane, LaneDot, Page, RunCount, RunDetail, RunEvent,
+    RunSummary, Stage, StageDot, StartRequest, Started, ToolCall, ToolUsageRow, Transcript,
+    TranscriptRef,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::dashboard::Dashboard;
@@ -109,14 +112,46 @@ pub async fn list(
     let next = (u32::try_from(runs.len()).ok() == Some(limit))
         .then(|| runs.last().map(|r| cursor(&r.started_at, r.id.as_str())))
         .flatten();
-    let settings = &dashboard.app.settings;
     Ok(Json(Page {
-        items: runs
-            .iter()
-            .map(|run| RunSummary::from_record(settings, run))
-            .collect(),
+        items: summaries(&dashboard, &runs).await?,
         next,
     }))
+}
+
+/// Runs as lists show them: each with where its lanes and stages stand,
+/// read for all of them at once (#225).
+pub(super) async fn summaries(
+    dashboard: &Dashboard,
+    runs: &[RunRecord],
+) -> Result<Vec<RunSummary>, StoreError> {
+    let ids: Vec<RunId> = runs.iter().map(|r| r.id.clone()).collect();
+    let store = &dashboard.app.store;
+    let lanes = store.lanes_of(&ids).await?;
+    let stages = store.stages_of(&ids).await?;
+    let settings = &dashboard.app.settings;
+    Ok(runs
+        .iter()
+        .map(|run| {
+            let mut summary = RunSummary::from_record(settings, run);
+            summary.lanes = lanes
+                .iter()
+                .filter(|(of, _, _)| *of == run.id)
+                .map(|(_, name, status)| LaneDot {
+                    name: name.clone(),
+                    status: status.as_str().to_owned(),
+                })
+                .collect();
+            summary.stages = stages
+                .iter()
+                .filter(|(of, _, _)| *of == run.id)
+                .map(|(_, stage, state)| StageDot {
+                    name: stage.as_str().to_owned(),
+                    state: state.as_str().to_owned(),
+                })
+                .collect();
+            summary
+        })
+        .collect())
 }
 
 /// `GET /runs/count`: how many runs the filters of `GET /runs` match, over
