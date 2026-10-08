@@ -1,6 +1,7 @@
 // The dashboard's only way to Henk: /dashboard/api/v1 (docs/API.md). Reads
 // carry the session cookie; actions also the session's CSRF token, which
 // /me gives. A 401 sends the browser to sign in and back.
+import { noteServerDate } from '../clock';
 import type {
   Cancelled,
   DraftItem,
@@ -62,6 +63,7 @@ async function send<T>(path: string, init: RequestInit = {}): Promise<T> {
   } catch {
     throw new ApiError(0, 'unreachable', 'Henk did not answer. Is it running?');
   }
+  noteServerDate(response.headers.get('date'));
   if (response.status === 401) {
     browser.go(loginUrl(browser.here()));
     throw new ApiError(401, 'unauthenticated', 'Sign in first.');

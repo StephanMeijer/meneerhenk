@@ -1,10 +1,10 @@
 <script lang="ts">
   import { ApiError, cancelRun } from '$lib/api/client';
   import type { Cancelled, Slots, WaitingReview } from '$lib/api/types';
-  import { now as clock } from '$lib/clock';
-  import { about, duration, kindText } from '$lib/format';
+  import { about, kindText } from '$lib/format';
   import Commit from '$lib/ui/Commit.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import Elapsed from '$lib/ui/Elapsed.svelte';
   import Empty from '$lib/ui/Empty.svelte';
   import Icon from '$lib/ui/Icon.svelte';
   import Time from '$lib/ui/Time.svelte';
@@ -14,25 +14,18 @@
    * id but no run page until it starts, so a row links its target. `shown`
    * are the run ids "Running now" lists: a review that just took its slot
    * may be there a moment before the next `slots` message drops it here.
-   * `cancel` is replaced in the tests. */
+   * `cancel` and `now` are replaced in the tests. */
   let {
     slots,
     shown = [],
     cancel = cancelRun,
-    now = () => new Date(),
+    now,
   }: {
     slots: Slots | null;
     shown?: string[];
     cancel?: (id: string) => Promise<Cancelled>;
     now?: () => Date;
   } = $props();
-
-  /** Now, again on every tick of the shared clock, so the time waiting
-   * moves on. */
-  let at = $derived.by(() => {
-    void $clock;
-    return now();
-  });
 
   let queued = $derived((slots?.waiting ?? []).filter((entry) => !shown.includes(entry.run_id)));
 
@@ -41,8 +34,6 @@
   let confirming = $state(false);
   let cancelling: string | null = $state(null);
   let note: string | null = $state(null);
-
-  const waited = (since: string, at: Date): string => duration(Math.max(0, at.getTime() - Date.parse(since)));
 
   function why(entry: WaitingReview): string {
     if (entry.reason === 'no_slot' && slots !== null) {
@@ -94,7 +85,7 @@
           </span>
           <span class="trigger">{entry.trigger}{#if entry.requester}<span class="sub who">{entry.requester}</span>{/if}</span>
           <span class="when">
-            <span>waiting <strong class="num">{waited(entry.since, at)}</strong></span>
+            <span>waiting <strong class="num"><Elapsed since={entry.since} {now} /></strong></span>
             <span class="muted">requested <Time iso={entry.since} /></span>
           </span>
           <span class="why muted">{why(entry)}</span>
@@ -117,7 +108,7 @@
   {#if asking}
     <p>
       <code>{asking.run_id}</code> on <strong>{about(asking.repo, asking.target)}</strong> has waited
-      {waited(asking.since, at)} for a slot and has not started.
+      <Elapsed since={asking.since} {now} /> for a slot and has not started.
     </p>
     <ul class="effects">
       <li>It ends as cancelled while queued, and the pull request gets one comment saying so.</li>

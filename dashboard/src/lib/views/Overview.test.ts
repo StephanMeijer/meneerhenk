@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { noteServerDate } from '$lib/clock';
 import type { DayStats, Health, OverviewStats, Page, RunSummary } from '$lib/api/types';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
 import { me, runSummary, waitingReview } from '$lib/testing/fixtures';
@@ -148,6 +149,35 @@ describe('Queued', () => {
     source.push('slots', { limit: 1, in_use: 1, waiting: [waitingReview('r-b', 9, 1)] });
     await settle(1);
     expect(ids()).toEqual(['r-b']);
+  });
+});
+
+describe('the clock', () => {
+  afterEach(() => {
+    noteServerDate(new Date().toUTCString());
+    vi.useRealTimers();
+  });
+
+  it('times the queued waits by the server, as it times the running durations', async () => {
+    // The browser is a minute behind the server.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(new Date('2026-10-07T10:00:05Z'));
+    noteServerDate('Wed, 07 Oct 2026 10:01:05 GMT');
+    const { connect, sources } = fakeConnect();
+    // No `now`: the page's own clock.
+    render(Overview, { me, query: new URLSearchParams(), connect, ...loaders(), now: undefined });
+    await settle();
+    firstOf(sources).push('snapshot', {
+      runs: [runSummary('r-1', 'running')],
+      count: 1,
+      slots: { limit: 1, in_use: 1, waiting: [waitingReview('r-q', 9, 1, { since: '2026-10-07T10:00:00Z' })] },
+    });
+    await settle(1);
+    expect(document.querySelector('ul.running .duration')?.textContent).toBe('1m 05s');
+    expect(document.querySelector('ol.queued .when strong')?.textContent, 'the browser clock would say 0m 05s').toBe('1m 05s');
+    vi.advanceTimersByTime(1000);
+    await settle(1);
+    expect(document.querySelector('ol.queued .when strong')?.textContent).toBe('1m 06s');
   });
 });
 
