@@ -32,6 +32,8 @@ use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
 use tracing::warn;
 
+use crate::live_session::Sessions;
+
 /// How many changes a slow follower may fall behind before it is dropped;
 /// it then reconnects and catches up from the replay or a snapshot.
 const CHANNEL: usize = 1024;
@@ -82,6 +84,8 @@ struct Inner {
     /// Shared by a write between the store and its announcement, alone by
     /// a snapshot.
     gate: RwLock<()>,
+    /// What running sessions say (#238), apart from the changes.
+    sessions: Sessions,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +106,7 @@ impl Default for Feed {
             sender,
             recent: Mutex::new(Recent::default()),
             gate: RwLock::new(()),
+            sessions: Sessions::default(),
         }))
     }
 }
@@ -144,6 +149,12 @@ impl Feed {
         // Sent under the lock, so followers see changes in seq order. No
         // follower is no error.
         let _ = self.0.sender.send(change);
+    }
+
+    /// What the running sessions of this process say (#238).
+    #[must_use]
+    pub fn sessions(&self) -> &Sessions {
+        &self.0.sessions
     }
 
     /// Every change from now on.
@@ -278,6 +289,7 @@ impl RunStore for Announcing {
     ) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.finish_run(id, status, summary, error).await?;
+        self.feed.sessions().run_ended(id);
         self.announce_run(id).await;
         Ok(())
     }
@@ -285,6 +297,7 @@ impl RunStore for Announcing {
     async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.supersede_run(id, by, reason).await?;
+        self.feed.sessions().run_ended(id);
         self.announce_run(id).await;
         Ok(())
     }
@@ -374,8 +387,15 @@ impl RunStore for Announcing {
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.drop_running_lanes(run, reason).await?;
+        self.feed.sessions().run_ended(run);
         self.announce_lanes(run).await;
         Ok(())
+    }
+
+    async fn session_message(&self, run: &RunId, session: &str, turn: u32, message: &str) {
+        self.feed
+            .sessions()
+            .said(run, session, turn, message, now());
     }
 
     async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
@@ -399,6 +419,7 @@ impl RunStore for Announcing {
         self.inner
             .finish_lane(run, name, status, turns, input_tokens, output_tokens, error)
             .await?;
+        self.feed.sessions().ended(run, name);
         self.announce_lanes(run).await;
         Ok(())
     }
@@ -786,6 +807,11 @@ mod tests {
         async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
             self.inner.drop_running_lanes(run, reason).await
         }
+        async fn session_message(&self, run: &RunId, session: &str, turn: u32, message: &str) {
+            self.inner
+                .session_message(run, session, turn, message)
+                .await;
+        }
         async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
             self.inner.start_lane(run, name, model).await
         }
@@ -1036,6 +1062,63 @@ mod tests {
             announced.iter().all(|c| c.seq <= seq),
             "what the snapshot holds is announced at or before its seq, so nothing repeats"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_s_messages_wait_on_the_feed_while_it_runs_and_go_when_it_ends() {
+        let (store, feed) = announcing();
+        let run = id("r-1");
+        store.create_run(&new_run("r-1")).await.unwrap();
+        let model: Arc<dyn henk_llm::ModelClient> =
+            Arc::new(henk_llm::testing::ScriptedClient::new(
+                "model-x",
+                [Ok(henk_llm::Completion {
+                    message: henk_llm::ChatMessage::assistant("All good."),
+                    stop: henk_llm::StopReason::EndTurn,
+                    usage: henk_llm::Usage::default(),
+                })],
+            ));
+        let mut news = feed.sessions().subscribe();
+        let spec = henk_session::SessionSpec {
+            name: "lane-a".into(),
+            model,
+            system: "s".into(),
+            opening: vec![henk_llm::ChatMessage::user("Review this.")],
+            tools: henk_agent::ToolSet::new(),
+            limits: henk_agent::AgentConfig {
+                max_turns: 3,
+                timeout: std::time::Duration::from_secs(5),
+                max_tool_output_chars: 100,
+                max_conversation_chars: 100_000,
+                keep_recent_turns: 2,
+                max_repeated_calls: 3,
+                record_argument_bytes: 4096,
+            },
+            continuation: None,
+            turn_warning: None,
+        };
+        henk_session::run_session(
+            &store,
+            &run,
+            spec,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let mut heard = Vec::new();
+        while let Ok(item) = news.try_recv() {
+            heard.push(match item.as_ref() {
+                crate::live_session::News::Said { said, .. } => {
+                    format!("{} turn {}", said.seq, said.turn)
+                }
+                crate::live_session::News::Ended { .. } => "ended".to_owned(),
+            });
+        }
+        assert_eq!(heard, ["1 turn 0", "2 turn 1", "ended"]);
+        assert!(
+            !feed.sessions().is_live(&run, "lane-a"),
+            "the transcript is the record now"
+        );
+        assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
     }
 
     fn announcing() -> (Announcing, Feed) {

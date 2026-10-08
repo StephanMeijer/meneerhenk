@@ -437,6 +437,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         reviews: u32,
     ) -> Result<Vec<LaneEnding>, StoreError>;
 
+    /// A message a session appended to its conversation, as it happens
+    /// (#238): `message` is the message as JSON, as a stored transcript
+    /// holds it. Not stored: the transcript kept when the session ends is
+    /// the record. A store that announces what happens passes it on to
+    /// the live view; the default ignores it.
+    async fn session_message(&self, _run: &RunId, _session: &str, _turn: u32, _message: &str) {}
+
     /// The stages of each of `runs` as (run, stage, state), in one read.
     ///
     /// # Errors

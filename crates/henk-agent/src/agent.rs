@@ -88,6 +88,15 @@ pub enum AgentEvent {
         /// Characters of the result, before the agent cut it for the model.
         result_chars: usize,
     },
+    /// A message joined the conversation (#238): the opening messages as
+    /// turn 0, then every message the run appends, as it was appended
+    /// (before any compaction), for the live view of a session.
+    Message {
+        /// The turn it belongs to; 0 for the opening.
+        turn: u32,
+        /// The message.
+        message: ChatMessage,
+    },
     /// The repeat guard refused a call that repeated the ones before it.
     RepeatRefused {
         /// Model-facing name.
@@ -322,10 +331,51 @@ impl Agent {
         }
     }
 
+    /// Adds the turn warning when the turns left before turn `turns + 1`
+    /// are the ones it warns at.
+    fn warn_of_turns(&self, messages: &mut Vec<ChatMessage>, turns: u32) {
+        if let Some(warning) = &self.turn_warning
+            && self.config.max_turns > warning.turns_left
+            && self.config.max_turns - turns == warning.turns_left
+        {
+            debug!(
+                turn = turns + 1,
+                turns_left = warning.turns_left,
+                "turn warning sent"
+            );
+            self.append(messages, turns, ChatMessage::user(warning.message.clone()));
+        }
+    }
+
+    /// Tells whoever listens the opening messages, as turn 0.
+    fn tell_opening(&self, initial: &[ChatMessage]) {
+        if self.events.is_none() {
+            return;
+        }
+        for message in initial {
+            self.emit(AgentEvent::Message {
+                turn: 0,
+                message: message.clone(),
+            });
+        }
+    }
+
+    /// Appends `message` to the conversation and tells whoever listens.
+    fn append(&self, messages: &mut Vec<ChatMessage>, turn: u32, message: ChatMessage) {
+        if self.events.is_some() {
+            self.emit(AgentEvent::Message {
+                turn,
+                message: message.clone(),
+            });
+        }
+        messages.push(message);
+    }
+
     /// Runs the loop from `initial` messages until it stops.
     #[instrument(skip_all, fields(model = %self.model.model()))]
     pub async fn run(&self, initial: Vec<ChatMessage>, cancel: CancellationToken) -> AgentOutcome {
         let deadline = tokio::time::Instant::now() + self.config.timeout;
+        self.tell_opening(&initial);
         let mut messages = initial;
         let mut usage = Usage::default();
         let mut turns = 0;
@@ -338,17 +388,7 @@ impl Agent {
             if turns >= self.config.max_turns {
                 break StopCause::MaxTurns;
             }
-            if let Some(warning) = &self.turn_warning
-                && self.config.max_turns > warning.turns_left
-                && self.config.max_turns - turns == warning.turns_left
-            {
-                debug!(
-                    turn = turns + 1,
-                    turns_left = warning.turns_left,
-                    "turn warning sent"
-                );
-                messages.push(ChatMessage::user(warning.message.clone()));
-            }
+            self.warn_of_turns(&mut messages, turns);
             turns += 1;
             let request = CompletionRequest {
                 system: Some(self.system.clone()),
@@ -375,7 +415,7 @@ impl Agent {
                 tool_calls: calls.len(),
             });
             debug!(turn = turns, tool_calls = calls.len(), stop = ?completion.stop, "model answered");
-            messages.push(completion.message);
+            self.append(&mut messages, turns, completion.message);
 
             if calls.is_empty() {
                 // A refusal ends the run as one. No nudge: that would be a
@@ -400,7 +440,7 @@ impl Agent {
                 match nudge {
                     Some(text) => {
                         debug!(turn = turns, ?reason, "continuing after a nudge");
-                        messages.push(ChatMessage::user(text));
+                        self.append(&mut messages, turns, ChatMessage::user(text));
                         continue;
                     }
                     None => break StopCause::EndTurn,
@@ -420,11 +460,11 @@ impl Agent {
                     return Self::finish(messages, turns, usage, StopCause::Cancelled, repeats);
                 }
                 ToolRound::Stuck(results, stop) => {
-                    messages.push(ChatMessage::tool_results(results));
+                    self.append(&mut messages, turns, ChatMessage::tool_results(results));
                     break stop;
                 }
             };
-            messages.push(ChatMessage::tool_results(results));
+            self.append(&mut messages, turns, ChatMessage::tool_results(results));
             self.compact(&mut messages, turns);
             if tokio::time::Instant::now() >= deadline {
                 break StopCause::Timeout;

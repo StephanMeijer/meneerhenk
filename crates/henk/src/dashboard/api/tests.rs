@@ -1040,6 +1040,10 @@ fn api_types_are_current() {
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),
         types::LaneStats::decl(&cfg),
+        types::SessionMessage::decl(&cfg),
+        types::LiveSnapshot::decl(&cfg),
+        types::LiveMessage::decl(&cfg),
+        types::SessionEnd::decl(&cfg),
         types::ReviewMark::decl(&cfg),
         types::LaneRow::decl(&cfg),
         types::LaneOutcome::decl(&cfg),
@@ -1710,6 +1714,119 @@ async fn the_event_filters_are_the_sources_and_kinds_recorded() {
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
 }
 
+fn said(message: &henk_llm::ChatMessage) -> String {
+    serde_json::to_string(message).unwrap()
+}
+
+#[tokio::test]
+async fn a_running_session_streams_what_it_says_as_text_and_ends_with_it() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let (run, _alive) = live_run(&f, "r-live").await;
+    let store = Arc::clone(&f.dashboard.app.store);
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    let opening = henk_llm::ChatMessage::user("<script>alert(1)</script> Review this.");
+    store
+        .session_message(&run, "lane-a", 0, &said(&opening))
+        .await;
+    let uri = "/dashboard/api/v1/runs/r-live/sessions/lane-a/stream";
+    let mut events = stream(&f, uri, &cookie, None).await;
+
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    let epoch = f.dashboard.app.feed.epoch().to_owned();
+    assert_eq!(snapshot.id.as_deref(), Some(format!("{epoch}-1").as_str()));
+    assert_eq!(snapshot.data["cut"], false);
+    let first = &snapshot.data["messages"][0];
+    assert_eq!(first["seq"], 1);
+    assert_eq!(first["message"]["role"], "user");
+    assert_eq!(first["message"]["turn"], 0);
+    assert_eq!(
+        first["message"]["parts"][0]["text"], "<script>alert(1)</script> Review this.",
+        "text, as it was said"
+    );
+
+    let answer = henk_llm::ChatMessage::assistant("Looking.");
+    store
+        .session_message(&run, "lane-a", 1, &said(&answer))
+        .await;
+    store
+        .session_message(&run, "lane-b", 1, &said(&answer))
+        .await;
+    let next = events.next().await.unwrap();
+    assert_eq!(next.event, "message");
+    assert_eq!(next.id.as_deref(), Some(format!("{epoch}-2").as_str()));
+    assert_eq!(next.data["message"]["parts"][0]["text"], "Looking.");
+    assert_eq!(next.data["message"]["turn"], 1);
+
+    // A follower that saw the first message gets only the second.
+    let mut again = stream(&f, uri, &cookie, Some(&format!("{epoch}-1"))).await;
+    let replayed = again.next().await.unwrap();
+    assert_eq!(
+        (replayed.event.as_str(), replayed.data["seq"].as_u64()),
+        ("message", Some(2))
+    );
+    // One from another process, or before a restart, starts again.
+    let mut other = stream(&f, uri, &cookie, Some("0badf00d-1")).await;
+    assert_eq!(other.next().await.unwrap().event, "snapshot");
+
+    store
+        .finish_lane(&run, "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+        .await
+        .unwrap();
+    let end = events.next().await.unwrap();
+    assert_eq!(end.event, "end");
+    assert_eq!(end.data["elsewhere"], false);
+    assert!(events.next().await.is_none(), "the stream closes");
+    assert_eq!(again.names_until_end().await, ["end"]);
+
+    // Ended now: the transcript takes over.
+    let mut late = stream(&f, uri, &cookie, None).await;
+    assert_eq!(late.names_until_end().await, ["end"]);
+}
+
+#[tokio::test]
+async fn a_session_another_process_runs_ends_its_stream_at_once() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = Arc::clone(&f.dashboard.app.store);
+    let run = RunId::parse("r-there").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "opened".into(),
+            link: String::new(),
+        })
+        .await
+        .unwrap();
+    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    let mut events = stream(
+        &f,
+        "/dashboard/api/v1/runs/r-there/sessions/lane-a/stream",
+        &cookie,
+        None,
+    )
+    .await;
+    let end = events.next().await.unwrap();
+    assert_eq!(
+        (end.event.as_str(), &end.data["elsewhere"]),
+        ("end", &json!(true))
+    );
+    let missing = get(
+        &f,
+        "/dashboard/api/v1/runs/r-none/sessions/lane-a/stream",
+        &cookie,
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn no_stream_without_a_session() {
     let f = fixture("https://127.0.0.1:9");
@@ -1717,6 +1834,7 @@ async fn no_stream_without_a_session() {
     for uri in [
         "/dashboard/api/v1/runs/stream",
         "/dashboard/api/v1/runs/r-review/stream",
+        "/dashboard/api/v1/runs/r-review/sessions/lane-a/stream",
     ] {
         let answer = call(&f, Method::GET, uri, &[], None).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED, "{uri}");

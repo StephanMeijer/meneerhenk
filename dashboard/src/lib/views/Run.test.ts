@@ -125,6 +125,30 @@ describe('Run', () => {
     expect(sources).toHaveLength(1);
   });
 
+  it('shows the conversation of a running lane as it happens when it is selected', async () => {
+    const { connect, sources } = fakeConnect();
+    const detail = {
+      ...runDetail('running'),
+      stages: reviewStages(),
+      lanes: runDetail('running').lanes.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running', finished_at: null } : l)),
+    };
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn(), connect, loadCalls: () => Promise.resolve([]) });
+    await settle();
+    expect(document.querySelector('.live-session')).toBeNull();
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-a'))?.click();
+    await settle();
+    expect(sources.map((s) => s.url)).toEqual([
+      '/dashboard/api/v1/runs/r-1/stream',
+      '/dashboard/api/v1/runs/r-1/sessions/lane-a/stream',
+    ]);
+    expect(document.querySelector('#live-title')?.textContent).toBe('Conversation of lane-a');
+
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-b'))?.click();
+    await settle();
+    expect(document.querySelector('.live-session'), 'lane-b has ended: its transcript tells it').toBeNull();
+    expect(sources[1]?.closed).toBe(true);
+  });
+
   it('does not follow a run that has ended', async () => {
     const { connect, sources } = fakeConnect();
     render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('finished')), cancel: vi.fn(), connect });

@@ -35,7 +35,7 @@ use crate::dashboard::auth::ApiViewer;
 use crate::live::{Change, ChangeKind};
 
 /// Messages waiting for a slow follower before its task waits too.
-const BUFFER: usize = 64;
+pub(super) const BUFFER: usize = 64;
 
 /// How often a keep-alive comment goes out.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -45,6 +45,13 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 pub struct StreamQuery {
     /// The last id seen, for a client that cannot set the header.
     last: Option<String>,
+}
+
+impl StreamQuery {
+    /// The last id seen, from the URL.
+    pub(super) fn last(&self) -> Option<&str> {
+        self.last.as_deref()
+    }
 }
 
 /// `GET /runs/{id}/stream`.
@@ -79,7 +86,7 @@ pub async fn running_stream(
     sse(events)
 }
 
-fn sse(events: mpsc::Receiver<Event>) -> Response {
+pub(super) fn sse(events: mpsc::Receiver<Event>) -> Response {
     let stream = stream::unfold(events, |mut events| async move {
         events
             .recv()
@@ -148,7 +155,7 @@ fn missed(dashboard: &Dashboard, last: Option<&str>, run: &RunRecord) -> Option<
 }
 
 /// Sends `message`; false once the follower has gone.
-async fn send<T: serde::Serialize>(
+pub(super) async fn send<T: serde::Serialize>(
     out: &mpsc::Sender<Event>,
     message: &T,
     id: Option<String>,
