@@ -25,9 +25,13 @@ serves it at `/dashboard` behind the dashboard's sign-in.
   API sends, with its tone and icon. One status, one colour, one icon,
   everywhere; the word is always shown too.
 - `src/lib/clock.ts`: the time relative times are shown against, ticking.
+- `src/lib/targets.ts`: what a start URL names, read as `crates/henk/src/urls.rs`
+  reads it, so the start dialog can say so while you type (#230). The
+  server checks again.
 - `src/lib/ui/`: the parts every page uses: `Status` (a pill), `Time`,
   `Commit`, `Live` (a stream's connection), `Icon` (inline SVG),
-  `Loading`, `Empty`, `Problem`, `Pager`.
+  `Loading`, `Empty`, `Problem`, `Pager`, `Dialog` (the browser's own
+  `<dialog>`: focus inside, Escape closes, focus goes back).
 - `src/lib/views/`: one component per page, and the parts they share. A
   view takes its loaders as props with the client's as defaults, so tests
   give it fixtures.

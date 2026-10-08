@@ -171,7 +171,7 @@ where
                 github_id = session.github_id,
                 "an API action without its session's token"
             );
-            return Err(ApiError::forbidden(
+            return Err(ApiError::csrf(
                 "The CSRF token is missing or not from this session. Reload and try again.",
             ));
         }

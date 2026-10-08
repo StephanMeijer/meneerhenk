@@ -45,7 +45,8 @@ bearer token (`hooks/api.rs`) are a separate thing and are unchanged.
 | Code | Status | When |
 |---|---|---|
 | `unauthenticated` | 401 | No current session |
-| `forbidden` | 403 | Id not on the list; an action without its token or from another origin |
+| `forbidden` | 403 | Id not on the list; an action from another origin |
+| `csrf` | 403 | An action without its session's CSRF token, or another session's; a reload gets a fresh one |
 | `bad_request` | 400 | A bad id, filter, cursor or body |
 | `unsupported_media_type` | 415 | An action whose body is not JSON |
 | `not_found` | 404 | No such run, event, transcript or route |

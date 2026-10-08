@@ -423,3 +423,38 @@ meter:-moz-meter-sub-sub-optimum::-moz-meter-bar { background: var(--fail); }
   h1 { font-size: 22px; }
   .filters label, .filters input, .filters select { width: 100%; }
 }
+
+/* Dialogs: the one floating layer, so the one shadow (#230) */
+
+.dialog {
+  width: min(32rem, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(1, 4, 9, 0.35);
+}
+.dialog::backdrop { background: rgba(12, 15, 20, 0.45); }
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) 0;
+}
+.dialog-head h2 { font-size: 17px; }
+.dialog-head .close { font-size: 20px; line-height: 1; padding: 0 6px; }
+.dialog-body { padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+.dialog-body p, .dialog-body ul { margin: 0; }
+.dialog-body ul { padding-left: 1.2rem; display: flex; flex-direction: column; gap: 4px; }
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-4);
+}
+.danger-solid { background: var(--fail); border-color: var(--fail); color: var(--surface); }
+.danger-solid:hover { background: var(--fail); filter: brightness(1.08); }

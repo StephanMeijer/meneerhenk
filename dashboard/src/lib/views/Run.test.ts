@@ -8,8 +8,17 @@ import Run from './Run.svelte';
 
 afterEach(cleanup);
 
-const cancelButton = (): HTMLButtonElement | undefined =>
-  [...document.querySelectorAll('button')].find((b) => b.textContent === 'Cancel this run');
+const buttonNamed = (text: string): HTMLButtonElement | undefined =>
+  [...document.querySelectorAll('button')].find((b) => (b.textContent ?? '').trim() === text);
+const cancelButton = (): HTMLButtonElement | undefined => buttonNamed('Cancel run');
+
+/** Opens the confirmation and confirms the cancel. */
+async function confirmCancel(): Promise<void> {
+  cancelButton()?.click();
+  await settle(1);
+  buttonNamed('Cancel review')?.click();
+  await settle();
+}
 
 const section = (title: string): string[][] => {
   const heading = [...document.querySelectorAll('h2')].find((h) => h.textContent === title);
@@ -47,15 +56,34 @@ describe('Run', () => {
     expect(cancelButton()).toBeUndefined();
   });
 
-  it('offers a cancel only while the run is running, and posts it', async () => {
+  it('offers a cancel only while the run is running, asks first, and posts it once', async () => {
     const cancel = vi.fn(() => Promise.resolve({ run_id: 'r-1' }));
     const { connect } = fakeConnect();
-    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect });
+    const detail = runDetail('running');
+    detail.lanes = detail.lanes.map((lane) => (lane.name === 'lane-a' ? { ...lane, status: 'running' } : lane));
+    render(Run, { id: 'r-1', who: 'github:5821', load: () => Promise.resolve(detail), cancel, connect });
     await settle();
-    const button = cancelButton();
-    expect(button).toBeDefined();
-    button?.click();
-    await settle();
+    expect(cancelButton()).toBeDefined();
+
+    cancelButton()?.click();
+    await settle(1);
+    const dialog = document.querySelector('dialog[open]');
+    expect(dialog?.querySelector('h2')?.textContent).toBe('Cancel this review?');
+    expect(dialog?.textContent).toContain('lane-a is still working.');
+    const effects = [...(dialog?.querySelectorAll('li') ?? [])].map((li) => li.textContent);
+    expect(effects).toEqual([
+      'All lanes stop now. Drafts still waiting are marked cancelled.',
+      'On the pull request, one comment and the check say it was cancelled and name you, github:5821.',
+      'Nothing already posted is removed.',
+    ]);
+    expect(document.activeElement?.textContent).toBe('Keep running');
+    buttonNamed('Keep running')?.click();
+    await settle(1);
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect(cancel).not.toHaveBeenCalled();
+
+    await confirmCancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledWith('r-1');
     expect(document.querySelector('[role=status]')?.textContent).toContain('Cancel sent');
   });
@@ -104,9 +132,54 @@ describe('Run', () => {
     );
     render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail('running')), cancel, connect: fakeConnect().connect });
     await settle();
-    cancelButton()?.click();
-    await settle();
+    await confirmCancel();
     expect(document.querySelector('[role=status]')?.textContent).toBe('That run is not running here.');
+  });
+
+  it('offers to review a finished review again, and starts a new run of its commit', async () => {
+    const start = vi.fn(() => Promise.resolve({ event_id: 'e-7' }));
+    const go = vi.fn();
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail()), cancel: vi.fn(), start, go });
+    await settle();
+    buttonNamed('Review again')?.click();
+    await settle(1);
+    const dialog = document.querySelector('dialog[open]');
+    const text = (dialog?.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('A new run, not a retry of this one.');
+    expect(text).toContain('Henk starts a new review of abc1234 on docspec/app #7.');
+    expect(text).toContain('If a review of that commit is running, the request joins it instead.');
+    buttonNamed('Start a new review')?.click();
+    await settle();
+    expect(start).toHaveBeenCalledWith({
+      kind: 'review',
+      url: 'https://github.com/docspec/app/pull/7',
+      commit: 'abc1234',
+      note: null,
+    });
+    expect(go).toHaveBeenCalledWith('/events/e-7');
+  });
+
+  it('does not offer a review again while running, for a superseded run, or for a plan', async () => {
+    const cases = [
+      runDetail('running'),
+      { ...runDetail(), run: { ...runDetail().run, status: 'superseded', superseded_by: 'r-2' } },
+      { ...runDetail(), run: { ...runDetail().run, kind: 'plan' } },
+    ];
+    for (const detail of cases) {
+      render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn(), connect: fakeConnect().connect });
+      await settle();
+      expect(buttonNamed('Review again'), detail.run.status + detail.run.kind).toBeUndefined();
+      cleanup();
+    }
+  });
+
+  it('names the run that replaced a superseded one', async () => {
+    const detail = { ...runDetail(), run: { ...runDetail().run, status: 'superseded', superseded_by: 'r-2' } };
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
+    await settle();
+    const facts = [...document.querySelectorAll('.facts div')];
+    const replaced = facts.find((f) => f.querySelector('dt')?.textContent === 'Replaced by');
+    expect(replaced?.querySelector('a')?.getAttribute('href')).toBe('/dashboard/runs/r-2');
   });
 
   it('shows a missing run as a problem', async () => {

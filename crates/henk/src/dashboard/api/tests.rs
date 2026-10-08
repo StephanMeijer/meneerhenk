@@ -157,12 +157,12 @@ async fn an_action_needs_its_token_the_dashboards_origin_and_a_json_body() {
     let other = signed_in_as(&f, &Session::fresh(ALLOWED, "alice".to_owned()).unwrap()).1;
     let refusals: &[Refusal<'_>] = &[
         (
-            "no token",
+            "csrf: no token",
             vec![("cookie", cookie.as_str()), ("origin", ORIGIN)],
             "application/json",
         ),
         (
-            "another session's token",
+            "csrf: another session's token",
             vec![
                 ("cookie", cookie.as_str()),
                 (CSRF_HEADER, other.as_str()),
@@ -200,7 +200,14 @@ async fn an_action_needs_its_token_the_dashboards_origin_and_a_json_body() {
             "{why}: {}",
             answer.body
         );
-        assert_eq!(answer.code(), "forbidden", "{why}");
+        // A missing or foreign token says so, for the client to offer a
+        // reload; the other refusals are plain refusals.
+        let code = if why.starts_with("csrf:") {
+            "csrf"
+        } else {
+            "forbidden"
+        };
+        assert_eq!(answer.code(), code, "{why}");
     }
     let form = call(
         &f,
