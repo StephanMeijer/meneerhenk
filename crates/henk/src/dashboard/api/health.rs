@@ -105,8 +105,8 @@ fn row(check: crate::doctor::Check) -> (String, String, String) {
 const RECENT_REVIEWS: usize = 10;
 
 /// Whether the reviews configured for workspaces got them (#254): of the
-/// last ended ones, how many had their commit checked out, and why the
-/// newest that did not went without. A failing checkout leaves a review
+/// last ended ones that reached their checkout, how many had their commit
+/// checked out, and why the newest that did not went without. A failing checkout leaves a review
 /// that still completes, so nothing else would say so.
 async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
     let settings = &dashboard.app.settings;
@@ -131,7 +131,7 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
             "could not read the reviews".to_owned(),
         );
     };
-    let wanted: Vec<&RunRecord> = runs
+    let ended: Vec<&RunRecord> = runs
         .iter()
         .filter(|run| run.status != RunStatus::Running && run.status != RunStatus::Superseded)
         .filter(|run| {
@@ -140,19 +140,27 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
                 .profile_for(&run.repo)
                 .serves(EnvLane::Review)
         })
+        .collect();
+    let ids: Vec<_> = ended.iter().map(|run| run.id.clone()).collect();
+    let stages = store.stages_of(&ids).await.unwrap_or_default();
+    let checkout = |run: &RunRecord, wanted: StageState| {
+        stages.iter().any(|(id, stage, state)| {
+            *id == run.id && *stage == Stage::Checkout && *state == wanted
+        })
+    };
+    let checked_out = |run: &RunRecord| checkout(run, StageState::Done);
+    // Only a review that reached its checkout wanted one: one with nothing
+    // to review skips it, and one cancelled in the queue or failed before
+    // its lanes never gets there.
+    let wanted: Vec<&RunRecord> = ended
+        .into_iter()
+        .filter(|run| checked_out(run) || checkout(run, StageState::Failed))
         .take(RECENT_REVIEWS)
         .collect();
     if wanted.is_empty() {
-        let text = "no review with workspaces has ended yet";
+        let text = "no review with workspaces has reached its checkout yet";
         return (name, "ok".to_owned(), text.to_owned());
     }
-    let ids: Vec<_> = wanted.iter().map(|run| run.id.clone()).collect();
-    let stages = store.stages_of(&ids).await.unwrap_or_default();
-    let checked_out = |run: &RunRecord| {
-        stages.iter().any(|(id, stage, state)| {
-            *id == run.id && *stage == Stage::Checkout && *state == StageState::Done
-        })
-    };
     let had = wanted.iter().filter(|run| checked_out(run)).count();
     let line = format!("{had} of the last {} reviews had one", wanted.len());
     let Some(without) = wanted.iter().find(|run| !checked_out(run)) else {

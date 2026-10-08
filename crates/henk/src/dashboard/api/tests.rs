@@ -1129,6 +1129,98 @@ async fn the_health_page_says_when_reviews_go_without_their_workspaces() {
     );
 }
 
+#[tokio::test]
+async fn reviews_that_never_reach_their_checkout_do_not_count_as_going_without() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.workspace.default.backend = henk_domain::workspace::BackendKind::Kubernetes;
+            s.workspace.default.review = true;
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    // A review with nothing to review skips its checkout; one cancelled in
+    // the queue ends with no checkout stage at all.
+    let end = |run: &'static str, checkout: Option<henk_store::StageState>, status: RunStatus| {
+        let store = store.clone();
+        async move {
+            let id = RunId::parse(run).unwrap();
+            store
+                .create_run(&NewRun {
+                    id: id.clone(),
+                    kind: RunKind::Review,
+                    platform: Platform::GitHub,
+                    repo: "docspec/app".into(),
+                    target: 7,
+                    commit: None,
+                    requester: None,
+                    trigger: "opened".into(),
+                    link: String::new(),
+                })
+                .await
+                .unwrap();
+            if checkout == Some(henk_store::StageState::Failed) {
+                store
+                    .event(
+                        &id,
+                        "warn",
+                        "review workspaces: none, the reviewed commit could not be checked out: fetch refused",
+                    )
+                    .await
+                    .unwrap();
+            }
+            if let Some(state) = checkout {
+                store
+                    .stage(
+                        &id,
+                        &henk_store::StageWrite::now(henk_store::Stage::Checkout, state, ""),
+                    )
+                    .await
+                    .unwrap();
+            }
+            store.finish_run(&id, status, None, None).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    end(
+        "r-1",
+        Some(henk_store::StageState::Skipped),
+        RunStatus::Finished,
+    )
+    .await;
+    end("r-2", None, RunStatus::Cancelled).await;
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "ok".to_owned(),
+            "no review with workspaces has reached its checkout yet".to_owned()
+        )
+    );
+
+    end(
+        "r-3",
+        Some(henk_store::StageState::Failed),
+        RunStatus::Finished,
+    )
+    .await;
+    end(
+        "r-4",
+        Some(henk_store::StageState::Skipped),
+        RunStatus::Finished,
+    )
+    .await;
+    end("r-5", None, RunStatus::Cancelled).await;
+    assert_eq!(
+        health_row(&f, &cookie, "workspaces").await,
+        (
+            "warn".to_owned(),
+            "0 of the last 1 reviews had one (checkout failed: fetch refused)".to_owned()
+        )
+    );
+}
+
 /// The SPA's TypeScript types, generated from the API's./// The SPA's TypeScript types, generated from the API's. `HENK_BLESS=1`
 /// writes them; otherwise a difference fails, so the checked-in file
 /// always matches the API.
