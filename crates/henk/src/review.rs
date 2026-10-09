@@ -2314,6 +2314,67 @@ lanes = [{ name = "lane-a", model = "m" }]
         app.shutdown.cancel();
     }
 
+    /// A slow platform does not cost a waiting review its place: B asks to
+    /// show its check queued first and gets the answer last, and still
+    /// starts before C, submitted after it (#262).
+    #[tokio::test]
+    async fn a_slow_queued_check_keeps_the_order_reviews_wait_in() {
+        let model = ScriptedClient::new("scripted", (0..12).map(|_| done()))
+            .with_delay(Duration::from_millis(400));
+        let mut f = fixture(DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let writer = Arc::new(FakeWriter {
+            head: SHA.to_owned(),
+            patches: henk_domain::diff::split_unified(DIFF),
+            slow_queue: Some((8, Duration::from_millis(250))),
+            ..FakeWriter::default()
+        });
+        f.app.test_writer = Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>);
+        let app = Arc::new(f.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let commit = CommitSha::parse(SHA).unwrap();
+        let _ = coordinator.submit_review(request(&placeholder), commit.clone());
+        until("review A holds the slot", || {
+            coordinator.running_reviews() == 1
+        })
+        .await;
+        let mut b = request(&placeholder);
+        b.target.number = 8;
+        let _ = coordinator.submit_review(b, commit.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut c = request(&placeholder);
+        c.target.number = 9;
+        let _ = coordinator.submit_review(c, commit);
+        until("both checks are queued", || {
+            writer.queued.lock().unwrap().len() == 2
+        })
+        .await;
+        assert_eq!(
+            coordinator
+                .slots()
+                .waiting
+                .iter()
+                .map(|w| (w.position, w.number))
+                .collect::<Vec<_>>(),
+            [(1, 8), (2, 9)]
+        );
+        until("B and C start", || {
+            writer.started.lock().unwrap().len() == 3
+        })
+        .await;
+        assert_eq!(
+            *writer.started.lock().unwrap(),
+            [
+                None,
+                Some("queued-2".to_owned()),
+                Some("queued-1".to_owned())
+            ],
+            "C's check was queued first, B still starts first"
+        );
+        app.shutdown.cancel();
+    }
+
     /// A review that waited with a queued check, then ran preflight against
     /// `writer`, with a dashboard so the queue link differs from the run's.
     async fn queued_then_preflight(writer: FakeWriter) -> (App, Arc<FakeWriter>, RunId) {

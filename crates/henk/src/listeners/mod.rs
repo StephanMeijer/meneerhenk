@@ -89,6 +89,9 @@ pub(crate) mod testing {
         pub queued: Mutex<Vec<(String, String, String)>>,
         /// `queue_review` fails instead, as an unreachable platform would.
         pub fail_queue: bool,
+        /// `queue_review` for this pull request number answers only after
+        /// this long, as a slow platform would.
+        pub slow_queue: Option<(u64, std::time::Duration)>,
         /// The queued check each `start_review` was given, in order.
         pub started: Mutex<Vec<Option<String>>>,
         /// The link each `finish_review` was given, in order.
@@ -123,12 +126,17 @@ pub(crate) mod testing {
 
         async fn queue_review(
             &self,
-            _: &ReviewTarget,
+            target: &ReviewTarget,
             _: &CommitSha,
             title: &str,
             summary: &str,
             _: &str,
         ) -> Result<Option<ReviewHandle>, PlatformError> {
+            if let Some((number, delay)) = self.slow_queue
+                && number == target.number
+            {
+                tokio::time::sleep(delay).await;
+            }
             if self.fail_queue {
                 return Err(PlatformError::Decode("the platform is away".to_owned()));
             }

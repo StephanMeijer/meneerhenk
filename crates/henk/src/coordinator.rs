@@ -9,7 +9,7 @@ use henk_domain::queue::{Decision, decide};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::RunId;
 use henk_platform::{IssueTarget, ReviewHandle, ReviewTarget};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -165,6 +165,46 @@ async fn queue_check(app: &App, request: &ReviewRequest) -> Option<ReviewHandle>
             None
         }
     }
+}
+
+/// Waits for a review slot while the pull request shows the review queued
+/// (#262). It joins the slot queue before it asks the platform to show the
+/// check queued, so a slow platform costs it no place: reviews start in the
+/// order they came, as [`Coordinator::slots`] says. A cancel ends the wait
+/// at once, not once a slot frees. Whatever ends it, the queued check is in
+/// `request` before this returns, so it closes. `None` when cancelled.
+async fn wait_for_slot(
+    app: &App,
+    slots: &Arc<Semaphore>,
+    cancel: &CancellationToken,
+    request: &mut ReviewRequest,
+) -> Option<Result<OwnedSemaphorePermit, AcquireError>> {
+    let (waited, queued_check) = {
+        // Boxed so a cancelled review leaves the queue before the platform
+        // answers.
+        let mut acquire = Box::pin(Arc::clone(slots).acquire_owned());
+        let mut queue = std::pin::pin!(queue_check(app, request));
+        let mut queued_check = None;
+        let mut asked = false;
+        let waited = loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break None,
+                permit = &mut acquire => break Some(permit),
+                check = &mut queue, if !asked => {
+                    queued_check = check;
+                    asked = true;
+                }
+            }
+        };
+        drop(acquire);
+        if !asked {
+            queued_check = queue.await;
+        }
+        (waited, queued_check)
+    };
+    request.queued_check = queued_check;
+    waited
 }
 
 /// A review that never got its slot: cancelled from the dashboard,
@@ -402,20 +442,15 @@ impl Coordinator {
                 Ok(permit) => Some(permit),
                 Err(tokio::sync::TryAcquireError::Closed) => return,
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    request.queued_check = queue_check(&app, &request).await;
-                    // A review waiting for a slot still hears its token: a
-                    // cancel ends it now, not once a slot frees.
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => None,
-                        permit = slots.acquire_owned() => {
-                            let Ok(permit) = permit else {
-                                // The slots closed under it: its queued
-                                // check still closes (#262).
-                                ended_while_queued(&app, &request).await;
-                                return;
-                            };
-                            Some(permit)
+                    let waited = wait_for_slot(&app, &slots, &cancel, &mut request).await;
+                    match waited {
+                        None => None,
+                        Some(Ok(permit)) => Some(permit),
+                        Some(Err(_)) => {
+                            // The slots closed under it: its queued check
+                            // still closes (#262).
+                            ended_while_queued(&app, &request).await;
+                            return;
                         }
                     }
                 }
