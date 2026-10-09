@@ -324,7 +324,7 @@ async fn preflight(
             NotReviewable(format!("{} is not on the allowlist", request.target.repo)).into(),
         );
     }
-    if app.settings.lanes.is_empty() {
+    if app.settings.lanes.is_empty() && app.settings.review.r#loop.is_none() {
         return Err(NotReviewable("no review lanes are configured".to_owned()).into());
     }
 

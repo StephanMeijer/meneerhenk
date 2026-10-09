@@ -125,57 +125,14 @@ pub async fn run_session(
         &spec.name,
         &model_name,
         spec.limits.record_argument_bytes,
+        0,
     )
     .await;
     if !calls.is_empty() {
         info!(lane = %spec.name, usage = %usage_line(&ToolUsage::from_calls(&calls)), "tool usage");
     }
-    // The whole conversation goes on the run (#191); a store that cannot
-    // take it costs the transcript, never the session.
-    match transcript::json(run, &spec.name, &model_name, &system, &outcome) {
-        Ok(body) => {
-            let record = henk_store::TranscriptRecord {
-                at: String::new(),
-                session: spec.name.clone(),
-                model: model_name.clone(),
-                stop: format!("{:?}", outcome.stop),
-                turns: outcome.turns,
-                bytes: u64::try_from(body.len()).unwrap_or(u64::MAX),
-                body,
-            };
-            if let Err(error) = store.record_transcript(run, &record).await {
-                tracing::warn!(%error, "could not store the transcript");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "could not serialise the transcript"),
-    }
-    if let Some(dir) = transcript::directory_from_env() {
-        match transcript::write(&dir, run, &spec.name, &model_name, &system, &outcome) {
-            Ok(path) => info!(path = %path.display(), "transcript written"),
-            Err(error) => tracing::warn!(%error, "could not write the transcript"),
-        }
-    }
-
-    // The lane row records how the session ended (#231): it ran to an end
-    // (finished), reached its time limit (timed out: what it drafted until
-    // then stands, it drafts nothing more), or broke off (did not finish,
-    // with why). How a caller presents a time limit is the caller's
-    // business: the review reports such a lane as stopped at the time limit
-    // in its summary, the planner treats it as a failed plan.
-    let (status, error) = match &outcome.stop {
-        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
-        StopCause::Timeout => (LaneStatus::TimedOut, None),
-        StopCause::Cancelled => (LaneStatus::DidNotFinish, Some("cancelled".to_owned())),
-        StopCause::ModelError(e) => (LaneStatus::DidNotFinish, Some(e.to_string())),
-        StopCause::Refused(why) => (
-            LaneStatus::DidNotFinish,
-            Some(format!("the model declined ({why})")),
-        ),
-        StopCause::Stuck { tool, .. } => (
-            LaneStatus::DidNotFinish,
-            Some(format!("stuck repeating {tool}")),
-        ),
-    };
+    keep_transcript(store, run, &spec.name, &model_name, &system, &outcome).await;
+    let (status, error) = lane_status(&outcome.stop);
     if let Err(store_error) = store
         .finish_lane(
             run,
@@ -209,6 +166,235 @@ pub async fn run_session(
         final_text: outcome.final_text,
         status,
         error,
+    }
+}
+
+/// Puts the whole conversation on the run (#191), and in
+/// `HENK_TRANSCRIPT_DIR` when it is set. A store that cannot take it costs
+/// the transcript, never the session.
+async fn keep_transcript(
+    store: &dyn RunStore,
+    run: &RunId,
+    name: &str,
+    model: &str,
+    system: &str,
+    outcome: &henk_agent::AgentOutcome,
+) {
+    match transcript::json(run, name, model, system, outcome) {
+        Ok(body) => {
+            let record = henk_store::TranscriptRecord {
+                at: String::new(),
+                session: name.to_owned(),
+                model: model.to_owned(),
+                stop: format!("{:?}", outcome.stop),
+                turns: outcome.turns,
+                bytes: u64::try_from(body.len()).unwrap_or(u64::MAX),
+                body,
+            };
+            if let Err(error) = store.record_transcript(run, &record).await {
+                tracing::warn!(%error, "could not store the transcript");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not serialise the transcript"),
+    }
+    if let Some(dir) = transcript::directory_from_env() {
+        match transcript::write(&dir, run, name, model, system, outcome) {
+            Ok(path) => info!(path = %path.display(), "transcript written"),
+            Err(error) => tracing::warn!(%error, "could not write the transcript"),
+        }
+    }
+}
+
+/// How a session ended, as its lane row records it (#231): it ran to an
+/// end (finished), reached its time limit (timed out: what it drafted until
+/// then stands, it drafts nothing more), or broke off (did not finish, with
+/// why). How a caller presents a time limit is the caller's business: the
+/// review reports such a lane as stopped at the time limit in its summary,
+/// the planner treats it as a failed plan.
+fn lane_status(stop: &StopCause) -> (LaneStatus, Option<String>) {
+    match stop {
+        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
+        StopCause::Timeout => (LaneStatus::TimedOut, None),
+        StopCause::Cancelled => (LaneStatus::DidNotFinish, Some("cancelled".to_owned())),
+        StopCause::ModelError(e) => (LaneStatus::DidNotFinish, Some(e.to_string())),
+        StopCause::Refused(why) => (
+            LaneStatus::DidNotFinish,
+            Some(format!("the model declined ({why})")),
+        ),
+        StopCause::Stuck { tool, .. } => (
+            LaneStatus::DidNotFinish,
+            Some(format!("stuck repeating {tool}")),
+        ),
+    }
+}
+
+/// A session kept across the rounds of a review loop (#284). Each round
+/// resumes the same conversation with one new message, so the model sees
+/// everything it said and read before. The run keeps one lane row for it,
+/// ended by [`ResumableSession::finish`] with the turns and tokens of every
+/// round, and its newest transcript holds the whole conversation.
+pub struct ResumableSession {
+    name: String,
+    model: Arc<dyn ModelClient>,
+    model_name: String,
+    system: String,
+    tools: ToolSet,
+    limits: AgentConfig,
+    messages: Vec<ChatMessage>,
+    turns: u32,
+    usage: Usage,
+    status: Option<(LaneStatus, Option<String>)>,
+}
+
+impl std::fmt::Debug for ResumableSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResumableSession")
+            .field("name", &self.name)
+            .field("model", &self.model_name)
+            .field("messages", &self.messages.len())
+            .field("turns", &self.turns)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How one round of a [`ResumableSession`] ended.
+#[derive(Debug)]
+pub struct RoundOutcome {
+    /// Why this round stopped.
+    pub stop: StopCause,
+    /// Model calls this round.
+    pub turns: u32,
+    /// The last assistant text of this round.
+    pub final_text: String,
+}
+
+impl ResumableSession {
+    /// A session that has not run yet. `limits` hold per round: every round
+    /// gets the whole turn limit and time limit again.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        model: Arc<dyn ModelClient>,
+        system: impl Into<String>,
+        tools: ToolSet,
+        limits: AgentConfig,
+    ) -> Self {
+        let model_name = model.model().to_owned();
+        Self {
+            name: name.into(),
+            model,
+            model_name,
+            system: system.into(),
+            tools,
+            limits,
+            messages: Vec::new(),
+            turns: 0,
+            usage: Usage::default(),
+            status: None,
+        }
+    }
+
+    /// The conversation so far.
+    #[must_use]
+    pub fn messages(&self) -> &[ChatMessage] {
+        &self.messages
+    }
+
+    /// Model calls over every round.
+    #[must_use]
+    pub fn turns(&self) -> u32 {
+        self.turns
+    }
+
+    /// Sends `message` after the conversation so far and runs until the
+    /// model ends its turn or a limit of this round stops it. Tool calls
+    /// and the live view are recorded as for any session; the transcript
+    /// stored after the round holds the whole conversation.
+    pub async fn resume(
+        &mut self,
+        store: &dyn RunStore,
+        run: &RunId,
+        message: ChatMessage,
+        cancel: CancellationToken,
+    ) -> RoundOutcome {
+        if self.status.is_none()
+            && let Err(error) = store.start_lane(run, &self.name, &self.model_name).await
+        {
+            tracing::warn!(%error, "could not record the lane start");
+        }
+        // The earlier messages are already in the live view.
+        let seen = self.messages.len();
+        let mut opening = std::mem::take(&mut self.messages);
+        opening.push(message);
+        let agent = Agent::new(
+            Arc::clone(&self.model),
+            self.tools.clone(),
+            self.system.clone(),
+            self.limits,
+        );
+        let (mut outcome, _) = run_recorded(
+            agent,
+            opening,
+            cancel,
+            store,
+            run,
+            &self.name,
+            &self.model_name,
+            self.limits.record_argument_bytes,
+            seen,
+        )
+        .await;
+        let status = lane_status(&outcome.stop);
+        for firing in &outcome.repeats {
+            let _ = store
+                .event(run, "warn", &repeat_event(&self.name, firing))
+                .await;
+        }
+        end_events(store, run, &self.name, &outcome, status.1.is_some()).await;
+        let round_turns = outcome.turns;
+        self.turns = self.turns.saturating_add(round_turns);
+        self.usage.add(&outcome.usage);
+        outcome.turns = self.turns;
+        outcome.usage = self.usage;
+        keep_transcript(
+            store,
+            run,
+            &self.name,
+            &self.model_name,
+            &self.system,
+            &outcome,
+        )
+        .await;
+        info!(lane = %self.name, turns = round_turns, status = ?status.0, "round ended");
+        self.status = Some(status);
+        self.messages = outcome.messages;
+        RoundOutcome {
+            stop: outcome.stop,
+            turns: round_turns,
+            final_text: outcome.final_text,
+        }
+    }
+
+    /// Ends the session's lane row with the turns and tokens of every
+    /// round, as its last round ended. A session that never ran has none.
+    pub async fn finish(&self, store: &dyn RunStore, run: &RunId) {
+        let Some((status, error)) = &self.status else {
+            return;
+        };
+        if let Err(store_error) = store
+            .finish_lane(
+                run,
+                &self.name,
+                *status,
+                u64::from(self.turns),
+                self.usage.prompt_tokens(),
+                self.usage.output_tokens,
+                error.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(error = %store_error, "could not record the lane end");
+        }
     }
 }
 
@@ -273,15 +459,23 @@ async fn run_recorded(
     session: &str,
     model: &str,
     cap: usize,
+    seen: usize,
 ) -> (henk_agent::AgentOutcome, Vec<ToolCallRecord>) {
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let agent = agent.with_events(events);
     let recorder = async {
         let mut calls = Vec::new();
+        // The first `seen` opening messages were sent in an earlier round
+        // of the same session (#284).
+        let mut skip = seen;
         while let Some(event) = received.recv().await {
             // What the session says goes to the live view as it happens
             // (#238); the transcript kept at the end is the record.
             if let AgentEvent::Message { turn, message } = &event {
+                if *turn == 0 && skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
                 match serde_json::to_string(message) {
                     Ok(json) => store.session_message(run, session, *turn, &json).await,
                     Err(error) => tracing::warn!(%error, "could not serialise a message"),
@@ -718,6 +912,67 @@ mod tests {
                 .unwrap(),
             "the whole conversation, as the model saw it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_sees_its_earlier_rounds_and_keeps_one_lane() {
+        let store = store_with_run().await;
+        let scripted = Arc::new(ScriptedClient::new("m", [text("first"), text("second")]));
+        let model: Arc<dyn ModelClient> = scripted.clone();
+        let mut session = ResumableSession::new(
+            "reviewer",
+            model,
+            "s",
+            ToolSet::new(),
+            AgentConfig::default(),
+        );
+        let one = session
+            .resume(
+                &store,
+                &run_id(),
+                ChatMessage::user("go"),
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!((one.final_text.as_str(), one.turns), ("first", 1));
+        let two = session
+            .resume(
+                &store,
+                &run_id(),
+                ChatMessage::user("again"),
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(two.final_text, "second");
+
+        let requests = scripted.requests();
+        assert_eq!(
+            serde_json::to_value(&requests[1].messages).unwrap(),
+            serde_json::to_value([
+                ChatMessage::user("go"),
+                ChatMessage::assistant("first"),
+                ChatMessage::user("again"),
+            ])
+            .unwrap(),
+            "the second round goes on from the first"
+        );
+        assert_eq!(session.messages().len(), 4);
+
+        session.finish(&store, &run_id()).await;
+        let lanes = store.lanes(&run_id()).await.unwrap();
+        assert_eq!(lanes.len(), 1, "one lane row for every round");
+        assert_eq!(
+            (lanes[0].status, lanes[0].turns, lanes[0].input_tokens),
+            (LaneStatus::Finished, 2, 24)
+        );
+        let stored = store
+            .transcript(&run_id(), "reviewer")
+            .await
+            .unwrap()
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&stored.body).unwrap();
+        assert_eq!(body["messages"].as_array().unwrap().len(), 4, "{body}");
+        assert_eq!(body["turns"], 2);
     }
 
     /// A store that takes nothing, here because the run is not in it, costs

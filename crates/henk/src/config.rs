@@ -403,6 +403,10 @@ pub struct ReviewConfig {
     /// lanes (#189). Absent: drafts are posted unchecked.
     #[serde(default)]
     pub fact_check: Option<FactCheckConfig>,
+    /// The reviewer↔fixer loop (#284). Present: a review is one reviewer
+    /// and one fixer taking turns instead of the lanes.
+    #[serde(default, rename = "loop")]
+    pub r#loop: Option<LoopConfig>,
     /// Changed files no lane reviews (§3.2): lockfiles and generated
     /// changelogs by default. A pattern without `/` matches the file name at
     /// any depth; `**` matches any number of directories. Setting the key
@@ -459,6 +463,31 @@ pub struct FactCheckConfig {
     pub skills: Vec<SkillName>,
 }
 
+/// The reviewer↔fixer loop (#284): a reviewer reviews, a fixer fixes what
+/// holds and pushes to the pull request's branch, and each resumes its own
+/// conversation the next round.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopConfig {
+    /// Model id from `[models]` for the reviewer.
+    pub reviewer: String,
+    /// Model id from `[models]` for the fixer.
+    pub fixer: String,
+    /// Rounds at most: one round is a reviewer turn and a fixer turn.
+    #[serde(default = "default_loop_max_rounds")]
+    pub max_rounds: u32,
+    /// Wall-clock limit per session per round, in seconds.
+    #[serde(default = "default_lane_timeout_secs")]
+    pub round_timeout_secs: u64,
+    /// Model calls per session per round.
+    #[serde(default = "default_lane_max_turns")]
+    pub round_max_turns: u32,
+}
+
+fn default_loop_max_rounds() -> u32 {
+    10
+}
+
 fn default_fact_check_timeout_secs() -> u64 {
     180
 }
@@ -493,6 +522,7 @@ impl Default for ReviewConfig {
             max_concurrent: default_max_concurrent(),
             github_drafts: false,
             fact_check: None,
+            r#loop: None,
             ignore: default_review_ignore(),
         }
     }
@@ -1268,6 +1298,11 @@ impl Config {
             ));
         }
         validate_fact_check(self.review.fact_check.as_ref(), &self.models)?;
+        validate_loop(
+            self.review.r#loop.as_ref(),
+            &self.models,
+            self.address.is_some(),
+        )?;
         if let Some(planning) = &self.planning {
             validate_planning(planning, &self.models, &self.discord.team_lead_ids)?;
         }
@@ -1538,6 +1573,37 @@ fn validate_fact_check(
                 model: model.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+/// The loop's models must exist, and it pushes the way an address run
+/// does, so it needs `[address]` for the checks, identity and trailers.
+fn validate_loop(
+    review_loop: Option<&LoopConfig>,
+    models: &BTreeMap<String, ModelFileConfig>,
+    address: bool,
+) -> Result<(), ConfigError> {
+    let Some(review_loop) = review_loop else {
+        return Ok(());
+    };
+    for model in [&review_loop.reviewer, &review_loop.fixer] {
+        if !models.contains_key(model) {
+            return Err(ConfigError::UnknownModel {
+                what: "review.loop".to_owned(),
+                model: model.clone(),
+            });
+        }
+    }
+    if review_loop.max_rounds == 0 {
+        return Err(ConfigError::Review(
+            "review.loop.max_rounds must be at least 1".to_owned(),
+        ));
+    }
+    if !address {
+        return Err(ConfigError::Review(
+            "review.loop pushes like an address run and needs [address]".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2434,6 +2500,33 @@ github_owners = ["docspec"]
     fn address(person: &str, extra: &str) -> Result<Settings, ConfigError> {
         let text = format!("{MINIMAL}{}{extra}", ADDRESS.replace("PERSON", person));
         Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn the_loop_names_known_models_and_needs_address() {
+        let settings = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\n").unwrap();
+        let review_loop = settings.review.r#loop.as_ref().unwrap();
+        assert_eq!(
+            (review_loop.max_rounds, review_loop.round_max_turns),
+            (10, 40)
+        );
+        let unknown = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"x\"\n").unwrap_err();
+        assert!(
+            matches!(&unknown, ConfigError::UnknownModel { what, model } if what == "review.loop" && model == "x"),
+            "{unknown}"
+        );
+        let none = address(
+            "",
+            "[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\nmax_rounds = 0\n",
+        )
+        .unwrap_err();
+        assert!(matches!(none, ConfigError::Review(_)), "{none}");
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let text = format!("{MINIMAL}{models}[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\n");
+        let alone = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap_err();
+        assert!(alone.to_string().contains("needs [address]"), "{alone}");
     }
 
     #[test]

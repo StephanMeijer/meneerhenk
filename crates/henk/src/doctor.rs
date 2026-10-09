@@ -400,6 +400,11 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
                     .fact_check
                     .as_ref()
                     .is_none_or(|f| &f.model != *id && f.backup_model.as_ref() != Some(*id))
+                && settings
+                    .review
+                    .r#loop
+                    .as_ref()
+                    .is_none_or(|l| &l.reviewer != *id && &l.fixer != *id)
         })
         .map(String::as_str)
         .collect();
@@ -407,12 +412,12 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         checks.push(Check::warn(
             "models",
             format!(
-                "configured but used by no lane, fact-check or planner: {}",
+                "configured but used by no lane, loop, fact-check or planner: {}",
                 unused.join(", ")
             ),
         ));
     }
-    if settings.lanes.is_empty() {
+    if settings.lanes.is_empty() && settings.review.r#loop.is_none() {
         checks.push(Check::warn(
             "review lanes",
             "none configured; reviews cannot run",
