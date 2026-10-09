@@ -2065,9 +2065,16 @@ mod sqlite {
 /// `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server. Every test gets
 /// its own schema, so tests run in parallel and leave nothing behind.
 mod postgres {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
 
     const URL: &str = "HENK_TEST_DATABASE_URL";
+
+    /// Numbers this process's schemas, so no two tests share one: tests
+    /// are threads of one process and can read the clock at the same
+    /// instant (#164).
+    static NEXT_SCHEMA: AtomicU64 = AtomicU64::new(0);
 
     /// A store in a fresh schema; the schema is dropped with the guard.
     pub(super) struct Schema {
@@ -2106,12 +2113,16 @@ mod postgres {
 
     pub(super) async fn schema() -> Schema {
         let base = std::env::var(URL).unwrap_or_else(|_| panic!("{URL} is not set"));
+        // The process id and counter keep tests apart, within one run and
+        // across runs at once; the clock keeps a schema a crashed run left
+        // behind under a recycled process id from getting in the way (#164).
         let name = format!(
-            "henk_test_{}",
+            "henk_test_{}_{}_{}",
+            std::process::id(),
+            NEXT_SCHEMA.fetch_add(1, Ordering::Relaxed),
             OffsetDateTime::now_utc()
                 .unix_timestamp_nanos()
                 .unsigned_abs()
-                ^ u128::from(std::process::id())
         );
         plain_client(&base)
             .await
