@@ -130,6 +130,31 @@ const INHERITED_ENV: &[&str] = &[
     "XDG_CONFIG_HOME",
 ];
 
+/// The whole environment a stdio child receives (#62): the [`INHERITED_ENV`]
+/// names `lookup` knows, then every `pass_env` name, then the fixed `env`
+/// map, which wins. Nothing else of Henk's environment comes through.
+///
+/// # Errors
+///
+/// Returns [`McpError::MissingEnv`] when `lookup` does not know a `pass_env`
+/// name.
+fn child_env(
+    pass_env: &[String],
+    env: &BTreeMap<String, String>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, String>, McpError> {
+    let mut full_env: BTreeMap<String, String> = INHERITED_ENV
+        .iter()
+        .filter_map(|name| lookup(name).map(|value| ((*name).to_owned(), value)))
+        .collect();
+    for name in pass_env {
+        let value = lookup(name).ok_or_else(|| McpError::MissingEnv(name.clone()))?;
+        full_env.insert(name.clone(), value);
+    }
+    full_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Ok(full_env)
+}
+
 impl RmcpSession {
     /// Connects to a configured server. `lookup_env` resolves the names in
     /// `pass_env` and `bearer_env`; in production it is `std::env::var`.
@@ -151,17 +176,7 @@ impl RmcpSession {
                 env,
                 pass_env,
             } => {
-                let mut full_env: BTreeMap<String, String> = INHERITED_ENV
-                    .iter()
-                    .filter_map(|name| lookup_env(name).map(|value| ((*name).to_owned(), value)))
-                    .collect();
-                for name in &pass_env {
-                    let value =
-                        lookup_env(name).ok_or_else(|| McpError::MissingEnv(name.clone()))?;
-                    full_env.insert(name.clone(), value);
-                }
-                full_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
-
+                let full_env = child_env(&pass_env, &env, &lookup_env)?;
                 let command = Command::new(&command).configure(|c| {
                     c.args(&args).env_clear().envs(&full_env).kill_on_drop(true);
                 });
@@ -290,5 +305,91 @@ impl McpSession for RmcpSession {
             })?
             .map_err(|e| self.service_error(e))?;
         Ok(ToolOutcome::from(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A parent environment holding Henk's secrets next to the basics.
+    fn parent(name: &str) -> Option<String> {
+        match name {
+            "PATH" => Some("/usr/bin".to_owned()),
+            "HOME" => Some("/home/henk".to_owned()),
+            "GITHUB_TOKEN" => Some("ghp_secret".to_owned()),
+            "DATABASE_URL" => Some("postgres://henk:secret@db/henk".to_owned()),
+            "GITLAB_PERSONAL_ACCESS_TOKEN" => Some("glpat-secret".to_owned()),
+            _ => None,
+        }
+    }
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn only_inherited_names_come_through() {
+        let env = child_env(&[], &BTreeMap::new(), parent).unwrap();
+        assert_eq!(env, map(&[("HOME", "/home/henk"), ("PATH", "/usr/bin")]));
+    }
+
+    #[test]
+    fn inherited_names_are_the_fixed_eight() {
+        let every = |name: &str| Some(format!("value of {name}"));
+        let env = child_env(&[], &BTreeMap::new(), every).unwrap();
+        let names: Vec<&str> = env.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "HOME",
+                "LANG",
+                "LC_ALL",
+                "PATH",
+                "TERM",
+                "TMPDIR",
+                "XDG_CACHE_HOME",
+                "XDG_CONFIG_HOME",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_known_pass_env_name_is_included() {
+        let pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN".to_owned()];
+        let env = child_env(&pass_env, &BTreeMap::new(), parent).unwrap();
+        assert_eq!(
+            env,
+            map(&[
+                ("GITLAB_PERSONAL_ACCESS_TOKEN", "glpat-secret"),
+                ("HOME", "/home/henk"),
+                ("PATH", "/usr/bin"),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_unknown_pass_env_name_is_missing_env() {
+        let error = child_env(&["NOT_SET".to_owned()], &BTreeMap::new(), parent).unwrap_err();
+        assert!(matches!(error, McpError::MissingEnv(ref name) if name == "NOT_SET"));
+    }
+
+    #[test]
+    fn fixed_env_overrides_inherited_and_adds_new_names() {
+        let fixed = map(&[("HOME", "/srv/mcp"), ("GITHUB_TOOLSETS", "repos")]);
+        let env = child_env(&[], &fixed, parent).unwrap();
+        assert_eq!(
+            env,
+            map(&[
+                ("GITHUB_TOOLSETS", "repos"),
+                ("HOME", "/srv/mcp"),
+                ("PATH", "/usr/bin"),
+            ])
+        );
     }
 }
