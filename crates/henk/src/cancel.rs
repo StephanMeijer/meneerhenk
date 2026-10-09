@@ -123,20 +123,26 @@ impl Drop for Registered {
     }
 }
 
-/// The comment a run cancelled from the dashboard leaves, without its
-/// marker. `by` is an id, never a display name (§2). `nothing_pushed` adds
-/// that nothing was pushed, for an address run, the one run that pushes.
+/// The comment a cancelled run leaves, without its marker. `by` is the
+/// requester id, never a display name (§2), and its prefix says where the
+/// cancel came from: `github:` the dashboard, `mcp:` an MCP client.
+/// `nothing_pushed` adds that nothing was pushed, for an address run, the
+/// one run that pushes.
 #[must_use]
 pub fn cancelled_notice(by: &str, link: &str, nothing_pushed: bool) -> String {
-    let who = by
-        .strip_prefix("github:")
-        .map_or_else(|| by.to_owned(), |id| format!("GitHub account {id}"));
+    let how = if let Some(id) = by.strip_prefix("github:") {
+        format!("from the dashboard by GitHub account {id}")
+    } else if let Some(name) = by.strip_prefix("mcp:") {
+        format!("over MCP by client {name}")
+    } else {
+        format!("by {by}")
+    };
     let pushed = if nothing_pushed {
         " Nothing was pushed."
     } else {
         ""
     };
-    format!("Cancelled from the dashboard by {who}.{pushed}\n\nRun: {link}")
+    format!("Cancelled {how}.{pushed}\n\nRun: {link}")
 }
 
 #[cfg(test)]
@@ -200,7 +206,12 @@ mod tests {
         );
         let address = cancelled_notice("github:1234", "https://henk/runs/r-1", true);
         assert!(address.contains("Nothing was pushed."));
-        for text in [review, address] {
+        let mcp = cancelled_notice("mcp:claude", "https://henk/runs/r-1", false);
+        assert_eq!(
+            mcp, "Cancelled over MCP by client claude.\n\nRun: https://henk/runs/r-1",
+            "not from the dashboard"
+        );
+        for text in [review, address, mcp] {
             assert!(henk_domain::text::is_in_style(&text), "{text}");
         }
     }
