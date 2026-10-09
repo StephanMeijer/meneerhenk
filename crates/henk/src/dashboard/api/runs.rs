@@ -393,7 +393,8 @@ pub async fn start(
     let source = EventSource::Dashboard {
         requester: who.clone(),
     };
-    let started = publish_start(&dashboard.bus, &body, source, &who)?;
+    let hosts = crate::urls::Hosts::from_settings(&dashboard.app.settings);
+    let started = publish_start(&dashboard.bus, &body, source, &who, &hosts)?;
     Ok((StatusCode::ACCEPTED, Json(started)).into_response())
 }
 
@@ -405,6 +406,7 @@ pub(crate) fn publish_start(
     request: &StartRequest,
     source: EventSource,
     who: &str,
+    hosts: &crate::urls::Hosts,
 ) -> Result<Started, ApiError> {
     let kind = Start::parse(&request.kind)
         .ok_or_else(|| ApiError::bad_request("kind is one of review, plan, address."))?;
@@ -418,6 +420,7 @@ pub(crate) fn publish_start(
         given(request.note.as_ref()),
         source,
         Some(who.to_owned()),
+        hosts,
     )
     .map_err(|message| ApiError::bad_request(format!("{message}.")))?;
     let event_id = publish(bus, event);

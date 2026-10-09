@@ -24,16 +24,25 @@ pub struct ApiHook {
     token: Option<SecretString>,
     requester: Option<String>,
     bus: Arc<EventBus>,
+    /// The hosts a URL may name (#58).
+    hosts: crate::urls::Hosts,
 }
 
 impl ApiHook {
-    /// Builds the hook. `requester` is the Team Lead id API work runs for.
+    /// Builds the hook. `requester` is the Team Lead id API work runs for;
+    /// a URL must be on one of `hosts`.
     #[must_use]
-    pub fn new(token: Option<SecretString>, requester: Option<String>, bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        token: Option<SecretString>,
+        requester: Option<String>,
+        bus: Arc<EventBus>,
+        hosts: crate::urls::Hosts,
+    ) -> Self {
         Self {
             token,
             requester,
             bus,
+            hosts,
         }
     }
 
@@ -153,7 +162,15 @@ fn start(
     let source = EventSource::Api {
         requester: hook.requester.clone(),
     };
-    match start_event(start, url, commit, note, source, hook.requester.clone()) {
+    match start_event(
+        start,
+        url,
+        commit,
+        note,
+        source,
+        hook.requester.clone(),
+        &hook.hosts,
+    ) {
         Ok(event) => {
             let id = publish(&hook.bus, event);
             (StatusCode::ACCEPTED, axum::Json(json!({"event": id}))).into_response()

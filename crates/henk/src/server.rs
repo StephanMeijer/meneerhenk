@@ -156,7 +156,12 @@ pub fn compose_with_secrets(
         .map(|p| p.requester_id.to_string());
     let github = Arc::new(GitHubHook::new(github_secret, Arc::clone(&bus)));
     let gitlab = Arc::new(GitLabHook::new(gitlab_token, Arc::clone(&bus)));
-    let api = Arc::new(ApiHook::new(api_token, requester, Arc::clone(&bus)));
+    let api = Arc::new(ApiHook::new(
+        api_token,
+        requester,
+        Arc::clone(&bus),
+        crate::urls::Hosts::from_settings(&app.settings),
+    ));
 
     let shared = Arc::new(Shared {
         coordinator: Arc::clone(&coordinator),
@@ -594,10 +599,9 @@ github_owners = ["docspec"]
             .header("authorization", "Bearer apitok")
             .body(Body::from(r#"{"url":"https://example.com/x"}"#))
             .unwrap();
-        assert_eq!(
-            call(composed(&app).router, bad_url).await.0,
-            StatusCode::BAD_REQUEST
-        );
+        let (status, body) = call(composed(&app).router, bad_url).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("example.com is neither"), "{body}");
 
         let good = Request::post("/plan")
             .header("authorization", "Bearer apitok")
@@ -648,6 +652,8 @@ github_owners = ["docspec"]
         assert_eq!(outcome.outcome, "ignored");
         assert_eq!(outcome.detail, "address runs are not configured");
 
+        // No [gitlab] here: a merge request URL is refused before any
+        // event, naming its host (#58).
         let gitlab = Request::post("/address")
             .header("authorization", "Bearer apitok")
             .body(Body::from(
@@ -655,23 +661,8 @@ github_owners = ["docspec"]
             ))
             .unwrap();
         let (status, body) = call(composed(&app).router, gitlab).await;
-        assert_eq!(
-            status,
-            StatusCode::ACCEPTED,
-            "a merge request is addressed too"
-        );
-        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
-        let recorded = app
-            .store
-            .inbound_event(&EventId::parse(event).unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(recorded.kind, "address_requested");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("gitlab.com is neither"), "{body}");
     }
 
     #[tokio::test]
