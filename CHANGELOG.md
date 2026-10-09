@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.23...v0.1.24) - 2026-10-09
+
+### Added
+
+- *(github)* the review check shows queued while a review waits for a slot
+
+### Fixed
+
+- *(review)* a waiting review keeps its place while its check is queued
+- *(review)* a queued check closes when its run cannot be recorded
+- *(review)* a queued check that could not be started still completes
+- *(mcp)* build a child server's environment in a tested pure function ([#62](https://github.com/StephanMeijer/meneerhenk/pull/62))
+
+### Other
+
+- Merge pull request #272 from StephanMeijer/fix/mcp-client-env-and-probe
+- Merge pull request #264 from StephanMeijer/feat/queued-check
+- Merge remote-tracking branch 'origin/main' into feat/queued-check
+- Merge main into feat/queued-check
+- *(mcp)* prove a stdio MCP child gets only child_env's variables, at the spawn
+
 ## [0.1.23](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.22...v0.1.23) - 2026-10-09
 
 ### Fixed
