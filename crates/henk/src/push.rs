@@ -45,6 +45,11 @@ pub(crate) struct Pusher<'a> {
     pub(crate) run: &'a RunId,
     /// Who asked, as the commit message names them.
     pub(crate) requester: &'a str,
+    /// Whether the run that pushes reviews the commit itself, as the review
+    /// loop does (#284): then it is in [`App::own_pushes`] and its
+    /// new-commits event starts no review. An address run's commit is a new
+    /// commit like any other and is reviewed as usual (§3.5).
+    pub(crate) reviewed_by_run: bool,
 }
 
 impl Pusher<'_> {
@@ -72,7 +77,8 @@ impl Pusher<'_> {
 
     /// Applies the changeset to the checkout, commits as Henk with `notes`
     /// in the message, makes sure the branch has not moved, and pushes.
-    /// Returns the commit, which is in [`App::own_pushes`] before it leaves.
+    /// Returns the commit, which is in [`App::own_pushes`] before it leaves
+    /// when the run reviews it itself.
     pub(crate) async fn commit_and_push(
         &self,
         checkout: &Checkout,
@@ -142,7 +148,9 @@ impl Pusher<'_> {
         stop_if_cancelled(cancel)?;
         // Known before the platform tells anyone, so its event about this
         // commit finds it (#284).
-        self.app.own_pushes.record(&sha);
+        if self.reviewed_by_run {
+            self.app.own_pushes.record(&sha);
+        }
         checkout
             .push(&facts.push.head_ref)
             .await
@@ -215,8 +223,8 @@ impl Pusher<'_> {
 /// about it to arrive.
 const OWN_PUSH_TTL: Duration = Duration::from_hours(24);
 
-/// The commits this process pushed, so an event about one of them is known
-/// as Henk's own and starts no review of it (#284). In memory: after a
+/// The commits this process pushed in a review loop, so an event about one
+/// of them is known as Henk's own and starts no review of it (#284). In memory: after a
 /// restart, the sender check of the listeners still knows Henk's account.
 #[derive(Debug, Default, Clone)]
 pub struct OwnPushes(Arc<Mutex<HashMap<String, Instant>>>);

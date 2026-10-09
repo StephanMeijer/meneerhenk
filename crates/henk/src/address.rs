@@ -285,6 +285,7 @@ impl Session<'_> {
             target: &self.request.target,
             run: self.run,
             requester: self.requester,
+            reviewed_by_run: false,
         }
     }
 
@@ -1076,6 +1077,10 @@ check_commands = [["true"]]
 
         let (remote_head, log) = remote_feature(remote.path()).await;
         assert_eq!(remote_head, sha, "pushed");
+        assert!(
+            !app.own_pushes.contains(&sha),
+            "an address run's commit is reviewed as usual (§3.5)"
+        );
         assert!(
             log.starts_with("meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"),
             "{log}"

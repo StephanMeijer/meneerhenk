@@ -67,6 +67,9 @@ pub(crate) struct LoopReport {
     pub(crate) results: Vec<LaneResult>,
     /// One line for the summary: rounds, commits pushed and why it stopped.
     pub(crate) line: String,
+    /// The last commit it pushed, now the pull request's head, which gets
+    /// the review's check too; `None` when it pushed nothing.
+    pub(crate) head: Option<CommitSha>,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -178,7 +181,17 @@ pub(crate) async fn run_loop(
             outcome,
         })
         .collect();
-    Ok(LoopRun::Ran(LoopReport { results, line }))
+    let head = rounds
+        .pushed
+        .last()
+        .map(|sha| CommitSha::parse(sha))
+        .transpose()
+        .context("the last pushed commit")?;
+    Ok(LoopRun::Ran(LoopReport {
+        results,
+        line,
+        head,
+    }))
 }
 
 /// Clones the pull request at its head, imports it into a workspace that
@@ -481,6 +494,7 @@ impl<'a> Rounds<'a> {
             target: self.on.target,
             run: self.on.run,
             requester: &self.requester,
+            reviewed_by_run: true,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher

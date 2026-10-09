@@ -702,15 +702,16 @@ async fn review_body(
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
-    let mut loop_line = None;
+    let mut looped = None;
     let results = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
         Vec::new()
     } else if review.app.settings.review.r#loop.is_some() {
-        let (results, line) = review_loop(review, registry, diff, title, base_ref, &cancel).await?;
-        loop_line = Some(line);
+        let mut report = review_loop(review, registry, diff, title, base_ref, &cancel).await?;
+        let results = std::mem::take(&mut report.results);
+        looped = Some(report);
         results
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
@@ -748,8 +749,8 @@ async fn review_body(
     fold_outdated(writer, target, &after).await;
 
     let mut summary_text = outcome.summary();
-    if let Some(line) = loop_line {
-        summary_text = format!("{summary_text} {line}");
+    if let Some(report) = &looped {
+        summary_text = format!("{summary_text} {}", report.line);
     }
     let body = Marker {
         run: run.clone(),
@@ -767,7 +768,35 @@ async fn review_body(
         .context("posting the summary")?;
     let published = published_line(store, run).await;
     stages::mark(store, run, Stage::Publish, StageState::Done, published).await;
+    if let Some(head) = looped.and_then(|report| report.head) {
+        check_on_head(review, &head, &outcome).await;
+    }
     Ok((outcome, summary_text))
+}
+
+/// The review loop moved the pull request's head to its last commit, which
+/// its run reviewed and which starts no other review (#284): that head gets
+/// the review's check too, so it does not wait for one. A failure is logged;
+/// the review is done all the same.
+async fn check_on_head(review: ReviewRun<'_>, head: &CommitSha, outcome: &ReviewOutcome) {
+    let ReviewRun {
+        writer,
+        target,
+        link,
+        ..
+    } = review;
+    let started = writer.start_review(target, head, link, None).await;
+    let closed = match started {
+        Ok(handle) => {
+            writer
+                .finish_review(target, head, handle.as_ref(), outcome, link)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = closed {
+        warn!(%error, head = %head.short(), "could not report the check on the loop's head");
+    }
 }
 
 /// The review's request and queue stages, from the coordinator's submit time.
@@ -853,7 +882,7 @@ async fn review_loop(
     title: &str,
     base_ref: &str,
     cancel: &CancellationToken,
-) -> anyhow::Result<(Vec<LaneResult>, String)> {
+) -> anyhow::Result<crate::review_loop::LoopReport> {
     let ReviewRun {
         app,
         target,
@@ -868,7 +897,7 @@ async fn review_loop(
         run,
     };
     let why = match crate::review_loop::run_loop(on, Arc::clone(&diff), cancel).await? {
-        crate::review_loop::LoopRun::Ran(report) => return Ok((report.results, report.line)),
+        crate::review_loop::LoopRun::Ran(report) => return Ok(report),
         crate::review_loop::LoopRun::Declined(why) => why,
     };
     info!(run = %run, %why, "the review loop did not run");
@@ -879,11 +908,19 @@ async fn review_loop(
         let line = format!(
             "The review loop did not run: {why}. No lanes are configured to review instead."
         );
-        return Ok((Vec::new(), line));
+        return Ok(crate::review_loop::LoopReport {
+            results: Vec::new(),
+            line,
+            head: None,
+        });
     }
     let results = run_lanes(review, registry, diff, title, base_ref, cancel).await?;
     let line = format!("The review loop did not run: {why}. The lanes reviewed instead.");
-    Ok((results, line))
+    Ok(crate::review_loop::LoopReport {
+        results,
+        line,
+        head: None,
+    })
 }
 
 /// Runs every configured lane on the diff, sharing one read session, and
@@ -4330,6 +4367,11 @@ lanes = [{ name = "lane-a", model = "m" }]
         .unwrap();
         let file = std::fs::read_to_string(checkout.path().join("src/a.rs")).unwrap();
         assert!(file.contains("let x = 4;"), "{file}");
+        // The new head gets the review's check too, not only the commit the
+        // review started at: nothing else reviews it.
+        let reported = f.writer.finished_commits.lock().unwrap().clone();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(reported.contains(&head), "{reported:?}");
 
         // One run, with a lane row and a transcript for each session.
         let record = f.app.store.run(&run).await.unwrap().unwrap();
@@ -4421,6 +4463,11 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
+        assert_eq!(
+            *f.writer.finished_commits.lock().unwrap(),
+            [before],
+            "nothing pushed, one check"
+        );
         assert_no_stage_running(&f.app, &run).await;
     }
 
