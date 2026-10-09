@@ -13,7 +13,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 # A fixed mise release, checked against the SHA256 kept here, so every
 # build installs the same binary. To update it, take the new release's
-# lines from its SHASUMS256.txt.
+# lines from its SHASUMS256.txt, and update deploy/sandbox/test-host.Containerfile
+# to the same release.
 ARG MISE_VERSION=v2026.10.3
 ARG MISE_SHA256_X64=8d48bc510b7d844fad0bc7156c0855c2a1e7230c51e498a7f6b63b021f8b57c5
 ARG MISE_SHA256_ARM64=357260e28904569a6e7124d33b65cef6d043846c07bb8f4906ddf22cc353d61d
