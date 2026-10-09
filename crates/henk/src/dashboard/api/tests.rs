@@ -1847,6 +1847,7 @@ async fn the_running_stream_sends_the_slots_when_they_change_not_only_in_snapsho
         acknowledge: None,
         run: None,
         submitted_at: None,
+        queued_check: None,
     };
     let commit =
         henk_domain::review::CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
@@ -1912,6 +1913,7 @@ async fn a_review_waiting_for_a_slot_is_on_the_running_stream_until_it_is_cancel
         acknowledge: None,
         run: None,
         submitted_at: None,
+        queued_check: None,
     };
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let commit = henk_domain::review::CommitSha::parse(sha).unwrap();

@@ -100,6 +100,7 @@ impl Listener for ReviewListener {
                     acknowledge: None,
                     run: None,
                     submitted_at: None,
+                    queued_check: None,
                 };
                 self.submit(request, head.clone())
             }
@@ -136,6 +137,7 @@ impl Listener for ReviewListener {
                     )),
                     run: None,
                     submitted_at: None,
+                    queued_check: None,
                 };
                 self.submit(request, head)
             }
@@ -162,6 +164,7 @@ impl Listener for ReviewListener {
                     acknowledge: None,
                     run: None,
                     submitted_at: None,
+                    queued_check: None,
                 };
                 self.submit(request, head)
             }

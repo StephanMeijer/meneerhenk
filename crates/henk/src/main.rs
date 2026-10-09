@@ -359,6 +359,7 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
             acknowledge: None,
             run: Some(run.clone()),
             submitted_at: None,
+            queued_check: None,
         };
         async move {
             review::run_review(&app, request, app.shutdown.child_token())

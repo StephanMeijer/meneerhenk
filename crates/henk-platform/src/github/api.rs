@@ -60,6 +60,23 @@ const PAGE_SIZE: usize = 100;
 /// is [`PlatformError::TooMany`], never a quietly partial list.
 const MAX_PAGES: usize = 100;
 
+/// A check run to create.
+#[derive(Debug, Clone, Copy)]
+pub struct NewCheckRun<'a> {
+    /// The check's name.
+    pub name: &'a str,
+    /// The commit it is on.
+    pub head_sha: &'a str,
+    /// `queued` or `in_progress`.
+    pub status: &'a str,
+    /// Where it links to.
+    pub details_url: &'a str,
+    /// Henk's own id for it: the run link.
+    pub external_id: &'a str,
+    /// Its title and summary, when it says something from the start.
+    pub output: Option<(&'a str, &'a str)>,
+}
+
 impl GitHubApi {
     /// Builds a client for `api_base` (normally `https://api.github.com`).
     ///
@@ -285,7 +302,8 @@ impl GitHubApi {
         Ok(response.get("data").cloned().unwrap_or(Value::Null))
     }
 
-    /// Creates a check run and returns its id.
+    /// Creates a check run, `in_progress` or `queued` as `run.status` says,
+    /// and returns its id.
     ///
     /// # Errors
     ///
@@ -294,27 +312,54 @@ impl GitHubApi {
         &self,
         owner: &str,
         repo: &str,
-        name: &str,
-        head_sha: &str,
-        details_url: &str,
-        external_id: &str,
+        run: &NewCheckRun<'_>,
     ) -> Result<u64, PlatformError> {
+        let mut body = json!({
+            "name": run.name,
+            "head_sha": run.head_sha,
+            "status": run.status,
+            "details_url": run.details_url,
+            "external_id": run.external_id,
+        });
+        if let Some((title, summary)) = run.output
+            && let Some(fields) = body.as_object_mut()
+        {
+            fields.insert(
+                "output".to_owned(),
+                json!({"title": title, "summary": summary}),
+            );
+        }
         let created = self
-            .post(
-                &format!("/repos/{owner}/{repo}/check-runs"),
-                &json!({
-                    "name": name,
-                    "head_sha": head_sha,
-                    "status": "in_progress",
-                    "details_url": details_url,
-                    "external_id": external_id,
-                }),
-            )
+            .post(&format!("/repos/{owner}/{repo}/check-runs"), &body)
             .await?;
         created
             .get("id")
             .and_then(Value::as_u64)
             .ok_or_else(|| PlatformError::Decode("check run without id".to_owned()))
+    }
+
+    /// Moves a queued check run to in progress, linked to the run (#262).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] on failure.
+    pub async fn start_check_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        check_run_id: u64,
+        details_url: &str,
+    ) -> Result<(), PlatformError> {
+        self.patch(
+            &format!("/repos/{owner}/{repo}/check-runs/{check_run_id}"),
+            &json!({
+                "status": "in_progress",
+                "details_url": details_url,
+                "output": {"title": "In progress", "summary": format!("Run: {details_url}")},
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Completes a check run.

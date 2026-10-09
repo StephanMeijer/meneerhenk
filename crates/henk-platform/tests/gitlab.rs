@@ -140,7 +140,7 @@ async fn review_lifecycle_on_gitlab() {
 
     assert!(
         writer
-            .start_review(&t, &commit, "https://henk/runs/r-1")
+            .start_review(&t, &commit, "https://henk/runs/r-1", None)
             .await
             .unwrap()
             .is_none()
@@ -221,6 +221,7 @@ async fn review_lifecycle_on_gitlab() {
         open_findings: 2,
         nothing_to_review: false,
         stopped: None,
+        not_reviewed: None,
     };
     writer
         .finish_review(&t, &commit, None, &outcome, "https://henk/runs/r-1")

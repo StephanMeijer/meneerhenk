@@ -84,6 +84,24 @@ pub(crate) mod testing {
         pub finished: Mutex<Vec<ReviewOutcome>>,
         /// The check id each `finish_review` closed, in order.
         pub finished_checks: Mutex<Vec<Option<String>>>,
+        /// Each check `queue_review` opened: its id, title and summary
+        /// (#262). Ids are `queued-1`, `queued-2`, and so on.
+        pub queued: Mutex<Vec<(String, String, String)>>,
+        /// `queue_review` fails instead, as an unreachable platform would.
+        pub fail_queue: bool,
+        /// `queue_review` for this pull request number answers only after
+        /// this long, as a slow platform would.
+        pub slow_queue: Option<(u64, std::time::Duration)>,
+        /// The queued check each `start_review` was given, in order.
+        pub started: Mutex<Vec<Option<String>>>,
+        /// The link each `finish_review` was given, in order.
+        pub finished_links: Mutex<Vec<String>>,
+        /// The state `pull_request` answers; open when unset.
+        pub state: Option<PullRequestState>,
+        /// `pull_request` fails instead, with this error text.
+        pub fail_pull_request: Option<String>,
+        /// `start_review` fails instead, after recording what it was given.
+        pub fail_start: bool,
     }
 
     #[async_trait::async_trait]
@@ -94,13 +112,38 @@ pub(crate) mod testing {
 
         async fn pull_request(&self, _: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {
             *self.pull_request_calls.lock().unwrap() += 1;
+            if let Some(error) = &self.fail_pull_request {
+                return Err(PlatformError::Decode(error.clone()));
+            }
             Ok(PullRequestInfo {
                 title: "t".into(),
                 head: CommitSha::parse(&self.head).unwrap(),
                 base_ref: "main".into(),
                 draft: false,
-                state: PullRequestState::Open,
+                state: self.state.unwrap_or(PullRequestState::Open),
             })
+        }
+
+        async fn queue_review(
+            &self,
+            target: &ReviewTarget,
+            _: &CommitSha,
+            title: &str,
+            summary: &str,
+            _: &str,
+        ) -> Result<Option<ReviewHandle>, PlatformError> {
+            if let Some((number, delay)) = self.slow_queue
+                && number == target.number
+            {
+                tokio::time::sleep(delay).await;
+            }
+            if self.fail_queue {
+                return Err(PlatformError::Decode("the platform is away".to_owned()));
+            }
+            let mut queued = self.queued.lock().unwrap();
+            let id = format!("queued-{}", queued.len() + 1);
+            queued.push((id.clone(), title.to_owned(), summary.to_owned()));
+            Ok(Some(ReviewHandle(id)))
         }
 
         async fn start_review(
@@ -108,8 +151,16 @@ pub(crate) mod testing {
             _: &ReviewTarget,
             _: &CommitSha,
             _: &str,
+            queued: Option<&ReviewHandle>,
         ) -> Result<Option<ReviewHandle>, PlatformError> {
-            Ok(None)
+            self.started
+                .lock()
+                .unwrap()
+                .push(queued.map(|h| h.0.clone()));
+            if self.fail_start {
+                return Err(PlatformError::Decode("the check would not move".to_owned()));
+            }
+            Ok(queued.cloned())
         }
 
         async fn acknowledge(
@@ -245,8 +296,9 @@ pub(crate) mod testing {
             _: &CommitSha,
             handle: Option<&ReviewHandle>,
             outcome: &ReviewOutcome,
-            _: &str,
+            link: &str,
         ) -> Result<(), PlatformError> {
+            self.finished_links.lock().unwrap().push(link.to_owned());
             self.finished.lock().unwrap().push(outcome.clone());
             self.finished_checks
                 .lock()

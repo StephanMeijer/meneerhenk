@@ -1726,6 +1726,21 @@ fn and_list(items: &[&str]) -> String {
 }
 
 impl Settings {
+    /// Where a review waiting for a slot links to (#262): the dashboard's
+    /// overview, which lists it as queued, or the run's own link when there
+    /// is no dashboard. The run's page has nothing to show until it starts.
+    #[must_use]
+    pub fn queue_link(&self, run: &henk_domain::run::RunId) -> String {
+        if self.dashboard.is_some() {
+            format!(
+                "{}/dashboard/",
+                self.server.public_base_url.trim_end_matches('/')
+            )
+        } else {
+            self.run_link(run)
+        }
+    }
+
     /// Why Henk's own process needs `git`, in words, one reason each; empty
     /// when it does not (#254). Henk checks out the reviewed commit, copies
     /// the planner's repository and clones for an address run itself, on
