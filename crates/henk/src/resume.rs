@@ -6,14 +6,16 @@
 //! refuse it there, and the review is of the pull request's current head.
 //! A resumed review is a newer run of its pull request, so the interrupted
 //! run is no longer the newest and a restart loop never resumes it twice.
-//! Plans are not resumed.
+//! A resumed review that was itself reaped is not resumed again: its
+//! process died while it ran, perhaps because of it, and resuming it once
+//! more could take Henk down on every start. Plans are not resumed.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::allowlist::RepoRef;
-use henk_domain::review::ReviewTarget;
+use henk_domain::review::{ReviewTarget, ReviewTrigger};
 use henk_domain::run::{RunId, RunKind};
 use henk_events::{Event, EventBus, EventKind, EventSource};
 use henk_store::{RunRecord, RunStatus};
@@ -31,15 +33,18 @@ use crate::review::Interrupted;
 /// review command reviews it.
 pub(crate) const RESUME_WITHIN: Duration = Duration::from_hours(24);
 
-/// Whether `run` is a review that ended as interrupted: stopped with Henk,
-/// or reaped after its process died.
+/// Whether `run` is a review to resume: one that ended as interrupted,
+/// stopped with Henk or reaped after its process died. A resumed review
+/// that was reaped is not: the process died while it ran, and resuming it
+/// again would bring a review that crashes Henk back on every start.
 fn ended_interrupted(run: &RunRecord) -> bool {
+    let resumed = ReviewTrigger::resumed_from(&run.trigger).is_some();
     run.kind == RunKind::Review
         && run.status == RunStatus::Failed
         && run
             .error
             .as_deref()
-            .is_some_and(|error| error == Interrupted.to_string() || error == REAPED)
+            .is_some_and(|error| error == Interrupted.to_string() || (error == REAPED && !resumed))
 }
 
 /// The reviews to resume: of each pull request whose newest review started
@@ -219,6 +224,18 @@ github_owners = ["docspec"]
         target: u64,
         ended: Option<(RunStatus, Option<&str>)>,
     ) {
+        run_for(app, id, kind, target, "opened", ended).await;
+    }
+
+    /// As [`run`], started by `trigger`.
+    async fn run_for(
+        app: &App,
+        id: &str,
+        kind: RunKind,
+        target: u64,
+        trigger: &str,
+        ended: Option<(RunStatus, Option<&str>)>,
+    ) {
         let run = RunId::parse(id).unwrap();
         app.store
             .create_run(&NewRun {
@@ -229,7 +246,7 @@ github_owners = ["docspec"]
                 target,
                 commit: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
                 requester: None,
-                trigger: "opened".to_owned(),
+                trigger: trigger.to_owned(),
                 link: format!("http://henk/runs/{id}"),
             })
             .await
@@ -329,6 +346,22 @@ github_owners = ["docspec"]
             ids(&interrupted_reviews(&app, an_hour_ago()).await),
             ["r-resumed"]
         );
+    }
+
+    /// #160: a resumed review that was reaped is not resumed again, so a
+    /// review that takes the process down costs one more crash, not one
+    /// on every start. One a shutdown stopped still is.
+    #[tokio::test]
+    async fn a_resumed_review_that_was_reaped_is_not_resumed_again() {
+        let app = app().await;
+        let reaped = Some((RunStatus::Failed, Some(REAPED)));
+        let resumed = ReviewTrigger::Resumed(RunId::parse("r-before").unwrap()).words();
+        run(&app, "r-crashed", RunKind::Review, 1, reaped).await;
+        run_for(&app, "r-again", RunKind::Review, 2, &resumed, reaped).await;
+        run_for(&app, "r-stopped", RunKind::Review, 3, &resumed, INTERRUPTED).await;
+
+        let found = interrupted_reviews(&app, an_hour_ago()).await;
+        assert_eq!(ids(&found), ["r-crashed", "r-stopped"]);
     }
 
     /// #160: the resumer asks after the first pass and once more when the

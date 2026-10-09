@@ -141,6 +141,9 @@ pub enum ReviewTrigger {
     Resumed(RunId),
 }
 
+/// How a resumed run's trigger starts, before the run it resumes.
+const RESUMED_AFTER: &str = "resumed after interrupted run ";
+
 impl ReviewTrigger {
     /// What the run record says started it.
     #[must_use]
@@ -151,8 +154,17 @@ impl ReviewTrigger {
             Self::Command => "review command".to_owned(),
             Self::Discord(_) => "discord".to_owned(),
             Self::Api(_) => "requested".to_owned(),
-            Self::Resumed(interrupted) => format!("resumed after interrupted run {interrupted}"),
+            Self::Resumed(interrupted) => format!("{RESUMED_AFTER}{interrupted}"),
         }
+    }
+
+    /// The run a record's trigger says it resumed, when [`Self::words`]
+    /// wrote it for [`Self::Resumed`]; `None` for any other trigger.
+    #[must_use]
+    pub fn resumed_from(words: &str) -> Option<RunId> {
+        words
+            .strip_prefix(RESUMED_AFTER)
+            .and_then(|run| RunId::parse(run).ok())
     }
 }
 
@@ -440,6 +452,23 @@ mod tests {
             "resumed after interrupted run r-20261006-6b344328"
         );
         assert_eq!(ReviewTrigger::NewCommits.words(), "new commits");
+    }
+
+    /// #160: a record's trigger reads back as the run it resumed, and only
+    /// a resumed one does.
+    #[test]
+    fn a_resumed_trigger_reads_back_as_its_run() {
+        let run = RunId::parse("r-20261006-6b344328").unwrap();
+        let words = ReviewTrigger::Resumed(run.clone()).words();
+        assert_eq!(ReviewTrigger::resumed_from(&words), Some(run));
+        for other in [
+            "opened",
+            "requested",
+            "new commits",
+            "resumed after interrupted run ",
+        ] {
+            assert_eq!(ReviewTrigger::resumed_from(other), None, "{other}");
+        }
     }
 
     fn outcome(lanes: &[(&str, LaneOutcome)], open_findings: usize) -> ReviewOutcome {

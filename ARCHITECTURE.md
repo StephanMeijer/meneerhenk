@@ -337,7 +337,11 @@ loop resumes each pull request at most once per start and never the same
 run twice. One more resume follows the first reaper pass a staleness window
 (three minutes) after start, which is the first that can reap a run a
 process left that died just before this start; after that the periodic
-passes reap only. Plans and address runs are not resumed.
+passes reap only. A resumed review that the reaper closed is not resumed
+again (`ReviewTrigger::resumed_from` reads its trigger back): its process
+died while it ran, and a review that takes Henk down would otherwise come
+back on every start. One a shutdown stopped is resumed. Plans and address
+runs are not resumed.
 
 ## 6. Hooks, events and listeners
 
