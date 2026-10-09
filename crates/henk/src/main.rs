@@ -179,7 +179,29 @@ enum McpCommand {
         /// Print the input schema of these tools.
         #[arg(long = "show")]
         show: Vec<String>,
+        /// Which scope table to compare against. Defaults to the platform
+        /// whose settings name the alias (#61).
+        #[arg(long, value_enum)]
+        platform: Option<PlatformArg>,
     },
+}
+
+/// A platform as `--platform` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PlatformArg {
+    /// GitHub.
+    Github,
+    /// GitLab.
+    Gitlab,
+}
+
+impl From<PlatformArg> for Platform {
+    fn from(arg: PlatformArg) -> Self {
+        match arg {
+            PlatformArg::Github => Self::GitHub,
+            PlatformArg::Gitlab => Self::GitLab,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -271,8 +293,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             command: LlmCommand::Models { model },
         } => cmd_llm_models(&cli.config, &model).await,
         Command::Mcp {
-            command: McpCommand::Probe { server, show },
-        } => cmd_mcp_probe(&cli.config, &server, &show).await,
+            command:
+                McpCommand::Probe {
+                    server,
+                    show,
+                    platform,
+                },
+        } => cmd_mcp_probe(&cli.config, &server, &show, platform.map(Platform::from)).await,
         Command::Runs {
             command: RunsCommand::Show { run, transcript },
         } => cmd_runs_show(&cli.config, &run, transcript.as_deref()).await,
@@ -512,20 +539,53 @@ async fn cmd_llm_models(config: &Path, model: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_mcp_probe(config: &Path, server: &str, show: &[String]) -> anyhow::Result<()> {
+/// The platform whose scope table `henk mcp probe` compares `alias` against
+/// (#61): GitLab when the alias is `gitlab.mcp_server` or
+/// `gitlab.write_mcp_server`, GitHub when it is `github.mcp_server`.
+///
+/// # Errors
+///
+/// Fails when neither section names the alias, or both do, so the operator
+/// passes `--platform`.
+fn probe_platform(settings: &Settings, alias: &str) -> anyhow::Result<Platform> {
+    let gitlab = settings
+        .gitlab
+        .as_ref()
+        .is_some_and(|gitlab| gitlab.mcp_server == alias || gitlab.write_mcp_server == alias);
+    let github = settings
+        .github
+        .as_ref()
+        .is_some_and(|github| github.mcp_server == alias);
+    match (github, gitlab) {
+        (true, false) => Ok(Platform::GitHub),
+        (false, true) => Ok(Platform::GitLab),
+        (true, true) => Err(anyhow!(
+            "MCP server {alias:?} is named by both [github] and [gitlab]; pass --platform github|gitlab"
+        )),
+        (false, false) => Err(anyhow!(
+            "MCP server {alias:?} is not named by [github] or [gitlab]; pass --platform github|gitlab"
+        )),
+    }
+}
+
+async fn cmd_mcp_probe(
+    config: &Path,
+    server: &str,
+    show: &[String],
+    platform: Option<Platform>,
+) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
     let server_config = settings
         .mcp
         .get(server)
         .ok_or_else(|| anyhow!("MCP server {server:?} is not configured"))?;
+    let platform = match platform {
+        Some(platform) => platform,
+        None => probe_platform(&settings, server)?,
+    };
     let session = henk_mcp::RmcpSession::connect(server, server_config, app::env_var).await?;
     let tools = session.list_tools().await?;
     println!("{} tools from {server}:", tools.len());
-    let platform = if server.contains("gitlab") {
-        Platform::GitLab
-    } else {
-        Platform::GitHub
-    };
     for tool in &tools {
         let exposed = if henk_domain::scope::is_exposed(platform, &tool.name) {
             "lane"
@@ -585,5 +645,68 @@ mod tests {
         };
         assert_eq!(urls.len(), 3);
         assert_eq!(commit, None);
+    }
+
+    fn example_settings() -> Settings {
+        Config::parse(config::EXAMPLE)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn probe_platform_follows_the_settings_not_the_alias_text() {
+        let mut settings = example_settings();
+        let Some(gitlab) = settings.gitlab.as_mut() else {
+            panic!("the example has a [gitlab] section");
+        };
+        gitlab.mcp_server = "gl".to_owned();
+        gitlab.write_mcp_server = "glw".to_owned();
+        let Some(github) = settings.github.as_mut() else {
+            panic!("the example has a [github] section");
+        };
+        github.mcp_server = "gitlab-ish".to_owned();
+        let platform = |alias| probe_platform(&settings, alias).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(platform("gl"), Platform::GitLab);
+        assert_eq!(platform("glw"), Platform::GitLab);
+        assert_eq!(platform("gitlab-ish"), Platform::GitHub);
+    }
+
+    #[test]
+    fn probe_platform_rejects_an_alias_neither_section_names() {
+        let settings = example_settings();
+        let error = probe_platform(&settings, "other")
+            .err()
+            .unwrap_or_else(|| panic!("no section names it"));
+        assert!(error.to_string().contains("--platform"), "{error}");
+    }
+
+    #[test]
+    fn probe_takes_an_optional_platform() {
+        let cli = Cli::try_parse_from(["henk", "mcp", "probe", "--server", "gl"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let Command::Mcp {
+            command: McpCommand::Probe { platform, .. },
+        } = cli.command
+        else {
+            panic!("not a probe");
+        };
+        assert_eq!(platform, None);
+        let cli = Cli::try_parse_from([
+            "henk",
+            "mcp",
+            "probe",
+            "--server",
+            "gl",
+            "--platform",
+            "gitlab",
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        let Command::Mcp {
+            command: McpCommand::Probe { platform, .. },
+        } = cli.command
+        else {
+            panic!("not a probe");
+        };
+        assert_eq!(platform, Some(PlatformArg::Gitlab));
     }
 }

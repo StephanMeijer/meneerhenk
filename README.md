@@ -306,6 +306,7 @@ henk address https://github.com/owner/repo/pull/7 --note "only the typo"
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
+henk mcp probe --server other --platform gitlab    # an alias [github] and [gitlab] do not name
 henk runs show r-20261005-1a2b3c4d                 # a run from the configured database
 henk runs show r-20261005-1a2b3c4d --transcript lane-a   # one session's conversation
 ```
