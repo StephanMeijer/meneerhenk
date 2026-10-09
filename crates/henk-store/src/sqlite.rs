@@ -215,19 +215,15 @@ impl RunStore for SqliteStore {
     }
 
     async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
-        let since = since
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        let since = instant(
+            "since",
+            &since
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
+        )?;
         self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs r
-                 WHERE r.kind = ?1 AND r.started_at >= ?2 AND NOT EXISTS (
-                     SELECT 1 FROM runs n
-                     WHERE n.kind = r.kind AND n.platform = r.platform
-                       AND n.repo = r.repo AND n.target = r.target
-                       AND (n.started_at > r.started_at
-                            OR (n.started_at = r.started_at AND n.id > r.id)))
-                 ORDER BY r.started_at, r.id"
+                "SELECT {RUN_COLUMNS} FROM ({LATEST_REVIEWS}) ORDER BY at, id"
             ))?;
             let raw = statement
                 .query_map(params![kind_str(RunKind::Review), since], raw_run)?
@@ -1525,6 +1521,31 @@ const LANE_ENDINGS: &str = concat!(
      ORDER BY r.at DESC, r.id DESC, l.name"
 );
 
+/// The newest review of each pull request that started at or after ?2 (an
+/// [`instant`]), over parameter 1 (the review kind), with its start as the
+/// instant `at` (#160). Compared as instants, not as text, so runs started
+/// in the same second keep their order: as text, "12:00:00Z" sorts after
+/// "12:00:00.4Z".
+const LATEST_REVIEWS: &str = concat!(
+    "SELECT r.*, ",
+    instant_of!("r.started_at"),
+    " AS at FROM runs r WHERE r.kind = ?1 AND ",
+    instant_of!("r.started_at"),
+    " >= ?2 AND NOT EXISTS (
+         SELECT 1 FROM runs n
+         WHERE n.kind = r.kind AND n.platform = r.platform
+           AND n.repo = r.repo AND n.target = r.target
+           AND (",
+    instant_of!("n.started_at"),
+    " > ",
+    instant_of!("r.started_at"),
+    " OR (",
+    instant_of!("n.started_at"),
+    " = ",
+    instant_of!("r.started_at"),
+    " AND n.id > r.id)))"
+);
+
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
 /// RFC 3339, so the first ten characters are the day.
 const DAY_RUNS: &str = concat!(
@@ -1724,6 +1745,43 @@ mod tests {
             trigger: "opened".into(),
             link: format!("https://henk.example/runs/{id}"),
         }
+    }
+
+    /// #160: the newest review of a pull request is found by time, also
+    /// when two start in the same second and their stored times differ in
+    /// fraction width, and the window's bound compares the same way.
+    #[tokio::test]
+    async fn the_newest_review_compares_start_times_as_instants() {
+        let store = SqliteStore::in_memory().unwrap();
+        for (run, at) in [
+            ("r-b", "2026-10-07T12:00:00Z"),
+            ("r-a", "2026-10-07T12:00:00.4Z"),
+        ] {
+            store.create_run(&new_run(run)).await.unwrap();
+            store
+                .with(|c| {
+                    c.execute(
+                        "UPDATE runs SET started_at = ?1 WHERE id = ?2",
+                        params![at, run],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let at = |v: &str| OffsetDateTime::parse(v, &Rfc3339).unwrap();
+
+        let latest = store
+            .latest_reviews(at("2026-10-07T11:00:00Z"))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = latest.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["r-a"], "r-a started 0.4 s after r-b");
+
+        let after_both = store
+            .latest_reviews(at("2026-10-07T12:00:00.5Z"))
+            .await
+            .unwrap();
+        assert!(after_both.is_empty(), "{after_both:?}");
     }
 
     #[tokio::test]
