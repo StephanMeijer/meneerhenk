@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -99,14 +100,28 @@ pub enum GitError {
 #[derive(Debug)]
 pub struct ScratchDir(PathBuf);
 
+/// Numbers this process's scratch directories, so no two share a path.
+static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
+/// How every scratch directory named `name` in this process begins:
+/// `{name}-{pid}-`. Two processes, such as two test runs at once, never
+/// share one (#156).
+pub(crate) fn scratch_prefix(name: &str) -> String {
+    format!("{name}-{}-", std::process::id())
+}
+
 impl ScratchDir {
-    /// Makes `name` under the system temp directory, empty.
+    /// Makes an empty directory under the system temp directory, named
+    /// `name` plus this process's id and a counter: readable, and never
+    /// another process's or another call's (#156).
     ///
     /// # Errors
     ///
     /// Returns the I/O error when the directory cannot be made.
     pub fn new(name: &str) -> std::io::Result<Self> {
-        let dir = std::env::temp_dir().join(name);
+        let n = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("{}{n}", scratch_prefix(name)));
+        // Only a dead process with a recycled id leaves this behind.
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }

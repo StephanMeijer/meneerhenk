@@ -2150,12 +2150,13 @@ check_commands = [["true"]]
         assert_eq!(execs.len(), 1, "{execs:?}");
         assert!(execs[0].contains("exit 0"), "{execs:?}");
         assert!(execs[0].ends_with("\nchecked"), "{execs:?}");
-        assert!(
-            !std::env::temp_dir()
-                .join("henk-address-r-addr-6-push")
-                .exists(),
-            "the push checkout is gone"
-        );
+        let push = crate::git::scratch_prefix("henk-address-r-addr-6-push");
+        let left: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&push))
+            .collect();
+        assert!(left.is_empty(), "the push checkout is gone: {left:?}");
     }
 
     /// `text` as a TOML basic string.
