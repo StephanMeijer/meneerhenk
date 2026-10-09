@@ -26,6 +26,7 @@ mod listeners;
 mod live;
 mod live_session;
 mod liveness;
+mod mcp_server;
 mod pages;
 mod plan;
 mod plan_tools;
@@ -251,6 +252,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let settings = load_settings(&cli.config)?;
             println!("{}", settings.describe());
+            // Whether each MCP client's token is set (#250); --probe is
+            // doctor's.
+            let mcp = doctor::check_mcp_server(&settings, false, app::env_var).await;
+            if !mcp.is_empty() {
+                let rendered = doctor::render(&mcp);
+                // The checks' lines, without doctor's count at the end.
+                for line in rendered.lines().filter(|line| line.starts_with('[')) {
+                    println!("{line}");
+                }
+            }
             // A setting that needs git where Henk runs is only as good as
             // the git there (#254).
             let git = doctor::check_git(&settings, None).await;

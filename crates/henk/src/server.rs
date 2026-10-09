@@ -171,6 +171,14 @@ pub fn compose_with_secrets(
         .merge(Arc::clone(&github).routes())
         .merge(Arc::clone(&gitlab).routes())
         .merge(Arc::clone(&api).routes())
+        // Henk's own MCP server (#248); 503 unless [mcp_server] is on.
+        .merge(crate::mcp_server::routes(
+            Arc::clone(app),
+            Arc::clone(&coordinator),
+            Arc::clone(&bus),
+            bus.listeners().collect(),
+            crate::mcp_server::tokens_from_env(app),
+        ))
         .layer(TraceLayer::new_for_http());
     let hooks: Vec<Arc<dyn Hook>> = vec![github, gitlab, api];
     Composed {

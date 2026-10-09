@@ -50,6 +50,7 @@ a pull request, and then only on that pull request's own branch (§3.5).
 | **Team Lead** (listed by Discord user id) | Discord user id, never a name | Additionally: *sudo* (§5.4). Their decisions are final to Henk |
 | **Known people** (a roster by Discord user id) | Discord user id | Henk knows their name and role |
 | **Anyone on the internet** | Email sender | Have their email answered |
+| **MCP clients** (agents with a configured token) | A named bearer token, never a name | With a *read* token: read runs, events, quality and health. With a *write* token: additionally start reviews, plans and address runs, and cancel runs. Recorded as `mcp:<token name>` |
 
 Rules:
 

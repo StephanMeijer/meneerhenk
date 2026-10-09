@@ -69,10 +69,93 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     checks.extend(check_models(settings, probe_models).await);
     checks.extend(check_github(settings).await);
     checks.extend(check_mcp(settings).await);
+    checks.extend(check_mcp_server(settings, probe_models, env_var).await);
     checks.push(check_database(settings).await);
     checks.extend(check_sandbox(settings, probe_models).await);
     checks.extend(check_kubernetes(settings, probe_models).await);
     checks.push(check_git(settings, None).await);
+    checks
+}
+
+/// Henk's own MCP server (#250): each client token's variable, set or not
+/// (never its value), and with `--probe` an `initialize` and `tools/list`
+/// against the running server at the public base URL, with the first token
+/// that is set, as a client would. `lookup` reads a variable: `env_var`,
+/// or a test's.
+pub async fn check_mcp_server(
+    settings: &Settings,
+    probe: bool,
+    lookup: impl Fn(&str) -> Option<String> + Clone,
+) -> Vec<Check> {
+    const NAME: &str = "Henk's MCP server";
+    let Some(config) = &settings.mcp_server else {
+        return Vec::new();
+    };
+    if !config.enabled {
+        return vec![Check::ok(NAME, "off; /mcp answers 503")];
+    }
+    let mut checks: Vec<Check> = config
+        .tokens
+        .iter()
+        .map(|token| {
+            let name = format!("secret ${}", token.env);
+            if lookup(&token.env).is_some() {
+                Check::ok(
+                    name,
+                    format!("set; MCP client {} ({})", token.name, token.scope.as_str()),
+                )
+            } else {
+                Check::warn(
+                    name,
+                    format!("not set; MCP client {} cannot connect", token.name),
+                )
+            }
+        })
+        .collect();
+    let Some(usable) = config.tokens.iter().find(|t| lookup(&t.env).is_some()) else {
+        checks.push(Check::fail(
+            NAME,
+            "on, but no token's variable is set: /mcp answers 503",
+        ));
+        return checks;
+    };
+    let url = format!(
+        "{}/mcp",
+        settings.server.public_base_url.trim_end_matches('/')
+    );
+    if !probe {
+        checks.push(Check::ok(NAME, format!("on at {url}; --probe connects")));
+        return checks;
+    }
+    let client = henk_mcp::McpServerConfig {
+        command: None,
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        pass_env: Vec::new(),
+        url: Some(url.clone()),
+        bearer_env: Some(usable.env.clone()),
+        call_timeout_secs: 30,
+    };
+    let probed = tokio::time::timeout(
+        Duration::from_secs(30),
+        RmcpSession::connect("henk", &client, lookup),
+    )
+    .await;
+    checks.push(match probed {
+        Ok(Ok(session)) => {
+            let listed = session.list_tools().await;
+            session.close().await;
+            match listed {
+                Ok(tools) => Check::ok(
+                    NAME,
+                    format!("{} tools at {url}, as {}", tools.len(), usable.name),
+                ),
+                Err(error) => Check::fail(NAME, format!("{url}: tools/list failed: {error}")),
+            }
+        }
+        Ok(Err(error)) => Check::fail(NAME, format!("{url}: {error}")),
+        Err(_) => Check::fail(NAME, format!("{url} did not answer within 30s")),
+    });
     checks
 }
 

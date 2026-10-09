@@ -152,6 +152,22 @@ max_turns = 12
 # session_key_env = "HENK_DASHBOARD_SESSION_KEY"
 # session_hours = 12
 
+# Henk's own MCP server at /mcp: an agent (Claude Code, an editor) can start
+# reviews, plans and address runs, follow and cancel them, and read review
+# quality and health. Each client has a named token, kept in the variable
+# env names; a read token may only read. What a client starts is asked by
+# mcp:<name>. Off unless enabled; see README "MCP server".
+# [mcp_server]
+# enabled = true
+# [[mcp_server.tokens]]
+# name = "claude-code"
+# env = "HENK_MCP_TOKEN_CLAUDE_CODE"
+# scope = "write"
+# [[mcp_server.tokens]]
+# name = "reporting"
+# env = "HENK_MCP_TOKEN_REPORTING"
+# scope = "read"
+
 [planning]
 model = "claude"
 timeout_secs = 1200
