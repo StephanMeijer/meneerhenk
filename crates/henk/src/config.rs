@@ -67,6 +67,9 @@ pub struct Config {
     /// External MCP servers by alias.
     #[serde(default)]
     pub mcp: BTreeMap<String, McpServerConfig>,
+    /// Henk's own MCP server at `/mcp` (#248, #249); absent means off.
+    #[serde(default)]
+    pub mcp_server: Option<McpServeConfig>,
     /// Where the team's skills live. Absent: no agent has skills.
     #[serde(default)]
     pub skills: Option<SkillsConfig>,
@@ -76,6 +79,106 @@ pub struct Config {
     /// Limits every model session shares.
     #[serde(default)]
     pub agent: AgentFileConfig,
+}
+
+/// Henk's own MCP server (#248, #249): which clients may use `/mcp`, and
+/// what each may do. Only token names and variable names live here; the
+/// tokens are in the environment (§8.4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServeConfig {
+    /// Whether `/mcp` answers at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The clients' tokens.
+    #[serde(default)]
+    pub tokens: Vec<McpTokenConfig>,
+}
+
+/// One MCP client's token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTokenConfig {
+    /// What the client is called on the record: a start through it is
+    /// asked by `mcp:<name>`.
+    pub name: String,
+    /// The environment variable that holds the token.
+    pub env: String,
+    /// What it may do.
+    pub scope: McpScope,
+}
+
+/// What an MCP client may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpScope {
+    /// List and read runs, events, review quality and health.
+    Read,
+    /// Also start and cancel runs.
+    Write,
+}
+
+impl McpScope {
+    /// The scope's word.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+/// Checks the ways in besides the hooks: the dashboard and the MCP server.
+fn validate_ways_in(
+    dashboard: Option<&DashboardConfig>,
+    mcp_server: Option<&McpServeConfig>,
+) -> Result<(), ConfigError> {
+    if let Some(dashboard) = dashboard {
+        validate_dashboard(dashboard)?;
+    }
+    if let Some(mcp_server) = mcp_server {
+        validate_mcp_serve(mcp_server)?;
+    }
+    Ok(())
+}
+
+/// Checks the MCP server's tokens: names a requester can carry, each once,
+/// each with its own variable; and at least one when it is on. Two tokens
+/// on one variable would be one secret with two scopes.
+fn validate_mcp_serve(config: &McpServeConfig) -> Result<(), ConfigError> {
+    let fail = |text: String| Err(ConfigError::McpServe(text));
+    if config.enabled && config.tokens.is_empty() {
+        return fail("mcp_server.enabled needs at least one [[mcp_server.tokens]]".to_owned());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut envs = std::collections::BTreeSet::new();
+    for token in &config.tokens {
+        let fine = !token.name.is_empty()
+            && token
+                .name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !fine {
+            return fail(format!(
+                "mcp_server token name {:?} must be lowercase letters, digits and dashes",
+                token.name
+            ));
+        }
+        if !seen.insert(token.name.as_str()) {
+            return fail(format!("mcp_server token {:?} is named twice", token.name));
+        }
+        if token.env.trim().is_empty() {
+            return fail(format!("mcp_server token {:?} needs env", token.name));
+        }
+        if !envs.insert(token.env.trim()) {
+            return fail(format!(
+                "mcp_server token {:?} uses env {:?}, which another token uses too",
+                token.name, token.env
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The HTTP server.
@@ -1150,6 +1253,9 @@ impl PersonConfig {
 /// Why a configuration is unusable.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// `[mcp_server]` is not usable (#248).
+    #[error("{0}")]
+    McpServe(String),
     /// The TOML did not parse or had the wrong shape.
     #[error("invalid configuration: {0}")]
     Syntax(#[from] toml::de::Error),
@@ -1222,6 +1328,8 @@ pub struct Settings {
     pub database: DatabaseConfig,
     /// True when `database` came from the deprecated `server.database_path`.
     pub legacy_database_path: bool,
+    /// Henk's own MCP server, when configured (#248).
+    pub mcp_server: Option<McpServeConfig>,
     /// The web dashboard, when configured.
     pub dashboard: Option<DashboardConfig>,
     /// Henk on Discord.
@@ -1328,9 +1436,7 @@ impl Config {
             kubernetes: workspace_kubernetes,
         } = self.workspace.into_parts(check_timeout_secs)?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
-        if let Some(dashboard) = &self.dashboard {
-            validate_dashboard(dashboard)?;
-        }
+        validate_ways_in(self.dashboard.as_ref(), self.mcp_server.as_ref())?;
         if !(1..=3650).contains(&self.server.keep_events_days) {
             return Err(ConfigError::Server(
                 "server.keep_events_days must be between 1 and 3650".to_owned(),
@@ -1356,6 +1462,7 @@ impl Config {
             database,
             legacy_database_path,
             dashboard: self.dashboard,
+            mcp_server: self.mcp_server,
             henk: HenkIdentity {
                 user: henk_id,
                 role: self.discord.henk_role_id,
@@ -1886,6 +1993,23 @@ impl Settings {
                 dashboard.client_id_env
             );
         }
+        if let Some(mcp) = &self.mcp_server {
+            let tokens: Vec<String> = mcp
+                .tokens
+                .iter()
+                .map(|t| format!("{} ({}, ${})", t.name, t.scope.as_str(), t.env))
+                .collect();
+            let _ = writeln!(
+                out,
+                "MCP server:      /mcp {}, tokens: {}",
+                if mcp.enabled { "on" } else { "off" },
+                if tokens.is_empty() {
+                    "none".to_owned()
+                } else {
+                    tokens.join(", ")
+                }
+            );
+        }
     }
 
     /// The workspace profiles, for [`Self::describe`], with a warning for
@@ -2387,6 +2511,58 @@ github_owners = ["docspec"]
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(!settings.legacy_database_path);
+    }
+
+    #[test]
+    fn the_mcp_server_needs_named_unique_tokens_when_it_is_on() {
+        assert!(
+            database("").unwrap().mcp_server.is_none(),
+            "off unless configured"
+        );
+        let token = |name: &str, scope: &str| {
+            format!("[[mcp_server.tokens]]\nname = \"{name}\"\nenv = \"T\"\nscope = \"{scope}\"\n")
+        };
+        let on = database(&format!(
+            "[mcp_server]\nenabled = true\n{}",
+            token("claude-code", "write")
+        ))
+        .unwrap();
+        let config = on.mcp_server.unwrap();
+        assert!(config.enabled);
+        assert_eq!(
+            config.tokens.first().map(|t| t.scope),
+            Some(McpScope::Write)
+        );
+        for (bad, why) in [
+            ("[mcp_server]\nenabled = true\n".to_owned(), "at least one"),
+            (
+                format!("[mcp_server]\n{}", token("Claude", "read")),
+                "lowercase",
+            ),
+            (
+                format!(
+                    "[mcp_server]\n{}{}",
+                    token("a", "read"),
+                    token("a", "write")
+                ),
+                "named twice",
+            ),
+            (
+                format!(
+                    "[mcp_server]\n{}{}",
+                    token("a", "read"),
+                    token("b", "write")
+                ),
+                "another token uses too",
+            ),
+        ] {
+            let error = database(&bad).unwrap_err().to_string();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
+        assert!(
+            database(&format!("[mcp_server]\n{}", token("a", "admin"))).is_err(),
+            "unknown scope"
+        );
     }
 
     #[test]

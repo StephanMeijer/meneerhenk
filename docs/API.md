@@ -6,6 +6,8 @@ The dashboard app at `/dashboard` (#197) is its client. It exists only when the
 
 The older `POST /review`, `/plan` and `/address` endpoints with one shared
 bearer token (`hooks/api.rs`) are a separate thing and are unchanged.
+Agents use the same reads and starts over MCP at `/mcp`, with their own
+tokens (README, "MCP server"); the tools answer with the types below.
 
 ## Authentication
 
