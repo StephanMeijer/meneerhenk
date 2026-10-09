@@ -408,6 +408,12 @@ impl<'a> Rounds<'a> {
             if let Some(stop) = self.broke_off("reviewer", &review) {
                 return Ok(stop);
             }
+            // Only a finished round can converge: prose, an empty reply or
+            // a cut-off answer after the nudges is no review.
+            if !self.handoff.finished() {
+                self.failed = true;
+                return Ok(format!("the reviewer did not finish round {round}"));
+            }
             let ledger = self.handoff.ledger();
             let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
             if findings.is_empty() {

@@ -51,6 +51,12 @@ impl Handoff {
         }
     }
 
+    /// Whether the reviewer called `finish_round` in the round under way.
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.state.lock().is_ok_and(|s| s.finished.is_some())
+    }
+
     /// A copy of the ledger as it stands.
     #[must_use]
     pub fn ledger(&self) -> Ledger {
@@ -152,8 +158,7 @@ pub fn reviewer_continuation(handoff: Arc<Handoff>) -> ContinuationFactory {
         let handoff = Arc::clone(&handoff);
         let nudged = AtomicU32::new(0);
         let continuation: Continuation = Box::new(move |ending: &Ending<'_>| {
-            let finished = handoff.state.lock().is_ok_and(|s| s.finished.is_some());
-            if finished || nudged.fetch_add(1, Ordering::SeqCst) >= NUDGES {
+            if handoff.finished() || nudged.fetch_add(1, Ordering::SeqCst) >= NUDGES {
                 return None;
             }
             Some(match ending.reason {

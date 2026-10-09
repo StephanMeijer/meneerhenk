@@ -4584,6 +4584,36 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_reviewer_that_never_finishes_its_round_is_not_convergence() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop-unfinished",
+            ScriptedClient::new("r", (0..3).map(|_| say("Done."))),
+            ScriptedClient::new("f", [say("Nothing to do.")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-unfinished").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(reviewer.requests().len(), 3, "nudged twice, then stopped");
+        assert!(fixer.requests().is_empty());
+        let summary = report.summary.unwrap();
+        assert!(!report.outcome.unwrap().completed(), "{summary}");
+        assert!(!summary.contains("converged"), "{summary}");
+        assert!(
+            summary.contains("the reviewer did not finish round 1"),
+            "{summary}"
+        );
+        assert!(henk_domain::text::is_in_style(&summary), "{summary}");
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_nothing_posted(&f.writer);
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
     async fn without_a_workspace_the_loop_ends_at_once_and_pushes_nothing() {
         let (f, reviewer, fixer, remote) = looping(
             "review-loop-none",
