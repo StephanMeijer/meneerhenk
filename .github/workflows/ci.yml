@@ -68,7 +68,10 @@ jobs:
       contents: read
     services:
       postgres:
-        image: docker.io/library/postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
+        # ECR Public's mirror of the official image, same digest: Docker Hub
+        # limits anonymous pulls per IP, GitHub's runners share IPs, and the
+        # pull failed the job before any test ran (#294).
+        image: public.ecr.aws/docker/library/postgres:17@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
         env:
           POSTGRES_PASSWORD: henk-ci
         ports:
