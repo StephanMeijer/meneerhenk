@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use henk_domain::allowlist::Platform;
 use henk_domain::queue::Decision;
-use henk_domain::review::is_review_request;
-use henk_events::{CommentKind, Event, EventKind, Handled, Listener, PullRequestAction};
+use henk_domain::review::{ReviewTrigger, is_review_request};
+use henk_events::{
+    CommentKind, Event, EventKind, EventSource, Handled, Listener, PullRequestAction,
+};
 use henk_platform::{PullRequestState, ReviewTarget};
 use tracing::instrument;
 
@@ -156,10 +158,18 @@ impl Listener for ReviewListener {
                         Err(outcome) => return outcome,
                     },
                 };
+                // A review resumed after a restart says which run it
+                // resumes (#160); it is refused like any other request.
+                let trigger = match &event.source {
+                    EventSource::Resume { interrupted } => {
+                        ReviewTrigger::Resumed(interrupted.clone()).words()
+                    }
+                    _ => "requested".to_owned(),
+                };
                 let request = ReviewRequest {
                     target: target.clone(),
                     commit: Some(head.clone()),
-                    trigger: "requested".to_owned(),
+                    trigger,
                     requester: requester.clone(),
                     acknowledge: None,
                     run: None,

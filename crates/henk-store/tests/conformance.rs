@@ -85,6 +85,7 @@ macro_rules! for_each_scenario {
             lane_endings_are_the_ended_reviews_newest_first,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
+            the_newest_review_of_each_pull_request_is_read_for_resuming,
             dropping_running_lanes_leaves_finished_ones_alone,
             lanes_findings_and_events_attach_to_a_run,
             events_and_outcomes_round_trip,
@@ -1452,6 +1453,65 @@ async fn only_running_runs_with_a_stale_heartbeat_are_orphaned(store: &dyn RunSt
         ids(store.orphaned_runs(in_an_hour).await.unwrap()),
         ["r-a", "r-b"],
         "a finished run is never orphaned; oldest first"
+    );
+}
+
+/// #160: a start reads the newest review of each pull request to resume
+/// the ones a restart interrupted. A later review of the same pull request
+/// takes the place of an earlier one; plans and other pull requests do not.
+async fn the_newest_review_of_each_pull_request_is_read_for_resuming(store: &dyn RunStore) {
+    let before = OffsetDateTime::now_utc() - time::Duration::seconds(1);
+    let run = |id: &str, kind: RunKind, repo: &str, target: u64| NewRun {
+        kind,
+        repo: repo.into(),
+        target,
+        ..new_run(id)
+    };
+    for (id, kind, repo, target) in [
+        ("r-a", RunKind::Review, "o/r", 7),
+        ("r-b", RunKind::Review, "o/r", 7),
+        ("r-c", RunKind::Review, "o/r", 8),
+        ("r-d", RunKind::Review, "o/r", 9),
+        ("r-e", RunKind::Plan, "o/r", 10),
+        ("r-f", RunKind::Plan, "o/r", 8),
+        ("r-g", RunKind::Review, "o/s", 7),
+    ] {
+        store
+            .create_run(&run(id, kind, repo, target))
+            .await
+            .unwrap();
+    }
+    for interrupted in ["r-a", "r-c"] {
+        store
+            .finish_run(
+                &id(interrupted),
+                RunStatus::Failed,
+                None,
+                Some("interrupted"),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .finish_run(&id("r-b"), RunStatus::Finished, Some("done"), None)
+        .await
+        .unwrap();
+
+    let latest = store.latest_reviews(before).await.unwrap();
+    let ids = latest.iter().map(|r| r.id.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        ["r-b", "r-c", "r-d", "r-g"],
+        "one review per pull request, the newest, in any state; oldest first"
+    );
+    let c = latest.iter().find(|r| r.id.as_str() == "r-c").unwrap();
+    assert_eq!(c.status, RunStatus::Failed);
+    assert_eq!(c.error.as_deref(), Some("interrupted"));
+
+    let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    assert!(
+        store.latest_reviews(later).await.unwrap().is_empty(),
+        "reviews that started before the window are left out"
     );
 }
 

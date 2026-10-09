@@ -17,7 +17,9 @@ use crate::address::{AddressRequest, run_address};
 use crate::app::App;
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
-use crate::review::{ReviewRequest, report_cancelled_while_queued, run_review};
+use crate::review::{
+    ReviewRequest, report_cancelled_while_queued, report_interrupted_while_queued, run_review,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
@@ -209,7 +211,9 @@ async fn wait_for_slot(
 
 /// A review that never got its slot: cancelled from the dashboard,
 /// superseded by a newer commit, or stopped with Henk. Its queued check,
-/// if it has one, is closed so nothing stays queued (#262).
+/// if it has one, is closed so nothing stays queued (#262). One stopped
+/// with Henk is recorded as an interrupted run, so the next start resumes
+/// it (#160).
 async fn ended_while_queued(app: &App, request: &ReviewRequest) {
     let Some(run) = request.run.as_ref() else {
         return;
@@ -217,6 +221,14 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
     if let Some(by) = app.cancels.cancelled_by(run) {
         if let Err(error) = report_cancelled_while_queued(app, request, &by).await {
             warn!(%error, "could not record the cancelled review");
+        }
+        return;
+    }
+    if app.cancels.superseded_by(run).is_none() && app.shutdown.is_cancelled() {
+        // Henk stops: the run is recorded as interrupted, so the next
+        // start resumes it like a review that was running (#160).
+        if let Err(error) = report_interrupted_while_queued(app, request).await {
+            warn!(%error, "could not record the interrupted review");
         }
         return;
     }
@@ -245,7 +257,7 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
     }
 }
 
-/// Starts and tracks background runs./// Starts and tracks background runs.
+/// Starts and tracks background runs.
 pub struct Coordinator {
     app: Arc<App>,
     active: Arc<Mutex<HashMap<Key, Active>>>,

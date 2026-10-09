@@ -32,6 +32,7 @@ mod plan;
 mod plan_tools;
 mod prune;
 mod recorder;
+mod resume;
 mod review;
 mod review_many;
 mod review_tools;

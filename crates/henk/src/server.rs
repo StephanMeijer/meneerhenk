@@ -204,8 +204,11 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     let composed = compose(&app);
     let cancel = CancellationToken::new();
     // Reaps at once, then every minute: a crash followed by a restart
-    // within the staleness window is closed too (#47).
-    let reaper = crate::liveness::spawn_reaper(Arc::clone(&app), cancel.clone());
+    // within the staleness window is closed too (#47). After the first
+    // pass, the reviews a restart interrupted are asked for again, through
+    // the bus like any request (#160).
+    let reaper =
+        crate::liveness::spawn_reaper(Arc::clone(&app), Arc::clone(&composed.bus), cancel.clone());
     // Workspaces a process that died left on the sandbox host go now (#84).
     // The sweep starts here, before any run: a workspace opened meanwhile
     // waits for it instead of being swept.

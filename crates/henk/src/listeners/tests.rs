@@ -44,21 +44,27 @@ struct Harness {
     bus: EventBus,
     store: Arc<dyn RunStore>,
     writer: Arc<FakeWriter>,
+    coordinator: Arc<Coordinator>,
     next: std::sync::atomic::AtomicU32,
 }
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_writer(FakeWriter {
+            head: SHA.to_owned(),
+            ..FakeWriter::default()
+        })
+        .await
+    }
+
+    async fn with_writer(writer: FakeWriter) -> Self {
         let settings = Config::parse(CONFIG).unwrap().into_settings().unwrap();
         let app = Arc::new(
             App::build(settings, Some(Path::new(":memory:")))
                 .await
                 .unwrap(),
         );
-        let writer = Arc::new(FakeWriter {
-            head: SHA.to_owned(),
-            ..FakeWriter::default()
-        });
+        let writer = Arc::new(writer);
         let writers: Arc<dyn Writers> = Arc::new(FakeWriters(Arc::clone(&writer)));
         let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
         let bus = EventBus::new(
@@ -73,13 +79,14 @@ impl Harness {
                     writers,
                 )),
                 Arc::new(PlanListener::new(Arc::clone(&coordinator))),
-                Arc::new(AddressListener::new(coordinator)),
+                Arc::new(AddressListener::new(Arc::clone(&coordinator))),
             ],
         );
         Self {
             bus,
             store: Arc::clone(&app.store),
             writer,
+            coordinator,
             next: std::sync::atomic::AtomicU32::new(1),
         }
     }
@@ -287,6 +294,107 @@ async fn a_direct_request_without_a_commit_resolves_the_head() {
         out.by_listener
     );
     assert_eq!(*h.writer.pull_request_calls.lock().unwrap(), 1);
+}
+
+/// A review a restart interrupted, as the store keeps it: of an older
+/// commit than the pull request's head now.
+async fn interrupted(h: &Harness, run: &str, path: &str) -> henk_store::RunRecord {
+    let id = RunId::parse(run).unwrap();
+    h.store
+        .create_run(&henk_store::NewRun {
+            id: id.clone(),
+            kind: henk_domain::run::RunKind::Review,
+            platform: Platform::GitHub,
+            repo: path.to_owned(),
+            target: 7,
+            commit: Some("fedcba9876543210fedcba9876543210fedcba98".to_owned()),
+            requester: Some("alice".to_owned()),
+            trigger: "new commits".to_owned(),
+            link: format!("http://henk/runs/{run}"),
+        })
+        .await
+        .unwrap();
+    h.store
+        .finish_run(
+            &id,
+            henk_store::RunStatus::Failed,
+            None,
+            Some("interrupted"),
+        )
+        .await
+        .unwrap();
+    h.store.run(&id).await.unwrap().unwrap()
+}
+
+/// What the review listener did with `event`.
+async fn reviewed(h: &Harness, event: Event) -> Handled {
+    h.bus
+        .deliver(event)
+        .await
+        .into_iter()
+        .find(|(name, _)| *name == "review")
+        .unwrap()
+        .1
+}
+
+/// #160: a resumed review goes through the review listener like any
+/// request, reviews the pull request's current head, not the interrupted
+/// commit, and says which run it resumes.
+#[tokio::test]
+async fn a_resumed_review_is_of_the_current_head_and_names_the_interrupted_run() {
+    let h = Harness::new().await;
+    // Every slot taken, so the resumed review waits where it can be seen.
+    let mut held = Vec::new();
+    while let Some(slot) = h.coordinator.take_a_slot() {
+        held.push(slot);
+    }
+    let old = interrupted(&h, "r-old", "docspec/app").await;
+    let event = crate::resume::resume_event(&old).unwrap();
+    let id = event.id.clone();
+    let Handled::Started(run) = reviewed(&h, event).await else {
+        panic!("the resumed review did not start");
+    };
+    assert_ne!(
+        run.as_str(),
+        "r-old",
+        "a resumed review is a run of its own"
+    );
+    let slots = h.coordinator.slots();
+    assert_eq!(slots.waiting.len(), 1);
+    let waiting = &slots.waiting[0];
+    assert_eq!(waiting.run, run);
+    assert_eq!(waiting.commit.as_str(), SHA, "the current head");
+    assert_eq!(waiting.trigger, "resumed after interrupted run r-old");
+    assert_eq!(waiting.requester.as_deref(), Some("alice"));
+    let recorded = h.store.inbound_event(&id).await.unwrap().unwrap();
+    assert_eq!(recorded.source, "resume");
+    assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
+}
+
+/// #160: a pull request that left the allowlist or was closed is not
+/// resumed.
+#[tokio::test]
+async fn a_resumed_review_is_refused_off_the_allowlist_or_on_a_closed_pull_request() {
+    let h = Harness::new().await;
+    let outside = interrupted(&h, "r-outside", "evil/app").await;
+    let review = reviewed(&h, crate::resume::resume_event(&outside).unwrap()).await;
+    assert!(
+        matches!(&review, Handled::Ignored(r) if r.contains("allowlist")),
+        "{review:?}"
+    );
+
+    let closed = Harness::with_writer(FakeWriter {
+        head: SHA.to_owned(),
+        state: Some(henk_platform::PullRequestState::Closed),
+        ..FakeWriter::default()
+    })
+    .await;
+    let old = interrupted(&closed, "r-closed", "docspec/app").await;
+    let review = reviewed(&closed, crate::resume::resume_event(&old).unwrap()).await;
+    assert!(
+        matches!(&review, Handled::Ignored(r) if r.contains("not open")),
+        "{review:?}"
+    );
 }
 
 #[tokio::test]

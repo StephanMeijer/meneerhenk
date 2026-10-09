@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use henk_domain::run::{EventId, RunId};
+use henk_domain::run::{EventId, RunId, RunKind};
 use rustls_platform_verifier::BuilderVerifierExt as _;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -441,6 +441,28 @@ impl RunStore for PgStore {
                      ORDER BY started_at, id"
                 ),
                 &[&RunStatus::Running.as_str(), &stale_before],
+            )
+            .await?
+            .iter()
+            .map(|row| raw_run(row)?.into_record())
+            .collect()
+    }
+
+    async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {RUN_COLUMNS} FROM runs r
+                     WHERE r.kind = $1 AND r.started_at >= $2 AND NOT EXISTS (
+                         SELECT 1 FROM runs n
+                         WHERE n.kind = r.kind AND n.platform = r.platform
+                           AND n.repo = r.repo AND n.target = r.target
+                           AND (n.started_at > r.started_at
+                                OR (n.started_at = r.started_at AND n.id > r.id)))
+                     ORDER BY r.started_at, r.id"
+                ),
+                &[&kind_str(RunKind::Review), &since],
             )
             .await?
             .iter()

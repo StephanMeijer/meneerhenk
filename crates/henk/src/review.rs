@@ -575,6 +575,103 @@ async fn close_queued_as_cancelled(
     }
 }
 
+/// Henk was told to stop while the review waited for a slot. It never
+/// started; its run is still recorded and ends `failed` as interrupted,
+/// as a running review's does, so the next start resumes it (#160). Its
+/// queued check, if it has one, closes as interrupted, also when the run
+/// could not be recorded. Nothing is posted.
+///
+/// # Errors
+///
+/// Returns an error when the run could not be recorded.
+pub async fn report_interrupted_while_queued(
+    app: &App,
+    request: &ReviewRequest,
+) -> anyhow::Result<()> {
+    let run = request.run.clone().unwrap_or_else(new_run_id);
+    let link = app.settings.run_link(&run);
+    let platform = request.target.platform();
+    let created = app
+        .store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform,
+            repo: request.target.repo.path(),
+            target: request.target.number,
+            commit: request.commit.as_ref().map(|c| c.as_str().to_owned()),
+            requester: request.requester.clone(),
+            trigger: request.trigger.clone(),
+            link: link.clone(),
+        })
+        .await;
+    if let Err(error) = created {
+        // No run page: the check links where the queue is shown.
+        close_queued_as_interrupted(app, request, &app.settings.queue_link(&run)).await;
+        return Err(error.into());
+    }
+    warn!(run = %run, "review interrupted before it started");
+    stages::request(
+        &*app.store,
+        &run,
+        request.submitted_at,
+        &request.trigger,
+        request.requester.as_deref(),
+    )
+    .await;
+    let interrupted = "interrupted while waiting for a slot";
+    stages::mark_span(
+        &*app.store,
+        &run,
+        Stage::Queued,
+        StageState::Failed,
+        interrupted,
+        request
+            .submitted_at
+            .unwrap_or_else(time::OffsetDateTime::now_utc),
+        None,
+    )
+    .await;
+    stages::end(
+        &*app.store,
+        &run,
+        StageState::Failed,
+        interrupted,
+        interrupted,
+    )
+    .await;
+    close_queued_as_interrupted(app, request, &link).await;
+    app.store
+        .finish_run(
+            &run,
+            RunStatus::Failed,
+            None,
+            Some(&Interrupted.to_string()),
+        )
+        .await?;
+    Ok(())
+}
+
+/// A queued check of a review Henk stopped before it started closes as
+/// interrupted, as a running one's does (#262).
+async fn close_queued_as_interrupted(app: &App, request: &ReviewRequest, link: &str) {
+    let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
+        return;
+    };
+    let outcome = ReviewOutcome::interrupted(commit.clone());
+    match app.writer(request.target.platform()) {
+        Ok(writer) => {
+            if let Err(finish_error) = writer
+                .finish_review(&request.target, commit, Some(handle), &outcome, link)
+                .await
+            {
+                error!(%finish_error, "could not close the queued check");
+            }
+        }
+        Err(writer_error) => error!(%writer_error, "could not close the queued check"),
+    }
+}
+
 /// Henk was told to stop: the check completes as interrupted, the run
 /// ends `failed`, and nothing is posted; the next review posts (§3.3).
 async fn report_interrupted(
@@ -1938,6 +2035,7 @@ lanes = [{ name = "lane-a", model = "m" }]
             cancel.clone(),
             Duration::from_millis(10),
             Duration::ZERO,
+            None,
         ));
         let mut status = RunStatus::Running;
         for _ in 0..200 {
@@ -2284,6 +2382,54 @@ lanes = [{ name = "lane-a", model = "m" }]
             )),
             "stopped with Henk while queued: {:?}",
             finished(&writer)
+        );
+    }
+
+    /// #160: a review Henk stops while it waits for a slot never started,
+    /// yet its run is recorded as interrupted, as a running review's is,
+    /// so the next start resumes it. Its queued check closes as interrupted.
+    #[tokio::test]
+    async fn a_review_stopped_while_queued_is_recorded_interrupted_for_the_next_start() {
+        let (app, writer, _coordinator, waiting) = one_slot_two_reviews(false).await;
+        until("B's check is queued", || {
+            writer.queued.lock().unwrap().len() == 1
+        })
+        .await;
+
+        app.shutdown.cancel();
+        let mut record = None;
+        for _ in 0..300 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            record = app
+                .store
+                .run(&waiting)
+                .await
+                .unwrap()
+                .filter(|r| r.status != RunStatus::Running);
+            if record.is_some() {
+                break;
+            }
+        }
+        let record = record.expect("the queued review is recorded once Henk stops");
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(record.error.as_deref(), Some("interrupted"));
+        assert_eq!(record.target, 8);
+        assert_eq!(record.commit.as_deref(), Some(SHA));
+        assert_no_stage_running(&app, &waiting).await;
+        assert!(
+            finished(&writer).contains(&(
+                Some("queued-1".to_owned()),
+                Some(henk_domain::review::Stopped::Interrupted)
+            )),
+            "{:?}",
+            finished(&writer)
+        );
+
+        let since = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+        let resumable = crate::resume::interrupted_reviews(&app, since).await;
+        assert!(
+            resumable.iter().any(|r| r.id == waiting),
+            "the next start resumes it: {resumable:?}"
         );
     }
 

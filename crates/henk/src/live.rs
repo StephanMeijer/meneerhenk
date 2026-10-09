@@ -400,6 +400,10 @@ impl RunStore for Announcing {
         self.inner.orphaned_runs(stale_before).await
     }
 
+    async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
+        self.inner.latest_reviews(since).await
+    }
+
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.drop_running_lanes(run, reason).await?;
@@ -820,6 +824,12 @@ mod tests {
             stale_before: OffsetDateTime,
         ) -> Result<Vec<RunRecord>, StoreError> {
             self.inner.orphaned_runs(stale_before).await
+        }
+        async fn latest_reviews(
+            &self,
+            since: OffsetDateTime,
+        ) -> Result<Vec<RunRecord>, StoreError> {
+            self.inner.latest_reviews(since).await
         }
         async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
             self.inner.drop_running_lanes(run, reason).await

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use henk_domain::run::{EventId, RunId};
+use henk_domain::run::{EventId, RunId, RunKind};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use rusqlite_migration::{M, Migrations};
 use time::OffsetDateTime;
@@ -209,6 +209,28 @@ impl RunStore for SqliteStore {
             ))?;
             let raw = statement
                 .query_map(params![RunStatus::Running.as_str(), cutoff], raw_run)?
+                .collect::<Result<Vec<_>, _>>()?;
+            raw.into_iter().map(RawRun::into_record).collect()
+        })
+    }
+
+    async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
+        let since = since
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        self.with(|c| {
+            let mut statement = c.prepare(&format!(
+                "SELECT {RUN_COLUMNS} FROM runs r
+                 WHERE r.kind = ?1 AND r.started_at >= ?2 AND NOT EXISTS (
+                     SELECT 1 FROM runs n
+                     WHERE n.kind = r.kind AND n.platform = r.platform
+                       AND n.repo = r.repo AND n.target = r.target
+                       AND (n.started_at > r.started_at
+                            OR (n.started_at = r.started_at AND n.id > r.id)))
+                 ORDER BY r.started_at, r.id"
+            ))?;
+            let raw = statement
+                .query_map(params![kind_str(RunKind::Review), since], raw_run)?
                 .collect::<Result<Vec<_>, _>>()?;
             raw.into_iter().map(RawRun::into_record).collect()
         })
