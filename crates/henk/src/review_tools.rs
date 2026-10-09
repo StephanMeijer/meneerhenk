@@ -84,12 +84,13 @@ impl LaneContext {
 }
 
 impl LaneContext {
-    /// The refusal when `key` already has a finding: improve it instead.
+    /// The refusal when `key` already has a finding on the pull request:
+    /// improve it instead.
     ///
-    /// Claim under the lock, then release it before any I/O: a std mutex
-    /// guard must not live across an await. Two lanes racing between the
-    /// claim and the post is rare, and the registry stays consistent because
-    /// the post result is recorded under the lock again.
+    /// This only reads the registry. Lanes do not race for a line here:
+    /// [`DraftBook::add`] in [`LaneContext::queue`] takes it under the
+    /// drafts' lock, and nothing is posted before every lane is done
+    /// (#49, #189).
     async fn refuse_if_taken(&self, key: &FindingKey) -> Option<ToolOutput> {
         let taken: Option<String> = {
             let Ok(registry) = self.registry.lock() else {
@@ -1056,6 +1057,34 @@ mod draft_tests {
         assert_eq!(a.drafts.lock().unwrap().len(), 1);
         let stored = a.store.drafts(&a.run).await.unwrap();
         assert_eq!(stored[0].body, "x is never set on the error path.");
+    }
+
+    /// Two lanes that post on one line at the same moment draft once: the
+    /// line is taken under the drafts' lock, and nothing is posted before
+    /// the lanes are done (#49).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_lanes_on_one_line_at_once_draft_once() {
+        for _ in 0..50 {
+            let (a, b) = two_lanes().await;
+            let start = Arc::new(tokio::sync::Barrier::new(2));
+            let lane = |ctx: &Arc<LaneContext>, body: &'static str| {
+                let (ctx, start) = (Arc::clone(ctx), Arc::clone(&start));
+                tokio::spawn(async move {
+                    start.wait().await;
+                    PostFinding(ctx).call(post(body)).await
+                })
+            };
+            let (first, second) = (lane(&a, "x is never set."), lane(&b, "x is wrong."));
+            let outputs = [first.await.unwrap(), second.await.unwrap()];
+            let refused: Vec<_> = outputs.iter().filter(|o| o.is_error).collect();
+            assert_eq!(refused.len(), 1, "one drafts, one is refused");
+            assert!(
+                refused[0].content.contains("by another reviewer"),
+                "{}",
+                refused[0].content
+            );
+            assert_eq!(a.drafts.lock().unwrap().len(), 1);
+        }
     }
 
     #[tokio::test]
