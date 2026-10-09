@@ -30,6 +30,23 @@ pub struct SqliteStore {
     connection: Mutex<Connection>,
 }
 
+/// A stored time column as an [`instant`], so it compares as a time.
+macro_rules! instant_of {
+    ($column:literal) => {
+        concat!(
+            "substr(",
+            $column,
+            ", 1, 19) || substr(CASE WHEN substr(",
+            $column,
+            ", 20, 1) = '.' THEN substr(",
+            $column,
+            ", 21, length(",
+            $column,
+            ") - 21) ELSE '' END || '000000000', 1, 9)"
+        )
+    };
+}
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("../migrations/sqlite/001_initial.sql")),
@@ -44,6 +61,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
         M::up(include_str!("../migrations/sqlite/011_stages.sql")),
         M::up(include_str!("../migrations/sqlite/012_stats.sql")),
+        M::up(include_str!("../migrations/sqlite/013_run_instant.sql")),
     ])
 }
 
@@ -179,14 +197,15 @@ impl RunStore for SqliteStore {
         &self,
         stale_before: OffsetDateTime,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let cutoff = stale_before
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        let cutoff = instant(
+            "stale_before",
+            &stale_before.format(&Rfc3339).unwrap_or_default(),
+        )?;
         self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs
-                 WHERE status = ?1 AND (heartbeat_at IS NULL OR heartbeat_at < ?2)
-                 ORDER BY started_at"
+                "SELECT {RUN_COLUMNS} FROM runs WHERE {ORPHANED}
+                 ORDER BY {started}, id",
+                started = instant_of!("started_at"),
             ))?;
             let raw = statement
                 .query_map(params![RunStatus::Running.as_str(), cutoff], raw_run)?
@@ -1068,12 +1087,12 @@ impl RunStore for SqliteStore {
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
-        let (before_at, before_id) = run_key(filter);
+        let (before_at, before_id) = run_key(filter)?;
         let (since, until) = run_window(filter)?;
         self.with(|c| {
             let mut statement = c.prepare(&format!(
                 "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
-                 ORDER BY started_at DESC, id DESC LIMIT ?10 OFFSET ?11"
+                 ORDER BY {RUN_ORDER} LIMIT ?10 OFFSET ?11"
             ))?;
             let raw = statement
                 .query_map(
@@ -1194,7 +1213,7 @@ impl RunStore for SqliteStore {
         let status = filter.status.map(status_str);
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
-        let (before_at, before_id) = run_key(filter);
+        let (before_at, before_id) = run_key(filter)?;
         let (since, until) = run_window(filter)?;
         self.with(|c| {
             let count: i64 = c.query_row(
@@ -1327,16 +1346,35 @@ impl RawInbound {
 
 /// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
 /// platform, repo, target, since, until, and the keyset (time, id).
-/// `since` and `until` are [`instant`]s, compared to `started_at` as one
-/// too: as text, "12:00:00.4Z" sorts before "12:00:00Z".
-const RUN_FILTER: &str = "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
+/// `since`, `until` and the keyset's time are [`instant`]s, compared to
+/// `started_at` as one too: as text, "12:00:00.4Z" sorts before
+/// "12:00:00Z" (#216).
+const RUN_FILTER: &str = concat!(
+    "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
      AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
      AND (?5 IS NULL OR target = ?5)
-     AND (?6 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
-            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) >= ?6)
-     AND (?7 IS NULL OR substr(started_at, 1, 19) || substr(CASE WHEN substr(started_at, 20, 1) = '.'
-            THEN substr(started_at, 21, length(started_at) - 21) ELSE '' END || '000000000', 1, 9) < ?7)
-     AND (?8 IS NULL OR started_at < ?8 OR (started_at = ?8 AND id < ?9))";
+     AND (?6 IS NULL OR ",
+    instant_of!("started_at"),
+    " >= ?6) AND (?7 IS NULL OR ",
+    instant_of!("started_at"),
+    " < ?7) AND (?8 IS NULL OR ",
+    instant_of!("started_at"),
+    " < ?8 OR (",
+    instant_of!("started_at"),
+    " = ?8 AND id < ?9))"
+);
+
+/// The `WHERE` of the orphaned runs, over parameters 1 (the running
+/// status) and 2 (the cutoff, an [`instant`]): no heartbeat, or one before
+/// the cutoff as a time.
+const ORPHANED: &str = concat!(
+    "status = ?1 AND (heartbeat_at IS NULL OR ",
+    instant_of!("heartbeat_at"),
+    " < ?2)"
+);
+
+/// The order of a run listing: newest first as a time, then by id.
+const RUN_ORDER: &str = concat!(instant_of!("started_at"), " DESC, id DESC");
 
 /// A row of a draft listing as read, before its texts are checked.
 struct DraftRow {
@@ -1412,23 +1450,6 @@ impl DraftRow {
             draft,
         })
     }
-}
-
-/// A stored time column as an [`instant`], so it compares as a time.
-macro_rules! instant_of {
-    ($column:literal) => {
-        concat!(
-            "substr(",
-            $column,
-            ", 1, 19) || substr(CASE WHEN substr(",
-            $column,
-            ", 20, 1) = '.' THEN substr(",
-            $column,
-            ", 21, length(",
-            $column,
-            ") - 21) ELSE '' END || '000000000', 1, 9)"
-        )
-    };
 }
 
 /// The `WHERE` of a draft count or listing over `drafts d JOIN runs r`,
@@ -1623,13 +1644,16 @@ fn run_window(filter: &RunFilter) -> Result<(Option<String>, Option<String>), St
     Ok((since, until))
 }
 
-/// The keyset of a run listing, as two parameters.
-fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
-    filter
-        .before
-        .as_ref()
-        .map(|k| (k.started_at.as_str(), k.id.as_str()))
-        .unzip()
+/// The keyset of a run listing, as two parameters: the time as an
+/// [`instant`], so a key compares as a time whatever its fraction.
+fn run_key(filter: &RunFilter) -> Result<(Option<String>, Option<&str>), StoreError> {
+    let Some(key) = filter.before.as_ref() else {
+        return Ok((None, None));
+    };
+    Ok((
+        Some(instant("before", &key.started_at)?),
+        Some(key.id.as_str()),
+    ))
 }
 
 /// The columns [`raw_run`] reads, in order.
@@ -1738,6 +1762,50 @@ mod tests {
             sources,
             ["comment", "webhook"],
             "one row per join, in order"
+        );
+    }
+
+    /// The plan of a run listing, one line per step.
+    fn run_listing_plan(store: &SqliteStore) -> Vec<String> {
+        store
+            .with(|c| {
+                let mut statement = c.prepare(&format!(
+                    "EXPLAIN QUERY PLAN SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
+                     ORDER BY {RUN_ORDER} LIMIT ?10 OFFSET ?11"
+                ))?;
+                let rows = statement.query_map(
+                    params![
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<i64>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        50,
+                        0
+                    ],
+                    |row| row.get::<_, String>(3),
+                )?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_run_listing_walks_the_instant_index_instead_of_sorting() {
+        let store = SqliteStore::in_memory().unwrap();
+        let plan = run_listing_plan(&store);
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX runs_started_instant")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
         );
     }
 }
