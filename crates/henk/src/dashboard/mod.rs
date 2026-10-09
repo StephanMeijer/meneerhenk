@@ -133,6 +133,15 @@ impl Dashboard {
     }
 }
 
+/// Whether `client_id` is a GitHub App's rather than an OAuth App's (#270).
+/// Signing in through a GitHub App makes GitHub ask people to let it act on
+/// their behalf, while the dashboard only needs to know who they are. GitHub
+/// App client ids start with `Iv1.` or `Iv23`, OAuth App ones with `Ov23` or
+/// are hex.
+pub fn is_github_app_client_id(client_id: &str) -> bool {
+    client_id.starts_with("Iv")
+}
+
 /// Every dashboard route.
 pub fn routes(dashboard: Arc<Dashboard>) -> Router {
     Router::new()

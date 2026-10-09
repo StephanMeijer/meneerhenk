@@ -290,7 +290,31 @@ pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {
     if let Some(gitlab) = &settings.gitlab {
         checks.push(gitlab_token(&gitlab.token_env, settings.address.is_some()));
     }
+    if let Some(dashboard) = &settings.dashboard {
+        let variable = &dashboard.client_id_env;
+        checks.push(dashboard_client_id(variable, env_var(variable).as_deref()));
+    }
     checks
+}
+
+/// Which kind of app the dashboard signs in with (#270). A GitHub App makes
+/// GitHub ask people to let it act on their behalf; an OAuth App without
+/// scopes asks only who they are, which is all the dashboard needs. Never
+/// shows the id.
+fn dashboard_client_id(variable: &str, value: Option<&str>) -> Check {
+    let name = format!("secret ${variable}");
+    match value {
+        None => Check::warn(name, "not set; the dashboard is off"),
+        Some(id) if crate::dashboard::is_github_app_client_id(id) => Check::warn(
+            name,
+            "a GitHub App's client id; GitHub asks people to let the dashboard act on \
+             their behalf. Use an OAuth App without scopes",
+        ),
+        Some(_) => Check::ok(
+            name,
+            "an OAuth App's client id; sign-in asks only who you are",
+        ),
+    }
 }
 
 /// Henk reads the GitLab token himself only for address runs (§3.5): to
@@ -752,5 +776,21 @@ mod tests {
             Verdict::Warn("not set; GitLab address runs are refused".to_owned())
         );
         assert!(matches!(gitlab_token(unset, false).verdict, Verdict::Ok(_)));
+    }
+
+    #[test]
+    fn the_dashboard_warns_when_it_signs_in_through_a_github_app() {
+        assert!(matches!(
+            dashboard_client_id("V", Some("Iv23liAbCdEfGhIjKlMn")).verdict,
+            Verdict::Warn(text) if text.contains("act on their behalf")
+        ));
+        assert!(matches!(
+            dashboard_client_id("V", Some("Ov23liAbCdEfGhIjKlMn")).verdict,
+            Verdict::Ok(_)
+        ));
+        assert_eq!(
+            dashboard_client_id("V", None).verdict,
+            Verdict::Warn("not set; the dashboard is off".to_owned())
+        );
     }
 }
