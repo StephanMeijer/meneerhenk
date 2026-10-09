@@ -242,6 +242,8 @@ pub struct ResumableSession {
     limits: AgentConfig,
     continuation: Option<ContinuationFactory>,
     messages: Vec<ChatMessage>,
+    /// Where each round's opening message sits in `messages`.
+    round_starts: Vec<usize>,
     turns: u32,
     usage: Usage,
     status: Option<(LaneStatus, Option<String>)>,
@@ -294,6 +296,7 @@ impl ResumableSession {
             limits,
             continuation: None,
             messages: Vec::new(),
+            round_starts: Vec::new(),
             turns: 0,
             usage: Usage::default(),
             status: None,
@@ -312,6 +315,46 @@ impl ResumableSession {
     #[must_use]
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
+    }
+
+    /// The time limit of the next rounds, such as what is left of a whole
+    /// run's (#286).
+    pub fn set_timeout(&mut self, timeout: std::time::Duration) {
+        self.limits.timeout = timeout;
+    }
+
+    /// When the conversation is over its `max_conversation_chars`, drops
+    /// every round but the last `keep_rounds` and puts `summary` in front
+    /// of the first one kept (#286). Rounds are dropped whole, so every
+    /// tool call keeps its result and the roles still alternate. Returns
+    /// whether anything was dropped.
+    pub fn compact_rounds(&mut self, summary: &str, keep_rounds: usize) -> bool {
+        if henk_agent::compact::size(&self.messages) <= self.limits.max_conversation_chars {
+            return false;
+        }
+        let keep = keep_rounds.max(1);
+        if self.round_starts.len() <= keep {
+            return false;
+        }
+        let first_kept = self.round_starts.len() - keep;
+        let cut = self.round_starts.get(first_kept).copied().unwrap_or(0);
+        self.messages.drain(..cut);
+        self.round_starts = self
+            .round_starts
+            .split_off(first_kept)
+            .into_iter()
+            .map(|start| start - cut)
+            .collect();
+        if let Some(opening) = self.messages.first_mut() {
+            opening.blocks.insert(
+                0,
+                henk_llm::Block::Text(format!(
+                    "What happened in the earlier rounds, which this conversation no longer holds:\n\n{summary}"
+                )),
+            );
+        }
+        info!(lane = %self.name, dropped = cut, "compacted the earlier rounds");
+        true
     }
 
     /// Model calls over every round.
@@ -338,6 +381,7 @@ impl ResumableSession {
         }
         // The earlier messages are already in the live view.
         let seen = self.messages.len();
+        self.round_starts.push(seen);
         let mut opening = std::mem::take(&mut self.messages);
         opening.push(message);
         let mut agent = Agent::new(
@@ -651,7 +695,7 @@ mod tests {
     use henk_domain::allowlist::RepoRef;
     use henk_domain::review::CommitSha;
     use henk_llm::testing::ScriptedClient;
-    use henk_llm::{Completion, LlmError, StopReason};
+    use henk_llm::{Completion, LlmError, Role, StopReason};
     use henk_mcp::testing::{FakeServer, echo_behaviour};
     use serde_json::json;
 
@@ -990,6 +1034,68 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&stored.body).unwrap();
         assert_eq!(body["messages"].as_array().unwrap().len(), 4, "{body}");
         assert_eq!(body["turns"], 2);
+    }
+
+    #[tokio::test]
+    async fn rounds_past_the_budget_give_way_to_their_summary() {
+        let store = store_with_run().await;
+        let answers = ["one", "two", "three", "four"].map(text);
+        let scripted = Arc::new(ScriptedClient::new("m", answers));
+        let model: Arc<dyn ModelClient> = scripted.clone();
+        let limits = AgentConfig {
+            max_conversation_chars: 10,
+            ..AgentConfig::default()
+        };
+        let mut session = ResumableSession::new("fixer", model, "s", ToolSet::new(), limits);
+        for round in ["round 1", "round 2", "round 3"] {
+            session
+                .resume(
+                    &store,
+                    &run_id(),
+                    ChatMessage::user(round),
+                    CancellationToken::new(),
+                )
+                .await;
+        }
+        assert!(session.compact_rounds("f1 fixed in abc.", 1));
+        let kept: Vec<String> = session.messages().iter().map(ChatMessage::text).collect();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(
+            kept[0].starts_with("What happened in the earlier rounds"),
+            "{kept:?}"
+        );
+        assert!(kept[0].contains("f1 fixed in abc.") && kept[0].ends_with("round 3"));
+        assert_eq!(kept[1], "three");
+        assert!(!session.compact_rounds("again", 1), "one round left");
+
+        session
+            .resume(
+                &store,
+                &run_id(),
+                ChatMessage::user("round 4"),
+                CancellationToken::new(),
+            )
+            .await;
+        let last = scripted.requests().pop().unwrap();
+        let roles: Vec<_> = last.messages.iter().map(|m| m.role).collect();
+        assert_eq!(roles, [Role::User, Role::Assistant, Role::User]);
+        assert!(last.messages[0].text().contains("f1 fixed in abc."));
+
+        let roomy = AgentConfig::default();
+        let model: Arc<dyn ModelClient> =
+            Arc::new(ScriptedClient::new("m", [text("a"), text("b")]));
+        let mut small = ResumableSession::new("reviewer", model, "s", ToolSet::new(), roomy);
+        for round in ["1", "2"] {
+            small
+                .resume(
+                    &store,
+                    &run_id(),
+                    ChatMessage::user(round),
+                    CancellationToken::new(),
+                )
+                .await;
+        }
+        assert!(!small.compact_rounds("s", 1), "within budget, nothing goes");
     }
 
     /// A store that takes nothing, here because the run is not in it, costs

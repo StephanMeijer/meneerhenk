@@ -44,6 +44,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
         M::up(include_str!("../migrations/sqlite/011_stages.sql")),
         M::up(include_str!("../migrations/sqlite/012_stats.sql")),
+        M::up(include_str!("../migrations/sqlite/013_loop.sql")),
     ])
 }
 
@@ -160,6 +161,16 @@ impl RunStore for SqliteStore {
             c.execute(
                 "UPDATE runs SET heartbeat_at = ?2 WHERE id = ?1",
                 params![id.as_str(), now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE runs SET loop_stop = ?2, loop_rounds = ?3 WHERE id = ?1",
+                params![id.as_str(), stop, rounds],
             )?;
             Ok(())
         })
@@ -1636,7 +1647,7 @@ fn run_key(filter: &RunFilter) -> (Option<&str>, Option<&str>) {
 }
 
 /// The columns [`raw_run`] reads, in order.
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by";
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by, loop_stop, loop_rounds";
 
 fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
     Ok(RawRun {
@@ -1657,6 +1668,8 @@ fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
         heartbeat_at: row.get(14)?,
         check_id: row.get(15)?,
         superseded_by: row.get(16)?,
+        loop_stop: row.get(17)?,
+        loop_rounds: row.get(18)?,
     })
 }
 

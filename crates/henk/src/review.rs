@@ -4224,10 +4224,28 @@ lanes = [{ name = "lane-a", model = "m" }]
         Arc<ScriptedClient>,
         crate::git::ScratchDir,
     ) {
+        looping_with(name, "", reviewer, fixer, provider).await
+    }
+
+    /// [`looping`] with more `[review.loop]` settings.
+    async fn looping_with(
+        name: &str,
+        settings: &str,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    ) {
         let (remote, head) = crate::git::tests::bare_remote(name).await;
         let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
         let config = CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
-            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n[address]\nmodel = \"f\"\nrequester_id = 3\n";
+            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n"
+            + settings
+            + "[address]\nmodel = \"f\"\nrequester_id = 3\n";
         let hub = Arc::new(LoopHub {
             remote: remote.path().to_path_buf(),
         });
@@ -4445,6 +4463,10 @@ lanes = [{ name = "lane-a", model = "m" }]
 
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("converged"), Some(3))
+        );
         let summary = report.summary.unwrap();
         assert!(
             summary.contains(
@@ -4514,6 +4536,81 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 1);
+        assert_nothing_posted(&f.writer);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_reports_a_fixed_finding_again_stops_the_loop() {
+        let claim = "x must be 3, the caller divides by it";
+        let (f, _, fixer, remote) = looping(
+            "review-loop-repeat",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, claim, None),
+                    finish_round(),
+                    say("Done for now."),
+                    report(2, "X must be 3: the caller divides by it", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-repeat").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("repeating_finding"), Some(2)),
+            "at the repeat, not at max_rounds (50)"
+        );
+        assert_eq!(fixer.requests().len(), 3, "the fixer never got the repeat");
+        let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let findings = loop_findings(&f.app, &run).await;
+        assert_eq!(findings[0].1, "fixed");
+        assert_eq!(findings[1].1, "unsettled");
+        assert_eq!(
+            findings[1].3,
+            format!("repeats f1, which was fixed in {}", &head[..12])
+        );
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("stopped: the reviewer reported f1 again as f2 after it was fixed"),
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_loop_stops_at_its_time_limit() {
+        let (f, reviewer, fixer, _remote) = looping_with(
+            "review-loop-slow",
+            "run_timeout_secs = 1\n",
+            ScriptedClient::new("r", [say("Thinking.")]).with_delay(Duration::from_secs(3)),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-slow").unwrap();
+        let _ = run_review(&f.app, request(&run), CancellationToken::new()).await;
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("timeout"), Some(1))
+        );
+        assert_eq!(reviewer.requests().len(), 1);
+        assert!(fixer.requests().is_empty());
         assert_nothing_posted(&f.writer);
     }
 

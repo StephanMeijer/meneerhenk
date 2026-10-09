@@ -148,7 +148,8 @@ max_turns = 12
 # [review.loop]
 # reviewer = "opus"
 # fixer = "claude"
-# max_rounds = 10
+# max_rounds = 50
+# run_timeout_secs = 3600
 # round_timeout_secs = 600
 # round_max_turns = 40
 

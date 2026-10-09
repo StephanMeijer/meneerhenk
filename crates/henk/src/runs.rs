@@ -318,6 +318,10 @@ fn render_run(out: &mut String, run: &RunRecord) {
     if let Some(by) = &run.superseded_by {
         let _ = writeln!(out, "  superseded by {by}");
     }
+    if let (Some(stop), Some(rounds)) = (&run.loop_stop, run.loop_rounds) {
+        let plural = if rounds == 1 { "round" } else { "rounds" };
+        let _ = writeln!(out, "  loop       {} after {rounds} {plural}", words(stop));
+    }
     if let Some(commit) = &run.commit {
         let _ = writeln!(out, "  commit     {commit}");
     }
@@ -467,6 +471,8 @@ mod tests {
             heartbeat_at: None,
             check_id: None,
             superseded_by: None,
+            loop_stop: None,
+            loop_rounds: None,
         };
         let lanes = vec![LaneRecord {
             name: "lane-a".into(),
@@ -652,6 +658,8 @@ mod tests {
             heartbeat_at: None,
             check_id: None,
             superseded_by: None,
+            loop_stop: None,
+            loop_rounds: None,
         };
         let text = render(&run, &[], &[], &[], &[], &[], &events);
         assert!(
