@@ -543,6 +543,17 @@ impl ServerHandler for HenkMcp {
     }
 }
 
+/// The names of every tool, for the tests that keep `llms.txt` in step
+/// with them (#292).
+#[cfg(test)]
+pub(crate) fn tool_names() -> Vec<String> {
+    HenkMcp::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
