@@ -1,6 +1,7 @@
 //! The review orchestrator (§3).
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,6 +79,10 @@ struct ReviewRun<'a> {
     commit: &'a CommitSha,
     run: &'a RunId,
     link: &'a str,
+    /// Whether the review posts on the pull request: the lanes do, a review
+    /// loop does not (#285). A loop that declines hands over to the lanes,
+    /// which post, so their cancel and failure notices post too.
+    posts: &'a AtomicBool,
 }
 
 /// What every lane of a review shares, ready once the read session is up.
@@ -197,6 +202,7 @@ pub async fn run_review(
         commit: &commit,
         run: &run,
         link: &link,
+        posts: &AtomicBool::new(posts_comments(app)),
     };
     let result = review_body(review, &info.title, &info.base_ref, cancel).await;
 
@@ -365,6 +371,7 @@ async fn report_superseded(
         commit,
         run,
         link,
+        ..
     } = review;
     info!(run = %run, "review superseded by a newer commit");
     let outcome = ReviewOutcome::superseded(commit.clone());
@@ -413,6 +420,7 @@ async fn report_cancelled(
         commit,
         run,
         link,
+        ..
     } = review;
     info!(run = %run, by, "review cancelled from the dashboard");
     let body = Marker {
@@ -424,7 +432,7 @@ async fn report_cancelled(
         withdrawn: None,
     }
     .attach(&crate::cancel::cancelled_notice(by, link, false));
-    if posts_comments(app)
+    if review.posts.load(Ordering::Relaxed)
         && let Err(post_error) = writer.post_comment(target, &body).await
     {
         error!(%post_error, "could not post that the review was cancelled");
@@ -592,6 +600,7 @@ async fn report_interrupted(
         commit,
         run,
         link,
+        ..
     } = review;
     warn!(run = %run, "review interrupted");
     let outcome = ReviewOutcome::interrupted(commit.clone());
@@ -627,6 +636,7 @@ async fn report_failure(
         commit,
         run,
         link,
+        ..
     } = review;
     let message = format!("{error:#}");
     error!(error = %message, "review failed");
@@ -649,7 +659,7 @@ async fn report_failure(
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
     ));
-    if posts_comments(app)
+    if review.posts.load(Ordering::Relaxed)
         && let Err(post_error) = writer.post_comment(target, &body).await
     {
         error!(%post_error, "could not post the failure comment");
@@ -839,6 +849,7 @@ async fn loop_body(
                 if !app.settings.lanes.is_empty() {
                     let note =
                         format!("The review loop did not run: {why}. The lanes reviewed instead.");
+                    review.posts.store(true, Ordering::Relaxed);
                     return lanes_body(review, title, base_ref, cancel, diff, Some(note)).await;
                 }
                 for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
@@ -4671,6 +4682,46 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// The lanes that review in the loop's place post, so a cancel from
+    /// the dashboard says so on the pull request, as without the loop.
+    #[tokio::test]
+    async fn the_lane_review_in_the_loop_s_place_posts_its_cancel_notice() {
+        let (f, _, _, _remote) = looping_from(
+            "review-loop-fork-cancel",
+            "someone/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())).with_delay(Duration::from_secs(30)),
+            ScriptedClient::new("r", []),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-fork-cancel").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        assert!(
+            f.writer
+                .replies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.body.contains("Cancelled from the dashboard")),
+            "one comment says it was cancelled"
+        );
     }
 
     #[tokio::test]
