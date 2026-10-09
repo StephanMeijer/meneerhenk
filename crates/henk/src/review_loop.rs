@@ -72,15 +72,27 @@ pub(crate) struct LoopReport {
     pub(crate) open: usize,
 }
 
-/// Runs the loop on `diff`. A loop that cannot get a workspace, or may not
-/// push to the pull request, fails before any session starts; once it runs,
-/// it ends with a report of why it stopped, and only a cancel or a store
-/// failure is an error.
+/// Whether the loop ran, or why it did not start.
+#[derive(Debug)]
+pub(crate) enum LoopRun {
+    /// It ran; how it ended.
+    Ran(LoopReport),
+    /// It may not push to this pull request (a fork, the default or a
+    /// protected branch), or the branch moved after the review was queued.
+    /// Nothing started and nothing was marked: the lanes review instead.
+    Declined(String),
+}
+
+/// Runs the loop on `diff`. A pull request the loop may not push to, or
+/// whose branch moved, declines it before anything starts, so it gets the
+/// lane review. A loop that cannot get a workspace fails before any session
+/// starts; once it runs, it ends with a report of why it stopped, and only a
+/// cancel or a store failure is an error.
 pub(crate) async fn run_loop(
     on: LoopTarget<'_>,
     diff: Arc<ReviewDiff>,
     cancel: &CancellationToken,
-) -> anyhow::Result<LoopReport> {
+) -> anyhow::Result<LoopRun> {
     let LoopTarget {
         app,
         target,
@@ -100,14 +112,13 @@ pub(crate) async fn run_loop(
         .await
         .context("reading the pull request")?;
     if let Some(why) = push_refusal(&facts.push) {
-        stages::mark(store, run, Stage::Checkout, StageState::Failed, &why).await;
-        return Err(anyhow!("the review loop may not push here: {why}"));
+        return Ok(LoopRun::Declined(why));
     }
     if facts.head != *commit {
-        return Err(anyhow!(
-            "the branch moved to {} before the loop started",
+        return Ok(LoopRun::Declined(format!(
+            "the branch moved to {} after this review was queued",
             facts.head.short()
-        ));
+        )));
     }
     let credential = writer
         .git_credential()
@@ -141,7 +152,7 @@ pub(crate) async fn run_loop(
     rounds.reviewer.finish(store, run).await;
     rounds.fixer.finish(store, run).await;
     workspace.close().await;
-    rounds.conclude(ended).await
+    Ok(LoopRun::Ran(rounds.conclude(ended).await?))
 }
 
 /// Clones the pull request at its head, imports it into a workspace that
@@ -408,11 +419,10 @@ impl<'a> Rounds<'a> {
             if let Some(stop) = self.broke_off("reviewer", &review) {
                 return Ok(stop);
             }
-            let ledger = self.handoff.ledger();
-            let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
-            if findings.is_empty() {
-                return Ok(LoopStop::Converged);
-            }
+            let findings = match self.reported(round) {
+                Ok(findings) => findings,
+                Err(stop) => return Ok(stop),
+            };
             if let Some(stop) = self.repeated(round).await {
                 return Ok(stop);
             }
@@ -545,6 +555,23 @@ impl<'a> Rounds<'a> {
             .with_ledger(|ledger| ledger.give(finding, LoopVerdict::Unsettled { reason }));
         self.handoff.record_verdicts(&[finding]).await;
         Some(LoopStop::RepeatingFinding { finding, of })
+    }
+
+    /// The findings the reviewer reported in `round`, for the fixer, or why
+    /// the loop stops. Only a finished round can converge: prose, an empty
+    /// reply or a cut-off answer after the nudges is no review.
+    fn reported(&self, round: u32) -> Result<Vec<String>, LoopStop> {
+        if !self.handoff.finished() {
+            return Err(LoopStop::SessionFailed(format!(
+                "the reviewer did not finish round {round}"
+            )));
+        }
+        let ledger = self.handoff.ledger();
+        let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
+        if findings.is_empty() {
+            return Err(LoopStop::Converged);
+        }
+        Ok(findings)
     }
 
     /// Why the loop stops when a session's round did not end its turn:

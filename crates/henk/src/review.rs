@@ -1,6 +1,7 @@
 //! The review orchestrator (§3).
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,6 +79,10 @@ struct ReviewRun<'a> {
     commit: &'a CommitSha,
     run: &'a RunId,
     link: &'a str,
+    /// Whether the review posts on the pull request: the lanes do, a review
+    /// loop does not (#285). A loop that declines hands over to the lanes,
+    /// which post, so their cancel and failure notices post too.
+    posts: &'a AtomicBool,
 }
 
 /// What every lane of a review shares, ready once the read session is up.
@@ -197,6 +202,7 @@ pub async fn run_review(
         commit: &commit,
         run: &run,
         link: &link,
+        posts: &AtomicBool::new(posts_comments(app)),
     };
     let result = review_body(review, &info.title, &info.base_ref, cancel).await;
 
@@ -365,6 +371,7 @@ async fn report_superseded(
         commit,
         run,
         link,
+        ..
     } = review;
     info!(run = %run, "review superseded by a newer commit");
     let outcome = ReviewOutcome::superseded(commit.clone());
@@ -413,6 +420,7 @@ async fn report_cancelled(
         commit,
         run,
         link,
+        ..
     } = review;
     info!(run = %run, by, "review cancelled from the dashboard");
     let body = Marker {
@@ -424,7 +432,7 @@ async fn report_cancelled(
         withdrawn: None,
     }
     .attach(&crate::cancel::cancelled_notice(by, link, false));
-    if posts_comments(app)
+    if review.posts.load(Ordering::Relaxed)
         && let Err(post_error) = writer.post_comment(target, &body).await
     {
         error!(%post_error, "could not post that the review was cancelled");
@@ -592,6 +600,7 @@ async fn report_interrupted(
         commit,
         run,
         link,
+        ..
     } = review;
     warn!(run = %run, "review interrupted");
     let outcome = ReviewOutcome::interrupted(commit.clone());
@@ -627,6 +636,7 @@ async fn report_failure(
         commit,
         run,
         link,
+        ..
     } = review;
     let message = format!("{error:#}");
     error!(error = %message, "review failed");
@@ -649,7 +659,7 @@ async fn report_failure(
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
     ));
-    if posts_comments(app)
+    if review.posts.load(Ordering::Relaxed)
         && let Err(post_error) = writer.post_comment(target, &body).await
     {
         error!(%post_error, "could not post the failure comment");
@@ -673,6 +683,25 @@ async fn review_body(
     base_ref: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ReviewOutcome, String)> {
+    if review.app.settings.review.r#loop.is_some() {
+        return loop_body(review, title, base_ref, cancel).await;
+    }
+    let store = &*review.app.store;
+    stages::mark(store, review.run, Stage::Diff, StageState::Running, "").await;
+    let diff = fetch_diff(review, base_ref).await?;
+    lanes_body(review, title, base_ref, cancel, diff, None).await
+}
+
+/// The lane review of `diff`: the lanes post their findings on the pull
+/// request, and the summary goes on it too, with `note` after it.
+async fn lanes_body(
+    review: ReviewRun<'_>,
+    title: &str,
+    base_ref: &str,
+    cancel: CancellationToken,
+    diff: Arc<ReviewDiff>,
+    note: Option<String>,
+) -> anyhow::Result<(ReviewOutcome, String)> {
     let ReviewRun {
         writer,
         target,
@@ -681,9 +710,6 @@ async fn review_body(
         link,
         ..
     } = review;
-    if review.app.settings.review.r#loop.is_some() {
-        return loop_body(review, base_ref, cancel).await;
-    }
 
     // Seed the shared registry from what is already on the pull request.
     let existing = writer
@@ -706,8 +732,6 @@ async fn review_body(
     ))));
 
     let store = &*review.app.store;
-    stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
-    let diff = fetch_diff(review, base_ref).await?;
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
@@ -741,7 +765,10 @@ async fn review_body(
 
     fold_outdated(writer, target, &after).await;
 
-    let summary_text = outcome.summary();
+    let mut summary_text = outcome.summary();
+    if let Some(note) = note {
+        summary_text = format!("{summary_text} {note}");
+    }
     let body = Marker {
         run: run.clone(),
         model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
@@ -780,9 +807,13 @@ fn stop_if_ended(review: ReviewRun<'_>, cancel: &CancellationToken) -> anyhow::R
 
 /// A review as a reviewer↔fixer loop (#284, #285): the reviewer's findings
 /// go to the fixer, never to the pull request. Nothing is posted; what the
-/// loop did is on the run, and its summary goes to the check.
+/// loop did is on the run, and its summary goes to the check. A pull request
+/// the loop may not push to (a fork, the default or a protected branch) or
+/// whose branch moved gets the lane review instead, as without the loop; the
+/// line for the summary says which ran.
 async fn loop_body(
     review: ReviewRun<'_>,
+    title: &str,
     base_ref: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ReviewOutcome, String)> {
@@ -809,8 +840,27 @@ async fn loop_body(
             commit,
             run,
         };
-        let report = crate::review_loop::run_loop(on, diff, &cancel).await?;
-        (report.results, report.open, Some(report.line))
+        match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await? {
+            crate::review_loop::LoopRun::Ran(report) => {
+                (report.results, report.open, Some(report.line))
+            }
+            crate::review_loop::LoopRun::Declined(why) => {
+                info!(run = %run, %why, "the review loop did not run");
+                if !app.settings.lanes.is_empty() {
+                    let note =
+                        format!("The review loop did not run: {why}. The lanes reviewed instead.");
+                    review.posts.store(true, Ordering::Relaxed);
+                    return lanes_body(review, title, base_ref, cancel, diff, Some(note)).await;
+                }
+                for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
+                    stages::mark(store, run, stage, StageState::Skipped, &why).await;
+                }
+                let line = format!(
+                    "The review loop did not run: {why}. No lanes are configured to review instead."
+                );
+                (Vec::new(), 0, Some(line))
+            }
+        }
     };
     stop_if_ended(review, &cancel)?;
     let outcome = ReviewOutcome {
@@ -4098,6 +4148,9 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// head is whatever `feature` holds now, so a push moves it.
     struct LoopHub {
         remote: std::path::PathBuf,
+        /// The repository the pull request's branch is in: `o/r` unless it
+        /// comes from a fork.
+        head_repo: &'static str,
     }
 
     #[async_trait::async_trait]
@@ -4110,7 +4163,7 @@ lanes = [{ name = "lane-a", model = "m" }]
             Ok(henk_platform::address::PullFacts {
                 push: henk_domain::address::PushFacts {
                     open: true,
-                    head_repo: Some("o/r".to_owned()),
+                    head_repo: Some(self.head_repo.to_owned()),
                     base_repo: "o/r".to_owned(),
                     head_ref: "feature".to_owned(),
                     default_branch: "main".to_owned(),
@@ -4211,6 +4264,29 @@ lanes = [{ name = "lane-a", model = "m" }]
         )
     }
 
+    /// [`CONFIG`] with a review loop of reviewer `r` and fixer `f` (#284).
+    fn loop_config() -> String {
+        loop_config_with("")
+    }
+
+    /// [`loop_config`] with more `[review.loop]` settings.
+    fn loop_config_with(settings: &str) -> String {
+        let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
+        CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
+            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n"
+            + settings
+            + "[address]\nmodel = \"f\"\nrequester_id = 3\n"
+    }
+
+    /// The fixture of a looping test: the app, the reviewer, the fixer and
+    /// the remote, which is returned to be kept.
+    type Looping = (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    );
+
     /// A reviewer `r` and a fixer `f`, each scripted, on a fresh local
     /// remote served by [`LoopHub`]; the remote is returned to be kept.
     async fn looping(
@@ -4218,12 +4294,7 @@ lanes = [{ name = "lane-a", model = "m" }]
         reviewer: ScriptedClient,
         fixer: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-    ) -> (
-        Fixture,
-        Arc<ScriptedClient>,
-        Arc<ScriptedClient>,
-        crate::git::ScratchDir,
-    ) {
+    ) -> Looping {
         looping_with(name, "", reviewer, fixer, provider).await
     }
 
@@ -4234,30 +4305,41 @@ lanes = [{ name = "lane-a", model = "m" }]
         reviewer: ScriptedClient,
         fixer: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-    ) -> (
-        Fixture,
-        Arc<ScriptedClient>,
-        Arc<ScriptedClient>,
-        crate::git::ScratchDir,
-    ) {
+    ) -> Looping {
+        let lanes = ScriptedClient::new("m", []);
+        looping_on(name, "o/r", settings, lanes, reviewer, fixer, provider).await
+    }
+
+    /// [`looping`] on a pull request whose branch is in `head_repo`, with
+    /// `lanes` answering the lane review.
+    async fn looping_from(
+        name: &str,
+        head_repo: &'static str,
+        lanes: ScriptedClient,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> Looping {
+        looping_on(name, head_repo, "", lanes, reviewer, fixer, provider).await
+    }
+
+    /// [`looping_from`] with more `[review.loop]` settings.
+    async fn looping_on(
+        name: &str,
+        head_repo: &'static str,
+        settings: &str,
+        lanes: ScriptedClient,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> Looping {
         let (remote, head) = crate::git::tests::bare_remote(name).await;
-        let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
-        let config = CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
-            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n"
-            + settings
-            + "[address]\nmodel = \"f\"\nrequester_id = 3\n";
+        let config = loop_config_with(settings);
         let hub = Arc::new(LoopHub {
             remote: remote.path().to_path_buf(),
+            head_repo,
         });
-        let mut f = fixture_on(
-            DIFF,
-            ScriptedClient::new("m", []),
-            &config,
-            head.as_str(),
-            provider,
-            Some(hub),
-        )
-        .await;
+        let mut f = fixture_on(DIFF, lanes, &config, head.as_str(), provider, Some(hub)).await;
         let (reviewer, fixer) = (Arc::new(reviewer), Arc::new(fixer));
         f.app.models.insert(
             "r".to_owned(),
@@ -4615,6 +4697,36 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_reviewer_that_never_finishes_its_round_is_not_convergence() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop-unfinished",
+            ScriptedClient::new("r", (0..3).map(|_| say("Done."))),
+            ScriptedClient::new("f", [say("Nothing to do.")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-unfinished").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(reviewer.requests().len(), 3, "nudged twice, then stopped");
+        assert!(fixer.requests().is_empty());
+        let summary = report.summary.unwrap();
+        assert!(!report.outcome.unwrap().completed(), "{summary}");
+        assert!(!summary.contains("converged"), "{summary}");
+        assert!(
+            summary.contains("the reviewer did not finish round 1"),
+            "{summary}"
+        );
+        assert!(henk_domain::text::is_in_style(&summary), "{summary}");
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_nothing_posted(&f.writer);
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
     async fn without_a_workspace_the_loop_ends_at_once_and_pushes_nothing() {
         let (f, reviewer, fixer, remote) = looping(
             "review-loop-none",
@@ -4635,6 +4747,138 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_from_a_fork_gets_the_lane_review_instead_of_the_loop() {
+        let (f, reviewer, fixer, remote) = looping_from(
+            "review-loop-fork",
+            "someone/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())),
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-fork").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished, "{:?}", record.error);
+        assert!(report.outcome.unwrap().completed());
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("The review loop did not run: its branch is in another repository"),
+            "{summary}"
+        );
+        assert!(summary.contains("The lanes reviewed instead."), "{summary}");
+        assert!(henk_domain::text::is_in_style(&summary), "{summary}");
+        assert!(!f.model.requests().is_empty(), "the lane reviewed");
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["lane-a"]);
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// The lanes that review in the loop's place post, so a cancel from
+    /// the dashboard says so on the pull request, as without the loop.
+    #[tokio::test]
+    async fn the_lane_review_in_the_loop_s_place_posts_its_cancel_notice() {
+        let (f, _, _, _remote) = looping_from(
+            "review-loop-fork-cancel",
+            "someone/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())).with_delay(Duration::from_secs(30)),
+            ScriptedClient::new("r", []),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-fork-cancel").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        assert!(
+            f.writer
+                .replies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.body.contains("Cancelled from the dashboard")),
+            "one comment says it was cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_after_queueing_gets_the_lane_review_instead_of_the_loop() {
+        let (f, reviewer, fixer, remote) = looping_from(
+            "review-loop-moved",
+            "o/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())),
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-moved").unwrap();
+        // Queued at an older commit than the branch's head now.
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        let report = run_review(&f.app, queued, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("The review loop did not run: the branch moved to"),
+            "{summary}"
+        );
+        assert!(report.outcome.unwrap().completed(), "{summary}");
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_review_with_only_the_loop_shows_its_check_queued() {
+        let lanes = "lanes = [{ name = \"lane-a\", model = \"m\" }]";
+        let only_loop = loop_config().replace(lanes, "lanes = []");
+        assert_ne!(only_loop, loop_config());
+        let f = fixture_on(
+            DIFF,
+            ScriptedClient::new("m", []),
+            &only_loop,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        assert!(f.app.settings.lanes.is_empty());
+        let run = RunId::parse("r-loop-queued").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        let handle = crate::coordinator::queue_check(&f.app, &queued).await;
+        assert_eq!(handle, Some(ReviewHandle("queued-1".to_owned())));
+        assert_eq!(f.writer.queued.lock().unwrap().len(), 1);
     }
 }
 

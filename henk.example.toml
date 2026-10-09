@@ -144,7 +144,9 @@ max_turns = 12
 # a fixer fixes what holds in the same workspace and Henk pushes it to the
 # pull request's branch, and each resumes its own conversation the next
 # round, until the reviewer finds nothing more or max_rounds is reached.
-# It pushes like an address run, so it needs [address] below.
+# It pushes like an address run, so it needs [address] below. A pull request
+# it may not push to (a fork, the default or a protected branch) gets the
+# lane review instead.
 # [review.loop]
 # reviewer = "opus"
 # fixer = "claude"
