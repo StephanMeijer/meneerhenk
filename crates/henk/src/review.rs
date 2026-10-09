@@ -4455,6 +4455,29 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
     }
+
+    #[tokio::test]
+    async fn a_review_with_only_the_loop_shows_its_check_queued() {
+        let lanes = "lanes = [{ name = \"lane-a\", model = \"m\" }]";
+        let only_loop = loop_config().replace(lanes, "lanes = []");
+        assert_ne!(only_loop, loop_config());
+        let f = fixture_on(
+            DIFF,
+            ScriptedClient::new("m", []),
+            &only_loop,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        assert!(f.app.settings.lanes.is_empty());
+        let run = RunId::parse("r-loop-queued").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        let handle = crate::coordinator::queue_check(&f.app, &queued).await;
+        assert_eq!(handle, Some(ReviewHandle("queued-1".to_owned())));
+        assert_eq!(f.writer.queued.lock().unwrap().len(), 1);
+    }
 }
 
 #[cfg(test)]
