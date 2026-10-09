@@ -418,6 +418,35 @@ github_owners = ["docspec"]
         assert_eq!(seen, ["r-a", "r-b"]);
     }
 
+    /// #160, #249: a review someone cancelled, from the dashboard or over
+    /// MCP, ends `cancelled`, not interrupted, and is not resumed.
+    #[tokio::test]
+    async fn a_cancelled_review_is_not_resumed() {
+        let app = app().await;
+        let by_mcp = crate::review::CancelledBy("mcp:claude".to_owned()).to_string();
+        let by_person = crate::review::CancelledBy("github:1234".to_owned()).to_string();
+        run(
+            &app,
+            "r-mcp",
+            RunKind::Review,
+            1,
+            Some((RunStatus::Cancelled, Some(by_mcp.as_str()))),
+        )
+        .await;
+        run(
+            &app,
+            "r-dashboard",
+            RunKind::Review,
+            2,
+            Some((RunStatus::Cancelled, Some(by_person.as_str()))),
+        )
+        .await;
+        run(&app, "r-stopped", RunKind::Review, 3, INTERRUPTED).await;
+
+        let found = interrupted_reviews(&app, an_hour_ago()).await;
+        assert_eq!(ids(&found), ["r-stopped"]);
+    }
+
     /// #160: once Henk is told to stop, the resumer asks for nothing,
     /// though a pass is due and a review ended interrupted: those are this
     /// process's own reviews ending in its shutdown grace.
