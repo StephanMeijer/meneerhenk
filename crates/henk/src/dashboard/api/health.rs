@@ -11,13 +11,20 @@ use henk_domain::workspace::EnvLane;
 use henk_store::{Page, RunFilter, RunRecord, RunStatus, Stage, StageState};
 
 use super::types::{Health, HealthCheck};
+use crate::app::App;
+use crate::coordinator::Coordinator;
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
 use crate::doctor::{Verdict, check_secrets};
 
 /// `GET /health`.
 pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: ApiViewer) -> Json<Health> {
-    let checks = health_rows(&dashboard)
+    Json(health_of(&dashboard.app, &dashboard.coordinator, &dashboard.listeners).await)
+}
+
+/// What the service has: `GET /health` and the MCP server's `health`.
+pub(crate) async fn health_of(app: &App, coordinator: &Coordinator, listeners: &[&str]) -> Health {
+    let checks = health_rows(app, coordinator, listeners)
         .await
         .into_iter()
         .map(|(name, state, detail)| HealthCheck {
@@ -26,13 +33,17 @@ pub async fn health(State(dashboard): State<Arc<Dashboard>>, _viewer: ApiViewer)
             detail,
         })
         .collect();
-    Json(Health { checks })
+    Health { checks }
 }
 
 /// What was checked, `ok`, `warn` or `fail`, and the detail.
-async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
-    let settings = &dashboard.app.settings;
-    let store = &dashboard.app.store;
+async fn health_rows(
+    app: &App,
+    coordinator: &Coordinator,
+    listeners: &[&str],
+) -> Vec<(String, String, String)> {
+    let settings = &app.settings;
+    let store = &app.store;
     let mut rows: Vec<(String, String, String)> = Vec::new();
     let store_ok = store
         .list_runs(&RunFilter::default(), Page::new(1, 0))
@@ -55,14 +66,14 @@ async fn health_rows(dashboard: &Dashboard) -> Vec<(String, String, String)> {
     rows.push((
         "listeners".to_owned(),
         "ok".to_owned(),
-        dashboard.listeners.join(", "),
+        listeners.join(", "),
     ));
     rows.push((
         "reviews".to_owned(),
         "ok".to_owned(),
-        reviews_line(&dashboard.coordinator.slots()),
+        reviews_line(&coordinator.slots()),
     ));
-    rows.push(workspaces_row(dashboard).await);
+    rows.push(workspaces_row(app).await);
     let git = crate::doctor::check_git(settings, None).await;
     rows.push(row(git));
     for check in check_secrets(settings) {
@@ -109,8 +120,8 @@ const RECENT_REVIEWS: usize = 10;
 /// checked out, and why the newest that did not went without. A failing
 /// checkout leaves a review that still completes, so nothing else would
 /// say so.
-async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
-    let settings = &dashboard.app.settings;
+async fn workspaces_row(app: &App) -> (String, String, String) {
+    let settings = &app.settings;
     let name = "workspaces".to_owned();
     if !settings
         .workspace
@@ -120,7 +131,7 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
         let text = "reviews run without workspaces: no profile has review = true";
         return (name, "ok".to_owned(), text.to_owned());
     }
-    let store = &dashboard.app.store;
+    let store = &app.store;
     let filter = RunFilter {
         kind: Some(RunKind::Review),
         ..RunFilter::default()
@@ -165,7 +176,7 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
             counted += 1;
             had += 1;
         } else if checkout(run, StageState::Failed)
-            && let Some(warning) = why_without(dashboard, run).await
+            && let Some(warning) = why_without(app, run).await
         {
             counted += 1;
             why.get_or_insert(warning);
@@ -184,14 +195,9 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
 
 /// Why `run` went without workspaces, from the warning its failed checkout
 /// left; none when the checkout did not fail on its own.
-async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> Option<String> {
+async fn why_without(app: &App, run: &RunRecord) -> Option<String> {
     const CHECKOUT: &str = "could not be checked out: ";
-    let events = dashboard
-        .app
-        .store
-        .events(&run.id)
-        .await
-        .unwrap_or_default();
+    let events = app.store.events(&run.id).await.unwrap_or_default();
     events
         .iter()
         .rev()

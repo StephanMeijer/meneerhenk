@@ -62,7 +62,7 @@ pub async fn run_stream(
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let run = run_of(&dashboard, id).await?;
+    let run = run_of(&dashboard.app, id).await?;
     let last = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
@@ -173,7 +173,7 @@ async fn snapshot(dashboard: &Dashboard, id: &RunId) -> Option<(u64, RunDetail, 
     let _settled = dashboard.app.feed.settled().await;
     let seq = dashboard.app.feed.last();
     let run = dashboard.app.store.run(id).await.ok()??;
-    let detail = run_detail(dashboard, &run).await.ok()?;
+    let detail = run_detail(&dashboard.app, &run).await.ok()?;
     Some((seq, detail, run.status != RunStatus::Running))
 }
 
@@ -296,7 +296,7 @@ async fn refresh_elsewhere(dashboard: &Dashboard, run: &RunRecord, out: &mpsc::S
         let Ok(Some(now)) = dashboard.app.store.run(&run.id).await else {
             return;
         };
-        let Ok(detail) = run_detail(dashboard, &now).await else {
+        let Ok(detail) = run_detail(&dashboard.app, &now).await else {
             return;
         };
         if !send(out, &RunMessage::Snapshot(Box::new(detail)), None).await {
@@ -321,7 +321,7 @@ async fn running_now(dashboard: &Dashboard) -> Option<RunningSnapshot> {
         .await
         .ok()?;
     let count = store.count_runs(&filter).await.ok()?;
-    let summaries = super::runs::summaries(dashboard, &runs).await.ok()?;
+    let summaries = super::runs::summaries(&dashboard.app, &runs).await.ok()?;
     Some(RunningSnapshot {
         count: count.max(u64::try_from(runs.len()).unwrap_or(u64::MAX)),
         runs: summaries,

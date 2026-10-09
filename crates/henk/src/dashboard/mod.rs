@@ -6,7 +6,7 @@
 //! ([`api`], #198), where the session cookie, scoped to `/dashboard`, reaches
 //! it. Sign-in, its callback and sign-out are the only other routes.
 
-mod api;
+pub(crate) mod api;
 mod app;
 mod auth;
 mod session;
