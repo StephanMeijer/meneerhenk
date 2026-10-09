@@ -828,11 +828,11 @@ async fn loop_body(
     stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
     let diff = fetch_diff(review, base_ref).await?;
     let nothing_to_review = diff.is_empty();
-    let (results, open_findings, line) = if nothing_to_review {
+    let (results, open_findings, line, head) = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
-        (Vec::new(), 0, None)
+        (Vec::new(), 0, None, None)
     } else {
         let on = crate::review_loop::LoopTarget {
             app,
@@ -842,7 +842,7 @@ async fn loop_body(
         };
         match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await? {
             crate::review_loop::LoopRun::Ran(report) => {
-                (report.results, report.open, Some(report.line))
+                (report.results, report.open, Some(report.line), report.head)
             }
             crate::review_loop::LoopRun::Declined(why) => {
                 info!(run = %run, %why, "the review loop did not run");
@@ -858,7 +858,7 @@ async fn loop_body(
                 let line = format!(
                     "The review loop did not run: {why}. No lanes are configured to review instead."
                 );
-                (Vec::new(), 0, Some(line))
+                (Vec::new(), 0, Some(line), None)
             }
         }
     };
@@ -877,6 +877,9 @@ async fn loop_body(
     }
     let skipped = "a review loop posts nothing on the pull request";
     stages::mark(store, run, Stage::Publish, StageState::Skipped, skipped).await;
+    if let Some(head) = head {
+        check_on_head(review, &head, &outcome).await;
+    }
     Ok((outcome, summary_text))
 }
 
@@ -884,6 +887,31 @@ async fn loop_body(
 /// loop, whose findings go to the fixer and whose record is the run (#285).
 fn posts_comments(app: &App) -> bool {
     app.settings.review.r#loop.is_none()
+}
+
+/// The review loop moved the pull request's head to its last commit, which
+/// its run reviewed and which starts no other review (#284): that head gets
+/// the review's check too, so it does not wait for one. A failure is logged;
+/// the review is done all the same.
+async fn check_on_head(review: ReviewRun<'_>, head: &CommitSha, outcome: &ReviewOutcome) {
+    let ReviewRun {
+        writer,
+        target,
+        link,
+        ..
+    } = review;
+    let started = writer.start_review(target, head, link, None).await;
+    let closed = match started {
+        Ok(handle) => {
+            writer
+                .finish_review(target, head, handle.as_ref(), outcome, link)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = closed {
+        warn!(%error, head = %head.short(), "could not report the check on the loop's head");
+    }
 }
 
 /// The review's request and queue stages, from the coordinator's submit time.
@@ -4453,6 +4481,11 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
         assert!(log.contains("review loop round 1"), "{log}");
         assert!(f.app.own_pushes.contains(&head));
+        // The new head gets the review's check too, not only the commit the
+        // review started at: nothing else reviews it.
+        let reported = f.writer.finished_commits.lock().unwrap().clone();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(reported.contains(&head), "{reported:?}");
         let findings = loop_findings(&f.app, &run).await;
         let fixed_why = "x is 3 now.".to_owned();
         assert_eq!(
@@ -4681,6 +4714,11 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
+        assert_eq!(
+            *f.writer.finished_commits.lock().unwrap(),
+            [before],
+            "nothing pushed, one check"
+        );
         assert_no_stage_running(&f.app, &run).await;
     }
 

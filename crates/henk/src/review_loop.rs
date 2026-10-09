@@ -70,6 +70,9 @@ pub(crate) struct LoopReport {
     pub(crate) line: String,
     /// The findings that ended unsettled or won't fix: what still stands.
     pub(crate) open: usize,
+    /// The last commit it pushed, now the pull request's head, which gets
+    /// the review's check too; `None` when it pushed nothing.
+    pub(crate) head: Option<CommitSha>,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -379,10 +382,17 @@ impl<'a> Rounds<'a> {
                 outcome,
             })
             .collect();
+        let head = self
+            .pushed
+            .last()
+            .map(|sha| CommitSha::parse(sha))
+            .transpose()
+            .context("the last pushed commit")?;
         Ok(LoopReport {
             results,
             line,
             open,
+            head,
         })
     }
 
@@ -558,6 +568,7 @@ impl<'a> Rounds<'a> {
             target: self.on.target,
             run: self.on.run,
             requester: &self.requester,
+            reviewed_by_run: true,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher

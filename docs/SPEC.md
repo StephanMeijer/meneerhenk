@@ -185,11 +185,11 @@ Henk then:
    open for them to resolve.
 7. **Sums up** in one comment with a link to the run.
 
-His push does not start a review of itself: Henk knows the commits he
-pushed, and the new-commits event of one is ignored, whoever it names as
-the sender. A review loop (#284) reviews the fixer's commits in the run
-that pushed them, and a review started otherwise never starts another
-address run (§8.1).
+His push is a new commit like any other: it is reviewed as usual (§3.1),
+and that review never starts another address run (§8.1). A review loop
+(#284) is the exception: it reviews the fixer's commits in the run that
+pushed them, so the new-commits event of one is ignored, whoever it names
+as the sender, and the last one gets that review's check.
 
 **Every address run ends.** Either the commit and replies are on the pull
 request, or he says in a comment that it failed, with a link to the run.
