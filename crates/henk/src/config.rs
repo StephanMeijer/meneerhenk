@@ -1292,17 +1292,7 @@ impl Config {
 
         validate_models(&self.models)?;
         let lanes = validate_lanes(&self.review.lanes, &self.models)?;
-        if self.review.ignore.iter().any(|p| p.trim().is_empty()) {
-            return Err(ConfigError::Review(
-                "review.ignore has an empty pattern".to_owned(),
-            ));
-        }
-        validate_fact_check(self.review.fact_check.as_ref(), &self.models)?;
-        validate_loop(
-            self.review.r#loop.as_ref(),
-            &self.models,
-            self.address.is_some(),
-        )?;
+        validate_review(&self.review, &self.models, self.address.is_some())?;
         if let Some(planning) = &self.planning {
             validate_planning(planning, &self.models, &self.discord.team_lead_ids)?;
         }
@@ -1575,6 +1565,22 @@ fn validate_fact_check(
         }
     }
     Ok(())
+}
+
+/// The review's own settings: its ignore patterns, its fact-check and its
+/// loop.
+fn validate_review(
+    review: &ReviewConfig,
+    models: &BTreeMap<String, ModelFileConfig>,
+    address: bool,
+) -> Result<(), ConfigError> {
+    if review.ignore.iter().any(|p| p.trim().is_empty()) {
+        return Err(ConfigError::Review(
+            "review.ignore has an empty pattern".to_owned(),
+        ));
+    }
+    validate_fact_check(review.fact_check.as_ref(), models)?;
+    validate_loop(review.r#loop.as_ref(), models, address)
 }
 
 /// The loop's models must exist, and it pushes the way an address run

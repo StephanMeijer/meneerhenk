@@ -33,6 +33,7 @@ mod prune;
 mod push;
 mod recorder;
 mod review;
+mod review_loop;
 mod review_many;
 mod review_tools;
 mod runs;

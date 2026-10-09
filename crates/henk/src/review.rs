@@ -702,11 +702,23 @@ async fn review_body(
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
+    let mut loop_line = None;
     let results = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
         Vec::new()
+    } else if review.app.settings.review.r#loop.is_some() {
+        // A reviewer and a fixer take turns instead of the lanes (#284).
+        let on = crate::review_loop::LoopTarget {
+            app: review.app,
+            target,
+            commit,
+            run,
+        };
+        let report = crate::review_loop::run_loop(on, diff, &cancel).await?;
+        loop_line = Some(report.line);
+        report.results
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
     };
@@ -742,7 +754,10 @@ async fn review_body(
 
     fold_outdated(writer, target, &after).await;
 
-    let summary_text = outcome.summary();
+    let mut summary_text = outcome.summary();
+    if let Some(line) = loop_line {
+        summary_text = format!("{summary_text} {line}");
+    }
     let body = Marker {
         run: run.clone(),
         model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
@@ -4018,6 +4033,294 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert_eq!(r.peek.inner.opened(), 3);
         assert_eq!(r.peek.inner.live(), 0);
         assert_eq!(r.peek.inner.unclosed(), 0, "closed, not just dropped");
+    }
+
+    /// The pull request of a review loop (#284), on a local remote: its
+    /// head is whatever `feature` holds now, so a push moves it.
+    struct LoopHub {
+        remote: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl henk_platform::address::AddressWriter for LoopHub {
+        async fn pull_facts(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+            let (head, _) = crate::git::tests::remote_feature(&self.remote).await;
+            Ok(henk_platform::address::PullFacts {
+                push: henk_domain::address::PushFacts {
+                    open: true,
+                    head_repo: Some("o/r".to_owned()),
+                    base_repo: "o/r".to_owned(),
+                    head_ref: "feature".to_owned(),
+                    default_branch: "main".to_owned(),
+                    head_protected: false,
+                },
+                head: CommitSha::parse(&head).unwrap(),
+                remote: self.remote.to_string_lossy().into_owned(),
+            })
+        }
+        async fn open_threads(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn git_credential(
+            &self,
+        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        {
+            Ok(None)
+        }
+        async fn repo_head(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn commit_identity(
+            &self,
+        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
+            Ok(henk_platform::address::CommitIdentity {
+                name: "meneer-henk[bot]".to_owned(),
+                email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
+            })
+        }
+        fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn commit_url(&self, _: &ReviewTarget, _: &str) -> String {
+            String::new()
+        }
+        async fn reply_in_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &henk_platform::address::OpenThread,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn resolve_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<(), henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn post_comment(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+    }
+
+    /// A backend that cannot open a workspace.
+    struct NoWorkspaces;
+
+    #[async_trait::async_trait]
+    impl crate::workspace::WorkspaceProvider for NoWorkspaces {
+        async fn open(
+            &self,
+            _: &std::path::Path,
+            _: &henk_domain::workspace::Profile,
+        ) -> Result<Arc<dyn crate::workspace::Workspace>, crate::workspace::WorkspaceError>
+        {
+            Err(crate::workspace::WorkspaceError::Refused(
+                "the sandbox host is down".to_owned(),
+            ))
+        }
+    }
+
+    fn say(text: &str) -> Result<Completion, henk_llm::LlmError> {
+        Ok(Completion {
+            message: henk_llm::ChatMessage::assistant(text),
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    fn edit(old: &str, new: &str) -> Result<Completion, henk_llm::LlmError> {
+        call(
+            "edit_file",
+            serde_json::json!({"path": "src/a.rs", "old": old, "new": new}),
+        )
+    }
+
+    /// A reviewer `r` and a fixer `f`, each scripted, on a fresh local
+    /// remote served by [`LoopHub`]; the remote is returned to be kept.
+    async fn looping(
+        name: &str,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    ) {
+        let (remote, head) = crate::git::tests::bare_remote(name).await;
+        let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
+        let config = CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
+            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n[address]\nmodel = \"f\"\nrequester_id = 3\n";
+        let hub = Arc::new(LoopHub {
+            remote: remote.path().to_path_buf(),
+        });
+        let mut f = fixture_on(
+            DIFF,
+            ScriptedClient::new("m", []),
+            &config,
+            head.as_str(),
+            provider,
+            Some(hub),
+        )
+        .await;
+        let (reviewer, fixer) = (Arc::new(reviewer), Arc::new(fixer));
+        f.app.models.insert(
+            "r".to_owned(),
+            Arc::clone(&reviewer) as Arc<dyn ModelClient>,
+        );
+        f.app
+            .models
+            .insert("f".to_owned(), Arc::clone(&fixer) as Arc<dyn ModelClient>);
+        (f, reviewer, fixer, remote)
+    }
+
+    /// The text of every message of a request, in order.
+    fn texts(request: &henk_llm::CompletionRequest) -> Vec<String> {
+        request
+            .messages
+            .iter()
+            .map(henk_llm::ChatMessage::text)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_and_a_fixer_resume_their_conversations_round_after_round() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop",
+            ScriptedClient::new(
+                "r",
+                [
+                    say("src/a.rs:2: x must be 3, the caller divides by it."),
+                    say("src/a.rs:2: x must be 4 now that the caller doubles it."),
+                    say("NO FINDINGS"),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    say("fixed: x is 3."),
+                    edit("let x = 3;", "let x = 4;"),
+                    say("fixed: x is 4."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        // Each second turn goes on from the first: one conversation each.
+        let asked = reviewer.requests();
+        assert_eq!(asked.len(), 3);
+        let second = texts(&asked[1]);
+        assert_eq!(
+            second[1],
+            "src/a.rs:2: x must be 3, the caller divides by it."
+        );
+        assert!(second[2].contains("fixed: x is 3."), "{second:?}");
+        assert!(
+            second[2].contains("+    let x = 3;"),
+            "the pushed patch: {second:?}"
+        );
+        assert_eq!(texts(&asked[2]).len(), 5, "three rounds, one conversation");
+        let fixing = fixer.requests();
+        assert_eq!(fixing.len(), 4);
+        let again = texts(&fixing[2]);
+        assert!(again[0].contains("x must be 3"), "{again:?}");
+        assert!(again.iter().any(|t| t == "fixed: x is 3."), "{again:?}");
+        assert!(again.last().unwrap().contains("x must be 4"), "{again:?}");
+
+        // Two commits on the pull request's branch, both Henk's own.
+        let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
+        assert!(log.contains("review loop round 2"), "{log}");
+        assert!(f.app.own_pushes.contains(&head));
+        let checkout = crate::git::Checkout::clone_at(
+            crate::git::ScratchDir::new("review-loop-after").unwrap(),
+            &remote.path().to_string_lossy(),
+            "feature",
+            &CommitSha::parse(&head).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        let file = std::fs::read_to_string(checkout.path().join("src/a.rs")).unwrap();
+        assert!(file.contains("let x = 4;"), "{file}");
+
+        // One run, with a lane row and a transcript for each session.
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("ran 3 rounds, pushed 2 commits and stopped: converged"),
+            "{summary}"
+        );
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["fixer", "reviewer"]);
+        assert_eq!(lanes[1].turns, 3);
+        for session in ["reviewer", "fixer"] {
+            assert!(
+                f.app
+                    .store
+                    .transcript(&run, session)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{session}"
+            );
+        }
+        let runs = f
+            .app
+            .store
+            .count_runs(&henk_store::RunFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(runs, 1, "the loop is one run");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn without_a_workspace_the_loop_ends_at_once_and_pushes_nothing() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop-none",
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(NoWorkspaces),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-none").unwrap();
+        let _ = run_review(&f.app, request(&run), CancellationToken::new()).await;
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        let error = record.error.unwrap_or_default();
+        assert!(error.contains("needs a workspace"), "{error}");
+        assert!(error.contains("the sandbox host is down"), "{error}");
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
     }
 }
 

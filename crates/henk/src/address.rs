@@ -365,12 +365,12 @@ impl Session<'_> {
         } else {
             // A cancel that came after the session ended stops the run here.
             stop_if_cancelled(&cancel)?;
-            let pusher = self.pusher();
+            let committer = self.pusher();
             let name = format!("henk-address-{}-push", self.run);
-            let checkout = pusher.checkout(&name, facts, credential).await?;
+            let checkout = committer.checkout(&name, facts, credential).await?;
             self.stage(Stage::Push, StageState::Running, "").await;
             let notes = fixed_notes(&threads, &settled);
-            let pushed = pusher
+            let pushed = committer
                 .commit_and_push(&checkout, facts, &notes, &changes, &cancel)
                 .await?;
             self.record_pushed(&pushed).await;

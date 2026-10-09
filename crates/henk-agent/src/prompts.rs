@@ -27,6 +27,14 @@ pub const PLANNER: &str = include_str!("../prompts/planner.md");
 /// Instructions for an address run (§3.5).
 pub const ADDRESS: &str = include_str!("../prompts/address.md");
 
+/// Instructions for the reviewer of a review loop (#284). `{{ref}}` and
+/// `{{repo}}` say which pull request.
+pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
+
+/// Instructions for the fixer of a review loop (#284). `{{ref}}`,
+/// `{{repo}}` and `{{max_files}}` are filled in.
+pub const LOOP_FIXER: &str = include_str!("../prompts/loop_fixer.md");
+
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
 pub const SKILLS: &str = include_str!("../prompts/skills.md");
@@ -78,6 +86,9 @@ mod tests {
         assert!(henk_domain::text::is_in_style(REVIEW_WORKSPACE));
         assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
+        assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
+        assert!(henk_domain::text::is_in_style(LOOP_FIXER));
+        assert!(LOOP_REVIEWER.contains("NO FINDINGS"));
         assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
         for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {
             assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");

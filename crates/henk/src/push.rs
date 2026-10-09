@@ -213,7 +213,7 @@ impl Pusher<'_> {
 
 /// How long Henk remembers a commit it pushed: long enough for any event
 /// about it to arrive.
-const OWN_PUSH_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const OWN_PUSH_TTL: Duration = Duration::from_hours(24);
 
 /// The commits this process pushed, so an event about one of them is known
 /// as Henk's own and starts no review of it (#284). In memory: after a

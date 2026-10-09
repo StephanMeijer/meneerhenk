@@ -140,6 +140,18 @@ backup_model = "claude"
 timeout_secs = 180
 max_turns = 12
 
+# The reviewer-fixer loop (#284), instead of the lanes: a reviewer reviews,
+# a fixer fixes what holds in the same workspace and Henk pushes it to the
+# pull request's branch, and each resumes its own conversation the next
+# round, until the reviewer finds nothing more or max_rounds is reached.
+# It pushes like an address run, so it needs [address] below.
+# [review.loop]
+# reviewer = "opus"
+# fixer = "claude"
+# max_rounds = 10
+# round_timeout_secs = 600
+# round_max_turns = 40
+
 # The web dashboard at /dashboard: sign in with GitHub. Only these GitHub
 # user ids (find yours at https://api.github.com/users/<login>) get in, and
 # each of them may start reviews, plans and address runs and cancel them.
