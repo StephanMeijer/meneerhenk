@@ -54,8 +54,11 @@ pub enum Claim<'a> {
 
 /// The findings on one pull/merge request, shared by all lanes of a review.
 ///
-/// Two lanes can find the same problem in the same second (open question 3).
-/// Whoever claims the key first posts; the other is told what exists.
+/// It holds what is on the platform: seeded before the lanes start, and
+/// changed only as the review's drafts are written after them. Two lanes
+/// that find the same problem in the same second (open question 3) meet
+/// in the [`DraftBook`](crate::draft::DraftBook), which gives a line to
+/// whoever drafts on it first (#49).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FindingRegistry {
     by_key: BTreeMap<FindingKey, Finding>,
@@ -84,9 +87,9 @@ impl FindingRegistry {
         self.by_key.get(key)
     }
 
-    /// Reports whether `key` is free. Does not reserve it; call
-    /// [`FindingRegistry::record`] once the comment is posted, under the
-    /// same lock.
+    /// Reports whether `key` already has a finding. Does not reserve it:
+    /// the [`DraftBook`](crate::draft::DraftBook) holds a line between
+    /// lanes, and [`FindingRegistry::record`] runs once a comment is posted.
     #[must_use]
     pub fn claim(&self, key: &FindingKey) -> Claim<'_> {
         self.by_key.get(key).map_or(Claim::New, Claim::Exists)

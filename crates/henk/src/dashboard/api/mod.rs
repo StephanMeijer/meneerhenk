@@ -50,6 +50,12 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// What went wrong, in words, for a caller that is not HTTP: the MCP
+    /// server's tool errors (#248).
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     /// An error with this status, code and message.
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
