@@ -62,7 +62,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/011_stages.sql")),
         M::up(include_str!("../migrations/sqlite/012_stats.sql")),
         M::up(include_str!("../migrations/sqlite/013_run_instant.sql")),
-        M::up(include_str!("../migrations/sqlite/013_loop.sql")),
+        M::up(include_str!("../migrations/sqlite/014_loop.sql")),
     ])
 }
 
