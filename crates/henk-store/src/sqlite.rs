@@ -61,6 +61,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/010_superseded_by.sql")),
         M::up(include_str!("../migrations/sqlite/011_stages.sql")),
         M::up(include_str!("../migrations/sqlite/012_stats.sql")),
+        M::up(include_str!("../migrations/sqlite/013_run_instant.sql")),
     ])
 }
 
@@ -1761,6 +1762,50 @@ mod tests {
             sources,
             ["comment", "webhook"],
             "one row per join, in order"
+        );
+    }
+
+    /// The plan of a run listing, one line per step.
+    fn run_listing_plan(store: &SqliteStore) -> Vec<String> {
+        store
+            .with(|c| {
+                let mut statement = c.prepare(&format!(
+                    "EXPLAIN QUERY PLAN SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
+                     ORDER BY {RUN_ORDER} LIMIT ?10 OFFSET ?11"
+                ))?;
+                let rows = statement.query_map(
+                    params![
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<i64>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        None::<String>,
+                        50,
+                        0
+                    ],
+                    |row| row.get::<_, String>(3),
+                )?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_run_listing_walks_the_instant_index_instead_of_sorting() {
+        let store = SqliteStore::in_memory().unwrap();
+        let plan = run_listing_plan(&store);
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX runs_started_instant")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
         );
     }
 }
