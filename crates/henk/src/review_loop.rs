@@ -401,14 +401,16 @@ impl<'a> Rounds<'a> {
         let first = opening(self.on.target, self.on.commit, diff);
         let mut message = first.clone();
         while self.round < self.config.max_rounds {
-            self.round += 1;
-            let round = self.round;
+            // A round counts once the reviewer's turn starts: a run out of
+            // time before it ran no round more.
+            let round = self.round + 1;
+            if let Some(stop) = self.out_of_time("reviewer", round) {
+                return Ok(stop);
+            }
+            self.round = round;
             self.handoff.start_round(round);
             if round > 1 {
                 self.compact(&first, round);
-            }
-            if let Some(stop) = self.out_of_time("reviewer") {
-                return Ok(stop);
             }
             let doing = format!("round {round}: reviewer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
@@ -423,9 +425,7 @@ impl<'a> Rounds<'a> {
                 Ok(findings) => findings,
                 Err(stop) => return Ok(stop),
             };
-            if let Some(stop) = self.repeated(round).await {
-                return Ok(stop);
-            }
+            // A reviewer that wrote to the workspace is the graver stop.
             if !self
                 .workspace
                 .export()
@@ -435,8 +435,11 @@ impl<'a> Rounds<'a> {
             {
                 return Ok(LoopStop::WorkspaceChanged);
             }
+            if let Some(stop) = self.repeated(round).await {
+                return Ok(stop);
+            }
 
-            if let Some(stop) = self.out_of_time("fixer") {
+            if let Some(stop) = self.out_of_time("fixer", round) {
                 return Ok(stop);
             }
             let doing = format!("round {round}: fixer");
@@ -517,14 +520,14 @@ impl<'a> Rounds<'a> {
 
     /// The timeout stop when the run's time is up; otherwise gives the
     /// next session's round what is left of it, at most a round's limit.
-    fn out_of_time(&mut self, who: &str) -> Option<LoopStop> {
+    fn out_of_time(&mut self, who: &str, round: u32) -> Option<LoopStop> {
         let left = self
             .deadline
             .saturating_duration_since(tokio::time::Instant::now());
         if left.is_zero() {
             return Some(LoopStop::Timeout(format!(
-                "the run's time limit of {}s was reached before the {who}'s turn in round {}",
-                self.config.run_timeout_secs, self.round
+                "the run's time limit of {}s was reached before the {who}'s turn in round {round}",
+                self.config.run_timeout_secs
             )));
         }
         let limit = left.min(Duration::from_secs(self.config.round_timeout_secs));
