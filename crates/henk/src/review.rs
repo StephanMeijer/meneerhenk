@@ -4343,7 +4343,10 @@ lanes = [{ name = "lane-a", model = "m" }]
         // Two commits on the pull request's branch, both Henk's own.
         let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
         assert!(log.contains("review loop round 2"), "{log}");
-        assert!(f.app.own_pushes.contains(&head));
+        assert_eq!(
+            f.app.own_pushes.pushed_for(&head),
+            Some(crate::push::PushedFor::ReviewedByRun)
+        );
         let checkout = crate::git::Checkout::clone_at(
             crate::git::ScratchDir::new("review-loop-after").unwrap(),
             &remote.path().to_string_lossy(),
@@ -4462,8 +4465,9 @@ lanes = [{ name = "lane-a", model = "m" }]
 
         let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_ne!(head, before, "round 1 pushed");
-        assert!(
-            f.app.own_pushes.contains(&head),
+        assert_eq!(
+            f.app.own_pushes.pushed_for(&head),
+            Some(crate::push::PushedFor::ReviewedByRun),
             "so nothing else reviews it"
         );
         let reported = f.writer.finished_commits.lock().unwrap().clone();

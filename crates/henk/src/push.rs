@@ -46,9 +46,9 @@ pub(crate) struct Pusher<'a> {
     /// Who asked, as the commit message names them.
     pub(crate) requester: &'a str,
     /// Whether the run that pushes reviews the commit itself, as the review
-    /// loop does (#284): then it is in [`App::own_pushes`] and its
-    /// new-commits event starts no review. An address run's commit is a new
-    /// commit like any other and is reviewed as usual (§3.5).
+    /// loop does (#284): its new-commits event then starts no review. An
+    /// address run's commit is a new commit like any other and is reviewed
+    /// as usual (§3.5, #298). Either way it goes in [`App::own_pushes`].
     pub(crate) reviewed_by_run: bool,
 }
 
@@ -147,10 +147,13 @@ impl Pusher<'_> {
         // The last moment a cancel can still stop the push.
         stop_if_cancelled(cancel)?;
         // Known before the platform tells anyone, so its event about this
-        // commit finds it (#284).
-        if self.reviewed_by_run {
-            self.app.own_pushes.record(&sha);
-        }
+        // commit finds it (#284, #298).
+        let why = if self.reviewed_by_run {
+            PushedFor::ReviewedByRun
+        } else {
+            PushedFor::Review
+        };
+        self.app.own_pushes.record(&sha, why);
         checkout
             .push(&facts.push.head_ref)
             .await
@@ -223,28 +226,42 @@ impl Pusher<'_> {
 /// about it to arrive.
 const OWN_PUSH_TTL: Duration = Duration::from_hours(24);
 
-/// The commits this process pushed in a review loop, so an event about one
-/// of them is known as Henk's own and starts no review of it (#284). In memory: after a
-/// restart, the sender check of the listeners still knows Henk's account.
+/// What a commit Henk pushed is for, as the review listener treats its
+/// new-commits event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushedFor {
+    /// A review loop's commit: the loop reviews it in the run that pushed
+    /// it, so the event starts no review (#284).
+    ReviewedByRun,
+    /// An address run's commit: a new commit like any other, reviewed as
+    /// usual (§3.5), though Henk's own account pushed it (#298).
+    Review,
+}
+
+/// The commits this process pushed and what each is for, so the event
+/// about one is recognised by the commit, not by who sent it. In memory:
+/// after a restart, an event about an earlier push is treated as anyone's,
+/// and the sender check drops it as Henk's own.
 #[derive(Debug, Default, Clone)]
-pub struct OwnPushes(Arc<Mutex<HashMap<String, Instant>>>);
+pub struct OwnPushes(Arc<Mutex<HashMap<String, (Instant, PushedFor)>>>);
 
 impl OwnPushes {
-    /// Remembers `sha` as pushed by Henk, and forgets what is too old.
-    pub fn record(&self, sha: &str) {
+    /// Remembers `sha` as pushed by Henk for `why`, and forgets what is too
+    /// old.
+    pub fn record(&self, sha: &str, why: PushedFor) {
         if let Ok(mut pushed) = self.0.lock() {
-            pushed.retain(|_, at| at.elapsed() < OWN_PUSH_TTL);
-            pushed.insert(sha.to_ascii_lowercase(), Instant::now());
+            pushed.retain(|_, (at, _)| at.elapsed() < OWN_PUSH_TTL);
+            pushed.insert(sha.to_ascii_lowercase(), (Instant::now(), why));
         }
     }
 
-    /// Whether Henk pushed `sha`.
+    /// What Henk pushed `sha` for, if Henk pushed it.
     #[must_use]
-    pub fn contains(&self, sha: &str) -> bool {
-        self.0.lock().is_ok_and(|pushed| {
-            pushed
-                .get(&sha.to_ascii_lowercase())
-                .is_some_and(|at| at.elapsed() < OWN_PUSH_TTL)
-        })
+    pub fn pushed_for(&self, sha: &str) -> Option<PushedFor> {
+        let pushed = self.0.lock().ok()?;
+        pushed
+            .get(&sha.to_ascii_lowercase())
+            .filter(|(at, _)| at.elapsed() < OWN_PUSH_TTL)
+            .map(|(_, why)| *why)
     }
 }
