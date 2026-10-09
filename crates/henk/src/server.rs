@@ -83,6 +83,13 @@ pub fn compose(app: &Arc<App>) -> Composed {
         let built = DashboardSecrets::from_env(config)
             .map_err(anyhow::Error::msg)
             .and_then(|secrets| {
+                if dashboard::is_github_app_client_id(&secrets.client_id) {
+                    warn!(
+                        variable = config.client_id_env,
+                        "the dashboard signs in through a GitHub App, so GitHub asks people \
+                         to let it act on their behalf; use an OAuth App without scopes"
+                    );
+                }
                 Dashboard::new(
                     Arc::clone(app),
                     Arc::clone(&composed.coordinator),

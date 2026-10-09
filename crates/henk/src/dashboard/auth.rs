@@ -350,8 +350,10 @@ pub async fn login(
         let _ = write!(acc, "{b:02x}");
         acc
     });
+    // No scope: the dashboard needs to know who signed in and nothing more
+    // (#270), so GitHub asks only for the public profile.
     let to = format!(
-        "{}/login/oauth/authorize?client_id={}&redirect_uri={}&state={state}&allow_signup=false",
+        "{}/login/oauth/authorize?client_id={}&redirect_uri={}&scope=&state={state}&allow_signup=false",
         dashboard.config.github_web_base.trim_end_matches('/'),
         encode(&dashboard.client_id),
         encode(&dashboard.redirect_uri()),

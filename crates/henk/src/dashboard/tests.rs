@@ -349,7 +349,7 @@ async fn signing_in_through_github_lets_only_listed_ids_in() {
     let login = get(&f, "/dashboard/login", None).await;
     assert_eq!(login.status, StatusCode::SEE_OTHER);
     let to = login.headers[header::LOCATION].to_str().unwrap().to_owned();
-    assert!(to.starts_with(&format!("{base}/login/oauth/authorize?client_id=cid&redirect_uri=https%3A%2F%2Fhenk.example%2Fdashboard%2Fauth%2Fcallback&state=")), "{to}");
+    assert!(to.starts_with(&format!("{base}/login/oauth/authorize?client_id=cid&redirect_uri=https%3A%2F%2Fhenk.example%2Fdashboard%2Fauth%2Fcallback&scope=&state=")), "{to}");
     let state = to
         .split("state=")
         .nth(1)
@@ -673,4 +673,13 @@ async fn signing_out_needs_the_token_and_the_dashboards_own_origin() {
             .any(|c| c.starts_with(&format!("{SESSION_COOKIE}=;")) && c.contains("Max-Age=0")),
         "{cleared:?}"
     );
+}
+
+#[test]
+fn a_github_app_client_id_is_told_from_an_oauth_app_one() {
+    assert!(super::is_github_app_client_id("Iv1.0123456789abcdef"));
+    assert!(super::is_github_app_client_id("Iv23liAbCdEfGhIjKlMn"));
+    assert!(!super::is_github_app_client_id("Ov23liAbCdEfGhIjKlMn"));
+    assert!(!super::is_github_app_client_id("0123456789abcdef0123"));
+    assert!(!super::is_github_app_client_id("cid"));
 }

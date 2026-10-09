@@ -605,8 +605,9 @@ flowchart LR
 | 7. Allowlists bound the world | `Allowlist::allows` in `listeners/filter.rs`, `run_review` and `run_plan` |
 | 8. Failure is visible | `report_failure` posts a failure comment and closes the check; `run_plan` posts "Planning failed"; both record the error on the run |
 
-The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth
-says who someone is; the configured GitHub user ids decide, on every
+The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth,
+through an OAuth App and without scopes, says who someone is and nothing
+more; the configured GitHub user ids decide, on every
 request, whether they may look and act. It is a single-page app
 (`dashboard/`, Svelte and Vite), built to static files that
 `crates/henk/build.rs` embeds; `dashboard/app` serves them from memory,

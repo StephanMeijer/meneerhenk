@@ -616,11 +616,16 @@ People sign in with GitHub, and only the GitHub user ids in
 `allowed_github_ids` get in. The id is checked on every request, so taking an
 id off the list ends that access at once. To set it up:
 1. Create a GitHub OAuth App (Settings, Developer settings, OAuth Apps).
+   Not Henk's GitHub App: signing in through a GitHub App makes GitHub ask
+   people to let it act on their behalf, while the dashboard only needs to
+   know who they are. `henk doctor` and the server's log warn when the client
+   id is a GitHub App's.
 2. Set its callback URL to `{public_base_url}/dashboard/auth/callback`.
 3. Put its client id and secret in the two variables, and a random key in
    the third.
 
-GitHub's token is used once, to read who signed in, and is not kept. The
+The sign-in asks for no scope, and GitHub's token is used once, to read who
+signed in, and is not kept. The
 session is a signed `HttpOnly` cookie scoped to `/dashboard`, and `Secure`
 when the public URL is https. The app shows everything as text, since the
 text in it is other people's words; its pages allow no inline script or
