@@ -86,6 +86,7 @@ macro_rules! for_each_scenario {
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             the_newest_review_of_each_pull_request_is_read_for_resuming,
+            a_resume_is_claimed_once,
             dropping_running_lanes_leaves_finished_ones_alone,
             lanes_findings_and_events_attach_to_a_run,
             events_and_outcomes_round_trip,
@@ -1512,6 +1513,59 @@ async fn the_newest_review_of_each_pull_request_is_read_for_resuming(store: &dyn
     assert!(
         store.latest_reviews(later).await.unwrap().is_empty(),
         "reviews that started before the window are left out"
+    );
+}
+
+/// #160: of two processes that read the same interrupted review, one
+/// claims its resume. The claim needs the run failed with the error it was
+/// read with, and changes that error, so a second claim fails.
+async fn a_resume_is_claimed_once(store: &dyn RunStore) {
+    store.create_run(&new_run("r-running")).await.unwrap();
+    store.create_run(&new_run("r-stopped")).await.unwrap();
+    store
+        .finish_run(
+            &id("r-stopped"),
+            RunStatus::Failed,
+            None,
+            Some("interrupted"),
+        )
+        .await
+        .unwrap();
+    let resumed = "interrupted, resumed after a restart";
+
+    assert!(
+        !store
+            .claim_resume(&id("r-running"), "interrupted", resumed)
+            .await
+            .unwrap(),
+        "a running run is not claimed"
+    );
+    assert!(
+        !store
+            .claim_resume(&id("r-stopped"), "boom", resumed)
+            .await
+            .unwrap(),
+        "a run that ended with another error is not claimed"
+    );
+    assert!(
+        store
+            .claim_resume(&id("r-stopped"), "interrupted", resumed)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .claim_resume(&id("r-stopped"), "interrupted", resumed)
+            .await
+            .unwrap(),
+        "a second claim fails"
+    );
+    let record = store.run(&id("r-stopped")).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error.as_deref(), Some(resumed));
+    assert_eq!(
+        store.run(&id("r-running")).await.unwrap().unwrap().status,
+        RunStatus::Running
     );
 }
 

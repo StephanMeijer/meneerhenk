@@ -232,6 +232,26 @@ impl RunStore for SqliteStore {
         })
     }
 
+    async fn claim_resume(
+        &self,
+        run: &RunId,
+        interrupted: &str,
+        resumed: &str,
+    ) -> Result<bool, StoreError> {
+        self.with(|c| {
+            let changed = c.execute(
+                "UPDATE runs SET error = ?4 WHERE id = ?1 AND status = ?2 AND error = ?3",
+                params![
+                    run.as_str(),
+                    RunStatus::Failed.as_str(),
+                    interrupted,
+                    resumed
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
         let at = |time: Option<OffsetDateTime>| {
             time.map_or_else(now, |t| t.format(&Rfc3339).unwrap_or_else(|_| now()))

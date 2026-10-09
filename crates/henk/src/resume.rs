@@ -60,6 +60,36 @@ pub(crate) async fn interrupted_reviews(app: &App, since: OffsetDateTime) -> Vec
     }
 }
 
+/// What an interrupted run's error becomes once a process claimed its
+/// resume: it says so, and no longer reads as interrupted.
+fn resumed_error(interrupted: &str) -> String {
+    format!("{interrupted}, resumed after a restart")
+}
+
+/// Claims the resume of `run` in the store, so that of two processes on
+/// one database that read it as interrupted, one resumes it (#160).
+/// `false` when another did, or when the claim could not be written.
+async fn claim(app: &App, run: &RunRecord) -> bool {
+    let Some(interrupted) = run.error.as_deref() else {
+        return false;
+    };
+    match app
+        .store
+        .claim_resume(&run.id, interrupted, &resumed_error(interrupted))
+        .await
+    {
+        Ok(true) => true,
+        Ok(false) => {
+            info!(run = %run.id, "another process resumed this review");
+            false
+        }
+        Err(error) => {
+            warn!(%error, run = %run.id, "could not claim the resume of an interrupted review");
+            false
+        }
+    }
+}
+
 /// The request that resumes `run`: a review of its pull request's current
 /// head, for whoever asked for the interrupted one.
 pub(crate) fn resume_event(run: &RunRecord) -> Option<Event> {
@@ -147,6 +177,9 @@ impl Resumer {
             let Some(event) = resume_event(&run) else {
                 continue;
             };
+            if !claim(app, &run).await {
+                continue;
+            }
             info!(run = %run.id, repo = %run.repo, number = run.target, event = %event.id, "resuming a review a restart interrupted");
             self.bus.publish(event);
             asked += 1;
@@ -162,6 +195,7 @@ impl Resumer {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use std::ops::Not;
     use std::sync::Mutex;
 
     use henk_domain::allowlist::Platform;
@@ -447,6 +481,42 @@ github_owners = ["docspec"]
         assert_eq!(ids(&found), ["r-stopped"]);
     }
 
+    /// #160: two processes on one database read the same interrupted
+    /// review; the store's claim lets one of them resume it, and the run
+    /// says it was resumed.
+    #[tokio::test]
+    async fn of_two_resumers_on_one_store_one_resumes_a_review() {
+        let app = app().await;
+        let (bus, heard) = bus();
+        run(&app, "r-shared", RunKind::Review, 1, INTERRUPTED).await;
+        let since = an_hour_ago();
+        let read_by_a = interrupted_reviews(&app, since).await;
+        let read_by_b = interrupted_reviews(&app, since).await;
+        assert_eq!(ids(&read_by_b), ["r-shared"], "both read it");
+
+        let mut a = Resumer::new(Arc::clone(&bus), Duration::from_hours(1));
+        let mut b = Resumer::new(bus, Duration::from_hours(1));
+        assert_eq!(a.after_pass(&app, Instant::now()).await, 1);
+        assert_eq!(b.after_pass(&app, Instant::now()).await, 0);
+        assert!(claim(&app, read_by_a.first().unwrap()).await.not());
+
+        until("the resume is delivered", || {
+            heard.0.lock().unwrap().len() == 1
+        })
+        .await;
+        let record = app
+            .store
+            .run(&RunId::parse("r-shared").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.error.as_deref(),
+            Some("interrupted, resumed after a restart")
+        );
+        assert!(interrupted_reviews(&app, since).await.is_empty());
+    }
+
     /// #160: once Henk is told to stop, the resumer asks for nothing,
     /// though a pass is due and a review ended interrupted: those are this
     /// process's own reviews ending in its shutdown grace.
@@ -497,6 +567,10 @@ github_owners = ["docspec"]
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(record.error.as_deref(), Some(REAPED));
+        assert_eq!(
+            record.error.as_deref(),
+            Some(resumed_error(REAPED).as_str()),
+            "reaped, then claimed for the resume"
+        );
     }
 }

@@ -404,6 +404,15 @@ impl RunStore for Announcing {
         self.inner.latest_reviews(since).await
     }
 
+    async fn claim_resume(
+        &self,
+        run: &RunId,
+        interrupted: &str,
+        resumed: &str,
+    ) -> Result<bool, StoreError> {
+        self.inner.claim_resume(run, interrupted, resumed).await
+    }
+
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.drop_running_lanes(run, reason).await?;
@@ -830,6 +839,14 @@ mod tests {
             since: OffsetDateTime,
         ) -> Result<Vec<RunRecord>, StoreError> {
             self.inner.latest_reviews(since).await
+        }
+        async fn claim_resume(
+            &self,
+            run: &RunId,
+            interrupted: &str,
+            resumed: &str,
+        ) -> Result<bool, StoreError> {
+            self.inner.claim_resume(run, interrupted, resumed).await
         }
         async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
             self.inner.drop_running_lanes(run, reason).await

@@ -470,6 +470,28 @@ impl RunStore for PgStore {
             .collect()
     }
 
+    async fn claim_resume(
+        &self,
+        run: &RunId,
+        interrupted: &str,
+        resumed: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE runs SET error = $4 WHERE id = $1 AND status = $2 AND error = $3",
+                &[
+                    &run.as_str(),
+                    &RunStatus::Failed.as_str(),
+                    &interrupted,
+                    &resumed,
+                ],
+            )
+            .await?;
+        Ok(changed == 1)
+    }
+
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         self.client()
             .await?
