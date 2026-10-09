@@ -19,6 +19,9 @@ use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
 use crate::review::{ReviewRequest, report_cancelled_while_queued, run_review};
 
+/// One pull or merge request, as the coordinator tells them apart. The
+/// repository path is lowercase: neither platform's paths are
+/// case-sensitive, and the allowlist compares them the same way (#57).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     platform: Platform,
@@ -30,7 +33,7 @@ impl Key {
     fn of(target: &ReviewTarget) -> Self {
         Self {
             platform: target.platform(),
-            repo: target.repo.path(),
+            repo: target.repo.path().to_ascii_lowercase(),
             number: target.number,
         }
     }
@@ -560,5 +563,42 @@ impl Coordinator {
             }
         });
         Ok(run)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use henk_domain::allowlist::RepoRef;
+
+    use super::*;
+
+    fn target(platform: Platform, path: &str, number: u64) -> ReviewTarget {
+        ReviewTarget {
+            repo: RepoRef::parse(platform, path).unwrap(),
+            number,
+        }
+    }
+
+    #[test]
+    fn a_path_differing_only_in_case_is_the_same_pull_request() {
+        let key = Key::of(&target(Platform::GitHub, "O/R", 7));
+        assert_eq!(key, Key::of(&target(Platform::GitHub, "o/r", 7)));
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitHub, "O/S", 7)),
+            "another repository"
+        );
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitHub, "o/r", 8)),
+            "another number"
+        );
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitLab, "o/r", 7)),
+            "another platform"
+        );
     }
 }
