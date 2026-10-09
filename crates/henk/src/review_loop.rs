@@ -21,6 +21,7 @@ use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::address::push_refusal;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
+use henk_domain::review_loop::LoopVerdict;
 use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Profile};
 use henk_llm::ChatMessage;
@@ -37,15 +38,15 @@ use crate::cancel::is_cancelled;
 use crate::checks::{describe, run_checks};
 use crate::config::LoopConfig;
 use crate::git::{Checkout, ScratchDir, git_command};
+use crate::loop_tools::{
+    FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding, finding_text,
+    fixer_continuation, reviewer_continuation, verdict_text,
+};
 use crate::push::{Pusher, stop_if_cancelled};
 use crate::review_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::stages;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
-
-/// What the reviewer ends a round with when it found nothing (interim, until
-/// `finish_round` in #285).
-const NO_FINDINGS: &str = "NO FINDINGS";
 
 /// The most of a pushed commit's patch the reviewer is shown in its resume
 /// message; the rest it reads in the workspace.
@@ -67,6 +68,8 @@ pub(crate) struct LoopReport {
     pub(crate) results: Vec<LaneResult>,
     /// One line for the summary: rounds, commits pushed and why it stopped.
     pub(crate) line: String,
+    /// The findings that ended unsettled or won't fix: what still stands.
+    pub(crate) open: usize,
 }
 
 /// Runs the loop on `diff`. A loop that cannot get a workspace, or may not
@@ -138,36 +141,7 @@ pub(crate) async fn run_loop(
     rounds.reviewer.finish(store, run).await;
     rounds.fixer.finish(store, run).await;
     workspace.close().await;
-    let stop = ended?;
-
-    let pushed = rounds.pushed.len();
-    let line = format!(
-        "The review loop ran {} {}, pushed {pushed} {} and stopped: {stop}.",
-        rounds.round,
-        if rounds.round == 1 { "round" } else { "rounds" },
-        if pushed == 1 { "commit" } else { "commits" },
-    );
-    info!(run = %run, rounds = rounds.round, pushed, %stop, "review loop ended");
-    let _ = store.event(run, "info", &line).await;
-    let state = if rounds.failed {
-        StageState::Failed
-    } else {
-        StageState::Done
-    };
-    stages::mark(store, run, Stage::Lanes, state, &line).await;
-    let outcome = if rounds.failed {
-        LaneOutcome::Dropped
-    } else {
-        LaneOutcome::Finished
-    };
-    let results = ["fixer", "reviewer"]
-        .into_iter()
-        .map(|name| LaneResult {
-            lane: LaneName::new(name),
-            outcome,
-        })
-        .collect();
-    Ok(LoopReport { results, line })
+    rounds.conclude(ended).await
 }
 
 /// Clones the pull request at its head, imports it into a workspace that
@@ -212,6 +186,7 @@ struct Rounds<'a> {
     config: &'a LoopConfig,
     workspace: Arc<dyn Workspace>,
     fixing: Arc<AddressContext>,
+    handoff: Arc<Handoff>,
     reviewer: ResumableSession,
     fixer: ResumableSession,
     writer: Arc<dyn AddressWriter>,
@@ -255,22 +230,15 @@ impl<'a> Rounds<'a> {
             ..AgentConfig::default()
         };
 
-        // The reviewer reads the diff and the workspace, and runs commands
-        // when the backend allows it; what it changes is never exported.
-        let reviewing = for_lane(Arc::clone(workspace), EnvLane::Review);
-        let files = Arc::new(DiffFiles::new(Arc::clone(diff)));
-        let mut reviewer_tools = ToolSet::new();
-        reviewer_tools.add(ListChangedFiles(Arc::clone(&files)));
-        reviewer_tools.add(GetFileDiff(files));
-        crate::code_tools::add(&mut reviewer_tools, &reviewing);
-        if bash {
-            crate::code_tools::add_bash(
-                &mut reviewer_tools,
-                &reviewing,
-                command_limit,
-                crate::code_tools::BashUse::Review,
-            );
-        }
+        let reviewer_model = app.model(&config.reviewer)?;
+        let handoff = Arc::new(Handoff {
+            run: on.run.clone(),
+            store: Arc::clone(&app.store),
+            reviewer_model: reviewer_model.model().to_owned(),
+            state: Mutex::new(HandoffState::default()),
+        });
+        let reviewer_tools =
+            reviewer_tools(workspace, diff, &handoff, bash.then_some(command_limit));
         let reviewer_system = format!(
             "{}\n\n{}",
             prompts::PERSONA,
@@ -306,6 +274,9 @@ impl<'a> Rounds<'a> {
         if bash {
             fixer_system = format!("{fixer_system}\n\n{}", prompts::ADDRESS_BASH);
         }
+        let mut fixer_tools = edit_tools(&fixing);
+        fixer_tools.add(ListFindings(Arc::clone(&handoff)));
+        fixer_tools.add(GiveVerdict(Arc::clone(&handoff)));
 
         Ok(Self {
             on,
@@ -313,25 +284,94 @@ impl<'a> Rounds<'a> {
             workspace: Arc::clone(workspace),
             reviewer: ResumableSession::new(
                 "reviewer",
-                app.model(&config.reviewer)?,
+                reviewer_model,
                 reviewer_system,
                 reviewer_tools,
                 limits,
-            ),
+            )
+            .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
             fixer: ResumableSession::new(
                 "fixer",
                 app.model(&config.fixer)?,
                 fixer_system,
-                edit_tools(&fixing),
+                fixer_tools,
                 limits,
-            ),
+            )
+            .with_continuation(fixer_continuation(Arc::clone(&handoff))),
             fixing,
+            handoff,
             writer,
             credential,
             requester: format!("discord:{}", address.requester_id),
             round: 0,
             pushed: Vec::new(),
             failed: false,
+        })
+    }
+
+    /// Gives every finding its one final verdict, whatever ended the loop
+    /// (#285), and sums the loop up for the review.
+    async fn conclude(&self, ended: anyhow::Result<String>) -> anyhow::Result<LoopReport> {
+        let (store, run) = (&*self.on.app.store, self.on.run);
+        // Every finding ends with one verdict, whatever ended the loop (#285).
+        let why = match &ended {
+            Ok(stop) => format!("the loop stopped: {stop}"),
+            Err(error) => format!("the loop stopped: {error:#}"),
+        };
+        let settled = self
+            .handoff
+            .with_ledger(|ledger| {
+                let mut ids = ledger.unpushed(&why);
+                ids.extend(ledger.close_all(&why));
+                ids
+            })
+            .unwrap_or_default();
+        self.handoff.record_verdicts(&settled).await;
+        let stop = ended?;
+        let ledger = self.handoff.ledger();
+        let open = ledger
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.verdict,
+                    Some(LoopVerdict::Unsettled { .. } | LoopVerdict::WontFix { .. })
+                )
+            })
+            .count();
+
+        let pushed = self.pushed.len();
+        let found = ledger.iter().count();
+        let line = format!(
+            "The review loop ran {} {}, settled {found} {}, pushed {pushed} {} and stopped: {stop}.",
+            self.round,
+            if self.round == 1 { "round" } else { "rounds" },
+            if found == 1 { "finding" } else { "findings" },
+            if pushed == 1 { "commit" } else { "commits" },
+        );
+        info!(run = %run, rounds = self.round, pushed, %stop, "review loop ended");
+        let _ = store.event(run, "info", &line).await;
+        let state = if self.failed {
+            StageState::Failed
+        } else {
+            StageState::Done
+        };
+        stages::mark(store, run, Stage::Lanes, state, &line).await;
+        let outcome = if self.failed {
+            LaneOutcome::Dropped
+        } else {
+            LaneOutcome::Finished
+        };
+        let results = ["fixer", "reviewer"]
+            .into_iter()
+            .map(|name| LaneResult {
+                lane: LaneName::new(name),
+                outcome,
+            })
+            .collect();
+        Ok(LoopReport {
+            results,
+            line,
+            open,
         })
     }
 
@@ -347,6 +387,7 @@ impl<'a> Rounds<'a> {
         while self.round < self.config.max_rounds {
             self.round += 1;
             let round = self.round;
+            self.handoff.start_round(round);
             let doing = format!("round {round}: reviewer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
             let review = self
@@ -356,7 +397,9 @@ impl<'a> Rounds<'a> {
             if let Some(stop) = self.broke_off("reviewer", &review) {
                 return Ok(stop);
             }
-            if review.final_text.trim().eq_ignore_ascii_case(NO_FINDINGS) {
+            let ledger = self.handoff.ledger();
+            let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
+            if findings.is_empty() {
                 return Ok("converged, the reviewer found nothing more".to_owned());
             }
             if !self
@@ -372,25 +415,53 @@ impl<'a> Rounds<'a> {
 
             let doing = format!("round {round}: fixer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
-            let findings = format!(
-                "Round {round}. The reviewer's findings, as data:\n\n{}",
-                review.final_text.trim()
+            let handed = format!(
+                "Round {round}. The reviewer's findings, as data:\n\n{}\n\nCheck each against the code, fix the ones that hold, and give every one its verdict with give_verdict.",
+                findings.join("\n\n")
             );
             let fix = self
                 .fixer
-                .resume(store, run, ChatMessage::user(findings), cancel.clone())
+                .resume(store, run, ChatMessage::user(handed), cancel.clone())
                 .await;
             if let Some(stop) = self.broke_off("fixer", &fix) {
                 return Ok(stop);
             }
-            let report = fix.final_text.trim();
-            message = match self.push_round(&mut facts, cancel).await? {
+            let silent = self
+                .handoff
+                .with_ledger(|ledger| ledger.close_all("the fixer gave no verdict"))
+                .unwrap_or_default();
+            self.handoff.record_verdicts(&silent).await;
+            let pushed = self.push_round(&mut facts, cancel).await?;
+            let unpushed = match &pushed {
+                Pushed::Nothing => "marked fixed, but nothing changed in the workspace",
+                Pushed::Stopped(why) => why.as_str(),
+                Pushed::Commit { .. } => "",
+            };
+            let ids: Vec<_> = self
+                .handoff
+                .ledger()
+                .reported_in(round)
+                .map(|f| f.id)
+                .collect();
+            if !unpushed.is_empty() {
+                self.handoff.with_ledger(|ledger| ledger.unpushed(unpushed));
+            }
+            self.handoff.record_verdicts(&ids).await;
+            let verdicts: Vec<String> = self
+                .handoff
+                .ledger()
+                .reported_in(round)
+                .map(verdict_text)
+                .collect();
+            let verdicts = verdicts.join("\n");
+            let contest = "To contest a rejection, once, report the finding again with new evidence and name it in reopens.";
+            message = match pushed {
                 Pushed::Nothing => format!(
-                    "Round {}. The fixer pushed nothing this round. Their report, as data:\n\n{report}\n\nReview again.",
+                    "Round {}. The fixer pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                     round + 1
                 ),
                 Pushed::Commit { sha, patch } => format!(
-                    "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir report, as data:\n\n{report}\n\nReview again.",
+                    "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                     round + 1
                 ),
                 Pushed::Stopped(why) => return Ok(why),
@@ -498,6 +569,7 @@ impl<'a> Rounds<'a> {
         if let Ok(mut state) = self.fixing.state.lock() {
             state.written.clear();
         }
+        self.handoff.with_ledger(|ledger| ledger.pushed(&sha));
         facts.head = CommitSha::parse(&sha).context("the pushed commit")?;
         let short = facts.head.short().to_owned();
         self.pushed.push(sha);
@@ -511,6 +583,34 @@ impl<'a> Rounds<'a> {
         .await;
         Ok(Pushed::Commit { sha: short, patch })
     }
+}
+
+/// The reviewer's tools: the diff, the workspace to read and, when the
+/// backend allows it (`bash` is its command limit), to run commands in,
+/// and the handoff. What it changes in the workspace is never exported.
+fn reviewer_tools(
+    workspace: &Arc<dyn Workspace>,
+    diff: &Arc<ReviewDiff>,
+    handoff: &Arc<Handoff>,
+    bash: Option<Duration>,
+) -> ToolSet {
+    let reviewing = for_lane(Arc::clone(workspace), EnvLane::Review);
+    let files = Arc::new(DiffFiles::new(Arc::clone(diff)));
+    let mut tools = ToolSet::new();
+    tools.add(ListChangedFiles(Arc::clone(&files)));
+    tools.add(GetFileDiff(files));
+    crate::code_tools::add(&mut tools, &reviewing);
+    if let Some(limit) = bash {
+        crate::code_tools::add_bash(
+            &mut tools,
+            &reviewing,
+            limit,
+            crate::code_tools::BashUse::Review,
+        );
+    }
+    tools.add(ReportFinding(Arc::clone(handoff)));
+    tools.add(FinishRound(Arc::clone(handoff)));
+    tools
 }
 
 /// What one round's push did.

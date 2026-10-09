@@ -22,6 +22,7 @@ pub mod plan;
 pub mod queue;
 pub mod repeat;
 pub mod review;
+pub mod review_loop;
 pub mod run;
 pub mod scope;
 pub mod skill;

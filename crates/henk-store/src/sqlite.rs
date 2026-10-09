@@ -1440,7 +1440,10 @@ const DRAFT_FILTER: &str = concat!(
     instant_of!("d.created_at"),
     " >= ?4) AND (?5 IS NULL OR ",
     instant_of!("d.created_at"),
-    " < ?5)"
+    " < ?5)",
+    // A review loop's findings are the fixer's to judge, not the
+    // fact-check's (#285).
+    " AND d.kind <> 'loop_finding'"
 );
 
 /// One count per verdict, and the waiting ones, in [`DraftRates`] order.

@@ -26,6 +26,7 @@ mod listeners;
 mod live;
 mod live_session;
 mod liveness;
+mod loop_tools;
 mod pages;
 mod plan;
 mod plan_tools;

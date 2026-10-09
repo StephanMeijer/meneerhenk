@@ -424,7 +424,9 @@ async fn report_cancelled(
         withdrawn: None,
     }
     .attach(&crate::cancel::cancelled_notice(by, link, false));
-    if let Err(post_error) = writer.post_comment(target, &body).await {
+    if posts_comments(app)
+        && let Err(post_error) = writer.post_comment(target, &body).await
+    {
         error!(%post_error, "could not post that the review was cancelled");
     }
     let outcome = ReviewOutcome::cancelled(commit.clone());
@@ -537,7 +539,9 @@ pub async fn report_cancelled_while_queued(
                 withdrawn: None,
             }
             .attach(&crate::cancel::cancelled_notice(by, &link, false));
-            if let Err(post_error) = writer.post_comment(&request.target, &body).await {
+            if posts_comments(app)
+                && let Err(post_error) = writer.post_comment(&request.target, &body).await
+            {
                 error!(%post_error, "could not post that the review was cancelled");
             }
             close_queued_as_cancelled(&writer, request, &link).await;
@@ -645,7 +649,9 @@ async fn report_failure(
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
     ));
-    if let Err(post_error) = writer.post_comment(target, &body).await {
+    if posts_comments(app)
+        && let Err(post_error) = writer.post_comment(target, &body).await
+    {
         error!(%post_error, "could not post the failure comment");
     }
     if let Err(finish_error) = writer
@@ -675,6 +681,9 @@ async fn review_body(
         link,
         ..
     } = review;
+    if review.app.settings.review.r#loop.is_some() {
+        return loop_body(review, base_ref, cancel).await;
+    }
 
     // Seed the shared registry from what is already on the pull request.
     let existing = writer
@@ -702,37 +711,15 @@ async fn review_body(
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
-    let mut loop_line = None;
     let results = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
         Vec::new()
-    } else if review.app.settings.review.r#loop.is_some() {
-        // A reviewer and a fixer take turns instead of the lanes (#284).
-        let on = crate::review_loop::LoopTarget {
-            app: review.app,
-            target,
-            commit,
-            run,
-        };
-        let report = crate::review_loop::run_loop(on, diff, &cancel).await?;
-        loop_line = Some(report.line);
-        report.results
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
     };
-    if cancel.is_cancelled() {
-        if let Some(by) = review.app.cancels.cancelled_by(review.run) {
-            return Err(CancelledBy(by).into());
-        }
-        // A shutdown cancels every review; superseding cancels only one.
-        return Err(if review.app.shutdown.is_cancelled() {
-            Interrupted.into()
-        } else {
-            Superseded.into()
-        });
-    }
+    stop_if_ended(review, &cancel)?;
 
     // The count comes from the platform, not from memory (§3.3).
     let after = writer
@@ -754,10 +741,7 @@ async fn review_body(
 
     fold_outdated(writer, target, &after).await;
 
-    let mut summary_text = outcome.summary();
-    if let Some(line) = loop_line {
-        summary_text = format!("{summary_text} {line}");
-    }
+    let summary_text = outcome.summary();
     let body = Marker {
         run: run.clone(),
         model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
@@ -775,6 +759,81 @@ async fn review_body(
     let published = published_line(store, run).await;
     stages::mark(store, run, Stage::Publish, StageState::Done, published).await;
     Ok((outcome, summary_text))
+}
+
+/// The error a cancelled review ends with: who cancelled it, a shutdown, or
+/// a newer review that superseded it.
+fn stop_if_ended(review: ReviewRun<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
+    if !cancel.is_cancelled() {
+        return Ok(());
+    }
+    if let Some(by) = review.app.cancels.cancelled_by(review.run) {
+        return Err(CancelledBy(by).into());
+    }
+    // A shutdown cancels every review; superseding cancels only one.
+    Err(if review.app.shutdown.is_cancelled() {
+        Interrupted.into()
+    } else {
+        Superseded.into()
+    })
+}
+
+/// A review as a reviewer↔fixer loop (#284, #285): the reviewer's findings
+/// go to the fixer, never to the pull request. Nothing is posted; what the
+/// loop did is on the run, and its summary goes to the check.
+async fn loop_body(
+    review: ReviewRun<'_>,
+    base_ref: &str,
+    cancel: CancellationToken,
+) -> anyhow::Result<(ReviewOutcome, String)> {
+    let ReviewRun {
+        app,
+        target,
+        commit,
+        run,
+        ..
+    } = review;
+    let store = &*app.store;
+    stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
+    let diff = fetch_diff(review, base_ref).await?;
+    let nothing_to_review = diff.is_empty();
+    let (results, open_findings, line) = if nothing_to_review {
+        for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
+            stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
+        }
+        (Vec::new(), 0, None)
+    } else {
+        let on = crate::review_loop::LoopTarget {
+            app,
+            target,
+            commit,
+            run,
+        };
+        let report = crate::review_loop::run_loop(on, diff, &cancel).await?;
+        (report.results, report.open, Some(report.line))
+    };
+    stop_if_ended(review, &cancel)?;
+    let outcome = ReviewOutcome {
+        commit: commit.clone(),
+        lanes: results,
+        open_findings,
+        nothing_to_review,
+        stopped: None,
+        not_reviewed: None,
+    };
+    let mut summary_text = outcome.summary();
+    if let Some(line) = line {
+        summary_text = format!("{summary_text} {line}");
+    }
+    let skipped = "a review loop posts nothing on the pull request";
+    stages::mark(store, run, Stage::Publish, StageState::Skipped, skipped).await;
+    Ok((outcome, summary_text))
+}
+
+/// Whether a review posts comments on the pull request: not as a review
+/// loop, whose findings go to the fixer and whose record is the run (#285).
+fn posts_comments(app: &App) -> bool {
+    app.settings.review.r#loop.is_none()
 }
 
 /// The review's request and queue stages, from the coordinator's submit time.
@@ -4201,25 +4260,108 @@ lanes = [{ name = "lane-a", model = "m" }]
             .collect()
     }
 
+    fn report(
+        line: u32,
+        claim: &str,
+        reopens: Option<&str>,
+    ) -> Result<Completion, henk_llm::LlmError> {
+        let mut args = serde_json::json!({
+            "path": "src/a.rs",
+            "line": line,
+            "claim": claim,
+            "why": "the caller divides by it",
+            "fix": "make it 3",
+        });
+        if let Some(reopens) = reopens {
+            args["reopens"] = serde_json::json!(reopens);
+        }
+        call("report_finding", args)
+    }
+
+    fn finish_round() -> Result<Completion, henk_llm::LlmError> {
+        call("finish_round", serde_json::json!({"covered": ["src/a.rs"]}))
+    }
+
+    fn judge(finding: &str, verdict: &str, reason: &str) -> Result<Completion, henk_llm::LlmError> {
+        call(
+            "give_verdict",
+            serde_json::json!({"finding": finding, "verdict": verdict, "reason": reason}),
+        )
+    }
+
+    /// The loop's findings on the run: (draft, verdict, checker, reason,
+    /// commit, contests).
+    async fn loop_findings(
+        app: &App,
+        run: &RunId,
+    ) -> Vec<(String, String, String, String, String, String)> {
+        app.store
+            .drafts(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| {
+                assert_eq!(d.kind, henk_store::LOOP_FINDING_KIND);
+                let decision = d.decision.unwrap();
+                (
+                    d.draft,
+                    decision.verdict.as_str().to_owned(),
+                    decision.checker,
+                    decision.reason,
+                    decision.comment_id,
+                    d.target,
+                )
+            })
+            .collect()
+    }
+
+    /// Nothing at all on the pull request: no comment, line comment,
+    /// rewrite or resolved thread (#285).
+    fn assert_nothing_posted(writer: &FakeWriter) {
+        assert!(writer.replies.lock().unwrap().is_empty(), "comments");
+        assert!(writer.posts.lock().unwrap().is_empty(), "line comments");
+        assert!(writer.updates.lock().unwrap().is_empty(), "rewrites");
+        assert!(
+            writer.resolved.lock().unwrap().is_empty(),
+            "resolved threads"
+        );
+    }
+
     #[tokio::test]
-    async fn a_reviewer_and_a_fixer_resume_their_conversations_round_after_round() {
+    async fn the_fixer_gives_each_finding_one_verdict_and_nothing_is_posted() {
         let (f, reviewer, fixer, remote) = looping(
             "review-loop",
             ScriptedClient::new(
                 "r",
                 [
-                    say("src/a.rs:2: x must be 3, the caller divides by it."),
-                    say("src/a.rs:2: x must be 4 now that the caller doubles it."),
-                    say("NO FINDINGS"),
+                    // Round 1: two findings.
+                    report(2, "x must be 3", None),
+                    report(1, "main must return a value", None),
+                    finish_round(),
+                    say("Done for now."),
+                    // Round 2: the rejection of f2, contested.
+                    report(
+                        1,
+                        "main must return a value: the exit code is read",
+                        Some("f2"),
+                    ),
+                    finish_round(),
+                    say("Done for now."),
+                    // Round 3: f2 again is refused; nothing new.
+                    report(1, "main must return a value", Some("f2")),
+                    finish_round(),
+                    say("Nothing more."),
                 ],
             ),
             ScriptedClient::new(
                 "f",
                 [
                     edit("let x = 1;", "let x = 3;"),
-                    say("fixed: x is 3."),
-                    edit("let x = 3;", "let x = 4;"),
-                    say("fixed: x is 4."),
+                    judge("f1", "fixed", "x is 3 now."),
+                    judge("f2", "rejected", "main returns (), see src/a.rs:1."),
+                    say("Both settled."),
+                    judge("f3", "rejected", "nothing reads an exit code here."),
+                    say("Settled."),
                 ],
             ),
             Arc::new(crate::workspace::host::HostProvider),
@@ -4230,55 +4372,90 @@ lanes = [{ name = "lane-a", model = "m" }]
             .await
             .unwrap();
 
-        // Each second turn goes on from the first: one conversation each.
-        let asked = reviewer.requests();
-        assert_eq!(asked.len(), 3);
-        let second = texts(&asked[1]);
-        assert_eq!(
-            second[1],
-            "src/a.rs:2: x must be 3, the caller divides by it."
-        );
-        assert!(second[2].contains("fixed: x is 3."), "{second:?}");
-        assert!(
-            second[2].contains("+    let x = 3;"),
-            "the pushed patch: {second:?}"
-        );
-        assert_eq!(texts(&asked[2]).len(), 5, "three rounds, one conversation");
-        let fixing = fixer.requests();
-        assert_eq!(fixing.len(), 4);
-        let again = texts(&fixing[2]);
-        assert!(again[0].contains("x must be 3"), "{again:?}");
-        assert!(again.iter().any(|t| t == "fixed: x is 3."), "{again:?}");
-        assert!(again.last().unwrap().contains("x must be 4"), "{again:?}");
-
-        // Two commits on the pull request's branch, both Henk's own.
+        // One commit, for f1; the rejections changed nothing.
         let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
-        assert!(log.contains("review loop round 2"), "{log}");
+        assert!(log.contains("review loop round 1"), "{log}");
         assert!(f.app.own_pushes.contains(&head));
-        let checkout = crate::git::Checkout::clone_at(
-            crate::git::ScratchDir::new("review-loop-after").unwrap(),
-            &remote.path().to_string_lossy(),
-            "feature",
-            &CommitSha::parse(&head).unwrap(),
-            None,
-        )
-        .await
-        .unwrap();
-        let file = std::fs::read_to_string(checkout.path().join("src/a.rs")).unwrap();
-        assert!(file.contains("let x = 4;"), "{file}");
+        let findings = loop_findings(&f.app, &run).await;
+        let fixed_why = "x is 3 now.".to_owned();
+        assert_eq!(
+            findings,
+            [
+                (
+                    "f1".into(),
+                    "fixed".into(),
+                    "fixer".into(),
+                    fixed_why,
+                    head.clone(),
+                    String::new()
+                ),
+                (
+                    "f2".into(),
+                    "rejected".into(),
+                    "fixer".into(),
+                    "main returns (), see src/a.rs:1.".into(),
+                    String::new(),
+                    String::new()
+                ),
+                (
+                    "f3".into(),
+                    "rejected".into(),
+                    "fixer".into(),
+                    "nothing reads an exit code here.".into(),
+                    String::new(),
+                    "f2".into()
+                ),
+            ],
+            "one verdict each, with its reason"
+        );
+        assert_nothing_posted(&f.writer);
 
-        // One run, with a lane row and a transcript for each session.
+        // Each side heard the other in its own conversation.
+        let asked = reviewer.requests();
+        assert_eq!(asked.len(), 10);
+        let round_two = texts(&asked[4]);
+        let verdicts = round_two.last().unwrap();
+        assert!(
+            verdicts.contains("f1 at src/a.rs:2 (x must be 3): fixed in"),
+            "{verdicts}"
+        );
+        assert!(
+            verdicts
+                .contains("f2 at src/a.rs:1 (main must return a value): rejected: main returns ()"),
+            "{verdicts}"
+        );
+        assert!(
+            verdicts.contains("+    let x = 3;"),
+            "the pushed patch: {verdicts}"
+        );
+        // The tool result of round 3's second contest of f2.
+        let refused = serde_json::to_string(asked[8].messages.last().unwrap()).unwrap();
+        assert!(
+            refused.contains("f2 was rejected twice and is closed"),
+            "{refused}"
+        );
+        let fixing = fixer.requests();
+        assert_eq!(fixing.len(), 6);
+        let second = texts(&fixing[4]);
+        assert!(second.iter().any(|t| t == "Both settled."), "{second:?}");
+        assert!(
+            second.last().unwrap().contains("f3 at src/a.rs:1"),
+            "{second:?}"
+        );
+
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished);
         let summary = report.summary.unwrap();
         assert!(
-            summary.contains("ran 3 rounds, pushed 2 commits and stopped: converged"),
+            summary.contains(
+                "ran 3 rounds, settled 3 findings, pushed 1 commit and stopped: converged"
+            ),
             "{summary}"
         );
+        assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 0);
         let lanes = f.app.store.lanes(&run).await.unwrap();
         let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["fixer", "reviewer"]);
-        assert_eq!(lanes[1].turns, 3);
         for session in ["reviewer", "fixer"] {
             assert!(
                 f.app
@@ -4298,6 +4475,46 @@ lanes = [{ name = "lane-a", model = "m" }]
             .unwrap();
         assert_eq!(runs, 1, "the loop is one run");
         assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_finding_the_fixer_gives_no_verdict_ends_unsettled() {
+        let (f, _, fixer, remote) = looping(
+            "review-loop-silent",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                    finish_round(),
+                    say("Nothing more."),
+                ],
+            ),
+            ScriptedClient::new("f", [say("Looked."), say("Still looking."), say("Done.")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-silent").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixer.requests().len(),
+            3,
+            "nudged twice, then settled for it"
+        );
+        let findings = loop_findings(&f.app, &run).await;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            (findings[0].1.as_str(), findings[0].3.as_str()),
+            ("unsettled", "the fixer gave no verdict")
+        );
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 1);
+        assert_nothing_posted(&f.writer);
     }
 
     #[tokio::test]
