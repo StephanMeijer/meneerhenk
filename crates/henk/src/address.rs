@@ -13,14 +13,12 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::address::{ThreadOutcome, push_refusal};
-use henk_domain::allowlist::Platform;
-use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, CommitIdentity, GitCredential, OpenThread};
+use henk_platform::address::{AddressWriter, GitCredential, OpenThread};
 use henk_session::{SessionSpec, model_id, run_session};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
@@ -30,10 +28,10 @@ use crate::address_tools::{AddressContext, AddressState, Settled, address_tools}
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::checks::{describe, run_checks};
-use crate::config::AddressConfig;
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
+use crate::push::{Pusher, stop_if_cancelled};
 use crate::stages;
 use crate::workspace::setup;
 use crate::workspace::traced::Traced;
@@ -209,14 +207,23 @@ async fn begin_stages(
     stages::mark(store, run, Stage::Started, StageState::Done, what).await;
 }
 
-/// Stops the run when its token fired. Checked where the run would
-/// otherwise go on to push, since nothing else looks at the token then.
-fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancelled> {
-    if cancel.is_cancelled() {
-        Err(Cancelled)
-    } else {
-        Ok(())
-    }
+/// What the commit message says was fixed: one line per thread the model
+/// settled as fixed, with where it was.
+fn fixed_notes(
+    threads: &[OpenThread],
+    settled: &std::collections::BTreeMap<String, Settled>,
+) -> Vec<String> {
+    threads
+        .iter()
+        .filter_map(|t| {
+            let s = settled.get(&t.thread_id)?;
+            (s.outcome == ThreadOutcome::Fixed).then(|| match (&t.path, t.line) {
+                (Some(path), Some(line)) => format!("{path}:{line}: {}", s.reply),
+                (Some(path), None) => format!("{path}: {}", s.reply),
+                _ => s.reply.clone(),
+            })
+        })
+        .collect()
 }
 
 fn marker(run: &RunId, model: &ModelId, kind: MarkerKind) -> Marker {
@@ -268,6 +275,17 @@ impl Session<'_> {
             .await;
         let pushed = format!("pushed {short} to the pull request's branch");
         self.stage(Stage::Push, StageState::Done, pushed).await;
+    }
+
+    /// Who pushes for this run.
+    fn pusher(&self) -> Pusher<'_> {
+        Pusher {
+            app: self.app,
+            writer: Arc::clone(&self.writer),
+            target: &self.request.target,
+            run: self.run,
+            requester: self.requester,
+        }
     }
 
     /// Records where a stage of this run stands (#226).
@@ -347,22 +365,13 @@ impl Session<'_> {
         } else {
             // A cancel that came after the session ended stops the run here.
             stop_if_cancelled(&cancel)?;
-            // A fresh checkout nothing ran in: only the checked changeset
-            // reaches it, and it is what Henk commits and pushes.
-            let dir = ScratchDir::new(&format!("henk-address-{}-push", self.run))
-                .context("making the checkout directory")?;
-            let checkout = Checkout::clone_at(
-                dir,
-                &facts.remote,
-                &facts.push.head_ref,
-                &facts.head,
-                credential,
-            )
-            .await
-            .context("checking out the pull request to push")?;
+            let pusher = self.pusher();
+            let name = format!("henk-address-{}-push", self.run);
+            let checkout = pusher.checkout(&name, facts, credential).await?;
             self.stage(Stage::Push, StageState::Running, "").await;
-            let pushed = self
-                .commit_and_push(&checkout, facts, &threads, &settled, &changes, &cancel)
+            let notes = fixed_notes(&threads, &settled);
+            let pushed = pusher
+                .commit_and_push(&checkout, facts, &notes, &changes, &cancel)
                 .await?;
             self.record_pushed(&pushed).await;
             Some(pushed)
@@ -492,96 +501,6 @@ impl Session<'_> {
         Ok((changes, checks_text))
     }
 
-    /// Applies the changeset to the checkout, commits as Henk, makes sure
-    /// the branch has not moved, and pushes. Returns the commit.
-    async fn commit_and_push(
-        &self,
-        checkout: &Checkout,
-        facts: &henk_platform::address::PullFacts,
-        threads: &[OpenThread],
-        settled: &std::collections::BTreeMap<String, Settled>,
-        changes: &[Change],
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<String> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
-        };
-        let target = &self.request.target;
-        let fixed_notes: Vec<String> = threads
-            .iter()
-            .filter_map(|t| {
-                let s = settled.get(&t.thread_id)?;
-                (s.outcome == ThreadOutcome::Fixed).then(|| match (&t.path, t.line) {
-                    (Some(path), Some(line)) => format!("{path}:{line}: {}", s.reply),
-                    (Some(path), None) => format!("{path}: {}", s.reply),
-                    _ => s.reply.clone(),
-                })
-            })
-            .collect();
-        let henk = self.henk_identity(config).await?;
-        let policy = config.trailer_policy(&target.repo);
-        let requester = if policy.requester_coauthor || policy.requester_signoff {
-            self.requester_identity(config).await?
-        } else {
-            None
-        };
-        let message = commit_message(
-            &fixed_notes,
-            self.run,
-            Some(self.requester),
-            &henk,
-            requester.as_ref(),
-            policy,
-        );
-        let identity = CommitIdentity {
-            name: henk.name().to_owned(),
-            email: henk.email().to_string(),
-        };
-        // Read again just before pushing: a head that moved means someone
-        // else pushed, and their work is not overwritten.
-        let now = self
-            .writer
-            .pull_facts(target)
-            .await
-            .context("reading the pull request again")?;
-        if now.head != facts.head {
-            return Err(anyhow!(
-                "the branch moved to {} while I worked",
-                now.head.short()
-            ));
-        }
-        if let Some(why) = push_refusal(&now.push) {
-            return Err(anyhow!("I may no longer push: {why}"));
-        }
-        checkout.apply(changes).context("applying the change")?;
-        let mut in_checkout = checkout
-            .changed_files()
-            .await
-            .context("listing the changes")?;
-        in_checkout.sort();
-        let mut expected: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
-        expected.sort_unstable();
-        if in_checkout != expected {
-            return Err(anyhow!(
-                "the checkout changed {} files where the changeset has {}",
-                in_checkout.len(),
-                expected.len()
-            ));
-        }
-        let sha = checkout
-            .commit(&identity, &message)
-            .await
-            .context("committing")?;
-        // The last moment a cancel can still stop the push.
-        stop_if_cancelled(cancel)?;
-        checkout
-            .push(&facts.push.head_ref)
-            .await
-            .context("pushing")?;
-        info!(commit = %sha, files = changes.len(), "pushed");
-        Ok(sha)
-    }
-
     /// How long one check may run: the workspace profile's command limit
     /// for this repository.
     fn command_limit(&self) -> Duration {
@@ -594,65 +513,6 @@ impl Session<'_> {
                 .limits
                 .command_secs,
         )
-    }
-
-    /// Who Henk commits and signs off as: `[address.identity]`, or the
-    /// App's own account.
-    async fn henk_identity(&self, config: &AddressConfig) -> anyhow::Result<CommitPerson> {
-        if let Some(person) = config.henk_identity().context("address.identity")? {
-            return Ok(person);
-        }
-        let identity = self
-            .writer
-            .commit_identity()
-            .await
-            .context("reading Henk's commit identity")?;
-        let email = Email::parse(&identity.email).context("Henk's commit email")?;
-        CommitPerson::new(&identity.name, email).context("Henk's commit name")
-    }
-
-    /// Who asked, as their trailers name them: their configured name and
-    /// email, or the platform's noreply address of the account their
-    /// `[[people]]` entry gives by id, under its current login. Never a
-    /// name from a comment (§2, §8.3). `None`, noted on the run, when there
-    /// is no account to credit.
-    async fn requester_identity(
-        &self,
-        config: &AddressConfig,
-    ) -> anyhow::Result<Option<CommitPerson>> {
-        let committer = self.app.settings.committers.get(&config.requester_id);
-        if let Some(person) = committer.and_then(|c| c.commit_as.clone()) {
-            return Ok(Some(person));
-        }
-        let platform = self.request.target.repo.platform();
-        let account = committer.and_then(|c| match platform {
-            Platform::GitHub => c.github_id,
-            Platform::GitLab => c.gitlab_id,
-        });
-        let Some(id) = account else {
-            let note = format!(
-                "requester {} has no {platform} account id in [[people]]; the commit has no requester trailers",
-                config.requester_id
-            );
-            info!("{note}");
-            if let Err(error) = self.app.store.event(self.run, "info", &note).await {
-                warn!(%error, "could not record the event");
-            }
-            return Ok(None);
-        };
-        let login = self
-            .writer
-            .user_login(id)
-            .await
-            .context("reading the requester's login")?;
-        let email = match platform {
-            Platform::GitHub => noreply::github(id, &login),
-            Platform::GitLab => noreply::gitlab(id, &login, &self.writer.noreply_host()?),
-        }
-        .context("the requester's noreply address")?;
-        Ok(Some(
-            CommitPerson::new(&login, email).context("the requester's commit name")?,
-        ))
     }
 
     async fn session(
@@ -1098,6 +958,7 @@ check_commands = [["true"]]
             feed: crate::live::Feed::default(),
             cancels: crate::cancel::Cancels::default(),
             workspace_provider: provider,
+            own_pushes: crate::push::OwnPushes::default(),
             test_writer: None,
             test_session: None,
             test_address_writer: Some(hub as Arc<dyn AddressWriter>),

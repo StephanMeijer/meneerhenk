@@ -44,6 +44,7 @@ struct Harness {
     bus: EventBus,
     store: Arc<dyn RunStore>,
     writer: Arc<FakeWriter>,
+    own_pushes: crate::push::OwnPushes,
     next: std::sync::atomic::AtomicU32,
 }
 
@@ -80,6 +81,7 @@ impl Harness {
             bus,
             store: Arc::clone(&app.store),
             writer,
+            own_pushes: app.own_pushes.clone(),
             next: std::sync::atomic::AtomicU32::new(1),
         }
     }
@@ -199,6 +201,21 @@ async fn drafts_wait_until_ready() {
         .deliver(pull_request("docspec/app", person("alice"), true))
         .await;
     assert!(matches!(draft.of("review"), Handled::Ignored(r) if r.starts_with("draft")));
+}
+
+#[tokio::test]
+async fn new_commits_henk_pushed_himself_start_no_review() {
+    let h = Harness::new().await;
+    h.own_pushes.record(&SHA.to_ascii_uppercase());
+    // Sent by a person's account, so only the pushed commit tells (#284).
+    let out = h
+        .deliver(pull_request("docspec/app", person("alice"), false))
+        .await;
+    assert!(
+        matches!(out.of("review"), Handled::Ignored(r) if r == "Henk's own push"),
+        "{:?}",
+        out.by_listener
+    );
 }
 
 #[tokio::test]
@@ -360,6 +377,7 @@ async fn one_address_run_per_pull_request_at_a_time() {
         feed: crate::live::Feed::default(),
         cancels: crate::cancel::Cancels::default(),
         workspace_provider: std::sync::Arc::new(crate::workspace::host::HostProvider),
+        own_pushes: crate::push::OwnPushes::default(),
         test_writer: None,
         test_session: None,
         test_address_writer: None,

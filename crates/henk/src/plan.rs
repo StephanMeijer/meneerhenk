@@ -705,6 +705,7 @@ requester_id = 3
                 feed: crate::live::Feed::default(),
                 cancels: crate::cancel::Cancels::default(),
                 workspace_provider: provider,
+                own_pushes: crate::push::OwnPushes::default(),
                 test_writer: None,
                 test_session: Some(session),
                 test_address_writer: source,

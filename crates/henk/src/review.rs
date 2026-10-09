@@ -1582,6 +1582,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 feed,
                 cancels: crate::cancel::Cancels::default(),
                 workspace_provider: provider,
+                own_pushes: crate::push::OwnPushes::default(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
                 test_address_writer: source,
