@@ -1936,6 +1936,51 @@ async fn a_whole_second_bound_holds_for_a_run_started_within_that_second(store: 
     assert_eq!(store.count_runs(&window).await.unwrap(), 1);
 }
 
+/// Runs started in one second list, page and go stale in time order, though
+/// their stored fractions differ in length (#216). `start` sets a run's
+/// `started_at` to an RFC 3339 time, which a scenario cannot do through the
+/// store, so each backend runs this with its own.
+async fn runs_in_one_second_list_by_time(store: &dyn RunStore, start: impl AsyncFn(&str, &str)) {
+    for (run, at) in [
+        ("r-a", "2026-10-07T12:00:00Z"),
+        ("r-b", "2026-10-07T12:00:00.4Z"),
+        ("r-c", "2026-10-07T12:00:00.45Z"),
+    ] {
+        store.create_run(&new_run(run)).await.unwrap();
+        start(run, at).await;
+    }
+    let ids = |runs: &[RunRecord]| runs.iter().map(|r| r.id.to_string()).collect::<Vec<_>>();
+
+    let all = store
+        .list_runs(&RunFilter::default(), Page::new(50, 0))
+        .await
+        .unwrap();
+    assert_eq!(ids(&all), ["r-c", "r-b", "r-a"], "newest first by time");
+
+    let mut seen = Vec::new();
+    let mut filter = RunFilter::default();
+    loop {
+        let page = store.list_runs(&filter, Page::new(1, 0)).await.unwrap();
+        let Some(last) = page.last() else { break };
+        let left = store.count_runs(&filter).await.unwrap();
+        assert_eq!(left, 3 - seen.len() as u64, "the count takes the keyset");
+        filter.before = Some(RunKey {
+            started_at: last.started_at.clone(),
+            id: last.id.to_string(),
+        });
+        seen.extend(ids(&page));
+    }
+    assert_eq!(seen, ["r-c", "r-b", "r-a"], "every run once, in order");
+
+    // Every heartbeat is older than an hour from now: all three are stale.
+    let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    assert_eq!(
+        ids(&store.orphaned_runs(later).await.unwrap()),
+        ["r-a", "r-b", "r-c"],
+        "stale runs oldest first by time"
+    );
+}
+
 async fn inbound_events_page_by_keyset_with_ties_on_the_time(store: &dyn RunStore) {
     for (id, at) in [
         ("e-a", "2026-10-03T00:00:01Z"),
@@ -2042,6 +2087,8 @@ async fn inbound_events_are_listed_with_their_outcomes(store: &dyn RunStore) {
 }
 
 mod sqlite {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
 
     fn open() -> Arc<dyn RunStore> {
@@ -2060,6 +2107,46 @@ mod sqlite {
     }
 
     for_each_scenario!(tests);
+
+    /// Numbers this process's database files, so no two tests share one.
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
+    /// A database file under the temp directory, removed with the guard,
+    /// for a test that writes to the database behind the store's back.
+    struct File(std::path::PathBuf);
+
+    impl File {
+        fn new() -> Self {
+            let n = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("henk-store-{}-{n}.db", std::process::id())))
+        }
+    }
+
+    impl Drop for File {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut path = self.0.clone().into_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_in_one_second_list_by_time() {
+        let file = File::new();
+        let store = SqliteStore::open(&file.0).unwrap();
+        let raw = rusqlite::Connection::open(&file.0).unwrap();
+        // Stored as written: the text whose order is not the time's.
+        super::runs_in_one_second_list_by_time(&store, async |run, at| {
+            raw.execute(
+                "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                rusqlite::params![run, at],
+            )
+            .unwrap();
+        })
+        .await;
+    }
 }
 
 /// `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server. Every test gets
@@ -2173,6 +2260,23 @@ mod postgres {
         let an_hour_ago = OffsetDateTime::now_utc() - time::Duration::hours(1);
         let orphans = schema.store.orphaned_runs(an_hour_ago).await.unwrap();
         assert_eq!(orphans.len(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn runs_in_one_second_list_by_time() {
+        let schema = schema().await;
+        let client = plain_client(&schema.url).await.unwrap();
+        super::runs_in_one_second_list_by_time(schema.store.as_ref(), async |run, at| {
+            client
+                .execute(
+                    "UPDATE runs SET started_at = $2::text::timestamptz WHERE id = $1",
+                    &[&run, &at],
+                )
+                .await
+                .unwrap();
+        })
+        .await;
     }
 }
 
