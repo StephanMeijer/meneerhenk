@@ -69,15 +69,27 @@ pub(crate) struct LoopReport {
     pub(crate) line: String,
 }
 
-/// Runs the loop on `diff`. A loop that cannot get a workspace, or may not
-/// push to the pull request, fails before any session starts; once it runs,
-/// it ends with a report of why it stopped, and only a cancel or a store
-/// failure is an error.
+/// Whether the loop ran, or why it did not start.
+#[derive(Debug)]
+pub(crate) enum LoopRun {
+    /// It ran; how it ended.
+    Ran(LoopReport),
+    /// It may not push to this pull request (a fork, the default or a
+    /// protected branch), or the branch moved after the review was queued.
+    /// Nothing started and nothing was marked: the lanes review instead.
+    Declined(String),
+}
+
+/// Runs the loop on `diff`. A pull request the loop may not push to, or
+/// whose branch moved, declines it before anything starts, so it gets the
+/// lane review. A loop that cannot get a workspace fails before any session
+/// starts; once it runs, it ends with a report of why it stopped, and only a
+/// cancel or a store failure is an error.
 pub(crate) async fn run_loop(
     on: LoopTarget<'_>,
     diff: Arc<ReviewDiff>,
     cancel: &CancellationToken,
-) -> anyhow::Result<LoopReport> {
+) -> anyhow::Result<LoopRun> {
     let LoopTarget {
         app,
         target,
@@ -97,14 +109,13 @@ pub(crate) async fn run_loop(
         .await
         .context("reading the pull request")?;
     if let Some(why) = push_refusal(&facts.push) {
-        stages::mark(store, run, Stage::Checkout, StageState::Failed, &why).await;
-        return Err(anyhow!("the review loop may not push here: {why}"));
+        return Ok(LoopRun::Declined(why));
     }
     if facts.head != *commit {
-        return Err(anyhow!(
-            "the branch moved to {} before the loop started",
+        return Ok(LoopRun::Declined(format!(
+            "the branch moved to {} after this review was queued",
             facts.head.short()
-        ));
+        )));
     }
     let credential = writer
         .git_credential()
@@ -167,7 +178,7 @@ pub(crate) async fn run_loop(
             outcome,
         })
         .collect();
-    Ok(LoopReport { results, line })
+    Ok(LoopRun::Ran(LoopReport { results, line }))
 }
 
 /// Clones the pull request at its head, imports it into a workspace that
