@@ -233,7 +233,9 @@ pub struct ReviewOutcome {
     /// is not complete (§3.3).
     pub stopped: Option<Stopped>,
     /// Why it was not reviewed, with [`Stopped::NotReviewed`] (#262): Henk's
-    /// own words, such as "pull request #7 is a draft".
+    /// own words, such as "pull request #7 is a draft". With
+    /// [`Stopped::Cancelled`], where the cancel came from, such as "over
+    /// MCP" (#293).
     pub not_reviewed: Option<String>,
 }
 
@@ -273,10 +275,12 @@ impl ReviewOutcome {
         Self::stopped_as(commit, Stopped::Superseded, None)
     }
 
-    /// The outcome of a review a person cancelled from the dashboard.
+    /// The outcome of a review a person or an MCP client cancelled; `via`
+    /// says where from ("from the dashboard", "over MCP"), or is empty.
     #[must_use]
-    pub fn cancelled(commit: CommitSha) -> Self {
-        Self::stopped_as(commit, Stopped::Cancelled, None)
+    pub fn cancelled(commit: CommitSha, via: &str) -> Self {
+        let via = (!via.is_empty()).then(|| via.to_owned());
+        Self::stopped_as(commit, Stopped::Cancelled, via)
     }
 
     /// The outcome of a review Henk was stopped in the middle of.
@@ -351,7 +355,12 @@ impl ReviewOutcome {
         match self.stopped {
             Some(Stopped::Superseded) => return "Superseded by a newer commit.".to_owned(),
             Some(Stopped::Interrupted) => return "Review interrupted.".to_owned(),
-            Some(Stopped::Cancelled) => return "Cancelled from the dashboard.".to_owned(),
+            Some(Stopped::Cancelled) => {
+                return match &self.not_reviewed {
+                    Some(via) => format!("Cancelled {via}."),
+                    None => "Cancelled.".to_owned(),
+                };
+            }
             Some(Stopped::NotReviewed) => {
                 let why = self.not_reviewed.as_deref().unwrap_or("it could not run");
                 return format!("Not reviewed: {why}.");
@@ -546,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_review_is_neutral_and_says_so() {
-        let cancelled = ReviewOutcome::cancelled(outcome(&[], 0).commit);
+        let cancelled = ReviewOutcome::cancelled(outcome(&[], 0).commit, "from the dashboard");
         assert!(!cancelled.completed());
         assert_eq!(cancelled.stopped, Some(Stopped::Cancelled));
         assert_eq!(cancelled.check_conclusion(), CheckConclusion::Neutral);
@@ -556,6 +565,10 @@ mod tests {
             "Cancelled from the dashboard."
         );
         assert!(crate::text::is_in_style(&cancelled.summary()));
+        let over_mcp = ReviewOutcome::cancelled(outcome(&[], 0).commit, "over MCP");
+        assert_eq!(over_mcp.headline(), "Cancelled over MCP.");
+        let unsaid = ReviewOutcome::cancelled(outcome(&[], 0).commit, "");
+        assert_eq!(unsaid.headline(), "Cancelled.");
     }
 
     #[test]

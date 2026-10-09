@@ -159,13 +159,13 @@ pub async fn run_address(
             // before the push, so nothing was pushed. Any other failure is
             // reported as one, even when a cancel was asked for meanwhile.
             let by = app.cancels.cancelled_by(&run).unwrap_or_default();
-            info!(run = %run, by, %failure, "address run cancelled from the dashboard");
+            info!(run = %run, by, %failure, "address run {}", crate::cancel::cancelled_reason(&by));
             let body = marker(&run, &model_id, MarkerKind::Reply)
                 .attach(&crate::cancel::cancelled_notice(&by, &link, true));
             if let Err(post_error) = writer.post_comment(&request.target, &body).await {
                 error!(%post_error, "could not post that the address run was cancelled");
             }
-            let reason = format!("cancelled from the dashboard by {by}");
+            let reason = crate::cancel::cancelled_reason(&by);
             stages::cancelled(store, &run, &by, "; nothing was pushed").await;
             app.store
                 .finish_run(&run, RunStatus::Cancelled, None, Some(&reason))
@@ -2183,7 +2183,29 @@ check_commands = [["true"]]
 
     #[tokio::test]
     async fn a_run_cancelled_from_the_dashboard_pushes_nothing_and_says_by_whom() {
-        let (remote, head) = bare_remote("henk-address-dashboard-cancel").await;
+        address_cancelled_by(
+            "henk-address-dashboard-cancel",
+            "github:1234",
+            "Cancelled from the dashboard by GitHub account 1234. Nothing was pushed.",
+        )
+        .await;
+    }
+
+    /// #293: a cancel over MCP is recorded as one, as the comment says.
+    #[tokio::test]
+    async fn a_run_cancelled_over_mcp_pushes_nothing_and_says_so() {
+        address_cancelled_by(
+            "henk-address-mcp-cancel",
+            "mcp:claude",
+            "Cancelled over MCP by client claude. Nothing was pushed.",
+        )
+        .await;
+    }
+
+    /// An address run `by` cancels while its model works: nothing pushed,
+    /// one comment, and the run's reason names where the cancel came from.
+    async fn address_cancelled_by(name: &str, by: &str, notice: &str) {
+        let (remote, head) = bare_remote(name).await;
         let hub = hub(Platform::GitHub, remote.path(), &head, None);
         let asked = Arc::new(tokio::sync::Notify::new());
         let provider = fake();
@@ -2198,7 +2220,7 @@ check_commands = [["true"]]
         let _cancellable = app.cancels.register(run.clone(), cancel.clone());
         let stop = async {
             asked.notified().await;
-            assert!(app.cancels.cancel(&run, "github:1234".to_owned()));
+            assert!(app.cancels.cancel(&run, by.to_owned()));
         };
         let (result, ()) = tokio::join!(
             run_address(&app, request(Platform::GitHub, "r-addr-9"), cancel),
@@ -2209,18 +2231,14 @@ check_commands = [["true"]]
         assert!(provider.closed(), "the workspace is destroyed");
         let comments = hub.comments.lock().unwrap().clone();
         assert_eq!(comments.len(), 1, "one comment");
-        assert!(
-            comments[0].contains(
-                "Cancelled from the dashboard by GitHub account 1234. Nothing was pushed."
-            ),
-            "{}",
-            comments[0]
-        );
+        assert!(comments[0].contains(notice), "{}", comments[0]);
         assert!(!comments[0].contains("kind=failure"), "{}", comments[0]);
         let (remote_head, _) = remote_feature(remote.path()).await;
         assert_eq!(remote_head, head.as_str(), "nothing was pushed");
         let record = app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Cancelled);
+        let reason = crate::cancel::cancelled_reason(by);
+        assert_eq!(record.error.as_deref(), Some(reason.as_str()));
     }
 
     /// A model that follows its script and, on its last answer, has a

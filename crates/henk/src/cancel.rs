@@ -93,7 +93,7 @@ impl Cancels {
 }
 
 /// The error of a run that stopped because its cancellation token fired.
-/// Only this error ends a run as cancelled from the dashboard: a run that
+/// Only this error ends a run as cancelled by a person or an MCP client: a run that
 /// failed for another reason after someone asked for a cancel is reported
 /// as the failure it is.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -123,19 +123,47 @@ impl Drop for Registered {
     }
 }
 
+/// Where a cancel by `by` came from, by its id's prefix: `github:` the
+/// dashboard, `mcp:` an MCP client, anything else unsaid. The one rule the
+/// notice, the run record and the log all follow (#293).
+#[must_use]
+pub fn cancelled_via(by: &str) -> &'static str {
+    if by.starts_with("github:") {
+        "from the dashboard"
+    } else if by.starts_with("mcp:") {
+        "over MCP"
+    } else {
+        ""
+    }
+}
+
+/// Why a cancelled run ended, as the run records it: where the cancel came
+/// from and the canceller's id (§2), `cancelled over MCP by mcp:claude`.
+#[must_use]
+pub fn cancelled_reason(by: &str) -> String {
+    match cancelled_via(by) {
+        "" => format!("cancelled by {by}"),
+        via => format!("cancelled {via} by {by}"),
+    }
+}
+
 /// The comment a cancelled run leaves, without its marker. `by` is the
-/// requester id, never a display name (§2), and its prefix says where the
-/// cancel came from: `github:` the dashboard, `mcp:` an MCP client.
+/// requester id, never a display name (§2); [`cancelled_via`] says where the
+/// cancel came from, and the account is named as a reader knows it.
 /// `nothing_pushed` adds that nothing was pushed, for an address run, the
 /// one run that pushes.
 #[must_use]
 pub fn cancelled_notice(by: &str, link: &str, nothing_pushed: bool) -> String {
-    let how = if let Some(id) = by.strip_prefix("github:") {
-        format!("from the dashboard by GitHub account {id}")
+    let who = if let Some(id) = by.strip_prefix("github:") {
+        format!("GitHub account {id}")
     } else if let Some(name) = by.strip_prefix("mcp:") {
-        format!("over MCP by client {name}")
+        format!("client {name}")
     } else {
-        format!("by {by}")
+        by.to_owned()
+    };
+    let how = match cancelled_via(by) {
+        "" => format!("by {who}"),
+        via => format!("{via} by {who}"),
     };
     let pushed = if nothing_pushed {
         " Nothing was pushed."
@@ -211,8 +239,31 @@ mod tests {
             mcp, "Cancelled over MCP by client claude.\n\nRun: https://henk/runs/r-1",
             "not from the dashboard"
         );
-        for text in [review, address, mcp] {
+        let other = cancelled_notice("discord:3", "https://henk/runs/r-1", false);
+        assert_eq!(
+            other,
+            "Cancelled by discord:3.\n\nRun: https://henk/runs/r-1"
+        );
+        for text in [review, address, mcp, other] {
             assert!(henk_domain::text::is_in_style(&text), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_record_says_where_a_cancel_came_from_as_the_notice_does() {
+        for (by, via, reason) in [
+            (
+                "github:1234",
+                "from the dashboard",
+                "cancelled from the dashboard by github:1234",
+            ),
+            ("mcp:claude", "over MCP", "cancelled over MCP by mcp:claude"),
+            ("discord:3", "", "cancelled by discord:3"),
+        ] {
+            assert_eq!(cancelled_via(by), via, "{by}");
+            assert_eq!(cancelled_reason(by), reason, "{by}");
+            let notice = cancelled_notice(by, "https://henk/runs/r-1", false);
+            assert!(notice.contains(via), "{notice}");
         }
     }
 }

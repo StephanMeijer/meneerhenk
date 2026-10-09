@@ -207,7 +207,7 @@ async fn wait_for_slot(
     waited
 }
 
-/// A review that never got its slot: cancelled from the dashboard,
+/// A review that never got its slot: cancelled from the dashboard or over MCP,
 /// superseded by a newer commit, or stopped with Henk. Its queued check,
 /// if it has one, is closed so nothing stays queued (#262).
 async fn ended_while_queued(app: &App, request: &ReviewRequest) {
