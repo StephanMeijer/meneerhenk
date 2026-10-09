@@ -59,6 +59,10 @@ pub(crate) struct LoopTarget<'a> {
     pub(crate) target: &'a ReviewTarget,
     pub(crate) commit: &'a CommitSha,
     pub(crate) run: &'a RunId,
+    /// The last commit the loop pushed, set the moment the push is done, so
+    /// however the review then ends, the pull request's new head gets its
+    /// check.
+    pub(crate) pushed_head: &'a Mutex<Option<CommitSha>>,
 }
 
 /// How a loop ended, for the review's summary.
@@ -70,9 +74,6 @@ pub(crate) struct LoopReport {
     pub(crate) line: String,
     /// The findings that ended unsettled or won't fix: what still stands.
     pub(crate) open: usize,
-    /// The last commit it pushed, now the pull request's head, which gets
-    /// the review's check too; `None` when it pushed nothing.
-    pub(crate) head: Option<CommitSha>,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -101,6 +102,7 @@ pub(crate) async fn run_loop(
         target,
         commit,
         run,
+        ..
     } = on;
     let config = app
         .settings
@@ -386,17 +388,10 @@ impl<'a> Rounds<'a> {
                 outcome,
             })
             .collect();
-        let head = self
-            .pushed
-            .last()
-            .map(|sha| CommitSha::parse(sha))
-            .transpose()
-            .context("the last pushed commit")?;
         Ok(LoopReport {
             results,
             line,
             open,
-            head,
         })
     }
 
@@ -679,6 +674,16 @@ impl<'a> Rounds<'a> {
                 ))));
             }
         };
+        // On the branch now: whatever fails next, the new head gets the
+        // review's check.
+        let new_head = CommitSha::parse(&sha).context("the pushed commit")?;
+        if let Ok(mut head) = self.on.pushed_head.lock() {
+            *head = Some(new_head.clone());
+        }
+        self.handoff.with_ledger(|ledger| ledger.pushed(&sha));
+        self.pushed.push(sha);
+        facts.head = new_head;
+        let short = facts.head.short().to_owned();
         let patch = head_patch(&checkout).await;
         workspace
             .baseline()
@@ -687,10 +692,6 @@ impl<'a> Rounds<'a> {
         if let Ok(mut state) = self.fixing.state.lock() {
             state.written.clear();
         }
-        self.handoff.with_ledger(|ledger| ledger.pushed(&sha));
-        facts.head = CommitSha::parse(&sha).context("the pushed commit")?;
-        let short = facts.head.short().to_owned();
-        self.pushed.push(sha);
         stages::mark(
             &*app.store,
             self.on.run,
