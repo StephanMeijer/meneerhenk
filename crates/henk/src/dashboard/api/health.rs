@@ -73,7 +73,7 @@ async fn health_rows(
         "ok".to_owned(),
         reviews_line(&coordinator.slots()),
     ));
-    rows.push(workspaces_row(dashboard).await);
+    rows.push(workspaces_row(app).await);
     let git = crate::doctor::check_git(settings, None).await;
     rows.push(row(git));
     for check in check_secrets(settings) {
@@ -120,8 +120,8 @@ const RECENT_REVIEWS: usize = 10;
 /// checked out, and why the newest that did not went without. A failing
 /// checkout leaves a review that still completes, so nothing else would
 /// say so.
-async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
-    let settings = &dashboard.app.settings;
+async fn workspaces_row(app: &App) -> (String, String, String) {
+    let settings = &app.settings;
     let name = "workspaces".to_owned();
     if !settings
         .workspace
@@ -131,7 +131,7 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
         let text = "reviews run without workspaces: no profile has review = true";
         return (name, "ok".to_owned(), text.to_owned());
     }
-    let store = &dashboard.app.store;
+    let store = &app.store;
     let filter = RunFilter {
         kind: Some(RunKind::Review),
         ..RunFilter::default()
@@ -176,7 +176,7 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
             counted += 1;
             had += 1;
         } else if checkout(run, StageState::Failed)
-            && let Some(warning) = why_without(dashboard, run).await
+            && let Some(warning) = why_without(app, run).await
         {
             counted += 1;
             why.get_or_insert(warning);
@@ -195,14 +195,9 @@ async fn workspaces_row(dashboard: &Dashboard) -> (String, String, String) {
 
 /// Why `run` went without workspaces, from the warning its failed checkout
 /// left; none when the checkout did not fail on its own.
-async fn why_without(dashboard: &Dashboard, run: &RunRecord) -> Option<String> {
+async fn why_without(app: &App, run: &RunRecord) -> Option<String> {
     const CHECKOUT: &str = "could not be checked out: ";
-    let events = dashboard
-        .app
-        .store
-        .events(&run.id)
-        .await
-        .unwrap_or_default();
+    let events = app.store.events(&run.id).await.unwrap_or_default();
     events
         .iter()
         .rev()
