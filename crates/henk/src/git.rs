@@ -527,6 +527,29 @@ pub(crate) mod tests {
         (remote, CommitSha::parse(&head).unwrap())
     }
 
+    /// Two scratch directories with one name get their own paths, both
+    /// under this process's prefix, and dropping one leaves the other and
+    /// its contents alone (#156).
+    #[test]
+    fn scratch_dirs_with_one_name_do_not_share_a_path() {
+        let name = "scratch-unique";
+        let prefix = scratch_prefix(name);
+        let first = ScratchDir::new(name).unwrap();
+        let kept = first.path().join("kept.txt");
+        std::fs::write(&kept, "still here").unwrap();
+        let second = ScratchDir::new(name).unwrap();
+        assert_ne!(first.path(), second.path());
+        for dir in [&first, &second] {
+            let base = dir.path().file_name().unwrap().to_string_lossy();
+            assert!(base.starts_with(&prefix), "{base} lacks {prefix}");
+        }
+        let second_path = second.path().to_path_buf();
+        drop(second);
+        assert!(!second_path.exists());
+        assert!(first.path().is_dir());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "still here");
+    }
+
     /// The head of `feature` on a bare remote, and its last commit as
     /// `author <email>` then the message.
     pub(crate) async fn remote_feature(remote: &Path) -> (String, String) {
