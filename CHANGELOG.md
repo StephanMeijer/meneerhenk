@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.22...v0.1.23) - 2026-10-09
+
+### Fixed
+
+- *(dashboard)* sign in for identity only, and warn about a GitHub App's client id
+
 ## [0.1.22](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.21...v0.1.22) - 2026-10-08
 
 ### Fixed
