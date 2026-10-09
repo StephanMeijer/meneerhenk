@@ -121,8 +121,13 @@ impl Resumer {
     /// on the passes it is due. A pass counts by when it began, as that is
     /// when its cutoff was taken: one that began inside the window may not
     /// have reaped what the window is for. Returns how many reviews it
-    /// asked for.
+    /// asked for. Once Henk is told to stop it asks for nothing more: its
+    /// own reviews are ending as interrupted then, and a request now would
+    /// only be stopped too.
     pub(crate) async fn after_pass(&mut self, app: &App, began: Instant) -> usize {
+        if app.shutdown.is_cancelled() {
+            self.done = true;
+        }
         if self.done {
             return 0;
         }
@@ -411,6 +416,23 @@ github_owners = ["docspec"]
         let mut seen = heard.0.lock().unwrap().clone();
         seen.sort();
         assert_eq!(seen, ["r-a", "r-b"]);
+    }
+
+    /// #160: once Henk is told to stop, the resumer asks for nothing,
+    /// though a pass is due and a review ended interrupted: those are this
+    /// process's own reviews ending in its shutdown grace.
+    #[tokio::test]
+    async fn nothing_is_resumed_once_henk_is_told_to_stop() {
+        let app = app().await;
+        let (bus, heard) = bus();
+        run(&app, "r-own", RunKind::Review, 1, INTERRUPTED).await;
+        let mut resumer = Resumer::new(bus, Duration::ZERO);
+
+        app.shutdown.cancel();
+        assert_eq!(resumer.after_pass(&app, Instant::now()).await, 0);
+        assert_eq!(resumer.after_pass(&app, Instant::now()).await, 0);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(heard.0.lock().unwrap().is_empty());
     }
 
     /// #160, #47: a process that died just before this start left its run
