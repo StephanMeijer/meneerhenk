@@ -155,6 +155,14 @@ fn child_env(
     Ok(full_env)
 }
 
+/// The process a stdio child runs as (#273): `full_env` is its whole
+/// environment, since nothing of Henk's is inherited.
+fn child_command(command: &str, args: &[String], full_env: &BTreeMap<String, String>) -> Command {
+    Command::new(command).configure(|c| {
+        c.args(args).env_clear().envs(full_env).kill_on_drop(true);
+    })
+}
+
 impl RmcpSession {
     /// Connects to a configured server. `lookup_env` resolves the names in
     /// `pass_env` and `bearer_env`; in production it is `std::env::var`.
@@ -177,9 +185,7 @@ impl RmcpSession {
                 pass_env,
             } => {
                 let full_env = child_env(&pass_env, &env, &lookup_env)?;
-                let command = Command::new(&command).configure(|c| {
-                    c.args(&args).env_clear().envs(&full_env).kill_on_drop(true);
-                });
+                let command = child_command(&command, &args, &full_env);
                 let (process, stderr) = TokioChildProcess::builder(command)
                     .stderr(Stdio::piped())
                     .spawn()
@@ -391,5 +397,37 @@ mod tests {
                 ("PATH", "/usr/bin"),
             ])
         );
+    }
+
+    /// #273: the spawned child sees exactly `child_env`'s map. The test
+    /// process always has `CARGO_MANIFEST_DIR`, so a spawn that inherits
+    /// Henk's environment shows up here without setting any variable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_spawned_child_sees_only_child_env() {
+        assert!(
+            std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
+            "cargo sets CARGO_MANIFEST_DIR for tests; without it this test proves nothing"
+        );
+        let fixed = BTreeMap::from([("HENK_TEST_FIXED".to_owned(), "1".to_owned())]);
+        let full_env = child_env(&[], &fixed, |_| None).unwrap();
+        let output = child_command("/usr/bin/env", &["-0".to_owned()], &full_env)
+            .output()
+            .await
+            .expect("/usr/bin/env runs the child; it exists on every Linux CI host");
+        assert!(output.status.success(), "{output:?}");
+        let names: Vec<String> = output
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                let entry = String::from_utf8_lossy(entry);
+                entry
+                    .split_once('=')
+                    .map_or(&*entry, |(name, _)| name)
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(names, ["HENK_TEST_FIXED"]);
     }
 }
