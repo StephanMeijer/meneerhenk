@@ -163,7 +163,8 @@ fn bearer(request: &Request) -> &str {
 
 /// Turns away a request without a valid token before any MCP handling,
 /// and tells the tools who called. Every token is compared, in constant
-/// time, so the time taken does not say which one matched.
+/// time, so the time taken does not say which one matched. A secret that
+/// matches more than one token is refused: its scope would be a guess.
 async fn guard(State(gate): State<Gate>, mut request: Request, next: Next) -> Response {
     if !gate.enabled || gate.tokens.is_empty() {
         return (
@@ -173,19 +174,19 @@ async fn guard(State(gate): State<Gate>, mut request: Request, next: Next) -> Re
             .into_response();
     }
     let given = bearer(&request).as_bytes();
-    let mut found = None;
+    let mut found = Vec::new();
     for token in gate.tokens.iter() {
         if bool::from(given.ct_eq(token.secret.expose_secret().as_bytes())) {
-            found = Some(token.caller.clone());
+            found.push(token.caller.clone());
         }
     }
-    let Some(caller) = found else {
+    let [caller] = found.as_slice() else {
         let mut refused = (StatusCode::UNAUTHORIZED, "bad token").into_response();
         refused
             .headers_mut()
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return refused;
     };
-    request.extensions_mut().insert(caller);
+    request.extensions_mut().insert(caller.clone());
     next.run(request).await
 }

@@ -144,13 +144,15 @@ fn validate_ways_in(
 }
 
 /// Checks the MCP server's tokens: names a requester can carry, each once,
-/// each with a variable; and at least one when it is on.
+/// each with its own variable; and at least one when it is on. Two tokens
+/// on one variable would be one secret with two scopes.
 fn validate_mcp_serve(config: &McpServeConfig) -> Result<(), ConfigError> {
     let fail = |text: String| Err(ConfigError::McpServe(text));
     if config.enabled && config.tokens.is_empty() {
         return fail("mcp_server.enabled needs at least one [[mcp_server.tokens]]".to_owned());
     }
     let mut seen = std::collections::BTreeSet::new();
+    let mut envs = std::collections::BTreeSet::new();
     for token in &config.tokens {
         let fine = !token.name.is_empty()
             && token
@@ -168,6 +170,12 @@ fn validate_mcp_serve(config: &McpServeConfig) -> Result<(), ConfigError> {
         }
         if token.env.trim().is_empty() {
             return fail(format!("mcp_server token {:?} needs env", token.name));
+        }
+        if !envs.insert(token.env.trim()) {
+            return fail(format!(
+                "mcp_server token {:?} uses env {:?}, which another token uses too",
+                token.name, token.env
+            ));
         }
     }
     Ok(())
@@ -2443,6 +2451,14 @@ github_owners = ["docspec"]
                     token("a", "write")
                 ),
                 "named twice",
+            ),
+            (
+                format!(
+                    "[mcp_server]\n{}{}",
+                    token("a", "read"),
+                    token("b", "write")
+                ),
+                "another token uses too",
             ),
         ] {
             let error = database(&bad).unwrap_err().to_string();

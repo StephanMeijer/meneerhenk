@@ -383,6 +383,19 @@ async fn no_mcp_without_a_good_token_and_none_when_it_is_off() {
     assert_eq!(post(&absent.url, Some(READ), None).await, 503);
 }
 
+#[tokio::test]
+async fn a_secret_two_tokens_share_is_refused_rather_than_given_a_scope() {
+    let mut tokens = both();
+    tokens.push(Token::new(
+        "also-reader",
+        McpScope::Read,
+        SecretString::from(WRITE.to_owned()),
+    ));
+    let henk = start_henk(ON, tokens).await;
+    assert_eq!(post(&henk.url, Some(WRITE), None).await, 401);
+    assert_ne!(post(&henk.url, Some(READ), None).await, 401);
+}
+
 /// `/mcp` on for config `mcp_server` but with no token given.
 async fn henk_plain(mcp_server: &str) -> String {
     start_henk(mcp_server, Vec::new()).await.url
