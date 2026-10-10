@@ -323,7 +323,7 @@ async fn end_cancelled(
     model_id: &ModelId,
     by: &str,
 ) -> anyhow::Result<PlanReport> {
-    info!(run = %run, by, "planning cancelled from the dashboard");
+    info!(run = %run, by, "planning {}", crate::cancel::cancelled_reason(by));
     let body = Marker {
         run: run.clone(),
         model: model_id.clone(),
@@ -336,7 +336,7 @@ async fn end_cancelled(
     if let Err(post_error) = writer.comment(&request.target, &body).await {
         error!(%post_error, "could not post that planning was cancelled");
     }
-    let reason = format!("cancelled from the dashboard by {by}");
+    let reason = crate::cancel::cancelled_reason(by);
     let cancelled = format!("cancelled by {by}");
     stages::end(
         &*app.store,
@@ -1288,6 +1288,22 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_plan_cancelled_from_the_dashboard_says_by_whom_and_ends_cancelled() {
+        plan_cancelled_by(
+            "github:1234",
+            "Cancelled from the dashboard by GitHub account 1234.",
+        )
+        .await;
+    }
+
+    /// #293: the run records a cancel over MCP as one, as the comment does.
+    #[tokio::test]
+    async fn a_plan_cancelled_over_mcp_says_so_in_the_run_and_the_comment() {
+        plan_cancelled_by("mcp:claude", "Cancelled over MCP by client claude.").await;
+    }
+
+    /// A plan `by` cancels before it starts: the error and the run's reason
+    /// name where the cancel came from, and the one comment says it.
+    async fn plan_cancelled_by(by: &str, notice: &str) {
         let f = fixture(
             FakeIssueWriter::new(Platform::GitHub, None, "Export runs."),
             vec![done()],
@@ -1296,24 +1312,19 @@ requester_id = 3
         let run = RunId::parse("r-plan-9").unwrap();
         let cancel = CancellationToken::new();
         let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
-        assert!(f.app.cancels.cancel(&run, "github:1234".to_owned()));
+        assert!(f.app.cancels.cancel(&run, by.to_owned()));
         let error = run_plan(&f.app, request("r-plan-9"), cancel)
             .await
             .unwrap_err();
-        assert!(
-            error.to_string().contains("cancelled from the dashboard"),
-            "{error}"
-        );
+        let reason = crate::cancel::cancelled_reason(by);
+        assert!(error.to_string().contains(&reason), "{error}");
         let comments = f.tracker.comments.lock().unwrap().clone();
         assert_eq!(comments.len(), 1);
-        assert!(
-            comments[0].starts_with("Cancelled from the dashboard by GitHub account 1234."),
-            "{}",
-            comments[0]
-        );
+        assert!(comments[0].starts_with(notice), "{}", comments[0]);
         assert!(!comments[0].contains("Planning failed"), "{}", comments[0]);
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Cancelled);
+        assert_eq!(record.error.as_deref(), Some(reason.as_str()));
     }
 
     /// A model that has a person cancel the run and then fails for its own
