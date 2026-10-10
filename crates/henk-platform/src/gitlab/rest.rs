@@ -73,9 +73,7 @@ impl GitLabRest {
     /// The web address of the instance: the API URL without `/api/v4`.
     #[must_use]
     pub fn web_url(&self) -> &str {
-        self.api_url
-            .strip_suffix("/api/v4")
-            .unwrap_or(&self.api_url)
+        super::web_base(&self.api_url)
     }
 
     /// The instance's host name, for the noreply commit address.

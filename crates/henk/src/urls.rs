@@ -7,57 +7,105 @@ use henk_platform::{IssueTarget, ReviewTarget};
 
 use crate::config::Settings;
 
-/// The web hosts of the configured platforms, lowercase: a URL parses only
-/// on one of them.
+/// The web addresses of the configured platforms: a URL parses only on one
+/// of them, with its scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hosts {
-    github: Option<String>,
-    gitlab: Option<String>,
+    github: Option<Origin>,
+    gitlab: Option<Origin>,
 }
 
-impl Hosts {
-    /// These hosts; each may be absent.
-    #[must_use]
-    pub fn new(github: Option<&str>, gitlab: Option<&str>) -> Self {
+/// The scheme and host (with its port, lowercase) of a web address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Origin {
+    scheme: Scheme,
+    host: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scheme {
+    Https,
+    Http,
+}
+
+impl Scheme {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            Self::Http => "http",
+        }
+    }
+}
+
+impl Origin {
+    fn https(host: &str) -> Self {
         Self {
-            github: github.map(str::to_ascii_lowercase),
-            gitlab: gitlab.map(str::to_ascii_lowercase),
+            scheme: Scheme::Https,
+            host: host.to_ascii_lowercase(),
         }
     }
 
-    /// The hosts the settings name. GitHub's is the host of `api_base`
-    /// without its `api.`: `api.github.com` is `github.com`, and a GitHub
-    /// Enterprise `https://ghe.example/api/v3` is `ghe.example`; without a
-    /// `[github]` table it is `github.com`, as the default `api_base` says.
-    /// GitLab's is the host of `api_url`, and there is none without a
-    /// `[gitlab]` table.
+    /// The origin of a configured web address; one without a scheme is
+    /// https.
+    fn of(url: &str) -> Self {
+        let (scheme, rest) = split_scheme(url).unwrap_or((Scheme::Https, url));
+        Self {
+            scheme,
+            host: rest.split('/').next().unwrap_or(rest).to_ascii_lowercase(),
+        }
+    }
+}
+
+impl Hosts {
+    /// These hosts, served over https; each may be absent.
+    #[cfg(test)]
+    #[must_use]
+    pub fn new(github: Option<&str>, gitlab: Option<&str>) -> Self {
+        Self {
+            github: github.map(Origin::https),
+            gitlab: gitlab.map(Origin::https),
+        }
+    }
+
+    /// The web addresses the settings name, derived as Henk's own links
+    /// and clone URLs are: GitHub's from `api_base` by
+    /// [`henk_platform::github::web_base`] (`https://github.com` without a
+    /// `[github]` table), GitLab's from `api_url` by
+    /// [`henk_platform::gitlab::web_base`], none without a `[gitlab]`
+    /// table. Each keeps the scheme its API address uses.
     #[must_use]
     pub fn from_settings(settings: &Settings) -> Self {
         let github = settings.github.as_ref().map_or_else(
-            || "github.com".to_owned(),
-            |github| {
-                let host = host_of(&github.api_base);
-                host.strip_prefix("api.").unwrap_or(&host).to_owned()
-            },
+            || Origin::https("github.com"),
+            |github| Origin::of(&henk_platform::github::web_base(&github.api_base)),
         );
         let gitlab = settings
             .gitlab
             .as_ref()
-            .map(|gitlab| host_of(&gitlab.api_url));
-        Self::new(Some(&github), gitlab.as_deref())
+            .map(|gitlab| Origin::of(henk_platform::gitlab::web_base(&gitlab.api_url)));
+        Self {
+            github: Some(github),
+            gitlab,
+        }
     }
 
-    /// The platform `host` belongs to, compared without regard to case.
-    fn platform(&self, host: &str) -> anyhow::Result<Platform> {
+    /// The platform `host` belongs to, compared without regard to case,
+    /// when `scheme` is the one that platform is configured with.
+    fn platform(&self, scheme: Scheme, host: &str) -> anyhow::Result<Platform> {
         let host = host.to_ascii_lowercase();
-        if self.github.as_deref() == Some(host.as_str()) {
-            return Ok(Platform::GitHub);
+        for (platform, origin) in [
+            (Platform::GitHub, self.github.as_ref()),
+            (Platform::GitLab, self.gitlab.as_ref()),
+        ] {
+            if let Some(origin) = origin.filter(|origin| origin.host == host) {
+                if origin.scheme != scheme {
+                    return Err(anyhow!("expected an {} URL", origin.scheme.name()));
+                }
+                return Ok(platform);
+            }
         }
-        if self.gitlab.as_deref() == Some(host.as_str()) {
-            return Ok(Platform::GitLab);
-        }
-        let configured = |name: &str, host: Option<&String>| match host {
-            Some(host) => format!("the configured {name} host ({host})"),
+        let configured = |name: &str, origin: Option<&Origin>| match origin {
+            Some(origin) => format!("the configured {name} host ({})", origin.host),
             None => format!("a {name} host: none is configured"),
         };
         Err(anyhow!(
@@ -68,23 +116,20 @@ impl Hosts {
     }
 }
 
-/// The host of an http or https URL, lowercase, with its port.
-fn host_of(url: &str) -> String {
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    rest.split('/').next().unwrap_or(rest).to_ascii_lowercase()
+/// The scheme of an http or https URL, and the rest after `://`.
+fn split_scheme(url: &str) -> Option<(Scheme, &str)> {
+    url.strip_prefix("https://")
+        .map(|rest| (Scheme::Https, rest))
+        .or_else(|| url.strip_prefix("http://").map(|rest| (Scheme::Http, rest)))
 }
 
-fn split(url: &str) -> anyhow::Result<(&str, &str)> {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .ok_or_else(|| anyhow!("expected an https URL"))?;
+fn split(url: &str) -> anyhow::Result<(Scheme, &str, &str)> {
+    let (scheme, without_scheme) =
+        split_scheme(url).ok_or_else(|| anyhow!("expected an https URL"))?;
     let (host, path) = without_scheme
         .split_once('/')
         .ok_or_else(|| anyhow!("URL has no path"))?;
-    Ok((host, path.trim_end_matches('/')))
+    Ok((scheme, host, path.trim_end_matches('/')))
 }
 
 /// Parses `https://github.com/owner/repo/pull/7` or
@@ -93,17 +138,20 @@ fn split(url: &str) -> anyhow::Result<(&str, &str)> {
 ///
 /// # Errors
 ///
-/// A URL that is not https, is on another host, or is not a pull or merge
-/// request.
+/// A URL that is not http(s), is on another host or another scheme than
+/// the one configured for it, or is not a pull or merge request.
 pub fn parse_pull_request_url(url: &str, hosts: &Hosts) -> anyhow::Result<ReviewTarget> {
-    let (host, path) = split(url)?;
-    match hosts.platform(host)? {
+    let (scheme, host, path) = split(url)?;
+    match hosts.platform(scheme, host)? {
         Platform::GitHub => {
             let mut parts = path.split('/');
             let (Some(owner), Some(repo), Some("pull"), Some(number)) =
                 (parts.next(), parts.next(), parts.next(), parts.next())
             else {
-                return Err(anyhow!("expected https://{host}/owner/repo/pull/N"));
+                return Err(anyhow!(
+                    "expected {}://{host}/owner/repo/pull/N",
+                    scheme.name()
+                ));
             };
             let number: u64 = number.parse().context("pull request number")?;
             Ok(ReviewTarget {
@@ -114,7 +162,8 @@ pub fn parse_pull_request_url(url: &str, hosts: &Hosts) -> anyhow::Result<Review
         Platform::GitLab => {
             let Some((project, number)) = path.split_once("/-/merge_requests/") else {
                 return Err(anyhow!(
-                    "expected https://{host}/group/project/-/merge_requests/N"
+                    "expected {}://{host}/group/project/-/merge_requests/N",
+                    scheme.name()
                 ));
             };
             let number: u64 = number
@@ -183,16 +232,20 @@ pub fn parse_review_targets(
 ///
 /// # Errors
 ///
-/// A URL that is not https, is on another host, or is not an issue.
+/// A URL that is not http(s), is on another host or another scheme than
+/// the one configured for it, or is not an issue.
 pub fn parse_issue_url(url: &str, hosts: &Hosts) -> anyhow::Result<IssueTarget> {
-    let (host, path) = split(url)?;
-    match hosts.platform(host)? {
+    let (scheme, host, path) = split(url)?;
+    match hosts.platform(scheme, host)? {
         Platform::GitHub => {
             let mut parts = path.split('/');
             let (Some(owner), Some(repo), Some("issues"), Some(number)) =
                 (parts.next(), parts.next(), parts.next(), parts.next())
             else {
-                return Err(anyhow!("expected https://{host}/owner/repo/issues/N"));
+                return Err(anyhow!(
+                    "expected {}://{host}/owner/repo/issues/N",
+                    scheme.name()
+                ));
             };
             let number: u64 = number.parse().context("issue number")?;
             Ok(IssueTarget {
@@ -202,7 +255,10 @@ pub fn parse_issue_url(url: &str, hosts: &Hosts) -> anyhow::Result<IssueTarget> 
         }
         Platform::GitLab => {
             let Some((project, number)) = path.split_once("/-/issues/") else {
-                return Err(anyhow!("expected https://{host}/group/project/-/issues/N"));
+                return Err(anyhow!(
+                    "expected {}://{host}/group/project/-/issues/N",
+                    scheme.name()
+                ));
             };
             let number: u64 = number
                 .split('/')
@@ -384,6 +440,75 @@ mod tests {
             Hosts::from_settings(&settings(gitlab)),
             Hosts::new(Some("github.com"), Some("gitlab.example"))
         );
+    }
+
+    /// Settings from the minimal config plus `extra`.
+    fn settings(extra: &str) -> Settings {
+        let base = "[discord]\nchannel_id = 1\nhenk_user_id = 2\nteam_lead_ids = [3]\n[mail]\naddress = \"henk@example.com\"\n[allowlist]\ngithub_owners = [\"o\"]\n";
+        crate::config::Config::parse(&format!("{base}{extra}"))
+            .and_then(crate::config::Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    const GITHUB: &str = "[mcp.github]\ncommand = \"unused\"\n[github]\napp_id = 1\ninstallation_id = 2\nbot_login = \"h[bot]\"\n";
+
+    #[test]
+    fn an_enterprise_api_host_is_the_web_host_as_henks_links_have_it() {
+        let enterprise = format!("{GITHUB}api_base = \"https://api.ghe.corp.com/api/v3\"\n");
+        let settings = settings(&enterprise);
+        let hosts = Hosts::from_settings(&settings);
+        let link = "https://api.ghe.corp.com/o/r/pull/7";
+        assert_eq!(
+            format!(
+                "{}/o/r/pull/7",
+                henk_platform::github::web_base("https://api.ghe.corp.com/api/v3")
+            ),
+            link,
+            "the dashboard link and clone URL keep the api. host"
+        );
+        let target = parse_pull_request_url(link, &hosts).unwrap();
+        assert_eq!(target.repo.platform(), Platform::GitHub);
+        assert_eq!(target.number, 7);
+        assert!(parse_pull_request_url("https://ghe.corp.com/o/r/pull/7", &hosts).is_err());
+
+        let public = Hosts::from_settings(&settings_with_api_base("https://api.github.com/"));
+        assert!(parse_pull_request_url("https://github.com/o/r/pull/7", &public).is_ok());
+        assert!(parse_pull_request_url("https://api.github.com/o/r/pull/7", &public).is_err());
+    }
+
+    fn settings_with_api_base(api_base: &str) -> Settings {
+        settings(&format!("{GITHUB}api_base = \"{api_base}\"\n"))
+    }
+
+    #[test]
+    fn a_gitlab_on_http_takes_the_http_urls_henk_links_to() {
+        let gitlab = "[mcp.gitlab]\ncommand = \"unused\"\n[mcp.gitlab-write]\ncommand = \"unused\"\n[gitlab]\napi_url = \"http://GitLab.internal/api/v4/\"\nusername = \"henk\"\n";
+        let settings = settings(gitlab);
+        let hosts = Hosts::from_settings(&settings);
+        for issue in [false, true] {
+            let what = if issue { "issues" } else { "merge_requests" };
+            let web = henk_platform::gitlab::web_base(&settings.gitlab.as_ref().unwrap().api_url);
+            let link = format!("{web}/g/p/-/{what}/1");
+            assert!(link.starts_with("http://GitLab.internal/g/p/-/"), "{link}");
+            let platform = if issue {
+                parse_issue_url(&link, &hosts).unwrap().repo.platform()
+            } else {
+                parse_pull_request_url(&link, &hosts)
+                    .unwrap()
+                    .repo
+                    .platform()
+            };
+            assert_eq!(platform, Platform::GitLab);
+        }
+        let error =
+            parse_pull_request_url("https://gitlab.internal/g/p/-/merge_requests/1", &hosts)
+                .unwrap_err()
+                .to_string();
+        assert_eq!(error, "expected an http URL", "the configured scheme only");
+        let error = parse_pull_request_url("http://github.com/o/r/pull/7", &hosts)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "expected an https URL", "GitHub stays https");
     }
 
     #[test]
