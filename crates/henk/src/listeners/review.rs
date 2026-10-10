@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use henk_domain::allowlist::Platform;
 use henk_domain::queue::Decision;
-use henk_domain::review::is_review_request;
-use henk_events::{CommentKind, Event, EventKind, Handled, Listener, PullRequestAction};
+use henk_domain::review::{ReviewTrigger, is_review_request};
+use henk_events::{
+    CommentKind, Event, EventKind, EventSource, Handled, Listener, PullRequestAction,
+};
 use henk_platform::{PullRequestState, ReviewTarget};
 use tracing::instrument;
 
@@ -162,13 +164,31 @@ impl Listener for ReviewListener {
                     Some(commit) => commit.clone(),
                     None => match self.head_of(target).await {
                         Ok(head) => head,
-                        Err(outcome) => return outcome,
+                        Err(outcome) => {
+                            // A resume that could not read the pull request
+                            // gives its claim back, so it is tried again
+                            // (#160); a refusal keeps it.
+                            if let (Handled::Failed(_), EventSource::Resume { interrupted }) =
+                                (&outcome, &event.source)
+                            {
+                                crate::resume::release(self.coordinator.app(), interrupted).await;
+                            }
+                            return outcome;
+                        }
                     },
+                };
+                // A review resumed after a restart says which run it
+                // resumes (#160); it is refused like any other request.
+                let trigger = match &event.source {
+                    EventSource::Resume { interrupted } => {
+                        ReviewTrigger::Resumed(interrupted.clone()).words()
+                    }
+                    _ => "requested".to_owned(),
                 };
                 let request = ReviewRequest {
                     target: target.clone(),
                     commit: Some(head.clone()),
-                    trigger: "requested".to_owned(),
+                    trigger,
                     requester: requester.clone(),
                     acknowledge: None,
                     run: None,

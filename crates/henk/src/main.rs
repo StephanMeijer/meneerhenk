@@ -34,6 +34,7 @@ mod plan_tools;
 mod prune;
 mod push;
 mod recorder;
+mod resume;
 mod review;
 mod review_loop;
 mod review_many;
@@ -364,11 +365,12 @@ async fn cmd_runs_show(config: &Path, run: &str, transcript: Option<&str>) -> an
 }
 
 async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> anyhow::Result<()> {
-    let targets = urls::parse_review_targets(urls, commit.as_deref())?;
+    let settings = load_settings(config)?;
+    let hosts = urls::Hosts::from_settings(&settings);
+    let targets = urls::parse_review_targets(urls, commit.as_deref(), &hosts)?;
     let commit = commit
         .map(|c| henk_domain::review::CommitSha::parse(&c))
         .transpose()?;
-    let settings = load_settings(config)?;
     let app = Arc::new(App::build(settings, None).await?);
     liveness::reap_orphans(&app).await;
     interrupt_on_ctrl_c(app.shutdown.clone());
@@ -463,10 +465,10 @@ fn interrupt_on_ctrl_c(shutdown: CancellationToken) {
 
 async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
+    let target = parse_issue_url(url, &urls::Hosts::from_settings(&settings))?;
     let app = App::build(settings, None).await?;
     liveness::reap_orphans(&app).await;
     interrupt_on_ctrl_c(app.shutdown.clone());
-    let target = parse_issue_url(url)?;
     let report = plan::run_plan(
         &app,
         plan::PlanRequest {
@@ -489,10 +491,10 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
 
 async fn cmd_address(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
     let settings = load_settings(config)?;
+    let target = parse_pull_request_url(url, &urls::Hosts::from_settings(&settings))?;
     let app = App::build(settings, None).await?;
     liveness::reap_orphans(&app).await;
     interrupt_on_ctrl_c(app.shutdown.clone());
-    let target = parse_pull_request_url(url)?;
     let report = address::run_address(
         &app,
         address::AddressRequest {
