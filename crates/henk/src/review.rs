@@ -3069,6 +3069,19 @@ lanes = [{ name = "lane-a", model = "m" }]
         }
     }
 
+    /// Waits until `ready` holds, then cancels `run`, so a test cancels
+    /// in the state it means to, not after a guess at how long getting
+    /// there takes.
+    async fn cancel_once(ready: impl Fn() -> bool, cancels: crate::cancel::Cancels, run: RunId) {
+        for _ in 0..500 {
+            if ready() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(cancels.cancel(&run, "github:1234".to_owned()));
+    }
+
     /// Two lanes and the fact-checker, reviewing in a workspace with one
     /// setup step.
     fn reviewing_config(extra: &str) -> String {
@@ -4131,11 +4144,13 @@ lanes = [{ name = "lane-a", model = "m" }]
         let r = reviewed("henk-review-ws-cancel", &reviewing_config(""), model, 0).await;
         let cancel = r.f.app.shutdown.child_token();
         let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
-        let (cancels, cancelled) = (r.f.app.cancels.clone(), run.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
-        });
+        // The lanes ask the model only once every workspace is set up.
+        let model = Arc::clone(&r.f.model);
+        tokio::spawn(cancel_once(
+            move || !model.requests().is_empty(),
+            r.f.app.cancels.clone(),
+            run.clone(),
+        ));
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             run_review(&r.f.app, request(&run), cancel),
@@ -4161,11 +4176,12 @@ lanes = [{ name = "lane-a", model = "m" }]
         .await;
         let cancel = r.f.app.shutdown.child_token();
         let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
-        let (cancels, cancelled) = (r.f.app.cancels.clone(), run.clone());
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
-        });
+        let peek = Arc::clone(&r.peek);
+        tokio::spawn(cancel_once(
+            move || peek.inner.opened() == 3,
+            r.f.app.cancels.clone(),
+            run.clone(),
+        ));
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             run_review(&r.f.app, request(&run), cancel),
