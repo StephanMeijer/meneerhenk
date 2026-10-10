@@ -40,9 +40,10 @@ use crate::stages;
 #[error("superseded by a review of a newer commit")]
 pub struct Superseded;
 
-/// A person cancelled the review from the dashboard (#69).
+/// A person cancelled the review from the dashboard (#69), or an MCP client
+/// did (#266); [`crate::cancel::cancelled_reason`] says which.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("cancelled from the dashboard by {0}")]
+#[error("{}", crate::cancel::cancelled_reason(.0))]
 pub struct CancelledBy(pub String);
 
 /// The review was cancelled because Henk was told to stop.
@@ -417,7 +418,7 @@ async fn report_cancelled(
         link,
         ..
     } = review;
-    info!(run = %run, by, "review cancelled from the dashboard");
+    info!(run = %run, by, "review {}", crate::cancel::cancelled_reason(by));
     let body = Marker {
         run: run.clone(),
         model: ModelId::parse("none").unwrap_or_else(|_| unreachable!("constant")),
@@ -432,7 +433,7 @@ async fn report_cancelled(
     {
         error!(%post_error, "could not post that the review was cancelled");
     }
-    let outcome = ReviewOutcome::cancelled(commit.clone());
+    let outcome = ReviewOutcome::cancelled(commit.clone(), crate::cancel::cancelled_via(by));
     if let Err(finish_error) = finish_checks(review, handle, &outcome).await {
         error!(%finish_error, "could not finish the check of a cancelled review");
     }
@@ -491,13 +492,14 @@ pub async fn report_cancelled_while_queued(
         // No run page: the check links where the queue is shown.
         match app.writer(platform) {
             Ok(writer) => {
-                close_queued_as_cancelled(&writer, request, &app.settings.queue_link(&run)).await;
+                close_queued_as_cancelled(&writer, request, &app.settings.queue_link(&run), by)
+                    .await;
             }
             Err(writer_error) => error!(%writer_error, "could not close the queued check"),
         }
         return Err(error.into());
     }
-    info!(run = %run, by, "review cancelled from the dashboard before it started");
+    info!(run = %run, by, "review {} before it started", crate::cancel::cancelled_reason(by));
     stages::request(
         &*app.store,
         &run,
@@ -544,7 +546,7 @@ pub async fn report_cancelled_while_queued(
             {
                 error!(%post_error, "could not post that the review was cancelled");
             }
-            close_queued_as_cancelled(&writer, request, &link).await;
+            close_queued_as_cancelled(&writer, request, &link, by).await;
         }
         Err(writer_error) => {
             error!(%writer_error, "could not post that the review was cancelled");
@@ -567,9 +569,10 @@ async fn close_queued_as_cancelled(
     writer: &Arc<dyn PlatformWriter>,
     request: &ReviewRequest,
     link: &str,
+    by: &str,
 ) {
     if let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) {
-        let outcome = ReviewOutcome::cancelled(commit.clone());
+        let outcome = ReviewOutcome::cancelled(commit.clone(), crate::cancel::cancelled_via(by));
         if let Err(finish_error) = writer
             .finish_review(&request.target, commit, Some(handle), &outcome, link)
             .await
@@ -2248,16 +2251,41 @@ lanes = [{ name = "lane-a", model = "m" }]
     /// must not post the failure comment, and its check is neutral.
     #[tokio::test]
     async fn a_review_cancelled_from_the_dashboard_says_by_whom_and_ends_cancelled() {
+        review_cancelled_by(
+            "github:1234",
+            "Cancelled from the dashboard by GitHub account 1234.",
+            "Cancelled from the dashboard.",
+            "cancelled from the dashboard by github:1234",
+        )
+        .await;
+    }
+
+    /// #293: a cancel over MCP says so on the pull request, the check and
+    /// the run, not "from the dashboard".
+    #[tokio::test]
+    async fn a_review_cancelled_over_mcp_says_so_everywhere() {
+        review_cancelled_by(
+            "mcp:claude",
+            "Cancelled over MCP by client claude.",
+            "Cancelled over MCP.",
+            "cancelled over MCP by mcp:claude",
+        )
+        .await;
+    }
+
+    /// A review that `by` cancels while it runs: the comment, the check's
+    /// headline and the run's stored reason, and no failure comment.
+    async fn review_cancelled_by(by: &str, notice_says: &str, headline: &str, reason: &str) {
         let run = RunId::parse("r-cancelled").unwrap();
         let model =
             ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
         let f = fixture(DIFF, model).await;
         let cancel = f.app.shutdown.child_token();
         let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
-        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        let (cancels, cancelled, by_whom) = (f.app.cancels.clone(), run.clone(), by.to_owned());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+            assert!(cancels.cancel(&cancelled, by_whom));
         });
         let result = tokio::time::timeout(
             Duration::from_secs(10),
@@ -2278,10 +2306,10 @@ lanes = [{ name = "lane-a", model = "m" }]
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.body.contains("Cancelled from the dashboard"))
+            .find(|r| r.body.contains("Cancelled "))
             .map(|r| r.body.clone())
             .expect("one comment says it was cancelled");
-        assert!(notice.contains("by GitHub account 1234."), "{notice}");
+        assert!(notice.starts_with(notice_says), "{notice}");
         assert_eq!(
             Marker::parse(&notice).and_then(|m| m.kind),
             Some(MarkerKind::Reply)
@@ -2289,14 +2317,45 @@ lanes = [{ name = "lane-a", model = "m" }]
         {
             let finished = f.writer.finished.lock().unwrap();
             assert_eq!(finished[0].check_conclusion(), CheckConclusion::Neutral);
-            assert_eq!(finished[0].headline(), "Cancelled from the dashboard.");
+            assert_eq!(finished[0].headline(), headline);
         }
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Cancelled);
-        assert_eq!(
-            record.error.as_deref(),
-            Some("cancelled from the dashboard by github:1234")
-        );
+        assert_eq!(record.error.as_deref(), Some(reason));
+    }
+
+    /// #57: the same pull request with its path in another case joins the
+    /// running review instead of starting a second one beside it.
+    #[tokio::test]
+    async fn a_request_differing_only_in_case_joins_the_running_review() {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let app = Arc::new(fixture(DIFF, model).await.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let commit = CommitSha::parse(SHA).unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let in_case = |path: &str| ReviewRequest {
+            target: ReviewTarget {
+                repo: RepoRef::parse(Platform::GitHub, path).unwrap(),
+                number: 7,
+            },
+            ..request(&placeholder)
+        };
+        let (_, run) = coordinator.submit_review(in_case("O/R"), commit.clone());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&run).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        let (decision, joined) = coordinator.submit_review(in_case("o/r"), commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Join);
+        assert_eq!(joined, run, "one review, not two");
+        assert!(coordinator.cancel(&run, "github:1234".to_owned()));
     }
 
     #[tokio::test]
