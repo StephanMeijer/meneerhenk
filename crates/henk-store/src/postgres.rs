@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use henk_domain::run::{EventId, RunId};
+use henk_domain::run::{EventId, RunId, RunKind};
 use rustls_platform_verifier::BuilderVerifierExt as _;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -215,7 +215,8 @@ const DRAFT_FILTER: &str =
     "($1::text IS NULL OR d.model = $1) AND ($2::text IS NULL OR d.lane = $2)
      AND ($3::text IS NULL OR r.repo = $3)
      AND ($4::timestamptz IS NULL OR d.created_at >= $4)
-     AND ($5::timestamptz IS NULL OR d.created_at < $5)";
+     AND ($5::timestamptz IS NULL OR d.created_at < $5)
+     AND d.kind <> 'loop_finding'";
 
 /// One count per verdict, and the waiting ones, in [`DraftRates`] order.
 const VERDICT_SUMS: &str = "COUNT(*) FILTER (WHERE d.verdict = 'confirmed'),
@@ -448,6 +449,50 @@ impl RunStore for PgStore {
             .collect()
     }
 
+    async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {RUN_COLUMNS} FROM runs r
+                     WHERE r.kind = $1 AND r.started_at >= $2 AND NOT EXISTS (
+                         SELECT 1 FROM runs n
+                         WHERE n.kind = r.kind AND n.platform = r.platform
+                           AND n.repo = r.repo AND n.target = r.target
+                           AND (n.started_at > r.started_at
+                                OR (n.started_at = r.started_at AND n.id > r.id)))
+                     ORDER BY r.started_at, r.id"
+                ),
+                &[&kind_str(RunKind::Review), &since],
+            )
+            .await?
+            .iter()
+            .map(|row| raw_run(row)?.into_record())
+            .collect()
+    }
+
+    async fn claim_resume(
+        &self,
+        run: &RunId,
+        interrupted: &str,
+        resumed: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .await?
+            .execute(
+                "UPDATE runs SET error = $4 WHERE id = $1 AND status = $2 AND error = $3",
+                &[
+                    &run.as_str(),
+                    &RunStatus::Failed.as_str(),
+                    &interrupted,
+                    &resumed,
+                ],
+            )
+            .await?;
+        Ok(changed == 1)
+    }
+
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         self.client()
             .await?
@@ -506,7 +551,8 @@ impl RunStore for PgStore {
         let drafts = client
             .query(
                 &format!(
-                    "SELECT {}, COUNT(*) FROM drafts WHERE created_at >= $1 GROUP BY 1",
+                    "SELECT {}, COUNT(*) FROM drafts
+                     WHERE created_at >= $1 AND kind <> 'loop_finding' GROUP BY 1",
                     day("created_at")
                 ),
                 &[&since],

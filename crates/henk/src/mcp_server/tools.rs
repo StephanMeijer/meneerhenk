@@ -452,7 +452,8 @@ impl HenkMcp {
         let source = EventSource::Mcp {
             requester: who.clone(),
         };
-        let started = match runs::publish_start(&self.bus, request, source, &who) {
+        let hosts = crate::urls::Hosts::from_settings(&self.app.settings);
+        let started = match runs::publish_start(&self.bus, request, source, &who, &hosts) {
             Ok(started) => started,
             Err(error) => return Ok(refused(error.message())),
         };
@@ -541,6 +542,17 @@ impl ServerHandler for HenkMcp {
                 "Meneer Henk reviews pull requests, plans issues and addresses review feedback. Start work with start_review, start_plan or start_address, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
             )
     }
+}
+
+/// The names of every tool, for the tests that keep `llms.txt` in step
+/// with them (#292).
+#[cfg(test)]
+pub(crate) fn tool_names() -> Vec<String> {
+    HenkMcp::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
 }
 
 #[cfg(test)]

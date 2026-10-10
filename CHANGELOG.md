@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.25...v0.1.26) - 2026-10-09
+
+### Added
+
+- Henk as an MCP server at /mcp, behind named read and write tokens
+
+### Fixed
+
+- *(cancel)* the cancel notice says where the cancel came from
+- *(config)* one env per MCP token, and a secret two tokens share is refused
+- *(store)* SQLite orders runs by time, not text
+
+### Other
+
+- Merge pull request #266 from StephanMeijer/feat/mcp-server
+- Merge branch 'fix/health-after-refactor' into feat/mcp-server
+- Merge remote-tracking branch 'origin/main' into feat/mcp-server
+- Merge pull request #267 from StephanMeijer/feat/mcp-operators
+- *(mcp)* a read token may not cancel a run that is still running
+- *(review)* two lanes on one line at once draft once
+- Merge pull request #282 from StephanMeijer/fix/sqlite-run-order
+- *(store)* index runs by started_at as an instant on SQLite
+
 ## [0.1.25](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.24...v0.1.25) - 2026-10-09
 
 ### Fixed

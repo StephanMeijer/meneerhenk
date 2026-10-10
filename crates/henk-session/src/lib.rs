@@ -240,11 +240,16 @@ pub struct ResumableSession {
     system: String,
     tools: ToolSet,
     limits: AgentConfig,
+    continuation: Option<ContinuationFactory>,
     messages: Vec<ChatMessage>,
     turns: u32,
     usage: Usage,
     status: Option<(LaneStatus, Option<String>)>,
 }
+
+/// Makes a fresh [`Continuation`] for each round of a [`ResumableSession`]:
+/// one is not `Clone`, and each round's nudges start over.
+pub type ContinuationFactory = Arc<dyn Fn() -> Continuation + Send + Sync>;
 
 impl std::fmt::Debug for ResumableSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -287,11 +292,20 @@ impl ResumableSession {
             system: system.into(),
             tools,
             limits,
+            continuation: None,
             messages: Vec::new(),
             turns: 0,
             usage: Usage::default(),
             status: None,
         }
+    }
+
+    /// Asks `continuation()`'s continuation, in every round, before the
+    /// round ends without tool calls.
+    #[must_use]
+    pub fn with_continuation(mut self, continuation: ContinuationFactory) -> Self {
+        self.continuation = Some(continuation);
+        self
     }
 
     /// The conversation so far.
@@ -326,12 +340,15 @@ impl ResumableSession {
         let seen = self.messages.len();
         let mut opening = std::mem::take(&mut self.messages);
         opening.push(message);
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             Arc::clone(&self.model),
             self.tools.clone(),
             self.system.clone(),
             self.limits,
         );
+        if let Some(continuation) = &self.continuation {
+            agent = agent.with_continuation(continuation());
+        }
         let (mut outcome, _) = run_recorded(
             agent,
             opening,

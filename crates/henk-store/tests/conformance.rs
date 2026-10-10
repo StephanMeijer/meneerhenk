@@ -17,10 +17,11 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord,
-    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
-    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite,
-    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, VerdictFilter,
+    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent,
+    LOOP_FINDING_KIND, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page,
+    PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage,
+    StageState, StageWrite, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
+    VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -85,6 +86,8 @@ macro_rules! for_each_scenario {
             lane_endings_are_the_ended_reviews_newest_first,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
+            the_newest_review_of_each_pull_request_is_read_for_resuming,
+            a_resume_is_claimed_once,
             dropping_running_lanes_leaves_finished_ones_alone,
             lanes_findings_and_events_attach_to_a_run,
             events_and_outcomes_round_trip,
@@ -101,6 +104,7 @@ macro_rules! for_each_scenario {
             tool_calls_are_kept_in_order_and_add_up_across_runs,
             transcripts_are_kept_whole_listed_and_pruned,
             drafts_are_kept_replaced_and_decided,
+            loop_findings_keep_their_verdicts_out_of_the_quality_figures,
             drafts_are_counted_by_group_and_listed_across_runs,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
         );
@@ -669,6 +673,73 @@ async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 9);
+}
+
+/// A review loop's findings (#285) keep the fixer's verdicts, and stay out
+/// of the fact-check's figures and listing.
+async fn loop_findings_keep_their_verdicts_out_of_the_quality_figures(store: &dyn RunStore) {
+    let run = new_run("r-loop");
+    store.create_run(&run).await.unwrap();
+    store
+        .record_draft(&run.id, &draft("d1", "lane-a", 4, "x is never set."))
+        .await
+        .unwrap();
+    let verdicts = [
+        DraftVerdict::Fixed,
+        DraftVerdict::Rejected,
+        DraftVerdict::WontFix,
+        DraftVerdict::Unsettled,
+    ];
+    for (n, verdict) in verdicts.into_iter().enumerate() {
+        let id = format!("f{}", n + 1);
+        let mut finding = draft(&id, "reviewer", 2, "x must be 3");
+        LOOP_FINDING_KIND.clone_into(&mut finding.kind);
+        store.record_draft(&run.id, &finding).await.unwrap();
+        let decision = DraftDecision {
+            at: String::new(),
+            verdict,
+            checker: "fixer".into(),
+            reason: "why".into(),
+            same_as: String::new(),
+            comment_id: String::new(),
+        };
+        store.decide_draft(&run.id, &id, &decision).await.unwrap();
+    }
+    let stored: Vec<_> = store
+        .drafts(&run.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|d| d.decision.map(|decision| decision.verdict))
+        .collect();
+    assert_eq!(stored, verdicts, "every loop verdict reads back");
+
+    let every = DraftFilter::default();
+    assert_eq!(store.count_drafts(&every).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .list_drafts(&every, Page::new(50, 0))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let rates = store.draft_rates(DraftGroup::Lane, &every).await.unwrap();
+    assert_eq!(
+        rates
+            .iter()
+            .map(|r| (r.key.as_str(), r.drafts))
+            .collect::<Vec<_>>(),
+        [("lane-a", 1)],
+        "only the fact-check's drafts"
+    );
+    let yesterday = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let days = store.daily_stats(yesterday).await.unwrap();
+    assert_eq!(
+        days.iter().map(|d| d.drafts).sum::<u64>(),
+        1,
+        "the overview's drafts per day leave loop findings out too"
+    );
 }
 
 async fn drafts_are_kept_replaced_and_decided(store: &dyn RunStore) {
@@ -1452,6 +1523,118 @@ async fn only_running_runs_with_a_stale_heartbeat_are_orphaned(store: &dyn RunSt
         ids(store.orphaned_runs(in_an_hour).await.unwrap()),
         ["r-a", "r-b"],
         "a finished run is never orphaned; oldest first"
+    );
+}
+
+/// #160: a start reads the newest review of each pull request to resume
+/// the ones a restart interrupted. A later review of the same pull request
+/// takes the place of an earlier one; plans and other pull requests do not.
+async fn the_newest_review_of_each_pull_request_is_read_for_resuming(store: &dyn RunStore) {
+    let before = OffsetDateTime::now_utc() - time::Duration::seconds(1);
+    let run = |id: &str, kind: RunKind, repo: &str, target: u64| NewRun {
+        kind,
+        repo: repo.into(),
+        target,
+        ..new_run(id)
+    };
+    for (id, kind, repo, target) in [
+        ("r-a", RunKind::Review, "o/r", 7),
+        ("r-b", RunKind::Review, "o/r", 7),
+        ("r-c", RunKind::Review, "o/r", 8),
+        ("r-d", RunKind::Review, "o/r", 9),
+        ("r-e", RunKind::Plan, "o/r", 10),
+        ("r-f", RunKind::Plan, "o/r", 8),
+        ("r-g", RunKind::Review, "o/s", 7),
+    ] {
+        store
+            .create_run(&run(id, kind, repo, target))
+            .await
+            .unwrap();
+    }
+    for interrupted in ["r-a", "r-c"] {
+        store
+            .finish_run(
+                &id(interrupted),
+                RunStatus::Failed,
+                None,
+                Some("interrupted"),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .finish_run(&id("r-b"), RunStatus::Finished, Some("done"), None)
+        .await
+        .unwrap();
+
+    let latest = store.latest_reviews(before).await.unwrap();
+    let ids = latest.iter().map(|r| r.id.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        ["r-b", "r-c", "r-d", "r-g"],
+        "one review per pull request, the newest, in any state; oldest first"
+    );
+    let c = latest.iter().find(|r| r.id.as_str() == "r-c").unwrap();
+    assert_eq!(c.status, RunStatus::Failed);
+    assert_eq!(c.error.as_deref(), Some("interrupted"));
+
+    let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+    assert!(
+        store.latest_reviews(later).await.unwrap().is_empty(),
+        "reviews that started before the window are left out"
+    );
+}
+
+/// #160: of two processes that read the same interrupted review, one
+/// claims its resume. The claim needs the run failed with the error it was
+/// read with, and changes that error, so a second claim fails.
+async fn a_resume_is_claimed_once(store: &dyn RunStore) {
+    store.create_run(&new_run("r-running")).await.unwrap();
+    store.create_run(&new_run("r-stopped")).await.unwrap();
+    store
+        .finish_run(
+            &id("r-stopped"),
+            RunStatus::Failed,
+            None,
+            Some("interrupted"),
+        )
+        .await
+        .unwrap();
+    let resumed = "interrupted, resumed after a restart";
+
+    assert!(
+        !store
+            .claim_resume(&id("r-running"), "interrupted", resumed)
+            .await
+            .unwrap(),
+        "a running run is not claimed"
+    );
+    assert!(
+        !store
+            .claim_resume(&id("r-stopped"), "boom", resumed)
+            .await
+            .unwrap(),
+        "a run that ended with another error is not claimed"
+    );
+    assert!(
+        store
+            .claim_resume(&id("r-stopped"), "interrupted", resumed)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .claim_resume(&id("r-stopped"), "interrupted", resumed)
+            .await
+            .unwrap(),
+        "a second claim fails"
+    );
+    let record = store.run(&id("r-stopped")).await.unwrap().unwrap();
+    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.error.as_deref(), Some(resumed));
+    assert_eq!(
+        store.run(&id("r-running")).await.unwrap().unwrap().status,
+        RunStatus::Running
     );
 }
 

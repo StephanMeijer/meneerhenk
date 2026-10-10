@@ -29,6 +29,8 @@ use subtle::ConstantTimeEq as _;
 use tracing::warn;
 
 pub(crate) use tools::HenkMcp;
+#[cfg(test)]
+pub(crate) use tools::tool_names;
 
 use crate::app::{App, env_var};
 use crate::config::McpScope;

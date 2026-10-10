@@ -3,7 +3,8 @@
 //! closes every run whose heartbeat stopped, and the review's check with it.
 //! A run another live process is working on keeps a fresh heartbeat and is
 //! never touched, and a run this process is working on is never touched
-//! even when its heartbeat lags (#47).
+//! even when its heartbeat lags (#47). Once the first pass is done, the
+//! reviews a restart interrupted are resumed (#160).
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,6 +13,7 @@ use std::time::Duration;
 use henk_domain::allowlist::RepoRef;
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::{RunId, RunKind};
+use henk_events::EventBus;
 use henk_platform::{ReviewHandle, ReviewTarget};
 use henk_store::{RunRecord, RunStatus, RunStore};
 use tokio::task::JoinHandle;
@@ -19,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::app::App;
+use crate::resume::Resumer;
 
 /// How often a running process says it is alive.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(30);
@@ -33,7 +36,7 @@ pub(crate) const STALE_AFTER: Duration = Duration::from_mins(3);
 const REAP_EVERY: Duration = Duration::from_mins(1);
 
 /// What an orphaned run and its lanes end with.
-const REAPED: &str = "interrupted: the process ended";
+pub(crate) const REAPED: &str = "interrupted: the process ended";
 
 /// The runs this process is working on. The reaper never closes one of
 /// them, even when its heartbeat lags behind (a store that was unreachable
@@ -104,18 +107,34 @@ impl Drop for KeepAlive {
     }
 }
 
-/// Reaps orphaned runs now and every [`REAP_EVERY`] until `cancel`.
-pub fn spawn_reaper(app: Arc<App>, cancel: CancellationToken) -> JoinHandle<()> {
-    tokio::spawn(reap_every(app, cancel, REAP_EVERY, STALE_AFTER))
+/// Reaps orphaned runs now and every [`REAP_EVERY`] until `cancel`, and
+/// resumes the reviews a restart interrupted on `bus` once the first pass
+/// is done (#160).
+pub fn spawn_reaper(
+    app: Arc<App>,
+    bus: Arc<EventBus>,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    let resumer = Resumer::new(bus, STALE_AFTER);
+    tokio::spawn(reap_every(
+        app,
+        cancel,
+        REAP_EVERY,
+        STALE_AFTER,
+        Some(resumer),
+    ))
 }
 
 /// The reaper's loop: every `every`, closes the runs silent for longer than
-/// `stale_after`. The first pass is immediate.
+/// `stale_after`. The first pass is immediate. After a pass, `resumer`
+/// resumes interrupted reviews on the passes it is due, never on every
+/// one (#160).
 pub(crate) async fn reap_every(
     app: Arc<App>,
     cancel: CancellationToken,
     every: Duration,
     stale_after: Duration,
+    mut resumer: Option<Resumer>,
 ) {
     let mut ticks = tokio::time::interval(every);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -123,7 +142,11 @@ pub(crate) async fn reap_every(
         tokio::select! {
             () = cancel.cancelled() => return,
             _ = ticks.tick() => {
+                let began = tokio::time::Instant::now();
                 reap_silent_since(&app, time::OffsetDateTime::now_utc() - stale_after).await;
+                if let Some(resumer) = resumer.as_mut() {
+                    resumer.after_pass(&app, began).await;
+                }
             }
         }
     }

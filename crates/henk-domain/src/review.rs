@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::allowlist::{Platform, RepoRef};
 use crate::identity::Requester;
 use crate::marker::ModelId;
+use crate::run::RunId;
 use crate::{GITHUB_HANDLE, GITLAB_HANDLE};
 
 /// Why a commit sha was rejected.
@@ -135,6 +136,36 @@ pub enum ReviewTrigger {
     Discord(Requester),
     /// A request through the CLI or the HTTP API, on behalf of a Team Lead.
     Api(Requester),
+    /// Henk started again after a restart interrupted this run, on the pull
+    /// request's current head (#160).
+    Resumed(RunId),
+}
+
+/// How a resumed run's trigger starts, before the run it resumes.
+const RESUMED_AFTER: &str = "resumed after interrupted run ";
+
+impl ReviewTrigger {
+    /// What the run record says started it.
+    #[must_use]
+    pub fn words(&self) -> String {
+        match self {
+            Self::Opened => "opened".to_owned(),
+            Self::NewCommits => "new commits".to_owned(),
+            Self::Command => "review command".to_owned(),
+            Self::Discord(_) => "discord".to_owned(),
+            Self::Api(_) => "requested".to_owned(),
+            Self::Resumed(interrupted) => format!("{RESUMED_AFTER}{interrupted}"),
+        }
+    }
+
+    /// The run a record's trigger says it resumed, when [`Self::words`]
+    /// wrote it for [`Self::Resumed`]; `None` for any other trigger.
+    #[must_use]
+    pub fn resumed_from(words: &str) -> Option<RunId> {
+        words
+            .strip_prefix(RESUMED_AFTER)
+            .and_then(|run| RunId::parse(run).ok())
+    }
 }
 
 /// One independent reviewer inside a review (§1.1, §3.2).
@@ -417,6 +448,34 @@ mod tests {
     use super::*;
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// #160: a resumed review's record names the run it resumes.
+    #[test]
+    fn a_resumed_review_names_the_interrupted_run() {
+        let run = RunId::parse("r-20261006-6b344328").unwrap();
+        assert_eq!(
+            ReviewTrigger::Resumed(run).words(),
+            "resumed after interrupted run r-20261006-6b344328"
+        );
+        assert_eq!(ReviewTrigger::NewCommits.words(), "new commits");
+    }
+
+    /// #160: a record's trigger reads back as the run it resumed, and only
+    /// a resumed one does.
+    #[test]
+    fn a_resumed_trigger_reads_back_as_its_run() {
+        let run = RunId::parse("r-20261006-6b344328").unwrap();
+        let words = ReviewTrigger::Resumed(run.clone()).words();
+        assert_eq!(ReviewTrigger::resumed_from(&words), Some(run));
+        for other in [
+            "opened",
+            "requested",
+            "new commits",
+            "resumed after interrupted run ",
+        ] {
+            assert_eq!(ReviewTrigger::resumed_from(other), None, "{other}");
+        }
+    }
 
     fn outcome(lanes: &[(&str, LaneOutcome)], open_findings: usize) -> ReviewOutcome {
         ReviewOutcome {

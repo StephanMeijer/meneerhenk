@@ -62,9 +62,12 @@ const STATES: Record<string, Omit<Look, 'label'>> = {
   ignored: look('neutral', 'minus'),
 };
 
-/** What the fact-check decided about a draft. */
+/** What the fact-check, or a review loop's fixer (#285), decided about a draft. */
 const VERDICTS: Record<string, Omit<Look, 'label'>> = {
   confirmed: look('ok', 'check'),
+  fixed: look('ok', 'check'),
+  wont_fix: look('neutral', 'minus'),
+  unsettled: look('warn', 'triangle'),
   rejected: look('fail', 'cross'),
   same_as: look('neutral', 'link'),
   unchecked: look('warn', 'triangle'),
