@@ -286,6 +286,12 @@
             <dd><a class="mono" href={href(runPath(d.run.superseded_by))} use:link>{d.run.superseded_by}</a></dd>
           </div>
         {/if}
+        {#if d.run.loop_stop !== null && d.run.loop_rounds !== null}
+          <div>
+            <dt>Loop</dt>
+            <dd>{d.run.loop_stop.replaceAll('_', ' ')} after {d.run.loop_rounds} {d.run.loop_rounds === 1 ? 'round' : 'rounds'}</dd>
+          </div>
+        {/if}
         {#if d.check_id}
           <div>
             <dt>Check</dt>

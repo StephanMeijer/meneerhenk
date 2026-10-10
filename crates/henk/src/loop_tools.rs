@@ -136,19 +136,7 @@ pub fn finding_text(finding: &LoopFinding) -> String {
 /// One finding's verdict as the reviewer reads it.
 #[must_use]
 pub fn verdict_text(finding: &LoopFinding) -> String {
-    let report = &finding.report;
-    let fate = match &finding.verdict {
-        None => "no verdict".to_owned(),
-        Some(LoopVerdict::Fixed { what, commit }) => match commit {
-            Some(sha) => format!("fixed in {}: {what}", sha.get(..12).unwrap_or(sha)),
-            None => format!("fixed: {what}"),
-        },
-        Some(verdict) => format!("{}: {}", verdict.as_str().replace('_', " "), verdict.text()),
-    };
-    format!(
-        "{} at {}:{} ({}): {fate}",
-        finding.id, report.path, report.line, report.claim
-    )
+    finding.verdict_line()
 }
 
 /// The reviewer's nudge: finish the round, at most [`NUDGES`] times.

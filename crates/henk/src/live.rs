@@ -386,6 +386,13 @@ impl RunStore for Announcing {
         self.inner.stages_of(runs).await
     }
 
+    async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.end_loop(id, stop, rounds).await?;
+        self.announce_run(id).await;
+        Ok(())
+    }
+
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner.set_check(id, check_id).await?;
@@ -811,6 +818,9 @@ mod tests {
             runs: &[RunId],
         ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
             self.inner.stages_of(runs).await
+        }
+        async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
+            self.inner.end_loop(id, stop, rounds).await
         }
         async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
             self.inner.set_check(id, check_id).await

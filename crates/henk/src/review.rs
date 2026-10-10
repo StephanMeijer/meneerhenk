@@ -4274,6 +4274,94 @@ lanes = [{ name = "lane-a", model = "m" }]
         }
     }
 
+    /// Opens host workspaces in which a search also writes a file, as a
+    /// reviewer that changes the workspace would.
+    struct Scribbling;
+
+    #[async_trait::async_trait]
+    impl crate::workspace::WorkspaceProvider for Scribbling {
+        async fn open(
+            &self,
+            dir: &std::path::Path,
+            profile: &henk_domain::workspace::Profile,
+        ) -> Result<Arc<dyn crate::workspace::Workspace>, crate::workspace::WorkspaceError>
+        {
+            let inner = crate::workspace::host::HostProvider
+                .open(dir, profile)
+                .await?;
+            Ok(Arc::new(Scribbler(inner)))
+        }
+    }
+
+    struct Scribbler(Arc<dyn crate::workspace::Workspace>);
+
+    #[async_trait::async_trait]
+    impl crate::workspace::Workspace for Scribbler {
+        async fn exec(
+            &self,
+            argv: &[String],
+            cwd: &henk_domain::address::WorkspacePath,
+            timeout: Duration,
+        ) -> Result<crate::workspace::ExecResult, crate::workspace::WorkspaceError> {
+            self.0.exec(argv, cwd, timeout).await
+        }
+
+        async fn read(
+            &self,
+            path: &henk_domain::address::WorkspacePath,
+            max_bytes: u64,
+        ) -> Result<Vec<u8>, crate::workspace::WorkspaceError> {
+            self.0.read(path, max_bytes).await
+        }
+
+        async fn write(
+            &self,
+            path: &henk_domain::address::WorkspacePath,
+            content: &[u8],
+        ) -> Result<(), crate::workspace::WorkspaceError> {
+            self.0.write(path, content).await
+        }
+
+        async fn list(
+            &self,
+            dir: &henk_domain::address::WorkspacePath,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            cap: usize,
+        ) -> Result<Vec<String>, crate::workspace::WorkspaceError> {
+            self.0.list(dir, only, cap).await
+        }
+
+        async fn search(
+            &self,
+            dir: &henk_domain::address::WorkspacePath,
+            pattern: &crate::workspace::Pattern,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            context: usize,
+            max_file_bytes: u64,
+            cap: usize,
+        ) -> Result<Vec<crate::workspace::Hit>, crate::workspace::WorkspaceError> {
+            let scribble = henk_domain::address::WorkspacePath::parse("scribble.txt").unwrap();
+            self.0.write(&scribble, b"the reviewer was here").await?;
+            self.0
+                .search(dir, pattern, only, context, max_file_bytes, cap)
+                .await
+        }
+
+        async fn export(
+            &self,
+        ) -> Result<Vec<crate::workspace::Exported>, crate::workspace::WorkspaceError> {
+            self.0.export().await
+        }
+
+        async fn baseline(&self) -> Result<(), crate::workspace::WorkspaceError> {
+            self.0.baseline().await
+        }
+
+        async fn close(&self) {
+            self.0.close().await;
+        }
+    }
+
     fn say(text: &str) -> Result<Completion, henk_llm::LlmError> {
         Ok(Completion {
             message: henk_llm::ChatMessage::assistant(text),
@@ -4291,10 +4379,26 @@ lanes = [{ name = "lane-a", model = "m" }]
 
     /// [`CONFIG`] with a review loop of reviewer `r` and fixer `f` (#284).
     fn loop_config() -> String {
+        loop_config_with("")
+    }
+
+    /// [`loop_config`] with more `[review.loop]` settings.
+    fn loop_config_with(settings: &str) -> String {
         let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
         CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
-            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n[address]\nmodel = \"f\"\nrequester_id = 3\n"
+            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n"
+            + settings
+            + "[address]\nmodel = \"f\"\nrequester_id = 3\n"
     }
+
+    /// The fixture of a looping test: the app, the reviewer, the fixer and
+    /// the remote, which is returned to be kept.
+    type Looping = (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    );
 
     /// A reviewer `r` and a fixer `f`, each scripted, on a fresh local
     /// remote served by [`LoopHub`]; the remote is returned to be kept.
@@ -4303,21 +4407,20 @@ lanes = [{ name = "lane-a", model = "m" }]
         reviewer: ScriptedClient,
         fixer: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-    ) -> (
-        Fixture,
-        Arc<ScriptedClient>,
-        Arc<ScriptedClient>,
-        crate::git::ScratchDir,
-    ) {
-        looping_from(
-            name,
-            "o/r",
-            ScriptedClient::new("m", []),
-            reviewer,
-            fixer,
-            provider,
-        )
-        .await
+    ) -> Looping {
+        looping_with(name, "", reviewer, fixer, provider).await
+    }
+
+    /// [`looping`] with more `[review.loop]` settings.
+    async fn looping_with(
+        name: &str,
+        settings: &str,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> Looping {
+        let lanes = ScriptedClient::new("m", []);
+        looping_on(name, "o/r", settings, lanes, reviewer, fixer, provider).await
     }
 
     /// [`looping`] on a pull request whose branch is in `head_repo`, with
@@ -4329,14 +4432,22 @@ lanes = [{ name = "lane-a", model = "m" }]
         reviewer: ScriptedClient,
         fixer: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-    ) -> (
-        Fixture,
-        Arc<ScriptedClient>,
-        Arc<ScriptedClient>,
-        crate::git::ScratchDir,
-    ) {
+    ) -> Looping {
+        looping_on(name, head_repo, "", lanes, reviewer, fixer, provider).await
+    }
+
+    /// [`looping_from`] with more `[review.loop]` settings.
+    async fn looping_on(
+        name: &str,
+        head_repo: &'static str,
+        settings: &str,
+        lanes: ScriptedClient,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> Looping {
         let (remote, head) = crate::git::tests::bare_remote(name).await;
-        let config = loop_config();
+        let config = loop_config_with(settings);
         let hub = Arc::new(LoopHub {
             remote: remote.path().to_path_buf(),
             head_repo,
@@ -4552,6 +4663,10 @@ lanes = [{ name = "lane-a", model = "m" }]
 
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("converged"), Some(3))
+        );
         let summary = report.summary.unwrap();
         assert!(
             summary.contains(
@@ -4621,6 +4736,155 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 1);
+        assert_nothing_posted(&f.writer);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_reports_a_fixed_finding_again_stops_the_loop() {
+        let claim = "x must be 3, the caller divides by it";
+        let (f, _, fixer, remote) = looping(
+            "review-loop-repeat",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, claim, None),
+                    finish_round(),
+                    say("Done for now."),
+                    report(2, "X must be 3: the caller divides by it", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-repeat").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("repeating_finding"), Some(2)),
+            "at the repeat, not at max_rounds (50)"
+        );
+        assert_eq!(fixer.requests().len(), 3, "the fixer never got the repeat");
+        let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let findings = loop_findings(&f.app, &run).await;
+        assert_eq!(findings[0].1, "fixed");
+        assert_eq!(findings[1].1, "unsettled");
+        assert_eq!(
+            findings[1].3,
+            format!("repeats f1, which was fixed in {}", &head[..12])
+        );
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("stopped: the reviewer reported f1 again as f2 after it was fixed"),
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_changes_the_workspace_and_repeats_a_fixed_finding_fails() {
+        let claim = "x must be 3, the caller divides by it";
+        let (f, _, fixer, _remote) = looping(
+            "review-loop-scribble",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, claim, None),
+                    finish_round(),
+                    say("Done for now."),
+                    call(
+                        "search",
+                        serde_json::json!({"pattern": "let x", "glob": "*.rs"}),
+                    ),
+                    report(2, claim, None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(Scribbling),
+        )
+        .await;
+        let run = RunId::parse("r-loop-scribble").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            record.loop_stop.as_deref(),
+            Some("workspace_changed"),
+            "{:?}",
+            report.summary
+        );
+        assert_eq!(fixer.requests().len(), 3, "the fixer never got round 2");
+        assert!(!report.outcome.unwrap().completed());
+    }
+
+    #[tokio::test]
+    async fn a_round_the_time_ran_out_before_is_not_counted() {
+        let (f, reviewer, fixer, _remote) = looping_with(
+            "review-loop-no-time",
+            "run_timeout_secs = 0\n",
+            ScriptedClient::new("r", []),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-no-time").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("timeout"), Some(0))
+        );
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let summary = report.summary.unwrap();
+        assert!(summary.contains("ran 0 rounds"), "{summary}");
+        assert!(
+            summary.contains("before the reviewer's turn in round 1"),
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_loop_stops_at_its_time_limit() {
+        let (f, reviewer, fixer, _remote) = looping_with(
+            "review-loop-slow",
+            "run_timeout_secs = 1\n",
+            ScriptedClient::new("r", [say("Thinking.")]).with_delay(Duration::from_secs(3)),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-slow").unwrap();
+        let _ = run_review(&f.app, request(&run), CancellationToken::new()).await;
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("timeout"), Some(1))
+        );
+        assert_eq!(reviewer.requests().len(), 1);
+        assert!(fixer.requests().is_empty());
         assert_nothing_posted(&f.writer);
     }
 
@@ -4793,6 +5057,65 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_compacted_fixer_keeps_its_own_history_not_the_reviewer_s_task() {
+        let (mut f, reviewer, fixer, _remote) = looping(
+            "review-loop-compact",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done."),
+                    report(1, "main must return a value", None),
+                    finish_round(),
+                    say("Done."),
+                    report(1, "main needs a doc comment", None),
+                    finish_round(),
+                    say("Done."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    judge("f1", "rejected", "x is never divided by."),
+                    say("Settled."),
+                    judge("f2", "rejected", "main returns ()."),
+                    say("Settled."),
+                    judge("f3", "wont_fix", "a test fixture needs none."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        // Every conversation is over budget from round 2 on.
+        f.app.settings.review.max_conversation_chars = 10;
+        f.app.settings.review.r#loop.as_mut().unwrap().max_rounds = 3;
+        let run = RunId::parse("r-loop-compact").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let earlier = "What happened in the earlier rounds";
+        // The reviewer's round 3 starts from its own task and the summary.
+        let asked = reviewer.requests();
+        assert_eq!(asked.len(), 9);
+        let first = texts(&asked[6]).into_iter().next().unwrap();
+        assert!(first.contains(earlier), "{first}");
+        assert!(first.contains("get_file_diff"), "{first}");
+        assert!(first.contains("f2 at src/a.rs:1"), "{first}");
+        // The fixer's round 3: the summary, never the reviewer's task or a
+        // tool it does not have.
+        let fixing = fixer.requests();
+        assert_eq!(fixing.len(), 6);
+        let first = texts(&fixing[4]).into_iter().next().unwrap();
+        assert!(first.contains(earlier), "{first}");
+        assert!(first.contains("f2 at src/a.rs:1"), "{first}");
+        assert!(!first.contains("Review pull request"), "{first}");
+        assert!(!first.contains("get_file_diff"), "{first}");
+    }
+
+    #[tokio::test]
     async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
         let (mut f, _reviewer, _fixer, remote) = looping(
             "review-loop-cancel-push",
@@ -4860,6 +5183,19 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
+        // A cancel is a skip, never a failed Lanes stage.
+        let stages = stage_list(&f.app, &run).await;
+        let lanes = stages
+            .iter()
+            .find(|(stage, _, _)| *stage == henk_store::Stage::Lanes)
+            .unwrap();
+        assert_eq!(lanes.1, StageState::Skipped, "{stages:?}");
+        assert!(
+            stages
+                .iter()
+                .all(|(_, state, _)| *state != StageState::Failed),
+            "{stages:?}"
+        );
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::address::push_refusal;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
-use henk_domain::review_loop::LoopVerdict;
+use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Profile};
 use henk_llm::ChatMessage;
@@ -214,10 +214,8 @@ struct Rounds<'a> {
     round: u32,
     /// The commits pushed, in order.
     pushed: Vec<String>,
-    /// Whether a session broke off, rather than the loop ending.
-    failed: bool,
-    /// Whether it ran out of rounds with the reviewer's findings open.
-    findings_left: bool,
+    /// When the whole run must have ended (#286).
+    deadline: tokio::time::Instant,
 }
 
 impl<'a> Rounds<'a> {
@@ -325,19 +323,18 @@ impl<'a> Rounds<'a> {
             requester: format!("discord:{}", address.requester_id),
             round: 0,
             pushed: Vec::new(),
-            failed: false,
-            findings_left: false,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs),
         })
     }
 
     /// Gives every finding its one final verdict, whatever ended the loop
     /// (#285), and sums the loop up for the review.
-    async fn conclude(&self, ended: anyhow::Result<String>) -> anyhow::Result<LoopReport> {
+    async fn conclude(&self, ended: anyhow::Result<LoopStop>) -> anyhow::Result<LoopReport> {
         let (store, run) = (&*self.on.app.store, self.on.run);
         // A cancel just before or during a push is a cancel like one inside a
         // session: the review sees its token and ends the way that says.
         let ended = match ended {
-            Err(error) if is_cancelled(&error) => Ok("cancelled".to_owned()),
+            Err(error) if is_cancelled(&error) => Ok(LoopStop::Cancelled),
             other => other,
         };
         // Every finding ends with one verdict, whatever ended the loop (#285).
@@ -355,6 +352,13 @@ impl<'a> Rounds<'a> {
             .unwrap_or_default();
         self.handoff.record_verdicts(&settled).await;
         let stop = ended?;
+        if let Err(error) = store.end_loop(run, stop.as_str(), self.round).await {
+            tracing::warn!(%error, "could not record why the loop stopped");
+        }
+        // A cancel is a skip, as for every other stage of a cancelled run
+        // (`stages::cancelled`), not a failure of the loop.
+        let cancelled = matches!(stop, LoopStop::Cancelled);
+        let failed = !cancelled && !stop.ended_well();
         let ledger = self.handoff.ledger();
         let open = ledger
             .iter()
@@ -377,13 +381,15 @@ impl<'a> Rounds<'a> {
         );
         info!(run = %run, rounds = self.round, pushed, %stop, "review loop ended");
         let _ = store.event(run, "info", &line).await;
-        let state = if self.failed {
+        let state = if cancelled {
+            StageState::Skipped
+        } else if failed {
             StageState::Failed
         } else {
             StageState::Done
         };
         stages::mark(store, run, Stage::Lanes, state, &line).await;
-        let outcome = if self.failed {
+        let outcome = if failed {
             LaneOutcome::Dropped
         } else {
             LaneOutcome::Finished
@@ -399,7 +405,7 @@ impl<'a> Rounds<'a> {
             results,
             line,
             open,
-            findings_left: self.findings_left,
+            findings_left: stop.left_findings_open(),
         })
     }
 
@@ -409,13 +415,22 @@ impl<'a> Rounds<'a> {
         mut facts: PullFacts,
         diff: &ReviewDiff,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<LoopStop> {
         let (store, run) = (&*self.on.app.store, self.on.run);
-        let mut message = opening(self.on.target, self.on.commit, diff);
+        let first = opening(self.on.target, self.on.commit, diff);
+        let mut message = first.clone();
         while self.round < self.config.max_rounds {
-            self.round += 1;
-            let round = self.round;
+            // A round counts once the reviewer's turn starts: a run out of
+            // time before it ran no round more.
+            let round = self.round + 1;
+            if let Some(stop) = self.out_of_time("reviewer", round) {
+                return Ok(stop);
+            }
+            self.round = round;
             self.handoff.start_round(round);
+            if round > 1 {
+                self.compact(&first, round);
+            }
             let doing = format!("round {round}: reviewer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
             let review = self
@@ -425,17 +440,11 @@ impl<'a> Rounds<'a> {
             if let Some(stop) = self.broke_off("reviewer", &review) {
                 return Ok(stop);
             }
-            // Only a finished round can converge: prose, an empty reply or
-            // a cut-off answer after the nudges is no review.
-            if !self.handoff.finished() {
-                self.failed = true;
-                return Ok(format!("the reviewer did not finish round {round}"));
-            }
-            let ledger = self.handoff.ledger();
-            let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
-            if findings.is_empty() {
-                return Ok("converged, the reviewer found nothing more".to_owned());
-            }
+            let findings = match self.reported(round) {
+                Ok(findings) => findings,
+                Err(stop) => return Ok(stop),
+            };
+            // A reviewer that wrote to the workspace is the graver stop.
             if !self
                 .workspace
                 .export()
@@ -443,10 +452,15 @@ impl<'a> Rounds<'a> {
                 .context("listing the changes")?
                 .is_empty()
             {
-                self.failed = true;
-                return Ok("the reviewer changed the workspace; nothing was pushed".to_owned());
+                return Ok(LoopStop::WorkspaceChanged);
+            }
+            if let Some(stop) = self.repeated(round).await {
+                return Ok(stop);
             }
 
+            if let Some(stop) = self.out_of_time("fixer", round) {
+                return Ok(stop);
+            }
             let doing = format!("round {round}: fixer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
             let handed = format!(
@@ -467,9 +481,9 @@ impl<'a> Rounds<'a> {
             self.handoff.record_verdicts(&silent).await;
             let pushed = self.push_round(&mut facts, cancel).await?;
             let unpushed = match &pushed {
-                Pushed::Nothing => "marked fixed, but nothing changed in the workspace",
-                Pushed::Stopped(why) => why.as_str(),
-                Pushed::Commit { .. } => "",
+                Pushed::Nothing => "marked fixed, but nothing changed in the workspace".to_owned(),
+                Pushed::Stopped(stop) => stop.to_string(),
+                Pushed::Commit { .. } => String::new(),
             };
             let ids: Vec<_> = self
                 .handoff
@@ -478,7 +492,8 @@ impl<'a> Rounds<'a> {
                 .map(|f| f.id)
                 .collect();
             if !unpushed.is_empty() {
-                self.handoff.with_ledger(|ledger| ledger.unpushed(unpushed));
+                self.handoff
+                    .with_ledger(|ledger| ledger.unpushed(&unpushed));
             }
             self.handoff.record_verdicts(&ids).await;
             let verdicts: Vec<String> = self
@@ -498,32 +513,112 @@ impl<'a> Rounds<'a> {
                     "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                     round + 1
                 ),
-                Pushed::Stopped(why) => return Ok(why),
+                Pushed::Stopped(stop) => return Ok(stop),
             };
         }
-        // The reviewer's last round had findings; the fixer's answer to
-        // them was never reviewed.
-        self.findings_left = true;
-        Ok(format!(
-            "it reached max_rounds ({})",
-            self.config.max_rounds
-        ))
+        Ok(LoopStop::MaxRounds(self.config.max_rounds))
+    }
+
+    /// Keeps both conversations within their budget: what the earlier
+    /// rounds came to, in place of all but the last round (#286). The
+    /// reviewer's summary starts with its task, `opening`; the fixer never
+    /// had that task or its tools, so its summary is the findings and the
+    /// commits alone.
+    fn compact(&mut self, opening: &str, round: u32) {
+        let ledger = self.handoff.ledger();
+        let commits = if self.pushed.is_empty() {
+            "none".to_owned()
+        } else {
+            self.pushed.join(", ")
+        };
+        let earlier = format!(
+            "The findings so far and their verdicts:\n{}\n\nCommits pushed: {commits}.",
+            ledger.summary(round)
+        );
+        self.reviewer
+            .compact_rounds(&format!("{opening}\n\n{earlier}"), 1);
+        self.fixer.compact_rounds(&earlier, 1);
+    }
+
+    /// The timeout stop when the run's time is up; otherwise gives the
+    /// next session's round what is left of it, at most a round's limit.
+    fn out_of_time(&mut self, who: &str, round: u32) -> Option<LoopStop> {
+        let left = self
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Some(LoopStop::Timeout(format!(
+                "the run's time limit of {}s was reached before the {who}'s turn in round {round}",
+                self.config.run_timeout_secs
+            )));
+        }
+        let limit = left.min(Duration::from_secs(self.config.round_timeout_secs));
+        let session = if who == "reviewer" {
+            &mut self.reviewer
+        } else {
+            &mut self.fixer
+        };
+        session.set_timeout(limit);
+        None
+    }
+
+    /// The stop when a finding of `round` repeats one the fixer fixed:
+    /// the two are going in circles (#286). The repeat stays unsettled.
+    async fn repeated(&self, round: u32) -> Option<LoopStop> {
+        let ledger = self.handoff.ledger();
+        let (finding, of) = ledger
+            .reported_in(round)
+            .find_map(|f| ledger.repeat_of(&f.report).map(|of| (f.id, of)))?;
+        let commit = match ledger.get(of).and_then(|f| f.verdict.as_ref()) {
+            Some(LoopVerdict::Fixed {
+                commit: Some(sha), ..
+            }) => sha.get(..12).unwrap_or(sha).to_owned(),
+            _ => String::new(),
+        };
+        let reason = format!("repeats {of}, which was fixed in {commit}");
+        self.handoff
+            .with_ledger(|ledger| ledger.give(finding, LoopVerdict::Unsettled { reason }));
+        self.handoff.record_verdicts(&[finding]).await;
+        Some(LoopStop::RepeatingFinding { finding, of })
+    }
+
+    /// The findings the reviewer reported in `round`, for the fixer, or why
+    /// the loop stops. Only a finished round can converge: prose, an empty
+    /// reply or a cut-off answer after the nudges is no review.
+    fn reported(&self, round: u32) -> Result<Vec<String>, LoopStop> {
+        if !self.handoff.finished() {
+            return Err(LoopStop::SessionFailed(format!(
+                "the reviewer did not finish round {round}"
+            )));
+        }
+        let ledger = self.handoff.ledger();
+        let findings: Vec<String> = ledger.reported_in(round).map(finding_text).collect();
+        if findings.is_empty() {
+            return Err(LoopStop::Converged);
+        }
+        Ok(findings)
     }
 
     /// Why the loop stops when a session's round did not end its turn:
     /// a cancel, a time or turn limit, a model error or refusal.
-    fn broke_off(&mut self, who: &str, round: &RoundOutcome) -> Option<String> {
+    fn broke_off(&self, who: &str, round: &RoundOutcome) -> Option<LoopStop> {
+        let which = self.round;
         let why = match &round.stop {
             StopCause::EndTurn => return None,
-            StopCause::Cancelled => return Some("cancelled".to_owned()),
+            StopCause::Cancelled => return Some(LoopStop::Cancelled),
+            StopCause::Timeout => {
+                return Some(LoopStop::Timeout(format!(
+                    "the {who} reached its time limit in round {which}"
+                )));
+            }
             StopCause::MaxTurns => "reached its turn limit".to_owned(),
-            StopCause::Timeout => "reached its time limit".to_owned(),
             StopCause::ModelError(error) => format!("failed: {error}"),
             StopCause::Refused(why) => format!("declined ({why})"),
             StopCause::Stuck { tool, .. } => format!("kept repeating {tool}"),
         };
-        self.failed = true;
-        Some(format!("the {who} {why} in round {}", self.round))
+        Some(LoopStop::SessionFailed(format!(
+            "the {who} {why} in round {which}"
+        )))
     }
 
     /// Checks what the fixer changed and pushes it as one commit; the
@@ -553,22 +648,20 @@ impl<'a> Rounds<'a> {
         )
         .await;
         if results.iter().any(|r| !r.passed()) {
-            self.failed = true;
-            return Ok(Pushed::Stopped(format!(
+            return Ok(Pushed::Stopped(LoopStop::BuildFailing(format!(
                 "the checks fail after the fixer's changes in round {}, so nothing was pushed: {}",
                 self.round,
                 describe(&results).trim()
-            )));
+            ))));
         }
         let exported = workspace.export().await.context("listing the changes")?;
         let changes = match checked_changeset(exported, address.max_changed_files) {
             Ok(changes) => changes,
             Err(why) => {
-                self.failed = true;
-                return Ok(Pushed::Stopped(format!(
+                return Ok(Pushed::Stopped(LoopStop::PushRefused(format!(
                     "the fixer's changes in round {} cannot be pushed: {why}",
                     self.round
-                )));
+                ))));
             }
         };
         stop_if_cancelled(cancel)?;
@@ -592,11 +685,10 @@ impl<'a> Rounds<'a> {
             Ok(sha) => sha,
             Err(error) if is_cancelled(&error) => return Err(error),
             Err(error) => {
-                self.failed = true;
-                return Ok(Pushed::Stopped(format!(
+                return Ok(Pushed::Stopped(LoopStop::PushRefused(format!(
                     "the push of round {} was refused: {error:#}",
                     self.round
-                )));
+                ))));
             }
         };
         // On the branch now: whatever fails next, the new head gets the
@@ -664,7 +756,7 @@ enum Pushed {
     /// One commit, with its patch for the reviewer.
     Commit { sha: String, patch: String },
     /// The loop cannot go on, and why.
-    Stopped(String),
+    Stopped(LoopStop),
 }
 
 /// The reviewer's first message: the pull request and its changed files.

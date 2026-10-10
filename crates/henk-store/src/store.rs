@@ -60,6 +60,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure.
     async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError>;
 
+    /// Records why a review loop stopped and after how many rounds (#286).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError>;
+
     /// Stores the platform's id for the review's check.
     ///
     /// # Errors

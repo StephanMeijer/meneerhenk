@@ -103,6 +103,7 @@ macro_rules! for_each_scenario {
             transcripts_are_kept_whole_listed_and_pruned,
             drafts_are_kept_replaced_and_decided,
             loop_findings_keep_their_verdicts_out_of_the_quality_figures,
+            a_loop_run_keeps_why_it_stopped,
             drafts_are_counted_by_group_and_listed_across_runs,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
         );
@@ -671,6 +672,33 @@ async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 9);
+}
+
+/// A review loop's run keeps why it stopped and after how many rounds
+/// (#286); any other run has neither.
+async fn a_loop_run_keeps_why_it_stopped(store: &dyn RunStore) {
+    for id in ["r-loop", "r-lanes"] {
+        store.create_run(&new_run(id)).await.unwrap();
+    }
+    let looped = RunId::parse("r-loop").unwrap();
+    store
+        .end_loop(&looped, "repeating_finding", 2)
+        .await
+        .unwrap();
+    let run = store.run(&looped).await.unwrap().unwrap();
+    assert_eq!(
+        (run.loop_stop.as_deref(), run.loop_rounds),
+        (Some("repeating_finding"), Some(2))
+    );
+    let listed = store
+        .list_runs(&RunFilter::default(), Page::new(50, 0))
+        .await
+        .unwrap();
+    let other = listed.iter().find(|r| r.id.as_str() == "r-lanes").unwrap();
+    assert_eq!(
+        (other.loop_stop.as_deref(), other.loop_rounds),
+        (None, None)
+    );
 }
 
 /// A review loop's findings (#285) keep the fixer's verdicts, and stay out
