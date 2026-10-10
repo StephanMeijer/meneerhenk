@@ -355,7 +355,10 @@ impl<'a> Rounds<'a> {
         if let Err(error) = store.end_loop(run, stop.as_str(), self.round).await {
             tracing::warn!(%error, "could not record why the loop stopped");
         }
-        let failed = !stop.ended_well();
+        // A cancel is a skip, as for every other stage of a cancelled run
+        // (`stages::cancelled`), not a failure of the loop.
+        let cancelled = matches!(stop, LoopStop::Cancelled);
+        let failed = !cancelled && !stop.ended_well();
         let ledger = self.handoff.ledger();
         let open = ledger
             .iter()
@@ -378,7 +381,9 @@ impl<'a> Rounds<'a> {
         );
         info!(run = %run, rounds = self.round, pushed, %stop, "review loop ended");
         let _ = store.event(run, "info", &line).await;
-        let state = if failed {
+        let state = if cancelled {
+            StageState::Skipped
+        } else if failed {
             StageState::Failed
         } else {
             StageState::Done

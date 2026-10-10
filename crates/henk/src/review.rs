@@ -5183,6 +5183,19 @@ lanes = [{ name = "lane-a", model = "m" }]
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
+        // A cancel is a skip, never a failed Lanes stage.
+        let stages = stage_list(&f.app, &run).await;
+        let lanes = stages
+            .iter()
+            .find(|(stage, _, _)| *stage == henk_store::Stage::Lanes)
+            .unwrap();
+        assert_eq!(lanes.1, StageState::Skipped, "{stages:?}");
+        assert!(
+            stages
+                .iter()
+                .all(|(_, state, _)| *state != StageState::Failed),
+            "{stages:?}"
+        );
     }
 
     #[tokio::test]
