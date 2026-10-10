@@ -731,6 +731,13 @@ async fn loop_findings_keep_their_verdicts_out_of_the_quality_figures(store: &dy
         [("lane-a", 1)],
         "only the fact-check's drafts"
     );
+    let yesterday = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let days = store.daily_stats(yesterday).await.unwrap();
+    assert_eq!(
+        days.iter().map(|d| d.drafts).sum::<u64>(),
+        1,
+        "the overview's drafts per day leave loop findings out too"
+    );
 }
 
 async fn drafts_are_kept_replaced_and_decided(store: &dyn RunStore) {

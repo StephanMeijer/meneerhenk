@@ -507,7 +507,8 @@ impl RunStore for PgStore {
         let drafts = client
             .query(
                 &format!(
-                    "SELECT {}, COUNT(*) FROM drafts WHERE created_at >= $1 GROUP BY 1",
+                    "SELECT {}, COUNT(*) FROM drafts
+                     WHERE created_at >= $1 AND kind <> 'loop_finding' GROUP BY 1",
                     day("created_at")
                 ),
                 &[&since],

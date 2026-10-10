@@ -1527,11 +1527,12 @@ const DAY_FINDINGS: &str = concat!(
 );
 
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
-/// RFC 3339, so the first ten characters are the day.
+/// RFC 3339, so the first ten characters are the day. A review loop's
+/// findings are left out, as in [`DRAFT_FILTER`] (#285).
 const DAY_DRAFTS: &str = concat!(
     "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
     instant_of!("created_at"),
-    " >= ?1 GROUP BY 1"
+    " >= ?1 AND kind <> 'loop_finding' GROUP BY 1"
 );
 
 /// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
