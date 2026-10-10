@@ -26,6 +26,7 @@ use super::{AddressListener, MentionListener, PlanListener, ReviewListener, Writ
 use crate::app::App;
 use crate::config::Config;
 use crate::coordinator::Coordinator;
+use crate::push::PushedFor;
 use crate::recorder::StoreRecorder;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -213,7 +214,8 @@ async fn drafts_wait_until_ready() {
 #[tokio::test]
 async fn new_commits_henk_pushed_himself_start_no_review() {
     let h = Harness::new().await;
-    h.own_pushes.record(&SHA.to_ascii_uppercase());
+    h.own_pushes
+        .record(&SHA.to_ascii_uppercase(), PushedFor::ReviewedByRun);
     // Sent by a person's account, so only the pushed commit tells (#284).
     let out = h
         .deliver(pull_request("docspec/app", person("alice"), false))
@@ -222,6 +224,46 @@ async fn new_commits_henk_pushed_himself_start_no_review() {
         matches!(out.of("review"), Handled::Ignored(r) if r == "Henk's own push"),
         "{:?}",
         out.by_listener
+    );
+}
+
+/// Henk's App pushed it, so the sender is a bot; the commit says it is an
+/// address run's, which is reviewed as usual (§3.5, #298).
+fn henks_push() -> Sender {
+    Sender {
+        login: "meneer-henk[bot]".into(),
+        is_bot: true,
+    }
+}
+
+#[tokio::test]
+async fn henks_address_commit_is_reviewed_though_a_bot_pushed_it() {
+    let h = Harness::new().await;
+    let before = h
+        .deliver(pull_request("docspec/app", henks_push(), false))
+        .await;
+    assert!(
+        matches!(before.of("review"), Handled::Ignored(r) if r == "sent by a bot"),
+        "a bot's commit Henk did not push stays filtered: {:?}",
+        before.by_listener
+    );
+
+    h.own_pushes.record(SHA, PushedFor::Review);
+    let out = h
+        .deliver(pull_request("docspec/app", henks_push(), false))
+        .await;
+    assert!(
+        matches!(out.of("review"), Handled::Started(_)),
+        "{:?}",
+        out.by_listener
+    );
+    let foreign = h
+        .deliver(pull_request("evil/app", henks_push(), false))
+        .await;
+    assert!(
+        matches!(foreign.of("review"), Handled::Ignored(r) if r.contains("allowlist")),
+        "the allowlist still applies: {:?}",
+        foreign.by_listener
     );
 }
 

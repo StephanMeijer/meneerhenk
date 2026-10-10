@@ -4623,7 +4623,10 @@ lanes = [{ name = "lane-a", model = "m" }]
         // One commit, for f1; the rejections changed nothing.
         let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
         assert!(log.contains("review loop round 1"), "{log}");
-        assert!(f.app.own_pushes.contains(&head));
+        assert_eq!(
+            f.app.own_pushes.pushed_for(&head),
+            Some(crate::push::PushedFor::ReviewedByRun)
+        );
         // The new head gets the review's check too, not only the commit the
         // review started at: nothing else reviews it.
         let reported = f.writer.finished_commits.lock().unwrap().clone();
@@ -4875,8 +4878,9 @@ lanes = [{ name = "lane-a", model = "m" }]
 
         let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_ne!(head, before, "round 1 pushed");
-        assert!(
-            f.app.own_pushes.contains(&head),
+        assert_eq!(
+            f.app.own_pushes.pushed_for(&head),
+            Some(crate::push::PushedFor::ReviewedByRun),
             "so nothing else reviews it"
         );
         let reported = f.writer.finished_commits.lock().unwrap().clone();

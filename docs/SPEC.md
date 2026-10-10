@@ -186,8 +186,10 @@ Henk then:
 7. **Sums up** in one comment with a link to the run.
 
 His push is a new commit like any other: it is reviewed as usual (§3.1),
-and that review never starts another address run (§8.1). A review loop
-(#284) is the exception: it reviews the fixer's commits in the run that
+and that review never starts another address run (§8.1). Henk knows the
+commit he pushed, so its new-commits event is reviewed although his own
+account sent it, which the sender check would otherwise drop (#298). A
+review loop (#284) is the exception: it reviews the fixer's commits in the run that
 pushed them, so the new-commits event of one is ignored, whoever it names
 as the sender, and the last one gets that review's check.
 

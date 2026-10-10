@@ -12,8 +12,9 @@ use henk_platform::{PullRequestState, ReviewTarget};
 use tracing::instrument;
 
 use super::Writers;
-use super::filter::rejected;
+use super::filter::{rejected, rejected_ignoring_sender};
 use crate::coordinator::Coordinator;
+use crate::push::PushedFor;
 use crate::review::ReviewRequest;
 
 /// Turns events into review requests for the coordinator.
@@ -77,16 +78,22 @@ impl Listener for ReviewListener {
                 draft,
                 sender,
             } => {
-                // A review loop reviews the commits it pushes in the run
-                // that pushed them; a new run would supersede it (#284).
-                // Only its pushes are recorded: an address run's commit is
-                // reviewed as usual (§3.5).
-                if *action == PullRequestAction::Synchronized
-                    && self.coordinator.app().own_pushes.contains(head.as_str())
-                {
-                    return Handled::Ignored("Henk's own push".to_owned());
-                }
-                if let Some(reason) = rejected(settings, repo, sender, None) {
+                // Henk's own pushes are known by the commit (#284, #298). A
+                // review loop reviews its commits in the run that pushed
+                // them, and a new run would supersede it. An address run's
+                // commit is reviewed as usual (§3.5), though Henk's own
+                // account sent the event; only the allowlist applies to it.
+                let pushed_for = (*action == PullRequestAction::Synchronized)
+                    .then(|| self.coordinator.app().own_pushes.pushed_for(head.as_str()))
+                    .flatten();
+                let refusal = match pushed_for {
+                    Some(PushedFor::ReviewedByRun) => {
+                        return Handled::Ignored("Henk's own push".to_owned());
+                    }
+                    Some(PushedFor::Review) => rejected_ignoring_sender(settings, repo),
+                    None => rejected(settings, repo, sender, None),
+                };
+                if let Some(reason) = refusal {
                     return Handled::Ignored(reason);
                 }
                 // GitLab drafts are never reviewed (§3.1); GitHub drafts only when configured.
@@ -98,6 +105,9 @@ impl Listener for ReviewListener {
                 let trigger = match action {
                     PullRequestAction::Opened => "opened",
                     PullRequestAction::Reopened => "reopened",
+                    PullRequestAction::Synchronized if pushed_for.is_some() => {
+                        "Henk's address commit"
+                    }
                     PullRequestAction::Synchronized => "new commits",
                 };
                 let request = ReviewRequest {
