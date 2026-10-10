@@ -503,7 +503,7 @@ impl<'a> Rounds<'a> {
             target: self.on.target,
             run: self.on.run,
             requester: &self.requester,
-            reviewed_by_run: true,
+            pushed_for: crate::push::PushedFor::ReviewedByRun,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher

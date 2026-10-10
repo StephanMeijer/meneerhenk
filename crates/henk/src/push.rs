@@ -45,11 +45,10 @@ pub(crate) struct Pusher<'a> {
     pub(crate) run: &'a RunId,
     /// Who asked, as the commit message names them.
     pub(crate) requester: &'a str,
-    /// Whether the run that pushes reviews the commit itself, as the review
-    /// loop does (#284): its new-commits event then starts no review. An
-    /// address run's commit is a new commit like any other and is reviewed
-    /// as usual (§3.5, #298). Either way it goes in [`App::own_pushes`].
-    pub(crate) reviewed_by_run: bool,
+    /// What the commit is for: reviewed in the run that pushes it, as the
+    /// review loop's is (#284), or reviewed as usual, as an address run's
+    /// is (§3.5, #298). Either way it goes in [`App::own_pushes`].
+    pub(crate) pushed_for: PushedFor,
 }
 
 impl Pusher<'_> {
@@ -148,12 +147,7 @@ impl Pusher<'_> {
         stop_if_cancelled(cancel)?;
         // Known before the platform tells anyone, so its event about this
         // commit finds it (#284, #298).
-        let why = if self.reviewed_by_run {
-            PushedFor::ReviewedByRun
-        } else {
-            PushedFor::Review
-        };
-        self.app.own_pushes.record(&sha, why);
+        self.app.own_pushes.record(&sha, self.pushed_for);
         checkout
             .push(&facts.push.head_ref)
             .await

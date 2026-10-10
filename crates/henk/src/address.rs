@@ -285,7 +285,7 @@ impl Session<'_> {
             target: &self.request.target,
             run: self.run,
             requester: self.requester,
-            reviewed_by_run: false,
+            pushed_for: crate::push::PushedFor::Review,
         }
     }
 
