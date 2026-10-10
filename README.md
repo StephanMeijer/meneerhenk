@@ -716,6 +716,14 @@ line in `docs/SPEC.md` once the team confirms it.
   review completes on it. The summary says the lane stopped at the time
   limit. A plan that reaches its time limit still fails (§4).
 - §3.3 Findings in resolved threads do not count towards N.
+- §3.3 A review a restart interrupted, running or waiting for a slot, or
+  closed as orphaned after its process died, is reviewed again after the
+  next start, on the pull request's current head, once per pull request
+  (#160). Henk looks back 24 hours, a fixed window. The resumed run's
+  trigger names the interrupted run; a closed pull request or one off the
+  allowlist is not resumed. A resumed review closed as orphaned is not
+  resumed again, so a review that takes Henk down cannot loop. Interrupted
+  plans and address runs are not resumed: ask again.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
 - §4 On GitHub, triage sets labels, type and links; priority, effort and
   target date are not set in this version.

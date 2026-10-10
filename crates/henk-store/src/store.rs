@@ -78,6 +78,33 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         stale_before: OffsetDateTime,
     ) -> Result<Vec<RunRecord>, StoreError>;
 
+    /// The newest review run of each pull request, for the pull requests
+    /// whose newest review started at or after `since`, oldest first: what
+    /// a start reads to resume reviews a restart interrupted (#160). A
+    /// review that started later for the same pull request, in any state,
+    /// takes the place of an earlier one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError>;
+
+    /// Claims the resume of `run`, a failed run whose error is still
+    /// `interrupted`, by changing its error to `resumed` in one conditional
+    /// write (#160). Two processes on one database that read the same
+    /// interrupted run cannot both claim it: `true` for the one that did,
+    /// `false` when the run no longer ended with that error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn claim_resume(
+        &self,
+        run: &RunId,
+        interrupted: &str,
+        resumed: &str,
+    ) -> Result<bool, StoreError>;
+
     /// Drops the lanes of `run` that are still running, with `reason`.
     ///
     /// # Errors

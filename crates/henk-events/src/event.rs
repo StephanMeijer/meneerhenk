@@ -68,6 +68,12 @@ pub enum EventSource {
         /// Who asked: `mcp:<token name>`.
         requester: String,
     },
+    /// Henk itself, on start: a review a restart interrupted is asked for
+    /// again (#160).
+    Resume {
+        /// The interrupted run.
+        interrupted: RunId,
+    },
 }
 
 impl EventSource {
@@ -80,6 +86,7 @@ impl EventSource {
             Self::Api { .. } => "api",
             Self::Dashboard { .. } => "dashboard",
             Self::Mcp { .. } => "mcp",
+            Self::Resume { .. } => "resume",
         }
     }
 
@@ -90,7 +97,7 @@ impl EventSource {
         match self {
             Self::Api { requester } => requester.as_deref(),
             Self::Dashboard { requester } | Self::Mcp { requester } => Some(requester),
-            Self::GitHubWebhook { .. } | Self::GitLabWebhook { .. } => None,
+            Self::GitHubWebhook { .. } | Self::GitLabWebhook { .. } | Self::Resume { .. } => None,
         }
     }
 }

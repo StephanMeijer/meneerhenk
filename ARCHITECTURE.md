@@ -320,6 +320,35 @@ findings concludes the check `success`, with findings `neutral`, and only
 On GitLab the commit status is always `success` with the count in its
 description, because a status must never block a pipeline (§8.2).
 
+A restart does not lose a review (#160). A shutdown ends a running review
+`failed` with the error `interrupted` and closes its check as "Review
+interrupted."; a review still waiting for a slot gets a run recorded the
+same way. A run a dead process left `running` is closed by the reaper
+(`liveness.rs`) with `interrupted: the process ended`. On start, after the
+reaper's first pass, `resume.rs` reads the newest review of each pull
+request started in the last 24 hours (`RunStore::latest_reviews`) and, for
+each that ended interrupted, publishes a `ReviewRequested` event with the
+source `resume` naming that run. The review listener handles it like a
+request from the API: the allowlist and a closed pull request refuse it,
+and the review is of the current head, with the trigger "resumed after
+interrupted run r-...". It gets its own check; the interrupted one stays
+closed. Before it publishes, the resumer claims the resume in the store
+(`RunStore::claim_resume`): one conditional write changes the interrupted
+run's error to say it was resumed, so of two processes on one database
+that read the same run, one resumes it. A resume whose pull request could
+not be read gives the claim back (`resume::release`), so a later pass or
+start tries again; a refusal keeps it. The resumed run is the newer run of its pull request, so a restart
+loop resumes each pull request at most once per start and never the same
+run twice. One more resume follows the first reaper pass a staleness window
+(three minutes) after start, which is the first that can reap a run a
+process left that died just before this start; after that the periodic
+passes reap only. A resumed review that the reaper closed is not resumed
+again (`ReviewTrigger::resumed_from` reads its trigger back): its process
+died while it ran, and a review that takes Henk down would otherwise come
+back on every start. One a shutdown stopped is resumed. Once Henk is told
+to stop, the resumer asks for nothing more: its own reviews are ending
+interrupted then. Plans and address runs are not resumed.
+
 ## 6. Hooks, events and listeners
 
 In serve mode nothing calls an orchestrator directly. A hook turns what it
