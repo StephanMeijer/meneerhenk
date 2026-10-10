@@ -3069,17 +3069,38 @@ lanes = [{ name = "lane-a", model = "m" }]
         }
     }
 
-    /// Waits until `ready` holds, then cancels `run`, so a test cancels
-    /// in the state it means to, not after a guess at how long getting
-    /// there takes.
-    async fn cancel_once(ready: impl Fn() -> bool, cancels: crate::cancel::Cancels, run: RunId) {
-        for _ in 0..500 {
-            if ready() {
-                break;
+    /// Drives `review` until `ready` holds, then cancels `run` and gives
+    /// the review ten seconds to end, so a test cancels in the state it
+    /// means to, not after a guess at how long getting there takes. The
+    /// wait runs on the test's own task, so a review that ends first or
+    /// never reaches the state fails the test naming `what`; the bound is
+    /// generous for loaded runners and costs nothing when the state comes.
+    async fn cancelled_once<T>(
+        review: impl std::future::Future<Output = T>,
+        what: &str,
+        ready: impl Fn() -> bool,
+        cancels: &crate::cancel::Cancels,
+        run: &RunId,
+    ) -> T {
+        let mut review = std::pin::pin!(review);
+        let reached = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+            while !ready() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the review never reached {what}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        tokio::select! {
+            _ = &mut review => panic!("the review ended before {what}"),
+            () = reached => {}
         }
-        assert!(cancels.cancel(&run, "github:1234".to_owned()));
+        assert!(cancels.cancel(run, "github:1234".to_owned()));
+        tokio::time::timeout(Duration::from_secs(10), review)
+            .await
+            .expect("a cancelled review ends promptly")
     }
 
     /// Two lanes and the fact-checker, reviewing in a workspace with one
@@ -4145,18 +4166,14 @@ lanes = [{ name = "lane-a", model = "m" }]
         let cancel = r.f.app.shutdown.child_token();
         let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
         // The lanes ask the model only once every workspace is set up.
-        let model = Arc::clone(&r.f.model);
-        tokio::spawn(cancel_once(
-            move || !model.requests().is_empty(),
-            r.f.app.cancels.clone(),
-            run.clone(),
-        ));
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            run_review(&r.f.app, request(&run), cancel),
+        let result = cancelled_once(
+            Box::pin(run_review(&r.f.app, request(&run), cancel)),
+            "the first model request",
+            || !r.f.model.requests().is_empty(),
+            &r.f.app.cancels,
+            &run,
         )
-        .await
-        .expect("a cancelled review ends promptly");
+        .await;
         assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
         assert_eq!(r.peek.inner.opened(), 3);
         assert_eq!(r.peek.inner.live(), 0);
@@ -4176,18 +4193,14 @@ lanes = [{ name = "lane-a", model = "m" }]
         .await;
         let cancel = r.f.app.shutdown.child_token();
         let _cancellable = r.f.app.cancels.register(run.clone(), cancel.clone());
-        let peek = Arc::clone(&r.peek);
-        tokio::spawn(cancel_once(
-            move || peek.inner.opened() == 3,
-            r.f.app.cancels.clone(),
-            run.clone(),
-        ));
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            run_review(&r.f.app, request(&run), cancel),
+        let result = cancelled_once(
+            Box::pin(run_review(&r.f.app, request(&run), cancel)),
+            "three open workspaces",
+            || r.peek.inner.opened() == 3,
+            &r.f.app.cancels,
+            &run,
         )
-        .await
-        .expect("the setup is not waited for");
+        .await;
         assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
         assert_eq!(r.peek.inner.opened(), 3);
         assert_eq!(r.peek.inner.live(), 0, "dropped mid-setup, so destroyed");
