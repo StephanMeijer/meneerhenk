@@ -71,6 +71,8 @@ pub(crate) struct LoopReport {
     pub(crate) results: Vec<LaneResult>,
     /// One line for the summary: rounds, commits pushed and why it stopped.
     pub(crate) line: String,
+    /// It ran out of rounds with the reviewer's last findings still open.
+    pub(crate) findings_left: bool,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -188,7 +190,11 @@ pub(crate) async fn run_loop(
             outcome,
         })
         .collect();
-    Ok(LoopRun::Ran(LoopReport { results, line }))
+    Ok(LoopRun::Ran(LoopReport {
+        results,
+        line,
+        findings_left: rounds.findings_left,
+    }))
 }
 
 /// Clones the pull request at its head, imports it into a workspace that
@@ -244,6 +250,8 @@ struct Rounds<'a> {
     pushed: Vec<String>,
     /// Whether a session broke off, rather than the loop ending.
     failed: bool,
+    /// Whether it ran out of rounds with the reviewer's findings open.
+    findings_left: bool,
 }
 
 impl<'a> Rounds<'a> {
@@ -353,6 +361,7 @@ impl<'a> Rounds<'a> {
             round: 0,
             pushed: Vec::new(),
             failed: false,
+            findings_left: false,
         })
     }
 
@@ -417,6 +426,9 @@ impl<'a> Rounds<'a> {
                 Pushed::Stopped(why) => return Ok(why),
             };
         }
+        // The reviewer's last round had findings; the fixer's answer to
+        // them was never reviewed.
+        self.findings_left = true;
         Ok(format!(
             "it reached max_rounds ({})",
             self.config.max_rounds

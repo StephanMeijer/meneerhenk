@@ -306,6 +306,7 @@ async fn close_queued_check(
             nothing_to_review: false,
             stopped: None,
             not_reviewed: None,
+            findings_left: false,
         }
     };
     if let Err(finish_error) = writer
@@ -619,6 +620,7 @@ async fn report_failure(
         nothing_to_review: false,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -686,6 +688,7 @@ async fn review_body(
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
     let mut loop_line = None;
+    let mut findings_left = false;
     let results = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
@@ -694,6 +697,7 @@ async fn review_body(
     } else if review.app.settings.review.r#loop.is_some() {
         let report = review_loop(review, registry, diff, title, base_ref, &cancel).await?;
         loop_line = Some(report.line);
+        findings_left = report.findings_left;
         report.results
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
@@ -726,6 +730,7 @@ async fn review_body(
         nothing_to_review,
         stopped: None,
         not_reviewed: None,
+        findings_left,
     };
 
     fold_outdated(writer, target, &after).await;
@@ -904,11 +909,16 @@ async fn review_loop(
         return Ok(crate::review_loop::LoopReport {
             results: Vec::new(),
             line,
+            findings_left: false,
         });
     }
     let results = run_lanes(review, registry, diff, title, base_ref, cancel).await?;
     let line = format!("The review loop did not run: {why}. The lanes reviewed instead.");
-    Ok(crate::review_loop::LoopReport { results, line })
+    Ok(crate::review_loop::LoopReport {
+        results,
+        line,
+        findings_left: false,
+    })
 }
 
 /// Runs every configured lane on the diff, sharing one read session, and
@@ -4474,6 +4484,44 @@ lanes = [{ name = "lane-a", model = "m" }]
             "the new head gets the check: {reported:?}"
         );
         assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_loop_out_of_rounds_with_findings_open_is_no_pass() {
+        let (mut f, _reviewer, _fixer, _remote) = looping(
+            "review-loop-rounds",
+            ScriptedClient::new("r", [say("src/a.rs:2: x must be 3.")]),
+            ScriptedClient::new(
+                "f",
+                [edit("let x = 1;", "let x = 3;"), say("fixed: x is 3.")],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        f.app.settings.review.r#loop.as_mut().unwrap().max_rounds = 1;
+        let run = RunId::parse("r-loop-rounds").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let outcome = report.outcome.unwrap();
+        assert!(outcome.completed());
+        assert_eq!(outcome.open_findings, 0, "the loop posts no findings");
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Neutral);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.starts_with("The review loop left findings open."),
+            "{summary}"
+        );
+        assert!(summary.contains("it reached max_rounds (1)"), "{summary}");
+        let finished = f.writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 2, "the queued commit and the new head");
+        assert!(
+            finished
+                .iter()
+                .all(|o| o.check_conclusion() != CheckConclusion::Success),
+            "{finished:?}"
+        );
     }
 
     #[tokio::test]
