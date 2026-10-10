@@ -2149,6 +2149,40 @@ lanes = [{ name = "lane-a", model = "m" }]
         );
     }
 
+    /// #57: the same pull request with its path in another case joins the
+    /// running review instead of starting a second one beside it.
+    #[tokio::test]
+    async fn a_request_differing_only_in_case_joins_the_running_review() {
+        let model =
+            ScriptedClient::new("scripted", [done(), done()]).with_delay(Duration::from_secs(30));
+        let app = Arc::new(fixture(DIFF, model).await.app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let commit = CommitSha::parse(SHA).unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let in_case = |path: &str| ReviewRequest {
+            target: ReviewTarget {
+                repo: RepoRef::parse(Platform::GitHub, path).unwrap(),
+                number: 7,
+            },
+            ..request(&placeholder)
+        };
+        let (_, run) = coordinator.submit_review(in_case("O/R"), commit.clone());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&run).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        let (decision, joined) = coordinator.submit_review(in_case("o/r"), commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Join);
+        assert_eq!(joined, run, "one review, not two");
+        assert!(coordinator.cancel(&run, "github:1234".to_owned()));
+    }
+
     #[tokio::test]
     async fn a_cancelled_review_leaves_the_queue_so_the_next_request_starts_afresh() {
         let model =

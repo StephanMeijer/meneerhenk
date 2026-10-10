@@ -21,6 +21,11 @@ use crate::review::{
     ReviewRequest, report_cancelled_while_queued, report_interrupted_while_queued, run_review,
 };
 
+/// One pull or merge request, as the coordinator tells them apart. The
+/// repository path is lowercase: neither platform's paths are
+/// case-sensitive, and the allowlist compares them the same way (#57).
+/// It is for telling them apart only: [`Active::repo`] keeps the path as
+/// written, for the queue and the logs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     platform: Platform,
@@ -32,7 +37,7 @@ impl Key {
     fn of(target: &ReviewTarget) -> Self {
         Self {
             platform: target.platform(),
-            repo: target.repo.path(),
+            repo: target.repo.path().to_ascii_lowercase(),
             number: target.number,
         }
     }
@@ -44,6 +49,9 @@ struct Active {
     commit: CommitSha,
     cancel: CancellationToken,
     generation: u64,
+    /// The repository path as the request wrote it, which the run record
+    /// keeps too; the key's is lowercase.
+    repo: String,
     /// When the coordinator took it.
     since: time::OffsetDateTime,
     /// Whether it holds a review slot yet (#225).
@@ -114,7 +122,7 @@ fn waiting(key: &Key, active: &Active) -> Waiting {
     Waiting {
         run: active.run.clone(),
         platform: key.platform,
-        repo: key.repo.clone(),
+        repo: active.repo.clone(),
         number: key.number,
         commit: active.commit.clone(),
         trigger: active.trigger.clone(),
@@ -394,7 +402,7 @@ impl Coordinator {
                     let joined = active
                         .get(&key)
                         .map_or_else(|| run.clone(), |a| a.run.clone());
-                    info!(repo = %key.repo, number = key.number, run = %joined, "joined the running review");
+                    info!(repo = %request.target.repo.path(), number = key.number, run = %joined, "joined the running review");
                     // Recorded off the lock: the store is async and this guard is not.
                     let store = Arc::clone(&self.app.store);
                     let (run_id, trigger) = (joined.clone(), request.trigger.clone());
@@ -405,7 +413,7 @@ impl Coordinator {
                 }
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
-                        warn!(repo = %key.repo, number = key.number, old = %old.commit.short(), new = %commit.short(), "superseding a running review");
+                        warn!(repo = %request.target.repo.path(), number = key.number, old = %old.commit.short(), new = %commit.short(), "superseding a running review");
                         // The old run learns which run replaced it (#231).
                         if !self.app.cancels.supersede(&old.run, &run) {
                             old.cancel.cancel();
@@ -424,6 +432,7 @@ impl Coordinator {
                     commit: commit.clone(),
                     cancel: cancel.clone(),
                     generation,
+                    repo: request.target.repo.path(),
                     since: time::OffsetDateTime::now_utc(),
                     started: Arc::clone(&started),
                     trigger: request.trigger.clone(),
@@ -572,5 +581,61 @@ impl Coordinator {
             }
         });
         Ok(run)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use henk_domain::allowlist::RepoRef;
+
+    use super::*;
+
+    fn target(platform: Platform, path: &str, number: u64) -> ReviewTarget {
+        ReviewTarget {
+            repo: RepoRef::parse(platform, path).unwrap(),
+            number,
+        }
+    }
+
+    #[test]
+    fn a_path_differing_only_in_case_is_the_same_pull_request() {
+        let key = Key::of(&target(Platform::GitHub, "O/R", 7));
+        assert_eq!(key, Key::of(&target(Platform::GitHub, "o/r", 7)));
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitHub, "O/S", 7)),
+            "another repository"
+        );
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitHub, "o/r", 8)),
+            "another number"
+        );
+        assert_ne!(
+            key,
+            Key::of(&target(Platform::GitLab, "o/r", 7)),
+            "another platform"
+        );
+    }
+
+    #[test]
+    fn a_queued_review_keeps_the_path_as_written() {
+        let asked = target(Platform::GitHub, "Owner/Repo", 7);
+        let key = Key::of(&asked);
+        assert_eq!(key, Key::of(&target(Platform::GitHub, "owner/repo", 7)));
+        let active = Active {
+            run: new_run_id(),
+            commit: CommitSha::parse(&"a".repeat(40)).unwrap(),
+            cancel: CancellationToken::new(),
+            generation: 1,
+            repo: asked.repo.path(),
+            since: time::OffsetDateTime::now_utc(),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            trigger: "push".to_owned(),
+            requester: None,
+        };
+        assert_eq!(waiting(&key, &active).repo, "Owner/Repo");
     }
 }
