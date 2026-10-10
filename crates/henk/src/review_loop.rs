@@ -74,6 +74,8 @@ pub(crate) struct LoopReport {
     pub(crate) line: String,
     /// The findings that ended unsettled or won't fix: what still stands.
     pub(crate) open: usize,
+    /// It ran out of rounds with the reviewer's last findings still open.
+    pub(crate) findings_left: bool,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -329,6 +331,12 @@ impl<'a> Rounds<'a> {
     /// (#285), and sums the loop up for the review.
     async fn conclude(&self, ended: anyhow::Result<LoopStop>) -> anyhow::Result<LoopReport> {
         let (store, run) = (&*self.on.app.store, self.on.run);
+        // A cancel just before or during a push is a cancel like one inside a
+        // session: the review sees its token and ends the way that says.
+        let ended = match ended {
+            Err(error) if is_cancelled(&error) => Ok(LoopStop::Cancelled),
+            other => other,
+        };
         // Every finding ends with one verdict, whatever ended the loop (#285).
         let why = match &ended {
             Ok(stop) => format!("the loop stopped: {stop}"),
@@ -392,6 +400,7 @@ impl<'a> Rounds<'a> {
             results,
             line,
             open,
+            findings_left: stop.left_findings_open(),
         })
     }
 

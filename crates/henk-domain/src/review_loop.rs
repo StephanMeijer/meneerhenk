@@ -208,6 +208,14 @@ impl LoopStop {
             Self::Converged | Self::MaxRounds(_) | Self::RepeatingFinding { .. }
         )
     }
+
+    /// Whether the loop stopped with the reviewer's last findings open: at
+    /// `max_rounds` the fixer's answer to them was never reviewed, so the
+    /// review is no pass even with no finding left unsettled.
+    #[must_use]
+    pub fn left_findings_open(&self) -> bool {
+        matches!(self, Self::MaxRounds(_))
+    }
 }
 
 impl fmt::Display for LoopStop {
@@ -600,6 +608,9 @@ mod tests {
         );
         assert!(repeat.ended_well() && LoopStop::Converged.ended_well());
         assert!(!LoopStop::Timeout("time".into()).ended_well());
+        assert!(LoopStop::MaxRounds(3).left_findings_open());
+        assert!(!LoopStop::Converged.left_findings_open());
+        assert!(!repeat.left_findings_open(), "the repeat is unsettled");
         assert_eq!(
             LoopStop::MaxRounds(50).to_string(),
             "it reached max_rounds (50)"

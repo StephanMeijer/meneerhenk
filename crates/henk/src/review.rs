@@ -312,6 +312,7 @@ async fn close_queued_check(
             nothing_to_review: false,
             stopped: None,
             not_reviewed: None,
+            findings_left: false,
         }
     };
     if let Err(finish_error) = writer
@@ -629,6 +630,7 @@ async fn report_failure(
         nothing_to_review: false,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -740,6 +742,7 @@ async fn lanes_body(
         nothing_to_review,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
 
     fold_outdated(writer, target, &after).await;
@@ -807,11 +810,11 @@ async fn loop_body(
     stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
     let diff = fetch_diff(review, base_ref).await?;
     let nothing_to_review = diff.is_empty();
-    let (results, open_findings, line) = if nothing_to_review {
+    let (results, open_findings, line, findings_left) = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
-        (Vec::new(), 0, None)
+        (Vec::new(), 0, None, false)
     } else {
         let on = crate::review_loop::LoopTarget {
             app,
@@ -821,9 +824,12 @@ async fn loop_body(
             pushed_head: review.pushed_head,
         };
         match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await? {
-            crate::review_loop::LoopRun::Ran(report) => {
-                (report.results, report.open, Some(report.line))
-            }
+            crate::review_loop::LoopRun::Ran(report) => (
+                report.results,
+                report.open,
+                Some(report.line),
+                report.findings_left,
+            ),
             crate::review_loop::LoopRun::Declined(why) => {
                 info!(run = %run, %why, "the review loop did not run");
                 if !app.settings.lanes.is_empty() {
@@ -838,7 +844,7 @@ async fn loop_body(
                 let line = format!(
                     "The review loop did not run: {why}. No lanes are configured to review instead."
                 );
-                (Vec::new(), 0, Some(line))
+                (Vec::new(), 0, Some(line), false)
             }
         }
     };
@@ -850,6 +856,7 @@ async fn loop_body(
         nothing_to_review,
         stopped: None,
         not_reviewed: None,
+        findings_left,
     };
     let mut summary_text = outcome.summary();
     if let Some(line) = line {
@@ -4997,6 +5004,125 @@ lanes = [{ name = "lane-a", model = "m" }]
             reported.contains(&head),
             "the new head gets the check: {reported:?}"
         );
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_loop_out_of_rounds_with_findings_open_is_no_pass() {
+        let (mut f, _reviewer, _fixer, _remote) = looping(
+            "review-loop-rounds",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        f.app.settings.review.r#loop.as_mut().unwrap().max_rounds = 1;
+        let run = RunId::parse("r-loop-rounds").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let outcome = report.outcome.unwrap();
+        assert!(outcome.completed());
+        assert_eq!(outcome.open_findings, 0, "the loop posts no findings");
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Neutral);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.starts_with("The review loop left findings open."),
+            "{summary}"
+        );
+        assert!(summary.contains("it reached max_rounds (1)"), "{summary}");
+        let finished = f.writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 2, "the queued commit and the new head");
+        assert!(
+            finished
+                .iter()
+                .all(|o| o.check_conclusion() != CheckConclusion::Success),
+            "{finished:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
+        let (mut f, _reviewer, _fixer, remote) = looping(
+            "review-loop-cancel-push",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        // The project's check says when it runs, and waits until the review
+        // was cancelled: the next step is the push.
+        let signals = crate::git::ScratchDir::new("review-loop-cancel-push-signals").unwrap();
+        let (running, go) = (signals.path().join("running"), signals.path().join("go"));
+        let script = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do :; done",
+            running.display(),
+            go.display()
+        );
+        f.app.settings.address.as_mut().unwrap().check_commands =
+            vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-cancel-push").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        let watcher = tokio::spawn(async move {
+            for _ in 0..1000 {
+                if running.exists() {
+                    assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::write(go, "").unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled loop ends promptly");
+        watcher.await.unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.is::<CancelledBy>(), "{error:#}");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+        assert!(
+            !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),
+            "no failure notice"
+        );
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
     }
 
