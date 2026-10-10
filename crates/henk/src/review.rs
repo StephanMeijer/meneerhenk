@@ -1,6 +1,7 @@
 //! The review orchestrator (§3).
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,6 +80,13 @@ struct ReviewRun<'a> {
     commit: &'a CommitSha,
     run: &'a RunId,
     link: &'a str,
+    /// Whether the review posts on the pull request: the lanes do, a review
+    /// loop does not (#285). A loop that declines hands over to the lanes,
+    /// which post, so their cancel and failure notices post too.
+    posts: &'a AtomicBool,
+    /// The last commit a review loop pushed (#284), the pull request's new
+    /// head, which every ending of the review reports its check on too.
+    pushed_head: &'a Mutex<Option<CommitSha>>,
 }
 
 /// What every lane of a review shares, ready once the read session is up.
@@ -191,6 +199,7 @@ pub async fn run_review(
     let handle = open_check(app, &writer, &request, &commit, &run, &link).await;
     started_stage(app, &run, handle.as_ref(), &commit).await;
 
+    let pushed_head = Mutex::new(None);
     let review = ReviewRun {
         app,
         writer: &writer,
@@ -198,6 +207,8 @@ pub async fn run_review(
         commit: &commit,
         run: &run,
         link: &link,
+        posts: &AtomicBool::new(posts_comments(app)),
+        pushed_head: &pushed_head,
     };
     let result = review_body(review, &info.title, &info.base_ref, cancel).await;
 
@@ -208,9 +219,7 @@ pub async fn run_review(
             } else {
                 RunStatus::Failed
             };
-            let closed = writer
-                .finish_review(&request.target, &commit, handle.as_ref(), &outcome, &link)
-                .await;
+            let closed = finish_checks(review, handle.as_ref(), &outcome).await;
             if let Err(error) = &closed {
                 error!(%error, "could not finish the check");
             }
@@ -304,6 +313,7 @@ async fn close_queued_check(
             nothing_to_review: false,
             stopped: None,
             not_reviewed: None,
+            findings_left: false,
         }
     };
     if let Err(finish_error) = writer
@@ -325,7 +335,7 @@ async fn preflight(
             NotReviewable(format!("{} is not on the allowlist", request.target.repo)).into(),
         );
     }
-    if app.settings.lanes.is_empty() {
+    if app.settings.lanes.is_empty() && app.settings.review.r#loop.is_none() {
         return Err(NotReviewable("no review lanes are configured".to_owned()).into());
     }
 
@@ -360,19 +370,11 @@ async fn report_superseded(
     handle: Option<&henk_platform::ReviewHandle>,
 ) -> anyhow::Result<()> {
     let ReviewRun {
-        app,
-        writer,
-        target,
-        commit,
-        run,
-        link,
+        app, commit, run, ..
     } = review;
     info!(run = %run, "review superseded by a newer commit");
     let outcome = ReviewOutcome::superseded(commit.clone());
-    if let Err(finish_error) = writer
-        .finish_review(target, commit, handle, &outcome, link)
-        .await
-    {
+    if let Err(finish_error) = finish_checks(review, handle, &outcome).await {
         error!(%finish_error, "could not finish the check of a superseded review");
     }
     let reason = Superseded.to_string();
@@ -414,6 +416,7 @@ async fn report_cancelled(
         commit,
         run,
         link,
+        ..
     } = review;
     info!(run = %run, by, "review {}", crate::cancel::cancelled_reason(by));
     let body = Marker {
@@ -425,14 +428,13 @@ async fn report_cancelled(
         withdrawn: None,
     }
     .attach(&crate::cancel::cancelled_notice(by, link, false));
-    if let Err(post_error) = writer.post_comment(target, &body).await {
+    if review.posts.load(Ordering::Relaxed)
+        && let Err(post_error) = writer.post_comment(target, &body).await
+    {
         error!(%post_error, "could not post that the review was cancelled");
     }
     let outcome = ReviewOutcome::cancelled(commit.clone(), crate::cancel::cancelled_via(by));
-    if let Err(finish_error) = writer
-        .finish_review(target, commit, handle, &outcome, link)
-        .await
-    {
+    if let Err(finish_error) = finish_checks(review, handle, &outcome).await {
         error!(%finish_error, "could not finish the check of a cancelled review");
     }
     let cancelled = format!("cancelled by {by}");
@@ -539,7 +541,9 @@ pub async fn report_cancelled_while_queued(
                 withdrawn: None,
             }
             .attach(&crate::cancel::cancelled_notice(by, &link, false));
-            if let Err(post_error) = writer.post_comment(&request.target, &body).await {
+            if posts_comments(app)
+                && let Err(post_error) = writer.post_comment(&request.target, &body).await
+            {
                 error!(%post_error, "could not post that the review was cancelled");
             }
             close_queued_as_cancelled(&writer, request, &link, by).await;
@@ -682,19 +686,11 @@ async fn report_interrupted(
     handle: Option<&henk_platform::ReviewHandle>,
 ) -> anyhow::Result<()> {
     let ReviewRun {
-        app,
-        writer,
-        target,
-        commit,
-        run,
-        link,
+        app, commit, run, ..
     } = review;
     warn!(run = %run, "review interrupted");
     let outcome = ReviewOutcome::interrupted(commit.clone());
-    if let Err(finish_error) = writer
-        .finish_review(target, commit, handle, &outcome, link)
-        .await
-    {
+    if let Err(finish_error) = finish_checks(review, handle, &outcome).await {
         error!(%finish_error, "could not finish the check of an interrupted review");
     }
     stages::end(
@@ -723,6 +719,7 @@ async fn report_failure(
         commit,
         run,
         link,
+        ..
     } = review;
     let message = format!("{error:#}");
     error!(error = %message, "review failed");
@@ -733,6 +730,7 @@ async fn report_failure(
         nothing_to_review: false,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
     let body = Marker {
         run: run.clone(),
@@ -745,13 +743,12 @@ async fn report_failure(
     .attach(&format!(
         "Review did not complete. That is my failure, not the code's.\n\nRun: {link}"
     ));
-    if let Err(post_error) = writer.post_comment(target, &body).await {
+    if review.posts.load(Ordering::Relaxed)
+        && let Err(post_error) = writer.post_comment(target, &body).await
+    {
         error!(%post_error, "could not post the failure comment");
     }
-    if let Err(finish_error) = writer
-        .finish_review(target, commit, handle, &failed, link)
-        .await
-    {
+    if let Err(finish_error) = finish_checks(review, handle, &failed).await {
         error!(%finish_error, "could not finish the check after failure");
     }
     stages::failed(&*app.store, run).await;
@@ -766,6 +763,25 @@ async fn review_body(
     title: &str,
     base_ref: &str,
     cancel: CancellationToken,
+) -> anyhow::Result<(ReviewOutcome, String)> {
+    if review.app.settings.review.r#loop.is_some() {
+        return loop_body(review, title, base_ref, cancel).await;
+    }
+    let store = &*review.app.store;
+    stages::mark(store, review.run, Stage::Diff, StageState::Running, "").await;
+    let diff = fetch_diff(review, base_ref).await?;
+    lanes_body(review, title, base_ref, cancel, diff, None).await
+}
+
+/// The lane review of `diff`: the lanes post their findings on the pull
+/// request, and the summary goes on it too, with `note` after it.
+async fn lanes_body(
+    review: ReviewRun<'_>,
+    title: &str,
+    base_ref: &str,
+    cancel: CancellationToken,
+    diff: Arc<ReviewDiff>,
+    note: Option<String>,
 ) -> anyhow::Result<(ReviewOutcome, String)> {
     let ReviewRun {
         writer,
@@ -797,8 +813,6 @@ async fn review_body(
     ))));
 
     let store = &*review.app.store;
-    stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
-    let diff = fetch_diff(review, base_ref).await?;
     // Every changed file left out by review.ignore: nothing for a lane to
     // read. The review still counts, folds and summarises (§3.2).
     let nothing_to_review = diff.is_empty();
@@ -810,17 +824,7 @@ async fn review_body(
     } else {
         run_lanes(review, registry, diff, title, base_ref, &cancel).await?
     };
-    if cancel.is_cancelled() {
-        if let Some(by) = review.app.cancels.cancelled_by(review.run) {
-            return Err(CancelledBy(by).into());
-        }
-        // A shutdown cancels every review; superseding cancels only one.
-        return Err(if review.app.shutdown.is_cancelled() {
-            Interrupted.into()
-        } else {
-            Superseded.into()
-        });
-    }
+    stop_if_ended(review, &cancel)?;
 
     // The count comes from the platform, not from memory (§3.3).
     let after = writer
@@ -838,11 +842,15 @@ async fn review_body(
         nothing_to_review,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
 
     fold_outdated(writer, target, &after).await;
 
-    let summary_text = outcome.summary();
+    let mut summary_text = outcome.summary();
+    if let Some(note) = note {
+        summary_text = format!("{summary_text} {note}");
+    }
     let body = Marker {
         run: run.clone(),
         model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
@@ -860,6 +868,147 @@ async fn review_body(
     let published = published_line(store, run).await;
     stages::mark(store, run, Stage::Publish, StageState::Done, published).await;
     Ok((outcome, summary_text))
+}
+
+/// The error a cancelled review ends with: who cancelled it, a shutdown, or
+/// a newer review that superseded it.
+fn stop_if_ended(review: ReviewRun<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
+    if !cancel.is_cancelled() {
+        return Ok(());
+    }
+    if let Some(by) = review.app.cancels.cancelled_by(review.run) {
+        return Err(CancelledBy(by).into());
+    }
+    // A shutdown cancels every review; superseding cancels only one.
+    Err(if review.app.shutdown.is_cancelled() {
+        Interrupted.into()
+    } else {
+        Superseded.into()
+    })
+}
+
+/// A review as a reviewer↔fixer loop (#284, #285): the reviewer's findings
+/// go to the fixer, never to the pull request. Nothing is posted; what the
+/// loop did is on the run, and its summary goes to the check. A pull request
+/// the loop may not push to (a fork, the default or a protected branch) or
+/// whose branch moved gets the lane review instead, as without the loop; the
+/// line for the summary says which ran.
+async fn loop_body(
+    review: ReviewRun<'_>,
+    title: &str,
+    base_ref: &str,
+    cancel: CancellationToken,
+) -> anyhow::Result<(ReviewOutcome, String)> {
+    let ReviewRun {
+        app,
+        target,
+        commit,
+        run,
+        ..
+    } = review;
+    let store = &*app.store;
+    stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
+    let diff = fetch_diff(review, base_ref).await?;
+    let nothing_to_review = diff.is_empty();
+    let (results, open_findings, line, findings_left) = if nothing_to_review {
+        for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
+            stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
+        }
+        (Vec::new(), 0, None, false)
+    } else {
+        let on = crate::review_loop::LoopTarget {
+            app,
+            target,
+            commit,
+            run,
+            pushed_head: review.pushed_head,
+        };
+        match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await? {
+            crate::review_loop::LoopRun::Ran(report) => (
+                report.results,
+                report.open,
+                Some(report.line),
+                report.findings_left,
+            ),
+            crate::review_loop::LoopRun::Declined(why) => {
+                info!(run = %run, %why, "the review loop did not run");
+                if !app.settings.lanes.is_empty() {
+                    let note =
+                        format!("The review loop did not run: {why}. The lanes reviewed instead.");
+                    review.posts.store(true, Ordering::Relaxed);
+                    return lanes_body(review, title, base_ref, cancel, diff, Some(note)).await;
+                }
+                for stage in [Stage::Checkout, Stage::Lanes, Stage::FactCheck] {
+                    stages::mark(store, run, stage, StageState::Skipped, &why).await;
+                }
+                let line = format!(
+                    "The review loop did not run: {why}. No lanes are configured to review instead."
+                );
+                (Vec::new(), 0, Some(line), false)
+            }
+        }
+    };
+    stop_if_ended(review, &cancel)?;
+    let outcome = ReviewOutcome {
+        commit: commit.clone(),
+        lanes: results,
+        open_findings,
+        nothing_to_review,
+        stopped: None,
+        not_reviewed: None,
+        findings_left,
+    };
+    let mut summary_text = outcome.summary();
+    if let Some(line) = line {
+        summary_text = format!("{summary_text} {line}");
+    }
+    let skipped = "a review loop posts nothing on the pull request";
+    stages::mark(store, run, Stage::Publish, StageState::Skipped, skipped).await;
+    Ok((outcome, summary_text))
+}
+
+/// Whether a review posts comments on the pull request: not as a review
+/// loop, whose findings go to the fixer and whose record is the run (#285).
+fn posts_comments(app: &App) -> bool {
+    app.settings.review.r#loop.is_none()
+}
+
+/// Closes the review's check on its commit with `outcome`, and, when a
+/// review loop pushed (#284), reports the same outcome on the last commit
+/// it pushed: the pull request's head now, which this run reviewed and
+/// which starts no other review, so it does not wait for a check. That one
+/// is best effort and logged; the result is the review's own check.
+async fn finish_checks(
+    review: ReviewRun<'_>,
+    handle: Option<&ReviewHandle>,
+    outcome: &ReviewOutcome,
+) -> Result<(), henk_platform::PlatformError> {
+    let ReviewRun {
+        writer,
+        target,
+        commit,
+        link,
+        pushed_head,
+        ..
+    } = review;
+    let closed = writer
+        .finish_review(target, commit, handle, outcome, link)
+        .await;
+    let head = pushed_head.lock().ok().and_then(|head| head.clone());
+    if let Some(head) = head.filter(|head| head != commit) {
+        let reported = match writer.start_review(target, &head, link, None).await {
+            Ok(started) => {
+                writer
+                    .finish_review(target, &head, started.as_ref(), outcome, link)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = reported {
+            warn!(%error, head = %head.short(), "could not report the check on the loop's head");
+        }
+    }
+    closed
 }
 
 /// The review's request and queue stages, from the coordinator's submit time.
@@ -1682,6 +1831,7 @@ lanes = [{ name = "lane-a", model = "m" }]
                 feed,
                 cancels: crate::cancel::Cancels::default(),
                 workspace_provider: provider,
+                own_pushes: crate::push::OwnPushes::default(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
                 test_address_writer: source,
@@ -4222,6 +4372,836 @@ lanes = [{ name = "lane-a", model = "m" }]
         assert_eq!(r.peek.inner.opened(), 3);
         assert_eq!(r.peek.inner.live(), 0);
         assert_eq!(r.peek.inner.unclosed(), 0, "closed, not just dropped");
+    }
+
+    /// The pull request of a review loop (#284), on a local remote: its
+    /// head is whatever `feature` holds now, so a push moves it.
+    struct LoopHub {
+        remote: std::path::PathBuf,
+        /// The repository the pull request's branch is in: `o/r` unless it
+        /// comes from a fork.
+        head_repo: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl henk_platform::address::AddressWriter for LoopHub {
+        async fn pull_facts(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+            let (head, _) = crate::git::tests::remote_feature(&self.remote).await;
+            Ok(henk_platform::address::PullFacts {
+                push: henk_domain::address::PushFacts {
+                    open: true,
+                    head_repo: Some(self.head_repo.to_owned()),
+                    base_repo: "o/r".to_owned(),
+                    head_ref: "feature".to_owned(),
+                    default_branch: "main".to_owned(),
+                    head_protected: false,
+                },
+                head: CommitSha::parse(&head).unwrap(),
+                remote: self.remote.to_string_lossy().into_owned(),
+            })
+        }
+        async fn open_threads(
+            &self,
+            _: &ReviewTarget,
+        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn git_credential(
+            &self,
+        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        {
+            Ok(None)
+        }
+        async fn repo_head(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn commit_identity(
+            &self,
+        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
+            Ok(henk_platform::address::CommitIdentity {
+                name: "meneer-henk[bot]".to_owned(),
+                email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
+            })
+        }
+        fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        fn commit_url(&self, _: &ReviewTarget, _: &str) -> String {
+            String::new()
+        }
+        async fn reply_in_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &henk_platform::address::OpenThread,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn resolve_thread(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<(), henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn post_comment(
+            &self,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
+            Err(unused())
+        }
+    }
+
+    /// A backend that cannot open a workspace.
+    struct NoWorkspaces;
+
+    #[async_trait::async_trait]
+    impl crate::workspace::WorkspaceProvider for NoWorkspaces {
+        async fn open(
+            &self,
+            _: &std::path::Path,
+            _: &henk_domain::workspace::Profile,
+        ) -> Result<Arc<dyn crate::workspace::Workspace>, crate::workspace::WorkspaceError>
+        {
+            Err(crate::workspace::WorkspaceError::Refused(
+                "the sandbox host is down".to_owned(),
+            ))
+        }
+    }
+
+    fn say(text: &str) -> Result<Completion, henk_llm::LlmError> {
+        Ok(Completion {
+            message: henk_llm::ChatMessage::assistant(text),
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    fn edit(old: &str, new: &str) -> Result<Completion, henk_llm::LlmError> {
+        call(
+            "edit_file",
+            serde_json::json!({"path": "src/a.rs", "old": old, "new": new}),
+        )
+    }
+
+    /// [`CONFIG`] with a review loop of reviewer `r` and fixer `f` (#284).
+    fn loop_config() -> String {
+        let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
+        CONFIG.replace("[review]\n", &format!("{models}[review]\n"))
+            + "[review.loop]\nreviewer = \"r\"\nfixer = \"f\"\n[address]\nmodel = \"f\"\nrequester_id = 3\n"
+    }
+
+    /// A reviewer `r` and a fixer `f`, each scripted, on a fresh local
+    /// remote served by [`LoopHub`]; the remote is returned to be kept.
+    async fn looping(
+        name: &str,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    ) {
+        looping_from(
+            name,
+            "o/r",
+            ScriptedClient::new("m", []),
+            reviewer,
+            fixer,
+            provider,
+        )
+        .await
+    }
+
+    /// [`looping`] on a pull request whose branch is in `head_repo`, with
+    /// `lanes` answering the lane review.
+    async fn looping_from(
+        name: &str,
+        head_repo: &'static str,
+        lanes: ScriptedClient,
+        reviewer: ScriptedClient,
+        fixer: ScriptedClient,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) -> (
+        Fixture,
+        Arc<ScriptedClient>,
+        Arc<ScriptedClient>,
+        crate::git::ScratchDir,
+    ) {
+        let (remote, head) = crate::git::tests::bare_remote(name).await;
+        let config = loop_config();
+        let hub = Arc::new(LoopHub {
+            remote: remote.path().to_path_buf(),
+            head_repo,
+        });
+        let mut f = fixture_on(DIFF, lanes, &config, head.as_str(), provider, Some(hub)).await;
+        let (reviewer, fixer) = (Arc::new(reviewer), Arc::new(fixer));
+        f.app.models.insert(
+            "r".to_owned(),
+            Arc::clone(&reviewer) as Arc<dyn ModelClient>,
+        );
+        f.app
+            .models
+            .insert("f".to_owned(), Arc::clone(&fixer) as Arc<dyn ModelClient>);
+        (f, reviewer, fixer, remote)
+    }
+
+    /// The text of every message of a request, in order.
+    fn texts(request: &henk_llm::CompletionRequest) -> Vec<String> {
+        request
+            .messages
+            .iter()
+            .map(henk_llm::ChatMessage::text)
+            .collect()
+    }
+
+    fn report(
+        line: u32,
+        claim: &str,
+        reopens: Option<&str>,
+    ) -> Result<Completion, henk_llm::LlmError> {
+        let mut args = serde_json::json!({
+            "path": "src/a.rs",
+            "line": line,
+            "claim": claim,
+            "why": "the caller divides by it",
+            "fix": "make it 3",
+        });
+        if let Some(reopens) = reopens {
+            args["reopens"] = serde_json::json!(reopens);
+        }
+        call("report_finding", args)
+    }
+
+    fn finish_round() -> Result<Completion, henk_llm::LlmError> {
+        call("finish_round", serde_json::json!({"covered": ["src/a.rs"]}))
+    }
+
+    fn judge(finding: &str, verdict: &str, reason: &str) -> Result<Completion, henk_llm::LlmError> {
+        call(
+            "give_verdict",
+            serde_json::json!({"finding": finding, "verdict": verdict, "reason": reason}),
+        )
+    }
+
+    /// The loop's findings on the run: (draft, verdict, checker, reason,
+    /// commit, contests).
+    async fn loop_findings(
+        app: &App,
+        run: &RunId,
+    ) -> Vec<(String, String, String, String, String, String)> {
+        app.store
+            .drafts(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| {
+                assert_eq!(d.kind, henk_store::LOOP_FINDING_KIND);
+                let decision = d.decision.unwrap();
+                (
+                    d.draft,
+                    decision.verdict.as_str().to_owned(),
+                    decision.checker,
+                    decision.reason,
+                    decision.comment_id,
+                    d.target,
+                )
+            })
+            .collect()
+    }
+
+    /// Nothing at all on the pull request: no comment, line comment,
+    /// rewrite or resolved thread (#285).
+    fn assert_nothing_posted(writer: &FakeWriter) {
+        assert!(writer.replies.lock().unwrap().is_empty(), "comments");
+        assert!(writer.posts.lock().unwrap().is_empty(), "line comments");
+        assert!(writer.updates.lock().unwrap().is_empty(), "rewrites");
+        assert!(
+            writer.resolved.lock().unwrap().is_empty(),
+            "resolved threads"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fixer_gives_each_finding_one_verdict_and_nothing_is_posted() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop",
+            ScriptedClient::new(
+                "r",
+                [
+                    // Round 1: two findings.
+                    report(2, "x must be 3", None),
+                    report(1, "main must return a value", None),
+                    finish_round(),
+                    say("Done for now."),
+                    // Round 2: the rejection of f2, contested.
+                    report(
+                        1,
+                        "main must return a value: the exit code is read",
+                        Some("f2"),
+                    ),
+                    finish_round(),
+                    say("Done for now."),
+                    // Round 3: f2 again is refused; nothing new.
+                    report(1, "main must return a value", Some("f2")),
+                    finish_round(),
+                    say("Nothing more."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    judge("f2", "rejected", "main returns (), see src/a.rs:1."),
+                    say("Both settled."),
+                    judge("f3", "rejected", "nothing reads an exit code here."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        // One commit, for f1; the rejections changed nothing.
+        let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
+        assert!(log.contains("review loop round 1"), "{log}");
+        assert!(f.app.own_pushes.contains(&head));
+        // The new head gets the review's check too, not only the commit the
+        // review started at: nothing else reviews it.
+        let reported = f.writer.finished_commits.lock().unwrap().clone();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(reported.contains(&head), "{reported:?}");
+        let findings = loop_findings(&f.app, &run).await;
+        let fixed_why = "x is 3 now.".to_owned();
+        assert_eq!(
+            findings,
+            [
+                (
+                    "f1".into(),
+                    "fixed".into(),
+                    "fixer".into(),
+                    fixed_why,
+                    head.clone(),
+                    String::new()
+                ),
+                (
+                    "f2".into(),
+                    "rejected".into(),
+                    "fixer".into(),
+                    "main returns (), see src/a.rs:1.".into(),
+                    String::new(),
+                    String::new()
+                ),
+                (
+                    "f3".into(),
+                    "rejected".into(),
+                    "fixer".into(),
+                    "nothing reads an exit code here.".into(),
+                    String::new(),
+                    "f2".into()
+                ),
+            ],
+            "one verdict each, with its reason"
+        );
+        assert_nothing_posted(&f.writer);
+
+        // Each side heard the other in its own conversation.
+        let asked = reviewer.requests();
+        assert_eq!(asked.len(), 10);
+        let round_two = texts(&asked[4]);
+        let verdicts = round_two.last().unwrap();
+        assert!(
+            verdicts.contains("f1 at src/a.rs:2 (x must be 3): fixed in"),
+            "{verdicts}"
+        );
+        assert!(
+            verdicts
+                .contains("f2 at src/a.rs:1 (main must return a value): rejected: main returns ()"),
+            "{verdicts}"
+        );
+        assert!(
+            verdicts.contains("+    let x = 3;"),
+            "the pushed patch: {verdicts}"
+        );
+        // The tool result of round 3's second contest of f2.
+        let refused = serde_json::to_string(asked[8].messages.last().unwrap()).unwrap();
+        assert!(
+            refused.contains("f2 was rejected twice and is closed"),
+            "{refused}"
+        );
+        let fixing = fixer.requests();
+        assert_eq!(fixing.len(), 6);
+        let second = texts(&fixing[4]);
+        assert!(second.iter().any(|t| t == "Both settled."), "{second:?}");
+        assert!(
+            second.last().unwrap().contains("f3 at src/a.rs:1"),
+            "{second:?}"
+        );
+
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains(
+                "ran 3 rounds, settled 3 findings, pushed 1 commit and stopped: converged"
+            ),
+            "{summary}"
+        );
+        assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 0);
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["fixer", "reviewer"]);
+        for session in ["reviewer", "fixer"] {
+            assert!(
+                f.app
+                    .store
+                    .transcript(&run, session)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{session}"
+            );
+        }
+        let runs = f
+            .app
+            .store
+            .count_runs(&henk_store::RunFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(runs, 1, "the loop is one run");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_finding_the_fixer_gives_no_verdict_ends_unsettled() {
+        let (f, _, fixer, remote) = looping(
+            "review-loop-silent",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                    finish_round(),
+                    say("Nothing more."),
+                ],
+            ),
+            ScriptedClient::new("f", [say("Looked."), say("Still looking."), say("Done.")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-silent").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixer.requests().len(),
+            3,
+            "nudged twice, then settled for it"
+        );
+        let findings = loop_findings(&f.app, &run).await;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            (findings[0].1.as_str(), findings[0].3.as_str()),
+            ("unsettled", "the fixer gave no verdict")
+        );
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 1);
+        assert_nothing_posted(&f.writer);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_that_never_finishes_its_round_is_not_convergence() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop-unfinished",
+            ScriptedClient::new("r", (0..3).map(|_| say("Done."))),
+            ScriptedClient::new("f", [say("Nothing to do.")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-unfinished").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(reviewer.requests().len(), 3, "nudged twice, then stopped");
+        assert!(fixer.requests().is_empty());
+        let summary = report.summary.unwrap();
+        assert!(!report.outcome.unwrap().completed(), "{summary}");
+        assert!(!summary.contains("converged"), "{summary}");
+        assert!(
+            summary.contains("the reviewer did not finish round 1"),
+            "{summary}"
+        );
+        assert!(henk_domain::text::is_in_style(&summary), "{summary}");
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_nothing_posted(&f.writer);
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn without_a_workspace_the_loop_ends_at_once_and_pushes_nothing() {
+        let (f, reviewer, fixer, remote) = looping(
+            "review-loop-none",
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(NoWorkspaces),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-none").unwrap();
+        let _ = run_review(&f.app, request(&run), CancellationToken::new()).await;
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        let error = record.error.unwrap_or_default();
+        assert!(error.contains("needs a workspace"), "{error}");
+        assert!(error.contains("the sandbox host is down"), "{error}");
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_loop_stopped_after_it_pushed_still_reports_the_check_on_the_new_head() {
+        let (f, _reviewer, _fixer, remote) = looping(
+            "review-loop-stopped",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                    finish_round(),
+                    say("Nothing more."),
+                ],
+            )
+            .with_delay(Duration::from_millis(300)),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        // Henk stops once round 1 pushed, while the reviewer looks again.
+        let cancel = CancellationToken::new();
+        let watcher = {
+            let (cancel, shutdown) = (cancel.clone(), f.app.shutdown.clone());
+            let remote = remote.path().to_path_buf();
+            let before = before.clone();
+            tokio::spawn(async move {
+                for _ in 0..400 {
+                    if crate::git::tests::remote_feature(&remote).await.0 != before {
+                        shutdown.cancel();
+                        cancel.cancel();
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+        };
+        let run = RunId::parse("r-loop-stopped").unwrap();
+        let result = run_review(&f.app, request(&run), cancel).await;
+        watcher.await.unwrap();
+        let error = result.unwrap_err();
+        assert!(error.is::<Interrupted>(), "{error:#}");
+
+        let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_ne!(head, before, "round 1 pushed");
+        assert!(
+            f.app.own_pushes.contains(&head),
+            "so nothing else reviews it"
+        );
+        let reported = f.writer.finished_commits.lock().unwrap().clone();
+        assert_eq!(reported.len(), 2, "{reported:?}");
+        assert!(reported.contains(&before), "{reported:?}");
+        assert!(
+            reported.contains(&head),
+            "the new head gets the check: {reported:?}"
+        );
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_loop_out_of_rounds_with_findings_open_is_no_pass() {
+        let (mut f, _reviewer, _fixer, _remote) = looping(
+            "review-loop-rounds",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        f.app.settings.review.r#loop.as_mut().unwrap().max_rounds = 1;
+        let run = RunId::parse("r-loop-rounds").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let outcome = report.outcome.unwrap();
+        assert!(outcome.completed());
+        assert_eq!(outcome.open_findings, 0, "the loop posts no findings");
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Neutral);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.starts_with("The review loop left findings open."),
+            "{summary}"
+        );
+        assert!(summary.contains("it reached max_rounds (1)"), "{summary}");
+        let finished = f.writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 2, "the queued commit and the new head");
+        assert!(
+            finished
+                .iter()
+                .all(|o| o.check_conclusion() != CheckConclusion::Success),
+            "{finished:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
+        let (mut f, _reviewer, _fixer, remote) = looping(
+            "review-loop-cancel-push",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        // The project's check says when it runs, and waits until the review
+        // was cancelled: the next step is the push.
+        let signals = crate::git::ScratchDir::new("review-loop-cancel-push-signals").unwrap();
+        let (running, go) = (signals.path().join("running"), signals.path().join("go"));
+        let script = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do :; done",
+            running.display(),
+            go.display()
+        );
+        f.app.settings.address.as_mut().unwrap().check_commands =
+            vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-cancel-push").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        let watcher = tokio::spawn(async move {
+            for _ in 0..1000 {
+                if running.exists() {
+                    assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::write(go, "").unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled loop ends promptly");
+        watcher.await.unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.is::<CancelledBy>(), "{error:#}");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+        assert!(
+            !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),
+            "no failure notice"
+        );
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_from_a_fork_gets_the_lane_review_instead_of_the_loop() {
+        let (f, reviewer, fixer, remote) = looping_from(
+            "review-loop-fork",
+            "someone/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())),
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-fork").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished, "{:?}", record.error);
+        assert!(report.outcome.unwrap().completed());
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("The review loop did not run: its branch is in another repository"),
+            "{summary}"
+        );
+        assert!(summary.contains("The lanes reviewed instead."), "{summary}");
+        assert!(henk_domain::text::is_in_style(&summary), "{summary}");
+        assert!(!f.model.requests().is_empty(), "the lane reviewed");
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["lane-a"]);
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_eq!(
+            *f.writer.finished_commits.lock().unwrap(),
+            [before],
+            "nothing pushed, one check"
+        );
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// The lanes that review in the loop's place post, so a cancel from
+    /// the dashboard says so on the pull request, as without the loop.
+    #[tokio::test]
+    async fn the_lane_review_in_the_loop_s_place_posts_its_cancel_notice() {
+        let (f, _, _, _remote) = looping_from(
+            "review-loop-fork-cancel",
+            "someone/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())).with_delay(Duration::from_secs(30)),
+            ScriptedClient::new("r", []),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-fork-cancel").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled review ends promptly");
+
+        assert!(result.is_err_and(|e| e.is::<CancelledBy>()));
+        assert!(
+            f.writer
+                .replies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.body.contains("Cancelled from the dashboard")),
+            "one comment says it was cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_after_queueing_gets_the_lane_review_instead_of_the_loop() {
+        let (f, reviewer, fixer, remote) = looping_from(
+            "review-loop-moved",
+            "o/r",
+            ScriptedClient::new("m", (0..4).map(|_| done())),
+            ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
+            ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-moved").unwrap();
+        // Queued at an older commit than the branch's head now.
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        let report = run_review(&f.app, queued, CancellationToken::new())
+            .await
+            .unwrap();
+
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.contains("The review loop did not run: the branch moved to"),
+            "{summary}"
+        );
+        assert!(report.outcome.unwrap().completed(), "{summary}");
+        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_review_with_only_the_loop_shows_its_check_queued() {
+        let lanes = "lanes = [{ name = \"lane-a\", model = \"m\" }]";
+        let only_loop = loop_config().replace(lanes, "lanes = []");
+        assert_ne!(only_loop, loop_config());
+        let f = fixture_on(
+            DIFF,
+            ScriptedClient::new("m", []),
+            &only_loop,
+            SHA,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        assert!(f.app.settings.lanes.is_empty());
+        let run = RunId::parse("r-loop-queued").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(CommitSha::parse(SHA).unwrap());
+        let handle = crate::coordinator::queue_check(&f.app, &queued).await;
+        assert_eq!(handle, Some(ReviewHandle("queued-1".to_owned())));
+        assert_eq!(f.writer.queued.lock().unwrap().len(), 1);
     }
 }
 

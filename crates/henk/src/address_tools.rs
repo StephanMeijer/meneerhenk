@@ -333,6 +333,16 @@ impl Tool for SettleThread {
 /// Every address tool over one context.
 #[must_use]
 pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
+    let mut set = edit_tools(ctx);
+    set.add(ListThreads(Arc::clone(ctx)))
+        .add(SettleThread(Arc::clone(ctx)));
+    set
+}
+
+/// The tools to read, change and check the code, without the review
+/// threads: what the fixer of a review loop works with (#284).
+#[must_use]
+pub fn edit_tools(ctx: &Arc<AddressContext>) -> ToolSet {
     let mut set = ToolSet::new();
     code_tools::add(&mut set, &ctx.workspace);
     if ctx.bash {
@@ -345,9 +355,7 @@ pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
     }
     set.add(EditFile(Arc::clone(ctx)))
         .add(WriteFile(Arc::clone(ctx)))
-        .add(RunChecks(Arc::clone(ctx)))
-        .add(ListThreads(Arc::clone(ctx)))
-        .add(SettleThread(Arc::clone(ctx)));
+        .add(RunChecks(Arc::clone(ctx)));
     set
 }
 

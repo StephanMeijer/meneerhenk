@@ -75,6 +75,7 @@ async fn start_henk(mcp_server: &str, tokens: Vec<Token>) -> Henk {
         live_runs: crate::liveness::LiveRuns::default(),
         feed,
         cancels: crate::cancel::Cancels::default(),
+        own_pushes: crate::push::OwnPushes::default(),
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: Some(writer),
         test_session: None,

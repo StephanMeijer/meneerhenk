@@ -47,6 +47,8 @@ pub struct App {
     /// Opens the workspaces address runs work in (§3.5), on the backend
     /// each profile names; tests swap in another.
     pub workspace_provider: Arc<dyn WorkspaceProvider>,
+    /// The commits Henk pushed, whose events start no review (#284).
+    pub own_pushes: crate::push::OwnPushes,
     /// Tests: the writer `writer` returns for every platform.
     #[cfg(test)]
     pub test_writer: Option<Arc<dyn PlatformWriter>>,
@@ -189,6 +191,7 @@ impl App {
             feed,
             cancels: crate::cancel::Cancels::default(),
             workspace_provider: Arc::new(Backends::new(ssh, kubernetes)),
+            own_pushes: crate::push::OwnPushes::default(),
             #[cfg(test)]
             test_writer: None,
             #[cfg(test)]

@@ -152,11 +152,12 @@ fn leave(
 /// Opens the review's check as queued on the pull request (#262), when
 /// the platform has one and the review could run once it has a slot.
 /// Henk's failure to open it is logged; the review waits all the same.
-async fn queue_check(app: &App, request: &ReviewRequest) -> Option<ReviewHandle> {
+pub(crate) async fn queue_check(app: &App, request: &ReviewRequest) -> Option<ReviewHandle> {
     let (Some(run), Some(commit)) = (&request.run, &request.commit) else {
         return None;
     };
-    if !app.settings.allowlist.allows(&request.target.repo) || app.settings.lanes.is_empty() {
+    let reviews = !app.settings.lanes.is_empty() || app.settings.review.r#loop.is_some();
+    if !app.settings.allowlist.allows(&request.target.repo) || !reviews {
         return None;
     }
     let writer = app.writer(request.target.platform()).ok()?;
