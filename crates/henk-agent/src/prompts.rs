@@ -88,7 +88,12 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
         assert!(henk_domain::text::is_in_style(LOOP_FIXER));
-        assert!(LOOP_REVIEWER.contains("NO FINDINGS"));
+        for tool in ["report_finding", "finish_round", "reopens"] {
+            assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
+        }
+        for tool in ["list_findings", "give_verdict", "run_checks"] {
+            assert!(LOOP_FIXER.contains(&format!("`{tool}`")), "{tool}");
+        }
         assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
         for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {
             assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");

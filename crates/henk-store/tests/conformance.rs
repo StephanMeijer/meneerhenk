@@ -17,10 +17,11 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DayRates, DraftDecision, DraftFilter, DraftGroup, DraftKey, DraftRates, DraftRecord,
-    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent, LaneStatus,
-    MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page, PgStore, PruneCounts, RunFilter,
-    RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite,
-    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, VerdictFilter,
+    DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction, InboundEvent,
+    LOOP_FINDING_KIND, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord, Page,
+    PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore, SqliteStore, Stage,
+    StageState, StageWrite, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
+    VerdictFilter,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -101,6 +102,7 @@ macro_rules! for_each_scenario {
             tool_calls_are_kept_in_order_and_add_up_across_runs,
             transcripts_are_kept_whole_listed_and_pruned,
             drafts_are_kept_replaced_and_decided,
+            loop_findings_keep_their_verdicts_out_of_the_quality_figures,
             drafts_are_counted_by_group_and_listed_across_runs,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
         );
@@ -669,6 +671,73 @@ async fn drafts_are_counted_by_group_and_listed_across_runs(store: &dyn RunStore
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 9);
+}
+
+/// A review loop's findings (#285) keep the fixer's verdicts, and stay out
+/// of the fact-check's figures and listing.
+async fn loop_findings_keep_their_verdicts_out_of_the_quality_figures(store: &dyn RunStore) {
+    let run = new_run("r-loop");
+    store.create_run(&run).await.unwrap();
+    store
+        .record_draft(&run.id, &draft("d1", "lane-a", 4, "x is never set."))
+        .await
+        .unwrap();
+    let verdicts = [
+        DraftVerdict::Fixed,
+        DraftVerdict::Rejected,
+        DraftVerdict::WontFix,
+        DraftVerdict::Unsettled,
+    ];
+    for (n, verdict) in verdicts.into_iter().enumerate() {
+        let id = format!("f{}", n + 1);
+        let mut finding = draft(&id, "reviewer", 2, "x must be 3");
+        LOOP_FINDING_KIND.clone_into(&mut finding.kind);
+        store.record_draft(&run.id, &finding).await.unwrap();
+        let decision = DraftDecision {
+            at: String::new(),
+            verdict,
+            checker: "fixer".into(),
+            reason: "why".into(),
+            same_as: String::new(),
+            comment_id: String::new(),
+        };
+        store.decide_draft(&run.id, &id, &decision).await.unwrap();
+    }
+    let stored: Vec<_> = store
+        .drafts(&run.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|d| d.decision.map(|decision| decision.verdict))
+        .collect();
+    assert_eq!(stored, verdicts, "every loop verdict reads back");
+
+    let every = DraftFilter::default();
+    assert_eq!(store.count_drafts(&every).await.unwrap(), 1);
+    assert_eq!(
+        store
+            .list_drafts(&every, Page::new(50, 0))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let rates = store.draft_rates(DraftGroup::Lane, &every).await.unwrap();
+    assert_eq!(
+        rates
+            .iter()
+            .map(|r| (r.key.as_str(), r.drafts))
+            .collect::<Vec<_>>(),
+        [("lane-a", 1)],
+        "only the fact-check's drafts"
+    );
+    let yesterday = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let days = store.daily_stats(yesterday).await.unwrap();
+    assert_eq!(
+        days.iter().map(|d| d.drafts).sum::<u64>(),
+        1,
+        "the overview's drafts per day leave loop findings out too"
+    );
 }
 
 async fn drafts_are_kept_replaced_and_decided(store: &dyn RunStore) {

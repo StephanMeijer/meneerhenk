@@ -215,7 +215,8 @@ const DRAFT_FILTER: &str =
     "($1::text IS NULL OR d.model = $1) AND ($2::text IS NULL OR d.lane = $2)
      AND ($3::text IS NULL OR r.repo = $3)
      AND ($4::timestamptz IS NULL OR d.created_at >= $4)
-     AND ($5::timestamptz IS NULL OR d.created_at < $5)";
+     AND ($5::timestamptz IS NULL OR d.created_at < $5)
+     AND d.kind <> 'loop_finding'";
 
 /// One count per verdict, and the waiting ones, in [`DraftRates`] order.
 const VERDICT_SUMS: &str = "COUNT(*) FILTER (WHERE d.verdict = 'confirmed'),
@@ -506,7 +507,8 @@ impl RunStore for PgStore {
         let drafts = client
             .query(
                 &format!(
-                    "SELECT {}, COUNT(*) FROM drafts WHERE created_at >= $1 GROUP BY 1",
+                    "SELECT {}, COUNT(*) FROM drafts
+                     WHERE created_at >= $1 AND kind <> 'loop_finding' GROUP BY 1",
                     day("created_at")
                 ),
                 &[&since],

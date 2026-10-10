@@ -244,7 +244,17 @@ pub enum DraftVerdict {
     Cancelled,
     /// The write to the platform failed.
     Failed,
+    /// A review loop's fixer fixed it; `comment_id` holds the commit (#285).
+    Fixed,
+    /// A review loop's fixer will not fix it here (#285).
+    WontFix,
+    /// A review loop ended before its verdict held (#285).
+    Unsettled,
 }
+
+/// The `kind` of a review loop's findings in the drafts table (#285). The
+/// fact-check's quality figures leave them out.
+pub const LOOP_FINDING_KIND: &str = "loop_finding";
 
 /// A stored verdict, refused when it is not one.
 pub(crate) fn draft_verdict(text: &str) -> Result<DraftVerdict, StoreError> {
@@ -266,6 +276,9 @@ impl DraftVerdict {
             Self::NotChecked => "not_checked",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
+            Self::Fixed => "fixed",
+            Self::WontFix => "wont_fix",
+            Self::Unsettled => "unsettled",
         }
     }
 
@@ -280,6 +293,9 @@ impl DraftVerdict {
             Self::NotChecked,
             Self::Cancelled,
             Self::Failed,
+            Self::Fixed,
+            Self::WontFix,
+            Self::Unsettled,
         ]
         .into_iter()
         .find(|verdict| verdict.as_str() == text)

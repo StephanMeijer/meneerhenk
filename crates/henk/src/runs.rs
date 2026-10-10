@@ -3,8 +3,8 @@
 use std::fmt::Write as _;
 
 use henk_store::{
-    DraftRecord, EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally, ToolUsage,
-    TranscriptSummary,
+    DraftRecord, DraftVerdict, EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally,
+    ToolUsage, TranscriptSummary,
 };
 use serde_json::Value;
 
@@ -250,6 +250,9 @@ fn indent(text: &str) -> String {
 pub fn draft_text(draft: &DraftRecord) -> String {
     let what = match draft.kind.as_str() {
         "finding" => String::new(),
+        // A review loop's finding names the rejected one it contests (#285).
+        henk_store::LOOP_FINDING_KIND if draft.target.is_empty() => String::new(),
+        henk_store::LOOP_FINDING_KIND => format!(" contests {}", draft.target),
         kind => format!(" {kind} of {}", draft.target),
     };
     let fate = match &draft.decision {
@@ -262,7 +265,13 @@ pub fn draft_text(draft: &DraftRecord) -> String {
             if !decision.checker.is_empty() {
                 let _ = write!(fate, " by {}", decision.checker);
             }
-            if !decision.comment_id.is_empty() {
+            if decision.verdict == DraftVerdict::Fixed {
+                let commit = decision
+                    .comment_id
+                    .get(..12)
+                    .unwrap_or(&decision.comment_id);
+                let _ = write!(fate, " in {commit}");
+            } else if !decision.comment_id.is_empty() {
                 let _ = write!(fate, ", comment {}", decision.comment_id);
             }
             if !decision.reason.is_empty() {
