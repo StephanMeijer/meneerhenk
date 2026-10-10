@@ -10,7 +10,6 @@
 //! process died while it ran, perhaps because of it, and resuming it once
 //! more could take Henk down on every start. Plans are not resumed.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,10 +59,38 @@ pub(crate) async fn interrupted_reviews(app: &App, since: OffsetDateTime) -> Vec
     }
 }
 
+/// What a claimed run's error ends with, after the error it ended with.
+const RESUMED: &str = ", resumed after a restart";
+
 /// What an interrupted run's error becomes once a process claimed its
 /// resume: it says so, and no longer reads as interrupted.
 fn resumed_error(interrupted: &str) -> String {
-    format!("{interrupted}, resumed after a restart")
+    format!("{interrupted}{RESUMED}")
+}
+
+/// Gives back the claim on resuming `run` when its request came to no
+/// run (#160), as when the pull request could not be read: the run reads
+/// as interrupted again, and a later pass or start resumes it.
+pub(crate) async fn release(app: &App, run: &RunId) {
+    let record = match app.store.run(run).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, run = %run, "could not read an interrupted review to give back its resume");
+            return;
+        }
+    };
+    let Some(resumed) = record.error.as_deref() else {
+        return;
+    };
+    let Some(interrupted) = resumed.strip_suffix(RESUMED) else {
+        return;
+    };
+    match app.store.claim_resume(run, resumed, interrupted).await {
+        Ok(true) => info!(run = %run, "gave back the resume of a review, to try again"),
+        Ok(false) => {}
+        Err(error) => warn!(%error, run = %run, "could not give back the resume of a review"),
+    }
 }
 
 /// Claims the resume of `run` in the store, so that of two processes on
@@ -122,7 +149,8 @@ pub(crate) fn resume_event(run: &RunRecord) -> Option<Event> {
 /// first that can reap what a process that died just before this start
 /// left, as its heartbeat was still fresh at start (#47). A review resumed
 /// by the first is skipped by the second, also while it still waits for a
-/// slot and has no run of its own.
+/// slot and has no run of its own: its claim in the store says so, unless
+/// the request came to no run and gave the claim back.
 #[derive(Debug)]
 pub(crate) struct Resumer {
     bus: Arc<EventBus>,
@@ -130,7 +158,6 @@ pub(crate) struct Resumer {
     stale_after: Duration,
     first_done: bool,
     done: bool,
-    resumed: HashSet<RunId>,
 }
 
 impl Resumer {
@@ -143,7 +170,6 @@ impl Resumer {
             stale_after,
             first_done: false,
             done: false,
-            resumed: HashSet::new(),
         }
     }
 
@@ -171,9 +197,6 @@ impl Resumer {
         let since = OffsetDateTime::now_utc() - RESUME_WITHIN;
         let mut asked = 0;
         for run in interrupted_reviews(app, since).await {
-            if !self.resumed.insert(run.id.clone()) {
-                continue;
-            }
             let Some(event) = resume_event(&run) else {
                 continue;
             };

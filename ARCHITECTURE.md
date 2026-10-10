@@ -335,7 +335,9 @@ interrupted run r-...". It gets its own check; the interrupted one stays
 closed. Before it publishes, the resumer claims the resume in the store
 (`RunStore::claim_resume`): one conditional write changes the interrupted
 run's error to say it was resumed, so of two processes on one database
-that read the same run, one resumes it. The resumed run is the newer run of its pull request, so a restart
+that read the same run, one resumes it. A resume whose pull request could
+not be read gives the claim back (`resume::release`), so a later pass or
+start tries again; a refusal keeps it. The resumed run is the newer run of its pull request, so a restart
 loop resumes each pull request at most once per start and never the same
 run twice. One more resume follows the first reaper pass a staleness window
 (three minutes) after start, which is the first that can reap a run a

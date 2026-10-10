@@ -155,7 +155,17 @@ impl Listener for ReviewListener {
                     Some(commit) => commit.clone(),
                     None => match self.head_of(target).await {
                         Ok(head) => head,
-                        Err(outcome) => return outcome,
+                        Err(outcome) => {
+                            // A resume that could not read the pull request
+                            // gives its claim back, so it is tried again
+                            // (#160); a refusal keeps it.
+                            if let (Handled::Failed(_), EventSource::Resume { interrupted }) =
+                                (&outcome, &event.source)
+                            {
+                                crate::resume::release(self.coordinator.app(), interrupted).await;
+                            }
+                            return outcome;
+                        }
                     },
                 };
                 // A review resumed after a restart says which run it

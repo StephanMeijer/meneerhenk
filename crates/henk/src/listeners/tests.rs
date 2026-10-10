@@ -371,6 +371,55 @@ async fn a_resumed_review_is_of_the_current_head_and_names_the_interrupted_run()
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
 }
 
+/// A start's first resume pass, on a bus nobody listens to: it claims
+/// the interrupted reviews and says how many.
+async fn claim_on_start(app: &App) -> usize {
+    let nobody = EventBus::new(Arc::new(henk_events::bus::NoRecorder), Vec::new());
+    crate::resume::Resumer::new(Arc::new(nobody), std::time::Duration::from_hours(1))
+        .after_pass(app, tokio::time::Instant::now())
+        .await
+}
+
+/// #160: a resume whose pull request could not be read, as in an outage
+/// right after a start, gives back its claim, so a later pass or start
+/// resumes the review; it is not lost.
+#[tokio::test]
+async fn a_resume_that_could_not_read_the_pull_request_is_tried_again() {
+    let h = Harness::with_writer(FakeWriter {
+        head: SHA.to_owned(),
+        fail_pull_request: Some("unreachable".to_owned()),
+        ..FakeWriter::default()
+    })
+    .await;
+    let app = h.coordinator.app();
+    interrupted(&h, "r-old", "docspec/app").await;
+    // The resumer claims it; its request is delivered below, by hand.
+    assert_eq!(claim_on_start(app).await, 1);
+    let since = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    assert!(
+        crate::resume::interrupted_reviews(app, since)
+            .await
+            .is_empty(),
+        "claimed"
+    );
+
+    let old = h
+        .store
+        .run(&RunId::parse("r-old").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let review = reviewed(&h, crate::resume::resume_event(&old).unwrap()).await;
+    assert!(matches!(review, Handled::Failed(_)), "{review:?}");
+    let again = crate::resume::interrupted_reviews(app, since).await;
+    assert_eq!(
+        again.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["r-old"],
+        "resumable again"
+    );
+    assert_eq!(again[0].error.as_deref(), Some("interrupted"));
+}
+
 /// #160: a pull request that left the allowlist or was closed is not
 /// resumed.
 #[tokio::test]
@@ -390,10 +439,19 @@ async fn a_resumed_review_is_refused_off_the_allowlist_or_on_a_closed_pull_reque
     })
     .await;
     let old = interrupted(&closed, "r-closed", "docspec/app").await;
+    let app = closed.coordinator.app();
+    assert_eq!(claim_on_start(app).await, 1);
     let review = reviewed(&closed, crate::resume::resume_event(&old).unwrap()).await;
     assert!(
         matches!(&review, Handled::Ignored(r) if r.contains("not open")),
         "{review:?}"
+    );
+    let since = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    assert!(
+        crate::resume::interrupted_reviews(app, since)
+            .await
+            .is_empty(),
+        "a refusal keeps the claim"
     );
 }
 
