@@ -9,7 +9,7 @@ use anyhow::Context as _;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use henk_domain::run::{EventId, RunId};
@@ -165,6 +165,7 @@ pub fn compose_with_secrets(
     });
     let router = Router::new()
         .route("/healthz", get(healthz))
+        .route("/llms.txt", get(llms_txt))
         .route("/runs/{id}", get(run_page))
         .route("/events/{id}", get(event_page))
         .with_state(Arc::clone(&shared))
@@ -293,6 +294,38 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
         "listeners": shared.bus.listeners().collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// How to use Henk from outside (#292), in the llmstxt.org format: the
+/// repository's `llms.txt`, served as it is.
+pub(crate) const LLMS_TXT: &str = include_str!("../../../llms.txt");
+
+/// What `/llms.txt` adds after the summary when this Henk serves no
+/// dashboard.
+const NO_DASHBOARD: &str =
+    "This Henk serves no dashboard: the Dashboard and Dashboard API sections do not apply here.";
+
+/// `llms.txt`, without sign-in: nothing in it is secret. Without a
+/// dashboard it says so after the summary.
+async fn llms_txt(State(shared): State<Arc<Shared>>) -> Response {
+    let body = if shared.dashboard.load(Ordering::Acquire) {
+        LLMS_TXT.to_owned()
+    } else {
+        let (summary, rest) = LLMS_TXT.split_once("\n\n## ").unwrap_or((LLMS_TXT, ""));
+        if rest.is_empty() {
+            format!("{summary}\n\n{NO_DASHBOARD}\n")
+        } else {
+            format!("{summary}\n\n{NO_DASHBOARD}\n\n## {rest}")
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// A run link as posted on a pull request or issue: the run is shown on
@@ -529,6 +562,169 @@ github_owners = ["docspec"]
         assert!(
             !page.contains("keep it simple"),
             "a recorded payload is never served without sign-in"
+        );
+    }
+
+    /// The server as [`compose`] builds it with a `[dashboard]` table and
+    /// its secrets: every route `llms.txt` may name is mounted.
+    async fn with_a_dashboard() -> Composed {
+        let text = format!(
+            "[server]\npublic_base_url = \"https://henk.example\"\n{MINIMAL}[dashboard]\nallowed_github_ids = [1]\n"
+        );
+        let settings = Config::parse(&text).unwrap().into_settings().unwrap();
+        let config = settings.dashboard.clone().unwrap();
+        let app = Arc::new(
+            App::build(settings, Some(std::path::Path::new(":memory:")))
+                .await
+                .unwrap(),
+        );
+        let mut with = composed(&app);
+        let secrets = DashboardSecrets {
+            client_id: "cid".to_owned(),
+            client_secret: SecretString::from("csecret".to_owned()),
+            session_key: SecretString::from("k".repeat(32)),
+        };
+        let dashboard = Dashboard::new(
+            Arc::clone(&app),
+            Arc::clone(&with.coordinator),
+            Arc::clone(&with.bus),
+            config,
+            &secrets,
+        )
+        .unwrap();
+        with.router = with_dashboard(
+            with.router,
+            dashboard::routes(Arc::new(dashboard)),
+            DefaultOnRequest::default(),
+        );
+        with.shared.dashboard.store(true, Ordering::Release);
+        with
+    }
+
+    /// Every `` `METHOD /path` `` in `llms.txt`.
+    fn llms_routes() -> Vec<(String, String)> {
+        LLMS_TXT
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter_map(|quoted| {
+                let (method, path) = quoted.split_once(' ')?;
+                let known = ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method);
+                (known && path.starts_with('/') && !path.contains(' '))
+                    .then(|| (method.to_owned(), path.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The status `method path` answers without a session or a token, and
+    /// whether the dashboard API said it has no such route.
+    async fn answer(router: &Router, method: &str, path: &str) -> (StatusCode, bool) {
+        let path = path.replace("{id}", "r-1").replace("{session}", "reviewer");
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let (status, body) = call(router.clone(), request).await;
+        let no_route = status == StatusCode::NOT_FOUND && body.contains("\"not_found\"");
+        (status, no_route)
+    }
+
+    #[tokio::test]
+    async fn llms_txt_is_served_without_a_session_and_says_when_there_is_no_dashboard() {
+        let app = test_app().await;
+        let response = composed(&app)
+            .router
+            .oneshot(Request::get("/llms.txt").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.starts_with("# Meneer Henk\n"), "{text}");
+        let note = text.find(NO_DASHBOARD).expect("the note");
+        assert!(
+            note < text.find("## Dashboard").unwrap(),
+            "after the summary"
+        );
+        assert_eq!(text.replace(&format!("{NO_DASHBOARD}\n\n"), ""), LLMS_TXT);
+
+        let (status, served) = call(
+            with_a_dashboard().await.router,
+            Request::get("/llms.txt").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!((status, served.as_str()), (StatusCode::OK, LLMS_TXT));
+    }
+
+    #[test]
+    fn llms_txt_is_in_style_and_shaped_as_llmstxt() {
+        let violations = henk_domain::text::style_violations(LLMS_TXT);
+        assert!(violations.is_empty(), "{violations:?}");
+        let mut lines = LLMS_TXT.lines();
+        assert_eq!(lines.next(), Some("# Meneer Henk"));
+        assert_eq!(lines.next(), Some(""));
+        assert!(lines.next().unwrap().starts_with("> "), "the summary");
+        let sections: Vec<&str> = LLMS_TXT
+            .lines()
+            .filter_map(|l| l.strip_prefix("## "))
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                "Dashboard",
+                "Dashboard API",
+                "MCP server",
+                "On a pull request or issue",
+                "Older endpoints",
+                "Optional"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_route_in_llms_txt_answers() {
+        let router = with_a_dashboard().await.router;
+        let named = llms_routes();
+        assert!(named.len() >= 20, "{named:?}");
+        for (method, path) in &named {
+            let (status, no_route) = answer(&router, method, path).await;
+            assert!(
+                status != StatusCode::NOT_FOUND && status != StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path} answered {status}: llms.txt names a route Henk does not have"
+            );
+            assert!(!no_route, "{method} {path}");
+        }
+        // The test catches a route that is gone, here and in the API.
+        for (method, path) in [("GET", "/nope"), ("GET", "/dashboard/api/v1/nope")] {
+            let (status, _) = answer(&router, method, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[test]
+    fn every_mcp_tool_and_only_those_is_in_llms_txt() {
+        let section = LLMS_TXT
+            .split("\n## MCP server\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .unwrap();
+        let named: std::collections::BTreeSet<String> = section
+            .lines()
+            .filter_map(|line| line.strip_prefix("- `"))
+            .filter_map(|line| line.split_once("`:"))
+            .map(|(tool, _)| tool.to_owned())
+            .collect();
+        let tools: std::collections::BTreeSet<String> =
+            crate::mcp_server::tool_names().into_iter().collect();
+        assert_eq!(
+            named, tools,
+            "llms.txt names exactly the MCP server's tools"
         );
     }
 

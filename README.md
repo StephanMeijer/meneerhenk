@@ -701,6 +701,15 @@ to Henk like the rest; the server answers each request with JSON, and a
 proxy that buffers responses does no harm, though leaving it unbuffered
 keeps it ready for streaming.
 
+### llms.txt
+
+[`llms.txt`](llms.txt) says how to use a running Henk from outside, in the
+[llmstxt.org](https://llmstxt.org) format, for people and agents alike: the
+dashboard, its API, the MCP server, what to ask on a pull request, and the
+older bearer-token endpoints. `henk serve` serves it at `/llms.txt` without
+sign-in; without a `[dashboard]` it says that the dashboard sections do not
+apply. A test fails when it names a route or MCP tool Henk does not have.
+
 ## Decisions taken for this version
 
 These answer open questions of the spec provisionally; each becomes a
