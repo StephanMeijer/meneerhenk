@@ -74,6 +74,8 @@ pub(crate) struct LoopReport {
     pub(crate) line: String,
     /// The findings that ended unsettled or won't fix: what still stands.
     pub(crate) open: usize,
+    /// It ran out of rounds with the reviewer's last findings still open.
+    pub(crate) findings_left: bool,
 }
 
 /// Whether the loop ran, or why it did not start.
@@ -214,6 +216,8 @@ struct Rounds<'a> {
     pushed: Vec<String>,
     /// Whether a session broke off, rather than the loop ending.
     failed: bool,
+    /// Whether it ran out of rounds with the reviewer's findings open.
+    findings_left: bool,
 }
 
 impl<'a> Rounds<'a> {
@@ -322,6 +326,7 @@ impl<'a> Rounds<'a> {
             round: 0,
             pushed: Vec::new(),
             failed: false,
+            findings_left: false,
         })
     }
 
@@ -329,6 +334,12 @@ impl<'a> Rounds<'a> {
     /// (#285), and sums the loop up for the review.
     async fn conclude(&self, ended: anyhow::Result<String>) -> anyhow::Result<LoopReport> {
         let (store, run) = (&*self.on.app.store, self.on.run);
+        // A cancel just before or during a push is a cancel like one inside a
+        // session: the review sees its token and ends the way that says.
+        let ended = match ended {
+            Err(error) if is_cancelled(&error) => Ok("cancelled".to_owned()),
+            other => other,
+        };
         // Every finding ends with one verdict, whatever ended the loop (#285).
         let why = match &ended {
             Ok(stop) => format!("the loop stopped: {stop}"),
@@ -388,6 +399,7 @@ impl<'a> Rounds<'a> {
             results,
             line,
             open,
+            findings_left: self.findings_left,
         })
     }
 
@@ -489,6 +501,9 @@ impl<'a> Rounds<'a> {
                 Pushed::Stopped(why) => return Ok(why),
             };
         }
+        // The reviewer's last round had findings; the fixer's answer to
+        // them was never reviewed.
+        self.findings_left = true;
         Ok(format!(
             "it reached max_rounds ({})",
             self.config.max_rounds
