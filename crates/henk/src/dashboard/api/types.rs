@@ -1234,19 +1234,12 @@ pub(super) fn link_to(
                 .github
                 .as_ref()
                 .map_or("https://api.github.com", |g| g.api_base.as_str());
-            let web = if api.trim_end_matches('/') == "https://api.github.com" {
-                "https://github.com".to_owned()
-            } else {
-                api.trim_end_matches('/')
-                    .trim_end_matches("/api/v3")
-                    .to_owned()
-            };
+            let web = henk_platform::github::web_base(api);
             let what = if issue { "issues" } else { "pull" };
             Some(format!("{web}/{repo}/{what}/{target}"))
         }
         Platform::GitLab => {
-            let api = settings.gitlab.as_ref()?.api_url.trim_end_matches('/');
-            let web = api.trim_end_matches("/api/v4");
+            let web = henk_platform::gitlab::web_base(&settings.gitlab.as_ref()?.api_url);
             let what = if issue { "issues" } else { "merge_requests" };
             Some(format!("{web}/{repo}/-/{what}/{target}"))
         }

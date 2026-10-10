@@ -6,7 +6,7 @@ use henk_domain::review::CommitSha;
 use henk_events::{Event, EventKind, EventSource};
 
 use super::new_event;
-use crate::urls::{parse_issue_url, parse_pull_request_url};
+use crate::urls::{Hosts, parse_issue_url, parse_pull_request_url};
 
 /// What is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,8 @@ impl Start {
 }
 
 /// The event for a start request, or why the request is not one. `commit`
-/// applies to a review, `note` to a plan or an address run.
+/// applies to a review, `note` to a plan or an address run; the URL must
+/// be on one of `hosts` (#58).
 ///
 /// # Errors
 ///
@@ -46,10 +47,11 @@ pub fn start_event(
     note: Option<String>,
     source: EventSource,
     requester: Option<String>,
+    hosts: &Hosts,
 ) -> Result<Event, String> {
     let kind = match start {
         Start::Review => EventKind::ReviewRequested {
-            target: parse_pull_request_url(url).map_err(|e| e.to_string())?,
+            target: parse_pull_request_url(url, hosts).map_err(|e| e.to_string())?,
             commit: commit
                 .map(CommitSha::parse)
                 .transpose()
@@ -60,12 +62,12 @@ pub fn start_event(
             return Err("only a review takes a commit".to_owned());
         }
         Start::Plan => EventKind::PlanRequested {
-            target: parse_issue_url(url).map_err(|e| e.to_string())?,
+            target: parse_issue_url(url, hosts).map_err(|e| e.to_string())?,
             note,
             requester,
         },
         Start::Address => EventKind::AddressRequested {
-            target: parse_pull_request_url(url).map_err(|e| e.to_string())?,
+            target: parse_pull_request_url(url, hosts).map_err(|e| e.to_string())?,
             note,
             requester,
         },

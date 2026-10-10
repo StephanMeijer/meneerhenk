@@ -155,12 +155,7 @@ impl GitHubApi {
     /// the public API, the host of a GitHub Enterprise `/api/v3` base.
     #[must_use]
     pub fn git_remote(&self, repo: &str) -> String {
-        let web = if self.api_base == "https://api.github.com" {
-            "https://github.com".to_owned()
-        } else {
-            self.api_base.trim_end_matches("/api/v3").to_owned()
-        };
-        format!("{web}/{repo}.git")
+        format!("{}/{repo}.git", super::web_base(&self.api_base))
     }
 
     /// `GET` a REST path.

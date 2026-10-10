@@ -452,7 +452,8 @@ impl HenkMcp {
         let source = EventSource::Mcp {
             requester: who.clone(),
         };
-        let started = match runs::publish_start(&self.bus, request, source, &who) {
+        let hosts = crate::urls::Hosts::from_settings(&self.app.settings);
+        let started = match runs::publish_start(&self.bus, request, source, &who, &hosts) {
             Ok(started) => started,
             Err(error) => return Ok(refused(error.message())),
         };
