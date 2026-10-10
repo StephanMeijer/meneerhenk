@@ -410,7 +410,12 @@ impl RunStore for Announcing {
         interrupted: &str,
         resumed: &str,
     ) -> Result<bool, StoreError> {
-        self.inner.claim_resume(run, interrupted, resumed).await
+        let _writing = self.feed.writing().await;
+        let claimed = self.inner.claim_resume(run, interrupted, resumed).await?;
+        if claimed {
+            self.announce_run(run).await;
+        }
+        Ok(claimed)
     }
 
     async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
@@ -1270,6 +1275,42 @@ mod tests {
                 ChangeKind::Heartbeat(_) => "heartbeat",
             })
             .collect()
+    }
+
+    /// #160: a claimed resume changes the run's error, and an open
+    /// dashboard sees it; a claim that fails changes nothing and says
+    /// nothing.
+    #[tokio::test]
+    async fn a_claimed_resume_is_announced_and_a_failed_claim_is_not() {
+        let (store, feed) = announcing();
+        let run = id("r-1");
+        store.create_run(&new_run("r-1")).await.unwrap();
+        store
+            .finish_run(&run, RunStatus::Failed, None, Some("interrupted"))
+            .await
+            .unwrap();
+        let before = feed.since(feed.epoch(), 0, &run).unwrap().len();
+
+        let resumed = "interrupted, resumed after a restart";
+        assert!(
+            store
+                .claim_resume(&run, "interrupted", resumed)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_resume(&run, "interrupted", resumed)
+                .await
+                .unwrap()
+        );
+
+        let all = feed.since(feed.epoch(), 0, &run).unwrap();
+        assert_eq!(all.len(), before + 1, "{:?}", kinds(&all));
+        let ChangeKind::Run(claimed) = &all[before].kind else {
+            panic!("{:?}", kinds(&all))
+        };
+        assert_eq!(claimed.error.as_deref(), Some(resumed));
     }
 
     #[tokio::test]
