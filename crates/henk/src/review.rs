@@ -4477,6 +4477,65 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
+        let (mut f, _reviewer, _fixer, remote) = looping(
+            "review-loop-cancel-push",
+            ScriptedClient::new("r", [say("src/a.rs:2: x must be 3.")]),
+            ScriptedClient::new(
+                "f",
+                [edit("let x = 1;", "let x = 3;"), say("fixed: x is 3.")],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        // The project's check says when it runs, and waits until the review
+        // was cancelled: the next step is the push.
+        let signals = crate::git::ScratchDir::new("review-loop-cancel-push-signals").unwrap();
+        let (running, go) = (signals.path().join("running"), signals.path().join("go"));
+        let script = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do :; done",
+            running.display(),
+            go.display()
+        );
+        f.app.settings.address.as_mut().unwrap().check_commands =
+            vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-cancel-push").unwrap();
+        let cancel = f.app.shutdown.child_token();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        let (cancels, cancelled) = (f.app.cancels.clone(), run.clone());
+        let watcher = tokio::spawn(async move {
+            for _ in 0..1000 {
+                if running.exists() {
+                    assert!(cancels.cancel(&cancelled, "github:1234".to_owned()));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::write(go, "").unwrap();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_review(&f.app, request(&run), cancel),
+        )
+        .await
+        .expect("a cancelled loop ends promptly");
+        watcher.await.unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.is::<CancelledBy>(), "{error:#}");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+        assert!(
+            !posted_kinds(&f.writer).contains(&Some(MarkerKind::Failure)),
+            "no failure notice"
+        );
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    #[tokio::test]
     async fn a_pull_request_from_a_fork_gets_the_lane_review_instead_of_the_loop() {
         let (f, reviewer, fixer, remote) = looping_from(
             "review-loop-fork",

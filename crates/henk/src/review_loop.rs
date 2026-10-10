@@ -154,7 +154,12 @@ pub(crate) async fn run_loop(
     rounds.reviewer.finish(store, run).await;
     rounds.fixer.finish(store, run).await;
     workspace.close().await;
-    let stop = ended?;
+    // A cancel just before or during a push is a cancel like one inside a
+    // session: the review sees its token and ends the way that says.
+    let stop = match ended {
+        Err(error) if is_cancelled(&error) => "cancelled".to_owned(),
+        other => other?,
+    };
 
     let pushed = rounds.pushed.len();
     let line = format!(
