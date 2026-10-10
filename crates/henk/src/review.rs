@@ -5057,6 +5057,65 @@ lanes = [{ name = "lane-a", model = "m" }]
     }
 
     #[tokio::test]
+    async fn a_compacted_fixer_keeps_its_own_history_not_the_reviewer_s_task() {
+        let (mut f, reviewer, fixer, _remote) = looping(
+            "review-loop-compact",
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done."),
+                    report(1, "main must return a value", None),
+                    finish_round(),
+                    say("Done."),
+                    report(1, "main needs a doc comment", None),
+                    finish_round(),
+                    say("Done."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    judge("f1", "rejected", "x is never divided by."),
+                    say("Settled."),
+                    judge("f2", "rejected", "main returns ()."),
+                    say("Settled."),
+                    judge("f3", "wont_fix", "a test fixture needs none."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        // Every conversation is over budget from round 2 on.
+        f.app.settings.review.max_conversation_chars = 10;
+        f.app.settings.review.r#loop.as_mut().unwrap().max_rounds = 3;
+        let run = RunId::parse("r-loop-compact").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let earlier = "What happened in the earlier rounds";
+        // The reviewer's round 3 starts from its own task and the summary.
+        let asked = reviewer.requests();
+        assert_eq!(asked.len(), 9);
+        let first = texts(&asked[6]).into_iter().next().unwrap();
+        assert!(first.contains(earlier), "{first}");
+        assert!(first.contains("get_file_diff"), "{first}");
+        assert!(first.contains("f2 at src/a.rs:1"), "{first}");
+        // The fixer's round 3: the summary, never the reviewer's task or a
+        // tool it does not have.
+        let fixing = fixer.requests();
+        assert_eq!(fixing.len(), 6);
+        let first = texts(&fixing[4]).into_iter().next().unwrap();
+        assert!(first.contains(earlier), "{first}");
+        assert!(first.contains("f2 at src/a.rs:1"), "{first}");
+        assert!(!first.contains("Review pull request"), "{first}");
+        assert!(!first.contains("get_file_diff"), "{first}");
+    }
+
+    #[tokio::test]
     async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
         let (mut f, _reviewer, _fixer, remote) = looping(
             "review-loop-cancel-push",

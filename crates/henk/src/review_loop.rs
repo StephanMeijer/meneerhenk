@@ -515,7 +515,10 @@ impl<'a> Rounds<'a> {
     }
 
     /// Keeps both conversations within their budget: what the earlier
-    /// rounds came to, in place of all but the last round (#286).
+    /// rounds came to, in place of all but the last round (#286). The
+    /// reviewer's summary starts with its task, `opening`; the fixer never
+    /// had that task or its tools, so its summary is the findings and the
+    /// commits alone.
     fn compact(&mut self, opening: &str, round: u32) {
         let ledger = self.handoff.ledger();
         let commits = if self.pushed.is_empty() {
@@ -523,13 +526,13 @@ impl<'a> Rounds<'a> {
         } else {
             self.pushed.join(", ")
         };
-        let summary = format!(
-            "{opening}\n\nThe findings so far and their verdicts:\n{}\n\nCommits pushed: {commits}.",
+        let earlier = format!(
+            "The findings so far and their verdicts:\n{}\n\nCommits pushed: {commits}.",
             ledger.summary(round)
         );
-        for session in [&mut self.reviewer, &mut self.fixer] {
-            session.compact_rounds(&summary, 1);
-        }
+        self.reviewer
+            .compact_rounds(&format!("{opening}\n\n{earlier}"), 1);
+        self.fixer.compact_rounds(&earlier, 1);
     }
 
     /// The timeout stop when the run's time is up; otherwise gives the
