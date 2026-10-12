@@ -125,7 +125,7 @@ flowchart TB
 
 | Crate | Modules | Depends on |
 |---|---|---|
-| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `workspace`, `path`, `push`, `commit`, `discord`, `mail` | serde, thiserror, serde_json |
+| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `plan_review`, `run`, `text`, `skill`, `workspace`, `path`, `push`, `commit`, `discord`, `mail` | serde, thiserror, serde_json |
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
@@ -133,7 +133,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `push`, `issue`, `github/{app,api,writer,push,issues}`, `gitlab/{writer,push,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `plan_pairing`, `plan_review_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -375,8 +375,10 @@ into a commit (section 3).
 Each session's tools are built once, when the session starts, and cut to
 what its role grants (`crates/henk/src/roles.rs`, `grant`). The roles and
 their ceilings are a pure rule in `crates/henk-domain/src/role.rs`: only
-the executor (the executor) edits, the handoff tools belong to their side of
-the pair, and the tracker and MCP tools are the planner's. A set built
+the executor edits, the handoff tools belong to their side of the pair,
+the tracker tools are the planner's, and the MCP read tools are the
+planner's and the reviewer's, who reviews plans too (#328); a pull
+request's reviewer is still built without them. A set built
 above its role's ceiling is a bug that tests stop on. The tool list never
 changes while a session runs, so a resumed round keeps the cached prompt
 prefix.
@@ -399,7 +401,9 @@ flowchart TD
     N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the executor"]
     N -- "list_findings, give_verdict" --> F2["the executor: one verdict per finding<br/>on the drafts, for the reviewer"]
     N -- "edit_file, write_file, run_checks" --> F3["the executor's Workspace<br/>pushed only by Henk, after the checks"]
-    N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
+    N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["the planner's PlanDraft, within ChangeBudget<br/>to the IssueWriter only once the review is done"]
+    N -- "raise_point, finish_round" --> F7["the plan's reviewer: a point into the PointLedger<br/>and a plan_point draft, for the planner"]
+    N -- "list_points, answer_point, withdraw_change" --> F9["the planner: one answer per point<br/>on the drafts, for the reviewer"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]
     F0 --> M
@@ -551,37 +555,68 @@ sequenceDiagram
     autonumber
     participant U as CLI or POST /plan
     participant P as plan.rs
+    participant PL as planner session
+    participant RV as reviewer session
     participant I as IssueWriter
-    participant A as Agent
-    participant X as read-only MCP
-    participant WEB as web_fetch
     participant DB as RunStore
 
     U->>P: run_plan(issue, note)
     P->>I: issue: open, not a pull request
     P->>DB: create_run
     P->>P: extract_plan: previous plan, if any
-    P->>A: Agent::run with guarded reads, web_fetch, tracker tools
-    loop study, triage, ask, write
-        A->>X: guarded reads of issue, code, related items
-        A->>WEB: documentation
-        A->>I: set_title, add_labels, link_issue, create_sub_issue, ask_questions
-        Note over A,I: each spends ChangeBudget, sub-issues are capped
-        A->>I: write_plan: with_plan_section replaces the folded section
+    P->>PL: round 0: the issue, guarded reads, web_fetch, drafting tools
+    PL->>PL: set_title, add_labels, link_issue, create_sub_issue, ask_questions, write_plan
+    Note over PL: each goes into the PlanDraft, within the ChangeBudget
+    loop rounds, up to [planning] max_rounds and run_timeout_secs
+        P->>RV: the issue and the draft, or the planner's answers and the revised draft
+        RV->>DB: raise_point: a plan_point draft
+        RV->>P: finish_round
+        alt no new points
+            P->>P: converged
+        else points
+            P->>PL: the round's points
+            PL->>DB: answer_point: taken or rejected
+            PL->>PL: write_plan, withdraw_change, ...
+        end
     end
-    alt plan written
+    P->>DB: end_loop(stop, rounds)
+    alt cancelled
+        P->>I: comment: cancelled, nothing published
+    else a plan drafted
+        P->>I: publish: each drafted change, then the plan, with the open points when a limit ended the review
         P->>I: append SessionEntry under the plan
         P->>DB: finish_run Finished
-    else timeout, model error, or no plan
+    else timeout, model error, or no plan in round 0
         P->>I: comment: Planning failed + run link
         P->>DB: finish_run Failed
     end
 ```
 
+The pairing (`plan_pairing.rs`) is the review loop's alternation applied to a
+plan: two `ResumableSession`s, the planner and the reviewer, each built once
+with a fixed system prompt and tools. Round 0 is the planner's draft; each
+round after it resumes the reviewer with the planner's answers and the
+revised draft, then the planner with the round's points, so each
+conversation only grows by a short update and the cached prefix holds
+(#321). The pairing does not compact earlier rounds. The handoff
+(`plan_review_tools.rs`) keeps the points in a `henk_domain::plan_review::
+PointLedger` and on the run's drafts with the kind `plan_point`; the
+planner's answers are the drafts' verdicts, `taken` or `rejected`, and a
+point still unanswered when the pairing ends is `unsettled`.
+
+Nothing reaches the tracker during the pairing. The drafting tools
+(`plan_tools.rs`) put each change in a `PlanDraft`, where a title,
+description, type, fields or questions replace the ones drafted before and
+`withdraw_change` takes one out; the budget bounds what the draft holds.
+`publish` makes the changes in a fixed order, the issue's own fields first,
+then relations, sub-issues and the questions, and writes the plan last. A
+change the tracker refuses is logged for the session entry; only a refused
+plan fails the run.
+
 The plan section and the session log are a region delimited by HTML comments,
-parsed and rendered by `henk_domain::plan`. `set_description` keeps that region
-intact; `write_plan` keeps the session log and replaces the plan; the session
-entry is appended by code after the run, never by the model.
+parsed and rendered by `henk_domain::plan`. A drafted description keeps that
+region intact; the plan keeps the session log and replaces the plan; the
+session entry is appended by code after the run, never by the model.
 
 ## 8. Run records
 
@@ -687,6 +722,13 @@ erDiagram
         text at
     }
 ```
+
+A plan records the same way: a `lanes` row for the planner and one for the
+reviewer, and in `drafts` the reviewer's points with the kind `plan_point`,
+where `path` is the part of the plan a point is about and `line` is 0, and
+the planner's answer as the verdict (`taken`, `rejected` or `unsettled`).
+`runs.loop_stop` and `loop_rounds` say why and after how many rounds its
+review stopped.
 
 A review records one `lanes` row per session (the reviewer and the executor),
 its stages, and in `drafts` every finding the reviewer reported, with the

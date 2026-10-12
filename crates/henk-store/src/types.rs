@@ -248,13 +248,20 @@ pub enum DraftVerdict {
     Fixed,
     /// A review loop's executor will not fix it here (#285).
     WontFix,
-    /// A review loop ended before its verdict held (#285).
+    /// A review loop ended before its verdict held (#285), or a planning
+    /// pairing before the planner answered the point (#328).
     Unsettled,
+    /// A planning pairing's planner took the reviewer's point (#328).
+    Taken,
 }
 
 /// The `kind` of a review loop's findings in the drafts table (#285). The
 /// overview's drafts per day leaves them out.
 pub const LOOP_FINDING_KIND: &str = "loop_finding";
+
+/// The `kind` of a planning pairing's points in the drafts table (#328).
+/// The overview's drafts per day leaves them out as well.
+pub const PLAN_POINT_KIND: &str = "plan_point";
 
 /// A stored verdict, refused when it is not one.
 pub(crate) fn draft_verdict(text: &str) -> Result<DraftVerdict, StoreError> {
@@ -279,6 +286,7 @@ impl DraftVerdict {
             Self::Fixed => "fixed",
             Self::WontFix => "wont_fix",
             Self::Unsettled => "unsettled",
+            Self::Taken => "taken",
         }
     }
 
@@ -296,6 +304,7 @@ impl DraftVerdict {
             Self::Fixed,
             Self::WontFix,
             Self::Unsettled,
+            Self::Taken,
         ]
         .into_iter()
         .find(|verdict| verdict.as_str() == text)

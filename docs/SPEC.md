@@ -227,7 +227,9 @@ the issue.
 Only an **open issue** is planned, not a pull/merge request. Asked to plan
 anything else, Henk says why he will not.
 
-Henk then:
+Henk plans as two colleagues working together (#328): the **planner**
+drafts the plan and its tracker changes, the **reviewer** reviews the draft,
+and the planner answers each point and revises. The planner then:
 
 1. **Studies:**
    - the issue and its comments;
@@ -258,7 +260,22 @@ Henk then:
    - dependencies on other issues and pull/merge requests.
 
    It is written in the issue's language.
-5. Keeps a folded log of **planning sessions** under the plan. Each session
+5. **Has the plan reviewed** before anything reaches the issue. Everything
+   in steps 2 to 4 is a draft until then:
+   - the reviewer checks the draft against the issue, the code and the
+     tracker (scope, missing steps, sizing, steps that do not hold) and
+     raises each problem as a point, or nothing when the plan holds;
+   - the planner answers every point: taken, saying what changed, or
+     rejected, saying why. The reviewer may contest a rejection once;
+   - this repeats until the reviewer raises nothing more, or a limit ends
+     it: at most 3 rounds, at most an hour in all;
+   - then Henk makes the drafted changes and writes the plan. When a limit
+     ended the review, the plan says why under "Points still open after
+     review", with every point the reviewer had not seen settled.
+
+   The run shows every round: each point, the planner's answer and why the
+   review stopped.
+6. Keeps a folded log of **planning sessions** under the plan. Each session
    records when, which model, who asked, what Henk changed, and a link to the
    run.
 
@@ -274,8 +291,9 @@ Henk then:
 comment on the issue that planning failed, with a link to the run. A plan that
 does not finish within its time limit has failed.
 
-Limits: at most 20 changes to the issue tracker per plan. Every change stays
-within that issue and its relations.
+Limits: at most 20 changes to the issue tracker per plan, counted on the
+draft, so a change the planner withdraws after review costs nothing. Every
+change stays within that issue and its relations.
 
 ---
 
@@ -464,9 +482,10 @@ These hold everywhere:
    tokens are held by the tools around the model. The model can only use
    them through narrow, purpose-built tools. Each role (planner, reviewer,
    executor) has a fixed ceiling of tools it may ever get: only the
-   executor edits, the handoff tools belong to the pair that uses them, and
-   the tracker and platform tools are the planner's. Configuration can
-   narrow a role's tools, never widen them (#171).
+   executor edits, the handoff tools belong to the pair that uses them, the
+   tracker tools are the planner's, and the platform's read tools are the
+   planner's and the reviewer's, who reviews plans too (#328).
+   Configuration can narrow a role's tools, never widen them (#171).
 5. **Scope is fixed per task.**
    - A review loop works only on its own pull/merge request: the reviewer
      at its own commit and those the executor added, the executor pushing
@@ -626,6 +645,13 @@ surprising reading of the earlier wording; veto any that is wrong.
 
 ## Revision notes (2026-10-12)
 
+- §4, §8 invariant 4: planning is a pairing (#328). The planner drafts and
+  the reviewer reviews the draft before anything reaches the issue; the
+  planner answers each point and revises, for at most 3 rounds and an hour.
+  Every tracker change is drafted until then, the budget counts the draft,
+  and a plan whose review a limit ended says what is still open. Planning
+  needs `[roles.reviewer]` as well as `[roles.planner]`. The reviewer may
+  use the platform's read tools.
 - §1, §3.2, §8.2: the review loop pushes as well as the address run, under
   the same refusals, and Henk's persona says so instead of "never change
   code". A pull request the loop may not push to is reviewed by the

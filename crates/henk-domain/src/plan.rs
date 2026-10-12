@@ -173,43 +173,37 @@ pub struct BudgetExhausted {
     pub limit: u32,
 }
 
-/// Tracker changes allowed per plan (§4).
+/// Tracker changes allowed per plan (§4). The planner drafts its changes
+/// until the review is done (#328), so the budget bounds what the draft
+/// holds: a change withdrawn gives its cost back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeBudget {
     limit: u32,
-    used: u32,
 }
 
 impl ChangeBudget {
     /// A budget of `limit` changes.
     #[must_use]
     pub const fn new(limit: u32) -> Self {
-        Self { limit, used: 0 }
+        Self { limit }
     }
 
-    /// Spends `cost` changes, or refuses without spending.
+    /// Whether a draft that costs `total` changes fits.
     ///
     /// # Errors
     ///
-    /// Returns [`BudgetExhausted`] when the cost does not fit.
-    pub fn spend(&mut self, cost: u32) -> Result<(), BudgetExhausted> {
-        if self.used.saturating_add(cost) > self.limit {
+    /// Returns [`BudgetExhausted`] when it does not.
+    pub fn fits(&self, total: u32) -> Result<(), BudgetExhausted> {
+        if total > self.limit {
             return Err(BudgetExhausted { limit: self.limit });
         }
-        self.used += cost;
         Ok(())
     }
 
-    /// Changes made.
+    /// Changes allowed.
     #[must_use]
-    pub const fn used(&self) -> u32 {
-        self.used
-    }
-
-    /// Changes left.
-    #[must_use]
-    pub const fn remaining(&self) -> u32 {
-        self.limit.saturating_sub(self.used)
+    pub const fn limit(&self) -> u32 {
+        self.limit
     }
 }
 
@@ -278,13 +272,10 @@ mod tests {
     }
 
     #[test]
-    fn budget_refuses_without_spending() {
-        let mut budget = ChangeBudget::new(3);
-        assert!(budget.spend(2).is_ok());
-        assert_eq!(budget.remaining(), 1);
-        assert_eq!(budget.spend(2), Err(BudgetExhausted { limit: 3 }));
-        assert_eq!(budget.used(), 2);
-        assert!(budget.spend(1).is_ok());
-        assert_eq!(budget.remaining(), 0);
+    fn a_draft_over_the_budget_does_not_fit() {
+        let budget = ChangeBudget::new(3);
+        assert!(budget.fits(3).is_ok());
+        assert_eq!(budget.fits(4), Err(BudgetExhausted { limit: 3 }));
+        assert_eq!(budget.limit(), 3);
     }
 }

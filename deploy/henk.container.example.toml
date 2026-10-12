@@ -59,8 +59,8 @@ effort = "high"
 max_tokens = 16384
 timeout_secs = 300
 
-# The review loop pairs the reviewer with the executor; planning needs the
-# planner.
+# The review loop pairs the reviewer with the executor; planning pairs the
+# planner with the reviewer.
 [review.loop]
 
 [planning]

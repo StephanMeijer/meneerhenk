@@ -17,6 +17,7 @@ pub mod mail;
 pub mod marker;
 pub mod path;
 pub mod plan;
+pub mod plan_review;
 pub mod push;
 pub mod queue;
 pub mod repeat;

@@ -691,6 +691,12 @@ pub struct PlanningConfig {
     /// Sub-issues per plan.
     #[serde(default = "default_sub_issue_cap")]
     pub sub_issue_cap: u32,
+    /// The reviewer's rounds on a drafted plan, at most (#328).
+    #[serde(default = "default_plan_max_rounds")]
+    pub max_rounds: u32,
+    /// The time the planner and the reviewer have together, in seconds.
+    #[serde(default = "default_plan_run_timeout_secs")]
+    pub run_timeout_secs: u64,
     /// The Team Lead on whose behalf CLI and API plans run.
     pub requester_id: DiscordUserId,
     /// The keys that moved to `[roles.planner]` (#322), read only to refuse
@@ -1302,6 +1308,12 @@ fn default_change_budget() -> u32 {
 fn default_sub_issue_cap() -> u32 {
     5
 }
+fn default_plan_max_rounds() -> u32 {
+    3
+}
+fn default_plan_run_timeout_secs() -> u64 {
+    3600
+}
 
 /// A known person.
 #[derive(Debug, Clone, Deserialize)]
@@ -1408,7 +1420,7 @@ pub enum ConfigError {
     /// A review setting is unusable.
     #[error("{0}")]
     Review(String),
-    /// The address setting is unusable.
+    /// A role, or a stage that needs it, is not configured as it must be.
     #[error("{0}")]
     Role(String),
     /// The dashboard setting is unusable.
@@ -1804,7 +1816,8 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
     Ok(())
 }
 
-/// The planner's model exists and its requester is a Team Lead.
+/// Planning pairs the planner with the reviewer (#328), so it needs both
+/// roles, and its requester is a Team Lead.
 fn validate_planning(
     planning: &PlanningConfig,
     roles: &RolesConfig,
@@ -1813,9 +1826,17 @@ fn validate_planning(
     if let Some((old, new)) = planning.moved_key() {
         return Err(moved(old, new));
     }
-    if roles.planner.is_none() {
+    for (missing, role) in [
+        (roles.planner.is_none(), "[roles.planner]"),
+        (roles.reviewer.is_none(), "[roles.reviewer]"),
+    ] {
+        if missing {
+            return Err(ConfigError::Role(format!("[planning] needs {role}")));
+        }
+    }
+    if planning.max_rounds == 0 {
         return Err(ConfigError::Role(
-            "[planning] needs [roles.planner]".to_owned(),
+            "planning.max_rounds must be at least 1".to_owned(),
         ));
     }
     if !team_lead_ids.contains(&planning.requester_id) {
@@ -2201,8 +2222,12 @@ impl Settings {
         if let Some(planning) = &self.planning {
             let _ = writeln!(
                 out,
-                "Planning:        planner for Team Lead {}; {} changes, {} sub-issues",
-                planning.requester_id, planning.change_budget, planning.sub_issue_cap
+                "Planning:        planner and reviewer for Team Lead {}; {} changes, {} sub-issues; up to {} rounds, {}s in all",
+                planning.requester_id,
+                planning.change_budget,
+                planning.sub_issue_cap,
+                planning.max_rounds,
+                planning.run_timeout_secs
             );
         }
         if let Some(executor) = &self.roles.executor {
@@ -2960,17 +2985,25 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn planning_needs_the_planner() {
+    fn planning_needs_the_planner_and_the_reviewer() {
         let models = ADDRESS.split("[[people]]").next().unwrap();
-        let error = Config::parse(&format!("{MINIMAL}{models}[planning]\nrequester_id = 3\n"))
+        let planning = |extra: &str| {
+            Config::parse(&format!(
+                "{MINIMAL}{models}[planning]\nrequester_id = 3\n{extra}"
+            ))
             .and_then(Config::into_settings)
-            .unwrap_err();
+        };
+        let planner = "[roles.planner]\nmodel = \"m\"\n";
+        let reviewer = "[roles.reviewer]\nmodel = \"m\"\n";
+        let error = planning(reviewer).unwrap_err();
         assert_eq!(error.to_string(), "[planning] needs [roles.planner]");
-        let settings = Config::parse(&format!(
-            "{MINIMAL}{models}[planning]\nrequester_id = 3\n[roles.planner]\nmodel = \"m\"\n"
-        ))
-        .and_then(Config::into_settings)
-        .unwrap();
+        let error = planning(planner).unwrap_err();
+        assert_eq!(error.to_string(), "[planning] needs [roles.reviewer]");
+        let error = planning(&format!("max_rounds = 0\n{planner}{reviewer}")).unwrap_err();
+        assert_eq!(error.to_string(), "planning.max_rounds must be at least 1");
+        let settings = planning(&format!("{planner}{reviewer}")).unwrap();
+        let config = settings.planning.as_ref().unwrap();
+        assert_eq!((config.max_rounds, config.run_timeout_secs), (3, 3600));
         let planner = settings.roles.planner.as_ref().unwrap();
         assert_eq!(
             (
@@ -3616,7 +3649,7 @@ github_owners = ["docspec"]
     #[test]
     fn planning_requester_must_be_a_team_lead() {
         let text = format!(
-            "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nrequester_id = 99\n[roles.planner]\nmodel = \"m\"\n"
+            "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nrequester_id = 99\n[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n"
         );
         assert!(matches!(
             Config::parse(&text).and_then(Config::into_settings),

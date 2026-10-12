@@ -11,8 +11,21 @@ pub const EXECUTOR_BASH: &str = include_str!("../prompts/executor_bash.md");
 /// default branch (#172). `{{branch}}` and `{{commit}}` say which.
 pub const PLAN_WORKSPACE: &str = include_str!("../prompts/plan_workspace.md");
 
-/// Instructions for the planner (§4).
+/// Instructions for the planner (§4), who drafts and revises after the
+/// reviewer's points (#328).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
+
+/// Instructions for the reviewer of a drafted plan (#328). `{{ref}}`,
+/// `{{repo}}` and `{{workspace}}`, what the reviewer's copy of the
+/// repository is, are filled in.
+pub const PLAN_REVIEWER: &str = include_str!("../prompts/plan_reviewer.md");
+
+/// The plan reviewer's `{{workspace}}` when it has a copy of the
+/// repository.
+pub const PLAN_REVIEWER_WORKSPACE: &str = "You read the code in the planner's copy of the repository at its default branch, {{branch}} at {{commit}}, with `list_files`, `search`, `read_file` and `bash`; nothing you change there goes anywhere.";
+
+/// The plan reviewer's `{{workspace}}` without one.
+pub const PLAN_REVIEWER_NO_WORKSPACE: &str = "Read the code with the platform's tools.";
 
 /// Instructions for the reviewer of a review loop (#284). `{{ref}}` and
 /// `{{repo}}` say which pull request.
@@ -71,6 +84,14 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
         assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
+        assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
+        assert!(henk_domain::text::is_in_style(PLAN_REVIEWER_WORKSPACE));
+        for tool in ["raise_point", "finish_round", "reopens"] {
+            assert!(PLAN_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
+        }
+        for tool in ["answer_point", "withdraw_change", "write_plan"] {
+            assert!(PLANNER.contains(&format!("`{tool}`")), "{tool}");
+        }
         for tool in ["report_finding", "finish_round", "reopens"] {
             assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
         }

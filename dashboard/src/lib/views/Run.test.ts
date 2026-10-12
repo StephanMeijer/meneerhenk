@@ -62,6 +62,30 @@ describe('Run', () => {
     expect(cancelButton()).toBeUndefined();
   });
 
+  it("shows a plan review's rounds and points (#328)", async () => {
+    const detail = runDetail();
+    detail.run = { ...detail.run, kind: 'plan', loop_stop: 'converged', loop_rounds: 2 };
+    detail.drafts = [
+      draft('p1', {
+        lane: 'reviewer',
+        kind: 'plan_point',
+        path: 'step 2',
+        line: 0,
+        body: 'Step 2 misses the export test.',
+        decision: { at: '', verdict: 'taken', checker: 'planner', reason: 'Step 2 tests it now.', same_as: '', comment_id: '' },
+      }),
+      draft('p2', { lane: 'reviewer', kind: 'plan_point', path: 'step 3', line: 0, target: 'p1', body: 'Still too big.' }),
+    ];
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
+    await settle();
+    const facts = [...document.querySelectorAll('.facts div')].map((div) => div.textContent?.replace(/\s+/g, ' ').trim());
+    expect(facts).toContain('Review converged after 2 rounds');
+    expect(section('Drafts')).toEqual([
+      ['p1', 'reviewer', 'step 2', 'Step 2 misses the export test.', 'taken', 'planner', '', 'Step 2 tests it now.'],
+      ['p2', 'reviewer', 'step 3', 'contests p1: Still too big.', 'waiting', '', '', ''],
+    ]);
+  });
+
   it('offers a cancel only while the run is running, asks first, and posts it once', async () => {
     const cancel = vi.fn(() => Promise.resolve({ run_id: 'r-1' }));
     const { connect } = fakeConnect();

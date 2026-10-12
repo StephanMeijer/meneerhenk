@@ -16,8 +16,8 @@ pub use types::{
     DayCounts, DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LOOP_FINDING_KIND,
     LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun,
-    OutcomeFilter, OutcomeRecord, Page, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus,
-    Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallKey,
+    OutcomeFilter, OutcomeRecord, PLAN_POINT_KIND, Page, PruneCounts, RunFilter, RunKey, RunRecord,
+    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallKey,
     ToolCallListing, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary,
     session_kind,
 };

@@ -27,6 +27,8 @@ mod loop_tools;
 mod mcp_server;
 mod pages;
 mod plan;
+mod plan_pairing;
+mod plan_review_tools;
 mod plan_tools;
 mod plan_workspace;
 mod prune;

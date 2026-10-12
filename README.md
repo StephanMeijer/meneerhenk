@@ -57,7 +57,20 @@ pushed. The record of a review is its run: the run page and `henk runs
 show` list the rounds, every finding with its verdict and the commits
 pushed, and the check's summary carries the loop's report.
 
-The planner has `write_plan`, the tracker tools and `web_fetch`. On GitLab
+Planning is a pairing (#328): the planner drafts the plan and its tracker
+changes, the reviewer reviews the draft with the platform's read tools and
+the planner's copy of the repository, and raises each problem with
+`raise_point`; the planner answers each point with `answer_point` (taken or
+rejected) and revises. Nothing reaches the issue until the reviewer raises
+nothing more, or `[planning] max_rounds` (3) or `run_timeout_secs` (3600)
+ends it; then Henk makes the drafted changes and writes the plan, and a
+review a limit ended leaves a "Points still open after review" section
+under the plan. The run page and `henk runs show` list each point with the
+planner's answer and why the review stopped.
+
+The planner has `write_plan`, the tracker tools and `web_fetch`, all of
+which draft until the review is done; `withdraw_change` takes a drafted
+change out again, and the change budget counts the draft. On GitLab
 it plans work items: it can set the type (issue or task), fill empty fields
 (weight, start and due date, health) with `set_fields`, link parent, child,
 blocking and related items, and create tasks under an issue. The
@@ -163,12 +176,13 @@ reported as nothing to review.
 Henk's agents are **roles** (#321), each configured once: `[roles.reviewer]`,
 `[roles.executor]` (the agent that changes the code) and `[roles.planner]`.
 A role names its `model` from `[models]` and has its own `max_turns` and
-`timeout_secs` per turn (a round of the review loop, or the planner's
-run; 40 turns and 600s by default, 80 and 1200s for the planner), its own
+`timeout_secs` per turn (a round of the review loop or of the plan review;
+40 turns and 600s by default, 80 and 1200s for the planner), its own
 `skills`, and optionally `tools`: a list that narrows the role's tools
 within what the role may ever have. Only the executor edits, the reviewer
-and the executor each have their side of the handoff, and only the
-planner has the tracker and MCP tools; left out, a role gets its defaults,
+and the executor each have their side of the handoff, only the planner
+has the tracker tools, and the planner and the reviewer, who reviews plans
+too, have the MCP read tools; left out, a role gets its defaults,
 and only the planner reaches the web. `henk config check` lists each
 role, refuses a tool the role may not have, and says which roles reach the
 web.
@@ -180,7 +194,8 @@ limits the whole loop: no round starts after it, and a round under way
 gets only what is left. The executor's `check_commands`,
 `max_changed_files`, identity and trailers apply to every commit the loop
 pushes, and its `requester_id` is who those commits are requested by.
-Planning needs `[planning]` with `[roles.planner]`. Without `[review.loop]`
+Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`.
+Without `[review.loop]`
 reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
 `reviews` check. A configuration from before #309 that still has lanes or
@@ -350,7 +365,9 @@ email = "henk@example.com"
   `[roles.executor]`. The deprecated `check_timeout_secs` is gone:
   `[workspace] command_secs` is the limit for every check.
 - `[review.loop]` without `[roles.reviewer]` and `[roles.executor]`, or
-  `[planning]` without `[roles.planner]`, is refused.
+  `[planning]` without `[roles.planner]` and `[roles.reviewer]` (#328), is
+  refused. The reviewer reviews plans as well as pull requests, with the
+  same `[roles.reviewer]` settings.
 
 ## Check a deployment
 
@@ -923,7 +940,9 @@ line in `docs/SPEC.md` once the team confirms it.
 - §3.3 A session that reaches its round's time limit, or a loop that
   reaches `run_timeout_secs`, stops the loop: what was pushed stands,
   every finding still open ends unsettled, and the check says why the loop
-  stopped. A plan that reaches its time limit still fails (§4).
+  stopped. A plan whose planner reaches its time limit before it drafted a
+  plan still fails (§4); a plan review a limit ends publishes the draft
+  with what is still open.
 - §3.3 A review a restart interrupted, running or waiting for a slot, or
   closed as orphaned after its process died, is reviewed again after the
   next start, on the pull request's current head, once per pull request
@@ -932,7 +951,9 @@ line in `docs/SPEC.md` once the team confirms it.
   allowlist is not resumed. A resumed review closed as orphaned is not
   resumed again, so a review that takes Henk down cannot loop. Interrupted
   plans are not resumed: ask again.
-- §4 A plan has 20 minutes (`planning.timeout_secs`).
+- §4 A plan has an hour in all (`planning.run_timeout_secs`), and each
+  turn the role's own `timeout_secs`; its review has at most 3 rounds
+  (`planning.max_rounds`).
 - §4 On GitHub, triage sets labels, type and links; priority, effort and
   target date are not set in this version.
 - Everywhere: the only rate limit is `review.max_concurrent`. On GitHub, a

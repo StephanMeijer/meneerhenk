@@ -1,8 +1,9 @@
 //! Roles (#171, #321): the agents Henk runs, and the tools each may ever
 //! have. A role's ceiling is a pure rule (§8.4): only the executor edits,
-//! the handoff tools belong to the pair that uses them, and the tracker and
-//! platform tools are the planner's. Configuration may narrow a role's
-//! tools, never widen them.
+//! the handoff tools belong to the pair that uses them, the tracker tools
+//! are the planner's, and the platform's read tools are the planner's and
+//! the reviewer's, who reviews plans as well as code (#328). Configuration
+//! may narrow a role's tools, never widen them.
 
 use std::fmt;
 
@@ -11,7 +12,8 @@ use std::fmt;
 pub enum Role {
     /// Turns an issue into a plan and sub-issues.
     Planner,
-    /// Reviews a pull request and hands its findings to the executor.
+    /// Reviews a pull request and hands its findings to the executor, or a
+    /// drafted plan and hands its points to the planner (#328).
     Reviewer,
     /// Changes the code: fixes what the reviewer found.
     Executor,
@@ -26,11 +28,12 @@ const WEB_FETCH: &str = "web_fetch";
 /// Loading one of the skills the role lists.
 const LOAD_SKILL: &str = "load_skill";
 
-/// What only the reviewer has: the diff and its side of the handoff.
+/// What only the reviewer has: the diff and its side of both handoffs.
 const REVIEWER: &[&str] = &[
     "list_changed_files",
     "get_file_diff",
     "report_finding",
+    "raise_point",
     "finish_round",
 ];
 /// What only the executor has: editing, the checks and its side of the
@@ -42,7 +45,8 @@ const EXECUTOR: &[&str] = &[
     "list_findings",
     "give_verdict",
 ];
-/// What only the planner has: the tracker tools.
+/// What only the planner has: the tracker tools, which draft until the
+/// review is done, and its side of the plan's handoff.
 const PLANNER: &[&str] = &[
     "set_title",
     "set_description",
@@ -53,6 +57,9 @@ const PLANNER: &[&str] = &[
     "create_sub_issue",
     "ask_questions",
     "write_plan",
+    "withdraw_change",
+    "list_points",
+    "answer_point",
 ];
 
 impl Role {
@@ -85,9 +92,9 @@ impl Role {
     }
 
     /// Whether the role may use an MCP server's tools, which the scope
-    /// guard filters (§8.5).
+    /// guard filters (§8.5): the planner, and the reviewer of its plan.
     fn has_platform_tools(self) -> bool {
-        self == Self::Planner
+        matches!(self, Self::Planner | Self::Reviewer)
     }
 
     /// The built-in tools the role may ever have, in a fixed order.
@@ -245,7 +252,7 @@ mod tests {
             );
             assert_eq!(
                 role.allows("github__get_issue"),
-                role == Role::Planner,
+                role != Role::Executor,
                 "{role}"
             );
             assert!(role.allows("read_file") && role.allows("bash"), "{role}");
@@ -261,6 +268,11 @@ mod tests {
         assert!(Role::Executor.allows("list_findings"));
         assert!(!Role::Reviewer.allows("give_verdict"));
         assert!(!Role::Planner.allows("report_finding"));
+        assert!(Role::Reviewer.allows("raise_point"));
+        assert!(!Role::Planner.allows("raise_point"));
+        assert!(Role::Planner.allows("answer_point"));
+        assert!(Role::Planner.allows("withdraw_change"));
+        assert!(!Role::Reviewer.allows("answer_point"));
     }
 
     #[test]
@@ -319,7 +331,8 @@ mod tests {
     fn a_platform_tool_comes_with_the_role_not_the_list() {
         let none: Vec<String> = Vec::new();
         assert!(Role::Planner.grants(&none, "gitlab__get_issue"));
-        assert!(!Role::Reviewer.grants(&Role::Reviewer.default_tools(), "github__get_file"));
+        assert!(Role::Reviewer.grants(&none, "github__get_file"));
+        assert!(!Role::Executor.grants(&Role::Executor.default_tools(), "github__get_file"));
         assert!(!Role::Planner.grants(&none, "read_file"));
     }
 }

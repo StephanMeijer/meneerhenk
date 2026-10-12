@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use henk_domain::run::RunKind;
 use henk_store::{
     DraftRecord, DraftVerdict, EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally,
     ToolUsage, TranscriptSummary,
@@ -251,8 +252,14 @@ pub fn draft_text(draft: &DraftRecord) -> String {
     let what = match draft.kind.as_str() {
         "finding" => String::new(),
         // A review loop's finding names the rejected one it contests (#285).
-        henk_store::LOOP_FINDING_KIND if draft.target.is_empty() => String::new(),
-        henk_store::LOOP_FINDING_KIND => format!(" contests {}", draft.target),
+        // A review loop's finding or a plan review's point names the
+        // rejected one it contests (#285, #328).
+        henk_store::LOOP_FINDING_KIND | henk_store::PLAN_POINT_KIND if draft.target.is_empty() => {
+            String::new()
+        }
+        henk_store::LOOP_FINDING_KIND | henk_store::PLAN_POINT_KIND => {
+            format!(" contests {}", draft.target)
+        }
         kind => format!(" {kind} of {}", draft.target),
     };
     let fate = match &draft.decision {
@@ -280,9 +287,15 @@ pub fn draft_text(draft: &DraftRecord) -> String {
             fate
         }
     };
+    // A plan review's point is about a part of the plan, not a line.
+    let place = if draft.line == 0 {
+        draft.path.clone()
+    } else {
+        format!("{}:{}", draft.path, draft.line)
+    };
     format!(
-        "{:<4} {:<12} {}:{}{what}  {fate}",
-        draft.draft, draft.lane, draft.path, draft.line
+        "{:<4} {:<12} {place}{what}  {fate}",
+        draft.draft, draft.lane
     )
 }
 
@@ -320,7 +333,12 @@ fn render_run(out: &mut String, run: &RunRecord) {
     }
     if let (Some(stop), Some(rounds)) = (&run.loop_stop, run.loop_rounds) {
         let plural = if rounds == 1 { "round" } else { "rounds" };
-        let _ = writeln!(out, "  loop       {} after {rounds} {plural}", words(stop));
+        let what = if run.kind == RunKind::Plan {
+            "review   "
+        } else {
+            "loop     "
+        };
+        let _ = writeln!(out, "  {what}  {} after {rounds} {plural}", words(stop));
     }
     if let Some(commit) = &run.commit {
         let _ = writeln!(out, "  commit     {commit}");

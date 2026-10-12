@@ -154,11 +154,16 @@ run_timeout_secs = 3600
 # env = "HENK_MCP_TOKEN_REPORTING"
 # scope = "read"
 
-# Planning an issue: the planner turns it into a plan and sub-issues. It
-# needs [roles.planner] below.
+# Planning an issue: the planner drafts a plan and its tracker changes, the
+# reviewer reviews the draft and the planner revises, until the reviewer
+# raises nothing more or max_rounds or run_timeout_secs ends it. Nothing
+# reaches the issue before then. It needs [roles.planner] and
+# [roles.reviewer] below.
 [planning]
 change_budget = 20
 sub_issue_cap = 5
+max_rounds = 3
+run_timeout_secs = 3600
 # CLI and API plans run on behalf of this Team Lead.
 requester_id = 523456789012345678
 
@@ -173,7 +178,8 @@ requester_id = 523456789012345678
 
 # The roles (#321): the agents Henk runs, each one model with its own
 # limits, tools and skills. max_turns and timeout_secs hold per turn: a
-# round of the review loop, or the planner's whole run. `tools` narrows a
+# round of the review loop or of the plan review. The reviewer reviews both
+# pull requests and plans. `tools` narrows a
 # role's tools within what the role may ever have; left out, the role gets
 # its defaults, and only the planner reaches the web. `henk config check`
 # lists each role's tools when they differ, and refuses a tool the role may

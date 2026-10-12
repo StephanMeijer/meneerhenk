@@ -16,9 +16,24 @@ export function verdictText(draft: Draft): string {
   return decision.same_as === '' ? verdict : `${verdict} ${decision.same_as}`;
 }
 
-/** What a draft says; a rewrite or withdrawal names the comment it is about. */
+/** The handoff kinds: a review loop's finding (#285) and a plan review's point (#328). */
+const HANDOFF_KINDS = ['loop_finding', 'plan_point'];
+
+/**
+ * What a draft says; a rewrite or withdrawal names the comment it is about,
+ * and a finding or point the rejected one it contests.
+ */
 export function draftWhat(draft: Draft): string {
-  return draft.kind === 'finding' ? draft.body : `${draft.kind} of ${draft.target}: ${draft.body}`;
+  if (draft.kind === 'finding') return draft.body;
+  if (HANDOFF_KINDS.includes(draft.kind)) {
+    return draft.target === '' ? draft.body : `contests ${draft.target}: ${draft.body}`;
+  }
+  return `${draft.kind} of ${draft.target}: ${draft.body}`;
+}
+
+/** Where a draft is: a file and line, or the part of a plan a point is about (#328). */
+export function draftPlace(draft: Draft): string {
+  return draft.line === 0 ? draft.path : `${draft.path}:${draft.line}`;
 }
 
 /** A tool result longer than this many lines is folded away. */
