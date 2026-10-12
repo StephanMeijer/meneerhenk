@@ -531,22 +531,6 @@ mutation($id: ID!) {
         self.graphql(MUTATION, json!({"id": thread_id})).await?;
         Ok(())
     }
-
-    /// Minimises a comment as outdated.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PlatformError`] on failure.
-    pub async fn minimize_comment(&self, node_id: &str) -> Result<(), PlatformError> {
-        const MUTATION: &str = r"
-mutation($id: ID!) {
-  minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) {
-    minimizedComment { isMinimized }
-  }
-}";
-        self.graphql(MUTATION, json!({"id": node_id})).await?;
-        Ok(())
-    }
 }
 
 /// One `reviewThreads` node.

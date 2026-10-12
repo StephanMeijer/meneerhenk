@@ -3,7 +3,7 @@
 //! No credential lives here (§8.4). Every secret is named by the environment
 //! variable that holds it and read by the component that needs it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -14,8 +14,6 @@ use henk_domain::commit::{CommitPerson, Email, IdentityError, TrailerPolicy};
 use henk_domain::discord::HenkIdentity;
 use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person};
 use henk_domain::mail::EmailAddress;
-use henk_domain::marker::ModelId;
-use henk_domain::review::{LaneName, LaneSpec};
 use henk_domain::skill::SkillName;
 use henk_domain::workspace::{BackendKind, Limits, Profile, Toolchain, WorkspacePolicy};
 use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
@@ -478,17 +476,7 @@ fn default_model_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
-    /// The lanes.
-    #[serde(default)]
-    pub lanes: Vec<LaneFileConfig>,
-    /// Wall-clock limit per lane, in seconds. The fact-check of what it
-    /// drafted runs after it and is not counted.
-    #[serde(default = "default_lane_timeout_secs")]
-    pub lane_timeout_secs: u64,
-    /// Model calls per lane.
-    #[serde(default = "default_lane_max_turns")]
-    pub lane_max_turns: u32,
-    /// Characters a lane's conversation may hold before old tool results
+    /// Characters a session's conversation may hold before old tool results
     /// are replaced by stubs. Every turn resends the whole conversation, so
     /// this bounds the cost of one turn.
     #[serde(default = "default_max_conversation_chars")]
@@ -502,20 +490,47 @@ pub struct ReviewConfig {
     /// Whether GitHub draft pull requests are reviewed (open question 1).
     #[serde(default)]
     pub github_drafts: bool,
-    /// Fact-checking of the lanes' drafts before they are posted, after the
-    /// lanes (#189). Absent: drafts are posted unchecked.
-    #[serde(default)]
-    pub fact_check: Option<FactCheckConfig>,
-    /// The reviewer↔fixer loop (#284). Present: a review is one reviewer
-    /// and one fixer taking turns instead of the lanes.
+    /// The reviewer↔fixer loop (#284): a review is one reviewer and one
+    /// fixer taking turns. Absent: reviews are off.
     #[serde(default, rename = "loop")]
     pub r#loop: Option<LoopConfig>,
-    /// Changed files no lane reviews (§3.2): lockfiles and generated
+    /// Changed files no review reads (§3.2): lockfiles and generated
     /// changelogs by default. A pattern without `/` matches the file name at
     /// any depth; `**` matches any number of directories. Setting the key
     /// replaces the default; `ignore = []` reviews everything.
     #[serde(default = "default_review_ignore")]
     pub ignore: Vec<String>,
+    /// The keys of the lanes and the fact-check (#309), read only to refuse
+    /// them with a message that says what replaced them.
+    #[serde(default)]
+    lanes: Option<toml::Value>,
+    /// See `lanes`.
+    #[serde(default)]
+    lane_timeout_secs: Option<toml::Value>,
+    /// See `lanes`.
+    #[serde(default)]
+    lane_max_turns: Option<toml::Value>,
+    /// See `lanes`.
+    #[serde(default)]
+    fact_check: Option<toml::Value>,
+}
+
+impl ReviewConfig {
+    /// The first key of the lanes or the fact-check (#309) the file still
+    /// has, as it is written there.
+    fn removed_key(&self) -> Option<&'static str> {
+        [
+            (self.lanes.is_some(), "[review].lanes"),
+            (
+                self.lane_timeout_secs.is_some(),
+                "[review].lane_timeout_secs",
+            ),
+            (self.lane_max_turns.is_some(), "[review].lane_max_turns"),
+            (self.fact_check.is_some(), "[review.fact_check]"),
+        ]
+        .into_iter()
+        .find_map(|(present, key)| present.then_some(key))
+    }
 }
 
 fn default_review_ignore() -> Vec<String> {
@@ -543,29 +558,6 @@ pub struct SkillsConfig {
     pub dir: String,
 }
 
-/// A second model checks every finding before it is posted (§3.2).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FactCheckConfig {
-    /// Model id from `[models]`.
-    pub model: String,
-    /// Model id from `[models]`, used for drafts `model` wrote itself and
-    /// for those `model` gave no verdict on.
-    #[serde(default)]
-    pub backup_model: Option<String>,
-    /// Wall-clock limit per draft, in seconds; a session gets this times
-    /// the drafts it checks.
-    #[serde(default = "default_fact_check_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Model calls per draft; a session gets this times the drafts it
-    /// checks.
-    #[serde(default = "default_fact_check_max_turns")]
-    pub max_turns: u32,
-    /// The skills the checker may load.
-    #[serde(default)]
-    pub skills: Vec<SkillName>,
-}
-
 /// The reviewer↔fixer loop (#284): a reviewer reviews, a fixer fixes what
 /// holds and pushes to the pull request's branch, and each resumes its own
 /// conversation the next round.
@@ -580,10 +572,10 @@ pub struct LoopConfig {
     #[serde(default = "default_loop_max_rounds")]
     pub max_rounds: u32,
     /// Wall-clock limit per session per round, in seconds.
-    #[serde(default = "default_lane_timeout_secs")]
+    #[serde(default = "default_round_timeout_secs")]
     pub round_timeout_secs: u64,
     /// Model calls per session per round.
-    #[serde(default = "default_lane_max_turns")]
+    #[serde(default = "default_round_max_turns")]
     pub round_max_turns: u32,
     /// Wall-clock limit for the whole loop, in seconds (#286): no round
     /// starts after it, and a round under way gets only what is left.
@@ -599,14 +591,7 @@ fn default_loop_run_timeout_secs() -> u64 {
     3600
 }
 
-fn default_fact_check_timeout_secs() -> u64 {
-    180
-}
-fn default_fact_check_max_turns() -> u32 {
-    12
-}
-
-fn default_lane_timeout_secs() -> u64 {
+fn default_round_timeout_secs() -> u64 {
     600
 }
 fn default_max_conversation_chars() -> usize {
@@ -615,7 +600,7 @@ fn default_max_conversation_chars() -> usize {
 fn default_keep_recent_turns() -> u32 {
     2
 }
-fn default_lane_max_turns() -> u32 {
+fn default_round_max_turns() -> u32 {
     40
 }
 fn default_max_concurrent() -> usize {
@@ -625,21 +610,21 @@ fn default_max_concurrent() -> usize {
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            lanes: Vec::new(),
-            lane_timeout_secs: default_lane_timeout_secs(),
-            lane_max_turns: default_lane_max_turns(),
             max_conversation_chars: default_max_conversation_chars(),
             keep_recent_turns: default_keep_recent_turns(),
             max_concurrent: default_max_concurrent(),
             github_drafts: false,
-            fact_check: None,
             r#loop: None,
             ignore: default_review_ignore(),
+            lanes: None,
+            lane_timeout_secs: None,
+            lane_max_turns: None,
+            fact_check: None,
         }
     }
 }
 
-/// Limits every model session shares: review lanes, fact-checks, planners
+/// Limits every model session shares: the review loop's sessions, planners
 /// and address runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -660,19 +645,6 @@ impl Default for AgentFileConfig {
             record_argument_bytes: 4096,
         }
     }
-}
-
-/// One lane.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LaneFileConfig {
-    /// Name shown when the lane does not finish. Not a model name.
-    pub name: String,
-    /// Model id from `[models]`.
-    pub model: String,
-    /// The skills this lane may load.
-    #[serde(default)]
-    pub skills: Vec<SkillName>,
 }
 
 /// Planning settings.
@@ -844,7 +816,8 @@ pub struct WorkspaceConfig {
     pub setup: Vec<Vec<String>>,
     /// The tool manager for the repository's toolchain: `"mise"`.
     pub toolchain: Option<Toolchain>,
-    /// Whether reviews get workspaces too (#170), one per lane.
+    /// Whether reviews get workspaces too (#170). The review loop opens its
+    /// workspace whether or not this is set (#284).
     pub review: bool,
     /// Whether the planner gets a workspace too (#172), at the default
     /// branch.
@@ -1276,9 +1249,6 @@ pub enum ConfigError {
         /// The id.
         model: String,
     },
-    /// Lane names must be unique and must not name a model (open question 4).
-    #[error("lane {0:?} is invalid: {1}")]
-    Lane(String, String),
     /// A platform section refers to an MCP alias that is not configured.
     #[error("{what} refers to unknown MCP server {alias:?}")]
     UnknownMcpServer {
@@ -1346,9 +1316,7 @@ pub struct Settings {
     pub gitlab: Option<GitLabConfig>,
     /// Models by id, without their secrets.
     pub models: BTreeMap<String, ModelFileConfig>,
-    /// Review lanes.
-    pub lanes: Vec<LaneSpec>,
-    /// Lane limits.
+    /// Reviews: the loop, its limits and what it leaves out.
     pub review: ReviewConfig,
     /// Planning.
     pub planning: Option<PlanningConfig>,
@@ -1407,7 +1375,6 @@ impl Config {
         }
 
         validate_models(&self.models)?;
-        let lanes = validate_lanes(&self.review.lanes, &self.models)?;
         validate_review(&self.review, &self.models, self.address.is_some())?;
         if let Some(planning) = &self.planning {
             validate_planning(planning, &self.models, &self.discord.team_lead_ids)?;
@@ -1422,7 +1389,7 @@ impl Config {
             )?;
         }
         let skills_dir = self.skills.map(|s| s.dir);
-        validate_skill_references(skills_dir.as_deref(), &self.review, self.planning.as_ref())?;
+        validate_skill_references(skills_dir.as_deref(), self.planning.as_ref())?;
         let committers = self
             .people
             .iter()
@@ -1474,7 +1441,6 @@ impl Config {
             github: self.github,
             gitlab: self.gitlab,
             models: self.models,
-            lanes,
             review: self.review,
             planning: self.planning,
             address: self.address,
@@ -1663,38 +1629,23 @@ fn validate_planning(
     Ok(())
 }
 
-fn validate_fact_check(
-    fact_check: Option<&FactCheckConfig>,
-    models: &BTreeMap<String, ModelFileConfig>,
-) -> Result<(), ConfigError> {
-    let Some(fact_check) = fact_check else {
-        return Ok(());
-    };
-    let named = std::iter::once(&fact_check.model).chain(&fact_check.backup_model);
-    for model in named {
-        if !models.contains_key(model) {
-            return Err(ConfigError::UnknownModel {
-                what: "review.fact_check".to_owned(),
-                model: model.clone(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// The review's own settings: its ignore patterns, its fact-check and its
-/// loop.
+/// The review's own settings: no key of the lanes or the fact-check
+/// (#309), its ignore patterns and its loop.
 fn validate_review(
     review: &ReviewConfig,
     models: &BTreeMap<String, ModelFileConfig>,
     address: bool,
 ) -> Result<(), ConfigError> {
+    if let Some(key) = review.removed_key() {
+        return Err(ConfigError::Review(format!(
+            "{key} was removed: a review is now the reviewer↔fixer loop. Configure [review.loop] and [address] instead; the README's \"Migrating from lanes\" says how"
+        )));
+    }
     if review.ignore.iter().any(|p| p.trim().is_empty()) {
         return Err(ConfigError::Review(
             "review.ignore has an empty pattern".to_owned(),
         ));
     }
-    validate_fact_check(review.fact_check.as_ref(), models)?;
     validate_loop(review.r#loop.as_ref(), models, address)
 }
 
@@ -1742,7 +1693,6 @@ fn skills_note(skills: &[SkillName]) -> String {
 /// Whether each listed skill exists is checked when they are loaded.
 fn validate_skill_references(
     dir: Option<&str>,
-    review: &ReviewConfig,
     planning: Option<&PlanningConfig>,
 ) -> Result<(), ConfigError> {
     if dir.is_some_and(|d| d.trim().is_empty()) {
@@ -1751,76 +1701,12 @@ fn validate_skill_references(
     if dir.is_some() {
         return Ok(());
     }
-    let lists = review
-        .lanes
-        .iter()
-        .filter(|lane| !lane.skills.is_empty())
-        .map(|lane| format!("lane {}", lane.name))
-        .chain(
-            review
-                .fact_check
-                .as_ref()
-                .filter(|f| !f.skills.is_empty())
-                .map(|_| "review.fact_check".to_owned()),
-        )
-        .chain(
-            planning
-                .filter(|p| !p.skills.is_empty())
-                .map(|_| "planning".to_owned()),
-        )
-        .next();
-    match lists {
-        Some(what) => Err(ConfigError::Skill(format!(
-            "{what} lists skills, but there is no [skills] section to load them from"
-        ))),
-        None => Ok(()),
+    if planning.is_some_and(|p| !p.skills.is_empty()) {
+        return Err(ConfigError::Skill(
+            "planning lists skills, but there is no [skills] section to load them from".to_owned(),
+        ));
     }
-}
-
-fn validate_lanes(
-    lanes: &[LaneFileConfig],
-    models: &BTreeMap<String, ModelFileConfig>,
-) -> Result<Vec<LaneSpec>, ConfigError> {
-    let mut names = BTreeSet::new();
-    let mut specs = Vec::new();
-    for lane in lanes {
-        if !models.contains_key(&lane.model) {
-            return Err(ConfigError::UnknownModel {
-                what: format!("lane {}", lane.name),
-                model: lane.model.clone(),
-            });
-        }
-        if lane.name.trim().is_empty() {
-            return Err(ConfigError::Lane(
-                lane.name.clone(),
-                "name is empty".to_owned(),
-            ));
-        }
-        if !names.insert(lane.name.clone()) {
-            return Err(ConfigError::Lane(
-                lane.name.clone(),
-                "duplicate name".to_owned(),
-            ));
-        }
-        let names_a_model = models
-            .values()
-            .any(|m| m.model.eq_ignore_ascii_case(&lane.name))
-            || models.contains_key(&lane.name);
-        if names_a_model {
-            return Err(ConfigError::Lane(
-                lane.name.clone(),
-                "lane names must not name a model".to_owned(),
-            ));
-        }
-        let model = ModelId::parse(lane.model.clone())
-            .map_err(|e| ConfigError::Lane(lane.name.clone(), e.to_string()))?;
-        specs.push(LaneSpec {
-            name: LaneName::new(lane.name.clone()),
-            model,
-            skills: lane.skills.clone(),
-        });
-    }
-    Ok(specs)
+    Ok(())
 }
 
 fn validate_mcp_references(
@@ -2115,29 +2001,20 @@ impl Settings {
         }
     }
 
-    /// The lanes, the fact-check, planning and their skills.
+    /// The review loop, planning, address runs and the skills.
     fn describe_agents(&self, out: &mut String) {
-        let _ = writeln!(out, "Review lanes:");
-        for lane in &self.lanes {
+        if let Some(review_loop) = &self.review.r#loop {
             let _ = writeln!(
                 out,
-                "  {} on model {}{}",
-                lane.name,
-                lane.model,
-                skills_note(&lane.skills)
+                "Review loop:     reviewer {}, fixer {}; up to {} rounds, {}s a round, {}s in all",
+                review_loop.reviewer,
+                review_loop.fixer,
+                review_loop.max_rounds,
+                review_loop.round_timeout_secs,
+                review_loop.run_timeout_secs
             );
-        }
-        if let Some(fact_check) = &self.review.fact_check {
-            let _ = writeln!(
-                out,
-                "Fact-check:      model {}{}{}",
-                fact_check.model,
-                fact_check
-                    .backup_model
-                    .as_deref()
-                    .map_or(String::new(), |b| format!(", backup {b}")),
-                skills_note(&fact_check.skills)
-            );
+        } else {
+            let _ = writeln!(out, "Reviews:         off (no [review.loop])");
         }
         if let Some(planning) = &self.planning {
             let _ = writeln!(
@@ -2240,8 +2117,8 @@ impl Settings {
     fn describe_limits(&self, out: &mut String) {
         let _ = writeln!(
             out,
-            "Review limits:   {} at once, {}s and {} turns per lane",
-            self.review.max_concurrent, self.review.lane_timeout_secs, self.review.lane_max_turns
+            "Review limits:   {} at once",
+            self.review.max_concurrent
         );
         let _ = writeln!(
             out,
@@ -2393,7 +2270,23 @@ github_owners = ["docspec"]
         let settings = Config::parse(EXAMPLE)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(settings.lanes.len(), 2);
+        let review_loop = settings.review.r#loop.as_ref().unwrap();
+        assert_eq!(
+            (review_loop.reviewer.as_str(), review_loop.fixer.as_str()),
+            ("opus", "claude")
+        );
+        assert!(
+            settings.address.is_some(),
+            "the loop pushes like an address run"
+        );
+        let described = settings.describe();
+        assert!(
+            described.contains(
+                "Review loop:     reviewer opus, fixer claude; up to 50 rounds, 600s a round, 3600s in all"
+            ),
+            "{described}"
+        );
+        assert!(!described.contains("Review lanes:"), "{described}");
         assert!(settings.github.is_some());
         assert!(settings.gitlab.is_some());
         assert_eq!(settings.mcp.len(), 3);
@@ -2636,14 +2529,15 @@ github_owners = ["docspec"]
         }
     }
 
-    /// The example with its commented `[address]` settings and the commented
-    /// fields of `[[people]]` switched on.
+    /// The example with every commented setting after `[address]` switched
+    /// on: its identity, trailers and repositories, and the commented fields
+    /// of `[[people]]`.
     fn example_with_address() -> String {
         let mut in_address = false;
         EXAMPLE
             .lines()
             .map(|line| {
-                in_address |= line == "# [address]";
+                in_address |= line == "[address]";
                 let setting = line.strip_prefix("# ").filter(|rest| {
                     let header = rest.starts_with('[') && rest.trim_end().ends_with(']');
                     header || rest.contains(" = ")
@@ -3266,8 +3160,51 @@ github_owners = ["docspec"]
         let settings = Config::parse(MINIMAL)
             .and_then(Config::into_settings)
             .unwrap();
-        assert!(settings.lanes.is_empty());
+        assert!(settings.review.r#loop.is_none());
         assert_eq!(settings.server.bind, "127.0.0.1:8080");
+        assert!(
+            settings
+                .describe()
+                .contains("Reviews:         off (no [review.loop])"),
+            "{}",
+            settings.describe()
+        );
+    }
+
+    /// The keys of the lanes and the fact-check are gone (#309): a file
+    /// that still has one fails with what replaced them.
+    #[test]
+    fn lane_and_fact_check_keys_name_the_review_loop() {
+        let model = "[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n";
+        for (section, key) in [
+            (
+                "[review]\nlanes = [{ name = \"a\", model = \"m\" }]\n",
+                "[review].lanes",
+            ),
+            (
+                "[review]\nlane_timeout_secs = 600\n",
+                "[review].lane_timeout_secs",
+            ),
+            ("[review]\nlane_max_turns = 40\n", "[review].lane_max_turns"),
+            (
+                "[review.fact_check]\nmodel = \"m\"\n",
+                "[review.fact_check]",
+            ),
+        ] {
+            let text = format!("{MINIMAL}\n{model}{section}");
+            let error = Config::parse(&text)
+                .and_then(Config::into_settings)
+                .unwrap_err();
+            assert!(matches!(error, ConfigError::Review(_)), "{key}: {error}");
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!("{key} was removed")),
+                "{message}"
+            );
+            assert!(message.contains("[review.loop]"), "{message}");
+            assert!(message.contains("Migrating from lanes"), "{message}");
+            assert!(henk_domain::text::is_in_style(&message), "{message}");
+        }
     }
 
     #[test]
@@ -3324,24 +3261,6 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn lanes_must_reference_models_and_not_name_them() {
-        let text = format!(
-            "{MINIMAL}\n[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\n[review]\nlanes = [{{ name = \"a\", model = \"nope\" }}]\n"
-        );
-        assert!(matches!(
-            Config::parse(&text).and_then(Config::into_settings),
-            Err(ConfigError::UnknownModel { .. })
-        ));
-        let text = text
-            .replace("model = \"nope\"", "model = \"m\"")
-            .replace("name = \"a\"", "name = \"gpt\"");
-        assert!(matches!(
-            Config::parse(&text).and_then(Config::into_settings),
-            Err(ConfigError::Lane(..))
-        ));
-    }
-
-    #[test]
     fn planning_requester_must_be_a_team_lead() {
         let text = format!(
             "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nmodel = \"m\"\nrequester_id = 99\n"
@@ -3367,24 +3286,6 @@ github_owners = ["docspec"]
         assert_eq!(settings.models.get("m").unwrap().effort, Some(Effort::High));
         let bad = text.replace("\"high\"", "\"extreme\"");
         assert!(matches!(Config::parse(&bad), Err(ConfigError::Syntax(_))));
-    }
-
-    #[test]
-    fn fact_check_models_must_exist() {
-        let model = "[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n";
-        let text = format!(
-            "{MINIMAL}\n{model}[review.fact_check]\nmodel = \"m\"\nbackup_model = \"nope\"\n"
-        );
-        assert!(matches!(
-            Config::parse(&text).and_then(Config::into_settings),
-            Err(ConfigError::UnknownModel { ref what, .. }) if what == "review.fact_check"
-        ));
-        let text = text.replace("backup_model = \"nope\"\n", "");
-        let settings = Config::parse(&text)
-            .and_then(Config::into_settings)
-            .unwrap();
-        let fact_check = settings.review.fact_check.unwrap();
-        assert_eq!((fact_check.timeout_secs, fact_check.max_turns), (180, 12));
     }
 
     #[test]

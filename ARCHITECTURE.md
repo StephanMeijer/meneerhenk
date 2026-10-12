@@ -29,7 +29,7 @@ flowchart LR
     subgraph process["henk serve, one process"]
         SRV["HTTP server<br/>webhooks, API, run pages"]
         COORD["Coordinator<br/>one review per PR at a time"]
-        REV["Review orchestrator<br/>lanes in parallel"]
+        REV["Review orchestrator<br/>reviewer and fixer in turns"]
         PLAN["Planner"]
         DB[("SQLite or PostgreSQL<br/>run records")]
     end
@@ -56,8 +56,8 @@ flowchart LR
     SRV --> PLAN
     REV --> DB
     PLAN --> DB
-    REV -- "MCP over stdio" --> GHR
-    REV -- "MCP over stdio" --> GLR
+    REV -- "git: clone, fetch, push" --> GH
+    REV -- "git: clone, fetch, push" --> GL
     PLAN -- "MCP over stdio" --> GHR
     PLAN -- "MCP over stdio" --> GLR
     REV -- "REST and GraphQL as the App" --> GH
@@ -82,7 +82,9 @@ flowchart LR
 What to notice: two sessions per platform. The read-only session is the only
 one a model can reach, and even that only through the guard of section 4. The
 write-mode session (GitLab) and the App REST client (GitHub) are driven by
-Henk's code with arguments it constructs.
+Henk's code with arguments it constructs. A review's models reach no MCP
+session at all: they read the diff Henk fetched and a workspace at the pull
+request's head, and only Henk's code pushes (section 3).
 
 ## 2. Crates
 
@@ -123,7 +125,7 @@ flowchart TB
 
 | Crate | Modules | Depends on |
 |---|---|---|
-| `henk-domain` | `identity`, `allowlist`, `review`, `finding`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
+| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
@@ -131,7 +133,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_tools`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `push`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -139,7 +141,11 @@ so every HTTPS client in the process shares the same rustls setup.
 ## 3. A review, end to end
 
 A `synchronize` webhook from GitHub, start to finish. The GitLab path is the
-same with the writer swapped (section 10 lists the differences).
+same with the writer swapped (section 10 lists the differences). A review is
+the reviewer↔fixer loop (#284, #309): a reviewer model reviews the pull
+request, a fixer model fixes what holds, and Henk pushes the fix to the pull
+request's branch, round after round, until the reviewer finds nothing more or
+a limit stops it.
 
 ```mermaid
 sequenceDiagram
@@ -150,11 +156,13 @@ sequenceDiagram
     participant D as listeners/review.rs
     participant C as coordinator.rs
     participant R as review.rs
-    participant L as Lane (henk-agent)
-    participant F as Fact-check (another model)
-    participant M as Model
-    participant X as read-only MCP
     participant W as GitHubWriter
+    participant L as review_loop.rs
+    participant A as AddressWriter
+    participant K as Workspace
+    participant V as Reviewer session
+    participant F as Fixer session
+    participant P as push.rs
     participant DB as RunStore
 
     GH->>S: POST /webhooks/github
@@ -163,88 +171,129 @@ sequenceDiagram
     S-->>GH: 202 Accepted, event id
     B->>DB: record the event
     B->>D: handle(event), every listener at once
-    D->>D: filter: not a bot, not Henk, no marker, allowlisted, not a draft
+    D->>D: filter: not the loop's own push, not a bot, not Henk, allowlisted, not a draft
     D->>C: submit_review(request, head)
     B->>DB: record each listener's outcome
     C->>C: queue::decide: Start, Join or Supersede
     C->>R: run_review (background task)
-    R->>W: pull_request, must be open
+    R->>R: preflight: allowlisted, [review.loop] configured
+    R->>W: pull_request: open, not a draft
     R->>DB: create_run
     R->>W: start_review: check run in progress
-    R->>W: existing_findings
-    R->>R: FindingRegistry::seeded
-    R->>X: RmcpSession::connect (child process)
-    par one task per configured lane
-        R->>L: Agent::run
-        loop until end of turn, turn limit or deadline
-            L->>M: complete(messages, tools)
-            M-->>L: tool calls
-            alt MCP read tool
-                L->>L: scope::guard pins owner, repo, pullNumber
-                L->>X: call_tool
-                X-->>L: text, truncated
-            else post_finding
-                L->>L: check style and the line, add a draft to the DraftBook
-                L->>DB: record_draft
-            end
-        end
-        L-->>R: LaneResult Finished, Stopped or Dropped
-    end
-    opt fact_check configured
-        loop one session per checking model and 10 drafts
-            R->>F: drafts, diff once, code tools + give_verdict per draft
-            F-->>R: confirmed, rejected or same_as, per draft
+    R->>W: diff, minus what review.ignore matches
+    R->>L: run_loop(diff)
+    L->>A: pull_facts: may Henk push, has the branch moved
+    L->>K: open at the head: clone, import, setup
+    loop until the loop stops
+        L->>V: resume: the pull request, or the last push and verdicts
+        V->>K: get_file_diff, read_file, search, bash
+        V->>DB: report_finding: a loop_finding draft
+        V-->>L: finish_round
+        opt findings, and a fixer
+            L->>F: resume: the round's findings
+            F->>K: read, edit_file, write_file, run_checks
+            F->>DB: give_verdict
+            F-->>L: end of turn
+            L->>K: run_checks, export, checked_changeset
+            L->>P: commit_and_push
+            P->>A: pull_facts again: head unchanged, push still allowed
+            P->>GH: fresh checkout, apply, commit, push fast-forward
         end
     end
-    R->>R: draft::settle
-    R->>W: post_finding, update_finding, resolve_finding, Marker attached
-    R->>DB: record_finding, decide_draft
-    R->>W: existing_findings again
-    R->>R: open = in diff and not resolved
-    R->>W: fold earlier summaries and resolved findings
-    R->>W: post_comment: summary + run link + Marker
-    R->>W: finish_review: success, neutral or failure
+    L->>DB: final verdicts, end_loop: why it stopped, rounds
+    L-->>R: LoopReport
+    R->>W: finish_review: success, neutral or failure, the loop's report in the summary
+    R->>W: the same on the head the loop pushed, if it pushed
     R->>DB: finish_run
 ```
 
-Three details carry the spec's weight. The count comes from the second
-`existing_findings` call, what the platform reports rather than memory, so
-findings of earlier reviews whose line is still in the diff count too (§3.3).
-The diff is fetched once per review (`PlatformWriter::diff`, parsed by
-`henk_domain::diff`, minus the files `review.ignore` matches, see
-`henk_domain::ignore`) and handed to lanes per file with line numbers; a lane
-that ends without opening every changed file is asked once to look at them,
-and the conversation is kept under a size budget by stubbing old tool
-results (`henk_agent::compact`). Stubbing edits earlier turns, and current
-Claude models refuse a thinking block replayed after its history changed, so
-a compaction that stubs anything also drops every thinking block. An edit
-also restarts the provider's prefix cache, so once over budget compaction
-stubs down to a low-water mark (75% of the budget): the history then stays
-append-only for several turns between edits. On an Anthropic model with
-`prompt_cache` (the default), the system prompt and the end of the
-conversation carry a cache marker, so each turn reads what the last one
-wrote; the run timeline records how much of the prompt came from the cache.
-Lanes draft inside the loop with `post_finding`, `improve_finding` and
-`withdraw_finding`, and never write (§3.2, #189): a draft goes into the
-review's `henk_domain::draft::DraftBook`, one per line across lanes, and
-other lanes see it in `list_existing_findings`. Once every lane has ended,
-`crate::fact_check` checks the drafts, with `[review.fact_check]`, in one
-session per checking model and chunk of ten, never on the lane's own model
-first, run one after another in the fact-checker's workspace. Each session
-gets the diff of its files once and gives a verdict per draft: confirmed,
-rejected, or the same as an earlier draft or an existing finding. Drafts
-without a verdict go to the backup model, then out unchecked, recorded as
-`unverified`. `draft::settle` turns the verdicts into writes, and
-`crate::drafts` writes them with the checking model on the marker. A lane
-that fails comes back as `Dropped` and the review stands on the others
-(§3.3). A lane that reaches its time limit comes back as `Stopped`: what it
-drafted is still checked, and the review completes.
+`run_review` refuses before it records a run when the repository is not on
+the allowlist, when no `[review.loop]` is configured ("reviews are off"), or
+when the pull request is closed or a draft. The diff is fetched once per
+review (`PlatformWriter::diff`, parsed by `henk_domain::diff`, minus the files
+`review.ignore` matches, see `henk_domain::ignore`). A diff with no change
+at all fails the review; one whose every file is ignored completes it with
+nothing to review and no loop.
+
+`review_loop::run_loop` reads the pull request's facts through the
+`AddressWriter`. When Henk may not push to it (a fork, the default or a
+protected branch, `push_refusal`) or its branch moved after the review was
+queued, the reviewer reviews alone (#307): one round at the reviewed commit,
+fetched by its sha, no fixer, nothing pushed, and its findings stand in the
+check. Otherwise the loop clones the branch at its head. Either way it opens
+one workspace, set up as the repository's profile says (section 7a), and
+both sessions take turns in it: after a push the workspace holds the new
+head, so nothing has to move.
+
+The reviewer and the fixer are each a `henk_session::ResumableSession`: every
+round resumes its own conversation, and a session's lane row, timeline and
+transcript cover all its rounds. The reviewer reads the diff per file with
+line numbers (`diff_tools.rs`) and the code in the workspace
+(`code_tools.rs`), and hands over what it found with `report_finding`, then
+`finish_round`. The fixer gets the round's findings as data, edits and runs
+the checks as an address run does (`address_tools::edit_tools`, without the
+review threads), and gives each finding one verdict with `give_verdict`:
+fixed, rejected or won't fix. Findings and verdicts live in the
+`henk_domain::review_loop::Ledger` and go on the run's drafts with the kind
+`loop_finding` (section 8); nothing reaches the pull request but the push.
+A session that stops short of `finish_round` or a verdict is nudged at most
+twice (`loop_tools.rs`), then what it left is settled for it.
+
+What the fixer changed is checked like an address run's changeset (§3.5):
+the configured checks must pass in the workspace, and `checked_changeset`
+refuses `.git`, escapes, links, submodules and too many files. `push.rs`,
+shared with the address run, then applies the changeset to a fresh checkout
+that nothing ran in, commits it as Henk and pushes it as a fast-forward,
+after reading the branch again: a head that moved, or a branch Henk may no
+longer push to, refuses the push. The commit is recorded in
+`App::own_pushes` before it leaves, so the webhook about it starts no other
+review. The reviewer's next message carries the pushed commit's patch and the
+fixer's verdicts; a rejection may be contested once, with new evidence.
+
+The loop stops (`henk_domain::review_loop::LoopStop`) when a round has no new
+findings (converged), at `max_rounds`, when a finding repeats one that was
+fixed, when the reviewer alone has had its round, when the checks fail after
+the fixer's changes, when a push is refused, when the reviewer changed its
+workspace, when a session fails or runs out of time (per round
+`round_timeout_secs`, for the whole loop `run_timeout_secs`, #286), or on a
+cancel. Every finding then gets one final verdict; one left without is
+`unsettled`. The first four stops end well and the review completes. A
+cancel ends it the way its token says: cancelled, superseded or interrupted
+(section 5). Every other stop is a failure of Henk, not of the code (§3.3). The run records why
+it stopped and after how many rounds (`RunStore::end_loop`), and the check's
+summary ends with the loop's report: rounds, commits pushed, why it stopped
+and the findings that still stand (unsettled or won't fix). Nothing is
+posted on the pull request; `finish_checks` also reports the outcome on the
+last commit the loop pushed, the pull request's new head.
+
+A run's stages are requested, queued, started, diff, checkout, lanes (the
+loop's rounds; the stage keeps its stored name), push, publish (skipped: a
+loop posts nothing) and done. Runs from before #309 also show a fact_check
+stage.
+
+Each session's conversation is kept under a size budget. Within a round old
+tool results are stubbed (`henk_agent::compact`); the diff a session reads
+is stubbed last. Stubbing edits earlier turns, and current Claude models
+refuse a thinking block replayed after its history changed, so a compaction
+that stubs anything also drops every thinking block. An edit also restarts
+the provider's prefix cache, so once over budget compaction stubs down to a
+low-water mark (75% of the budget): the history then stays append-only for
+several turns between edits. Between rounds, a conversation over budget
+drops every round but the last and starts with a summary of the findings,
+their verdicts and the commits pushed (`ResumableSession::compact_rounds`,
+#286). On an Anthropic model with `prompt_cache` (the default), the system
+prompt and the end of the conversation carry a cache marker, so each turn
+reads what the last one wrote; the run timeline records how much of the
+prompt came from the cache.
 
 ## 4. Where a tool call goes
 
 The most important picture in this file. A model never receives a credential
-or a write tool. What it receives is a list of tool names; every call goes
-through Henk's dispatcher, and every MCP call through the guard.
+or a tool that writes to a platform. What it receives is a list of tool names;
+every call goes through Henk's dispatcher, and every MCP call through the
+guard. A review's sessions get no MCP tools: the reviewer reads the diff and
+its workspace, and the fixer edits the workspace, which only Henk's code turns
+into a commit (section 3).
 
 ```mermaid
 flowchart TD
@@ -259,12 +308,11 @@ flowchart TD
     P --> X["McpSession::call_tool<br/>child process over stdio"]
     X --> T["flatten content to text<br/>truncate to max_tool_output_chars"]
     T --> M
-    N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file, opened files tracked"]
-    N -- "read_file" --> F6["a numbered line range<br/>through the guarded file read"]
-    N -- "list_existing_findings" --> F1["read the shared FindingRegistry<br/>and the other lanes' drafts"]
-    N -- "post_finding" --> F2["style check<br/>line must be in the diff<br/>line free of findings and other lanes' drafts<br/>a draft, written after the lanes and the fact-check"]
-    N -- "improve_finding" --> F3["refuse when a person answered<br/>a draft, written after the lanes and the fact-check"]
-    N -- "withdraw_finding" --> F7["refuse when a person answered<br/>a draft, written after the lanes and the fact-check"]
+    N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file"]
+    N -- "list_files, read_file, search, bash" --> F6["the session's own Workspace<br/>a reviewer's or planner's never exported"]
+    N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the fixer"]
+    N -- "list_findings, give_verdict" --> F2["the fixer: one verdict per finding<br/>on the drafts, for the reviewer"]
+    N -- "edit_file, write_file, run_checks" --> F3["the fixer's or address run's Workspace<br/>pushed only by Henk, after the checks"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]
@@ -273,7 +321,6 @@ flowchart TD
     F1 --> M
     F2 --> M
     F3 --> M
-    F7 --> M
     F4 --> M
     F5 --> M
     F8 --> M
@@ -300,23 +347,29 @@ stateDiagram-v2
     Requested --> Running: Start, or Supersede after cancelling the old run
     Joined --> [*]
     state Running {
-        [*] --> Lanes
-        Lanes --> Summarising: every lane Finished, Stopped or Dropped
+        [*] --> Rounds
+        Rounds --> Rounds: the fixer's changes pushed, the reviewer again
+        Rounds --> Summarising: the loop stopped
     }
     Running --> Superseded: a newer commit arrived
-    Summarising --> Finished: at least one lane finished or stopped
-    Summarising --> Failed: no lane finished, or a platform write failed
+    Summarising --> Finished: converged, max_rounds, a repeated finding, or the reviewer alone
+    Summarising --> Failed: checks failed, push refused, a session failed or ran out of time
+    Running --> Failed: the diff, the pull request or the workspace could not be read
     Superseded --> [*]: check neutral, no comment, names the run that replaced it
-    Finished --> [*]: summary posted, check success or neutral
-    Failed --> [*]: failure comment, check failure
+    Finished --> [*]: check success or neutral, the loop's report in its summary
+    Failed --> [*]: check failure, no comment
 ```
 
 The decision between Start, Join and Supersede is the pure function
 `henk_domain::queue::decide`; the coordinator applies it under a lock and
 cancels the superseded run's token, telling it which run replaced it; the
-old run ends `superseded` with that run's id (#231). On GitHub, `Finished` with zero open
-findings concludes the check `success`, with findings `neutral`, and only
-`Failed` concludes `failure`, which is Henk's failure, not the code's (§3.3).
+old run ends `superseded` with that run's id (#231). A loop that already
+pushed when it was cancelled or superseded leaves its commits on the branch;
+the check on the pushed head reports how the review ended. On GitHub,
+`Finished` with no finding left standing concludes the check `success`, with
+findings that stand (unsettled or won't fix) or a loop stopped at
+`max_rounds` `neutral`, and only `Failed` concludes `failure`, which is
+Henk's failure, not the code's (§3.3).
 On GitLab the commit status is always `success` with the count in its
 description, because a status must never block a pipeline (§8.2).
 
@@ -397,8 +450,12 @@ real recordings. Recordings never leave the service.
 A session (`henk-session`) is the other abstraction: `SessionSpec` says what
 varies (model, system prompt, opening messages, tools, limits) and
 `run_session` does what every session shares (the lane row, the loop, the stop
-mapping, the timeline line). A review is N sessions on one read-only MCP
-session; a plan is one.
+mapping, the timeline line). A plan and an address run are one session each.
+A review is two `ResumableSession`s, the reviewer and the fixer (only the
+reviewer when it reviews alone), each resumed once per round with its own
+conversation. The table that holds a session's row is still called `lanes`,
+after the review lanes it was made for: every session, reviewer, fixer,
+planner or address, records one row there (section 8).
 
 ## 7. Planning
 
@@ -453,11 +510,11 @@ sequenceDiagram
     participant DB as RunStore
 
     U->>R: run_address(pull request, note)
-    R->>W: pull_facts; push_refusal: fork, default, protected, closed
+    R->>W: pull_facts, push_refusal: fork, default, protected, closed
     R->>DB: create_run (kind address)
     R->>W: open_threads (Henk's notes by author, never by marker)
     R->>G: clone_at head, credential via env only
-    R->>S: open: copy the files without .git; the clone is removed
+    R->>S: open: copy the files without .git, the clone is removed
     R->>A: tools on the workspace: read, search, edit, write, run_checks, settle_thread
     A-->>R: edits in the workspace, an outcome per thread
     R->>S: run_checks (each one on the run's timeline), export the changeset
@@ -467,7 +524,7 @@ sequenceDiagram
     R->>W: pull_facts again: head unchanged?
     R->>G: fresh clone_at head, apply the changeset, commit with Henk-Run, Requested-by and the trailers
     R->>G: push, fast-forward only
-    R->>W: reply per thread; resolve Henk's own fixed findings; summary
+    R->>W: reply per thread, resolve Henk's own fixed findings, summary
     R->>DB: finish_run
 ```
 
@@ -488,18 +545,20 @@ never the tree the checks ran in, only the checked changeset applied to a
 fresh checkout. Every backend passes the same contract tests
 (`workspace/contract.rs`).
 
-A review opens workspaces only when its repository's profile has
-`review = true` (`review_workspace.rs`): one per lane and one for the
-fact-checker, at the reviewed commit, through the same setup stage
-(`workspace/setup.rs`). They are wrapped by `workspace::for_lane`, which
-refuses `export` for every run but an address run
-(`henk_domain::workspace::EnvLane::exports`), so nothing a lane does in one
-can become a commit. The code tools on a workspace (`list_files`,
-`read_file`, `search`) are written once in `code_tools.rs` and shared by
-the address run, the review lanes, the fact-checker and the planner
-(`lane_workspace.rs` opens the read-only lanes' workspaces), with `bash`
-for every lane on a backend where the model may run commands
-(`BackendKind::runs_model_commands`: not the host). A `search`
+A review with files to review opens one workspace, whatever the profile's
+`review` says (#284): the loop's, at the pull request's head, through the same setup stage
+(`workspace/setup.rs`), with every command recorded on the run
+(`workspace/traced.rs`). The reviewer sees it through `workspace::for_lane`,
+which refuses `export` for every run but an address run
+(`henk_domain::workspace::EnvLane::exports`), so nothing the reviewer does
+there can become a commit. The fixer works in the same workspace unwrapped:
+its changes are exported, checked and pushed by `push.rs` from a fresh
+checkout, as an address run's are. The code tools on a workspace
+(`list_files`, `read_file`, `search`) are written once in `code_tools.rs` and
+shared by the address run, the loop's reviewer and fixer, and the planner
+(`plan_workspace.rs` opens the planner's workspace), with `bash` for the
+reviewer, the fixer and the planner on a backend where the model may run
+commands (`BackendKind::runs_model_commands`: not the host). A `search`
 pattern is checked in Henk (`workspace::Pattern`) in the syntax Rust's
 regex and PCRE read alike, since the host backend matches with the one and
 the `ssh` backend with `grep -P`.
@@ -513,6 +572,8 @@ best-effort, so a run that pushed is never reported as failed.
 ```mermaid
 erDiagram
     runs ||--o{ lanes : has
+    runs ||--o{ drafts : holds
+    runs ||--o{ stages : moves_through
     runs ||--o{ findings : records
     runs ||--o{ events : logs
     runs ||--o{ requests : joined_by
@@ -520,7 +581,7 @@ erDiagram
     event_outcomes }o--o| runs : led_to
     runs {
         text id PK "r-YYYYMMDD-xxxxxxxx"
-        text kind "review or plan"
+        text kind "review, plan or address"
         text platform
         text repo
         int target "PR, MR or issue number"
@@ -534,16 +595,42 @@ erDiagram
         text link "public_base_url/runs/id"
         text summary
         text error
+        text loop_stop "why a review loop stopped"
+        int loop_rounds
     }
     lanes {
         text run_id FK
-        text name
+        text name "one row per session: reviewer, fixer, planner, address"
         text model
         text status "running, finished, timed_out, did_not_finish"
         int turns
         int input_tokens
         int output_tokens
         text error
+    }
+    drafts {
+        int id PK
+        text run_id FK
+        text draft "f1, f2, ..."
+        text lane "reviewer"
+        text model
+        text kind "loop_finding"
+        text path
+        int line
+        text target "the rejected finding it contests"
+        text body
+        text verdict "fixed, rejected, wont_fix, unsettled"
+        text checker "fixer, or empty"
+        text reason
+        text comment_id "the commit of a fix"
+    }
+    stages {
+        text run_id FK
+        text stage
+        text state "running, done, failed, skipped"
+        text started_at
+        text ended_at
+        text detail
     }
     findings {
         int id PK
@@ -552,7 +639,7 @@ erDiagram
         text path
         int line
         text comment_id
-        text action "posted, improved, refused"
+        text action "lane-era runs only"
     }
     events {
         int id PK
@@ -585,11 +672,23 @@ erDiagram
     }
 ```
 
+A review records one `lanes` row per session (the reviewer and the fixer),
+its stages, and in `drafts` every finding the reviewer reported, with the
+kind `loop_finding`, and the verdict it ended with: `fixed` with the commit in
+`comment_id`, `rejected` or `wont_fix` by the fixer, or `unsettled` when the
+loop gave it one. Its `findings` stay empty, since nothing is posted. The
+names are those of the review lanes the tables were made for (#309 removed
+the lanes and the fact-check): the `lanes`, `drafts`, `findings` and `stages`
+tables and their parsers are kept so a lane-era run, with its lanes, its
+drafts with fact-check verdicts (`confirmed`, `same_as`, `unchecked` and the
+rest), its posted findings and its `fact_check` stage, still reads back on
+the run page and in `henk runs show`.
+
 Every comment Henk posts ends with a hidden marker
 (`<!-- meneer-henk run=... model=... kind=... -->`) rendered by
-`henk_domain::marker`. It is how he recognises his own words, how the writer
-finds earlier summaries and findings, and how a comment links back to its run
-(§8.1, §8.6).
+`henk_domain::marker`. It is how he recognises his own words and how a
+comment links back to its run (§8.1, §8.6). A review posts no comment any
+more; the markers on comments of earlier reviews still parse.
 
 ## 9. Trust boundaries
 
@@ -601,7 +700,7 @@ flowchart LR
     end
     subgraph henk["Henk's process: enforces"]
         GUARD["scope::guard"]
-        TOOLS["review_tools, plan_tools"]
+        TOOLS["loop_tools, address_tools, plan_tools"]
         STYLE["text::style_violations"]
         ALLOW["Allowlist"]
         MARK["Marker"]
@@ -632,7 +731,7 @@ flowchart LR
 | 5. Scope is fixed per task | `scope::guard` pins repository, pull request and commit for reviews, repository and issue for plans; `plan_tools` refuse other issues except through `link_issue` |
 | 6. Every visible action is traceable | `Marker` on every comment, `RunStore` for every run and every inbound event with its outcomes (events pruned after `server.keep_events_days`, runs kept), `/runs/{id}` leading to the run on the dashboard |
 | 7. Allowlists bound the world | `Allowlist::allows` in `listeners/filter.rs`, `run_review` and `run_plan` |
-| 8. Failure is visible | `report_failure` posts a failure comment and closes the check; `run_plan` posts "Planning failed"; both record the error on the run |
+| 8. Failure is visible | `report_failure` closes the review's check as a failure, with no comment; `run_plan` posts "Planning failed"; both record the error on the run |
 
 The dashboard (`/dashboard`) is a second way in, for people. GitHub OAuth,
 through an OAuth App and without scopes, says who someone is and nothing
@@ -660,17 +759,17 @@ too; without a dashboard they are not served.
 | Concern | GitHub | GitLab |
 |---|---|---|
 | Reads for models | `github-mcp-server` with `GITHUB_READ_ONLY=1` | `mcp-gitlab` in `readonly` mode |
-| Writes | REST and GraphQL as the App (`github/api.rs`), because the MCP server's pending-review model is a per-user singleton and unsafe for concurrent lanes | `mcp-gitlab` in `modify` mode with a tool allow-list, driven by `gitlab/writer.rs` |
+| Writes | REST and GraphQL as the App (`github/api.rs`), because the MCP server's pending-review model is a per-user singleton, unsafe for concurrent writes | `mcp-gitlab` in `modify` mode with a tool allow-list, driven by `gitlab/writer.rs` |
 | Review started | check run `in_progress` | award emoji on the merge request |
-| Finding | review comment at `commit_id`, `path`, `line`, `side` | diff thread with a `position` built from the merge request's `diff_refs` |
-| Folding | GraphQL `minimizeComment` as `OUTDATED` | the earlier summary note is edited to `*Outdated.*` plus its marker |
+| Loop push | git over HTTPS with the App installation token as `x-access-token` | git over HTTPS with the personal access token as `oauth2` |
 | Review ended | check `success`, `neutral` or `failure` | commit status always `success`, count in the description |
 | Thread state | GraphQL review threads: `isResolved`, who replied | `mr_discussions`: `resolved`, who replied |
 | Mention reply | reply in the review thread, or a conversation comment | reply in the discussion, or a note |
 
 ## 11. Configuration and secrets
 
-`henk.toml` holds ids, the allowlist, models, lanes and the MCP server commands.
+`henk.toml` holds ids, the allowlist, models, the review loop (`[review.loop]`,
+which needs `[address]`) and the MCP server commands.
 It never holds a secret; every secret is named by the environment variable that
 carries it, and the deployment fills those variables from OpenBao.
 

@@ -21,12 +21,12 @@ use tracing::{error, info, instrument, warn};
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::ids::new_run_id;
-use crate::lane_workspace::{PlanWorkspace, open_for_plan};
 use crate::liveness::KeepAlive;
 use crate::plan_tools::{
     AddLabels, AskQuestions, CreateSubIssue, LinkIssue, PlanContext, PlanState, SetDescription,
     SetFields, SetIssueType, SetTitle, WritePlan,
 };
+use crate::plan_workspace::{PlanWorkspace, open_for_plan};
 use crate::review::Interrupted;
 use crate::stages;
 use crate::web_fetch::WebFetch;

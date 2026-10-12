@@ -653,10 +653,10 @@ pub async fn kubernetes_provider(
 
 /// `workspace` with a time budget of its own against `limits`: each
 /// command gets at most `command_secs` and all of them together at most
-/// `run_secs`, as well as whatever the workspace under it allows. The
-/// fact-checker's checks share one copy but each get their own time, so
-/// one check's commands cannot leave a later check none (#85). Closing
-/// it leaves the workspace under it open: that has its own owner.
+/// `run_secs`, as well as whatever the workspace under it allows (#85), for
+/// tests of a run's time on a fake workspace. Closing it leaves the
+/// workspace under it open: that has its own owner.
+#[cfg(test)]
 pub fn metered(workspace: Arc<dyn Workspace>, limits: Limits) -> Arc<dyn Workspace> {
     Arc::new(Metered {
         inner: workspace,
@@ -665,11 +665,13 @@ pub fn metered(workspace: Arc<dyn Workspace>, limits: Limits) -> Arc<dyn Workspa
 }
 
 /// See [`metered`].
+#[cfg(test)]
 struct Metered {
     inner: Arc<dyn Workspace>,
     budget: Budget,
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl Workspace for Metered {
     async fn exec(
@@ -942,50 +944,6 @@ mod tests {
             Duration::from_secs(10),
             "what a command did not use is free again"
         );
-    }
-
-    #[tokio::test]
-    async fn metered_copies_of_one_workspace_each_have_their_own_time() {
-        use crate::workspace::fake::{FakeProvider, Scripted};
-        let dir = crate::git::ScratchDir::new("henk-metered").unwrap();
-        let mut provider = FakeProvider::default();
-        provider.script.insert(
-            "slow".to_owned(),
-            Scripted {
-                delay: Duration::from_secs(30),
-                ..Scripted::default()
-            },
-        );
-        let shared = provider
-            .open(dir.path(), &Profile::default())
-            .await
-            .unwrap();
-        let one = metered(Arc::clone(&shared), limits(10, 1));
-        let two = metered(Arc::clone(&shared), limits(10, 1));
-        let slow = vec!["slow".to_owned()];
-        let root = WorkspacePath::root();
-        let first = one
-            .exec(&slow, &root, Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(first.timed_out && first.duration == Duration::from_secs(1));
-        let again = one
-            .exec(&slow, &root, Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(again.output.starts_with("not started:"), "{}", again.output);
-        let other = two
-            .exec(&slow, &root, Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(other.duration, Duration::from_secs(1), "{}", other.output);
-        two.close().await;
-        assert_eq!(
-            provider.live(),
-            1,
-            "closing a metered copy leaves the workspace open"
-        );
-        shared.close().await;
     }
 
     fn exported(path: &str, mode: FileMode, deleted: bool) -> Exported {

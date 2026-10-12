@@ -1,16 +1,15 @@
 //! The GitHub writer.
 
 use henk_domain::allowlist::Platform;
-use henk_domain::marker::{Marker, MarkerKind};
 use henk_domain::review::{CheckConclusion, CommitSha, ReviewOutcome};
 use serde_json::{Value, json};
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use crate::error::PlatformError;
 use crate::github::api::{GitHubApi, NewCheckRun};
 use crate::writer::{
-    DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
-    PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
+    FilePatch, PlatformWriter, PostedComment, PullRequestInfo, PullRequestState, ReviewHandle,
+    ReviewTarget,
 };
 
 /// Name of the check run (§3.3).
@@ -45,15 +44,6 @@ impl GitHubWriter {
     pub fn api(&self) -> &GitHubApi {
         &self.api
     }
-
-    /// Whether Henk's own account wrote `comment`. The marker in a body is
-    /// traceability, not authorship: anyone can paste one (§8).
-    fn is_henk(&self, comment: &Value) -> bool {
-        comment
-            .pointer("/user/login")
-            .and_then(Value::as_str)
-            .is_some_and(|login| !login.is_empty() && login.eq_ignore_ascii_case(&self.bot_login))
-    }
 }
 
 fn posted(value: &Value) -> Result<PostedComment, PlatformError> {
@@ -73,10 +63,6 @@ fn posted(value: &Value) -> Result<PostedComment, PlatformError> {
             .unwrap_or("")
             .to_owned(),
     })
-}
-
-fn body_of(value: &Value) -> &str {
-    value.get("body").and_then(Value::as_str).unwrap_or("")
 }
 
 #[async_trait::async_trait]
@@ -226,145 +212,6 @@ impl PlatformWriter for GitHubWriter {
         Ok(())
     }
 
-    async fn existing_findings(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingFinding>, PlatformError> {
-        let comments = self
-            .api
-            .get_all(&format!(
-                "/repos/{}/pulls/{}/comments",
-                target.repo.path(),
-                target.number
-            ))
-            .await?;
-        let threads = self
-            .api
-            .review_threads(target.repo.owner(), target.repo.name(), target.number)
-            .await?;
-
-        let mut findings = Vec::new();
-        for comment in &comments {
-            if comment.get("in_reply_to_id").is_some_and(|v| !v.is_null()) || !self.is_henk(comment)
-            {
-                continue;
-            }
-            let Some(marker) = Marker::parse(body_of(comment)) else {
-                continue;
-            };
-            if marker.kind.is_some_and(|k| k != MarkerKind::Finding) {
-                continue;
-            }
-            let Some(id) = comment.get("id").and_then(Value::as_u64) else {
-                continue;
-            };
-            let thread = threads
-                .iter()
-                .find(|t| t.comments.iter().any(|c| c.database_id == id));
-            let answered_by_person = thread.is_some_and(|t| {
-                t.comments
-                    .iter()
-                    .any(|c| c.database_id != id && !c.is_bot && c.author != self.bot_login)
-            });
-            findings.push(ExistingFinding {
-                comment_id: id.to_string(),
-                node_id: comment
-                    .get("node_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                path: comment
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                line: comment
-                    .get("line")
-                    .and_then(Value::as_u64)
-                    .and_then(|l| u32::try_from(l).ok()),
-                body: body_of(comment).to_owned(),
-                marker,
-                resolved: thread.is_some_and(|t| t.resolved),
-                answered_by_person,
-            });
-        }
-        debug!(count = findings.len(), "existing findings");
-        Ok(findings)
-    }
-
-    async fn existing_summaries(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingSummary>, PlatformError> {
-        let comments = self
-            .api
-            .get_all(&format!(
-                "/repos/{}/issues/{}/comments",
-                target.repo.path(),
-                target.number
-            ))
-            .await?;
-        Ok(comments
-            .iter()
-            .filter(|c| self.is_henk(c))
-            .filter_map(|c| {
-                let marker = Marker::parse(body_of(c))?;
-                if !matches!(marker.kind, Some(MarkerKind::Summary | MarkerKind::Failure)) {
-                    return None;
-                }
-                Some(ExistingSummary {
-                    comment_id: c.get("id")?.as_u64()?.to_string(),
-                    node_id: c.get("node_id").and_then(Value::as_str).map(str::to_owned),
-                    marker,
-                    folded: false,
-                })
-            })
-            .collect())
-    }
-
-    async fn post_finding(
-        &self,
-        target: &ReviewTarget,
-        commit: &CommitSha,
-        path: &str,
-        line: u32,
-        side: DiffSide,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        let created = self
-            .api
-            .post(
-                &format!(
-                    "/repos/{}/pulls/{}/comments",
-                    target.repo.path(),
-                    target.number
-                ),
-                &json!({
-                    "body": body,
-                    "commit_id": commit.as_str(),
-                    "path": path,
-                    "line": line,
-                    "side": match side { DiffSide::Left => "LEFT", DiffSide::Right => "RIGHT" },
-                }),
-            )
-            .await?;
-        posted(&created)
-    }
-
-    async fn update_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-        body: &str,
-    ) -> Result<(), PlatformError> {
-        self.api
-            .patch(
-                &format!("/repos/{}/pulls/comments/{comment_id}", target.repo.path()),
-                &json!({"body": body}),
-            )
-            .await?;
-        Ok(())
-    }
-
     async fn post_comment(
         &self,
         target: &ReviewTarget,
@@ -406,53 +253,6 @@ impl PlatformWriter for GitHubWriter {
             posted(&created)
         } else {
             self.post_comment(target, body).await
-        }
-    }
-
-    async fn resolve_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-    ) -> Result<(), PlatformError> {
-        let threads = self
-            .api
-            .review_threads(target.repo.owner(), target.repo.name(), target.number)
-            .await?;
-        let thread = threads
-            .iter()
-            .find(|t| {
-                t.comments
-                    .iter()
-                    .any(|c| c.database_id.to_string() == comment_id)
-            })
-            .ok_or_else(|| {
-                PlatformError::Decode(format!("no review thread holds comment {comment_id}"))
-            })?;
-        if thread.resolved {
-            return Ok(());
-        }
-        self.api.resolve_review_thread(&thread.id).await
-    }
-
-    async fn fold_summary(
-        &self,
-        _target: &ReviewTarget,
-        summary: &ExistingSummary,
-    ) -> Result<(), PlatformError> {
-        match &summary.node_id {
-            Some(node_id) => self.api.minimize_comment(node_id).await,
-            None => Err(PlatformError::Decode("summary without node id".to_owned())),
-        }
-    }
-
-    async fn fold_finding(
-        &self,
-        _target: &ReviewTarget,
-        finding: &ExistingFinding,
-    ) -> Result<(), PlatformError> {
-        match &finding.node_id {
-            Some(node_id) => self.api.minimize_comment(node_id).await,
-            None => Err(PlatformError::Decode("finding without node id".to_owned())),
         }
     }
 

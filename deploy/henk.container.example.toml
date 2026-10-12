@@ -59,16 +59,14 @@ effort = "high"
 max_tokens = 16384
 timeout_secs = 300
 
-[review]
-lanes = [
-  { name = "lane-a", model = "proxy-fast" },
-  { name = "lane-b", model = "claude" },
-]
-lane_timeout_secs = 900
+[review.loop]
+reviewer = "opus"
+fixer = "claude"
 
-[review.fact_check]
-model = "opus"
-backup_model = "claude"
+# The review loop pushes like an address run, so it needs this table.
+[address]
+model = "claude"
+requester_id = 523456789012345678
 
 [planning]
 model = "claude"

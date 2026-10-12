@@ -50,8 +50,8 @@ pub(crate) mod testing {
     use henk_domain::allowlist::Platform;
     use henk_domain::review::{CommitSha, ReviewOutcome};
     use henk_platform::{
-        DiffSide, ExistingFinding, ExistingSummary, PlatformError, PlatformWriter, PostedComment,
-        PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
+        PlatformError, PlatformWriter, PostedComment, PullRequestInfo, PullRequestState,
+        ReviewHandle, ReviewTarget,
     };
 
     use super::Writers;
@@ -65,19 +65,11 @@ pub(crate) mod testing {
     }
 
     /// Answers `pull_request` with a fixed open head and records replies.
-    /// Line comments are refused unless `accept_posts` is set; then they,
-    /// rewrites and resolved threads are recorded.
     #[derive(Debug, Default)]
     pub struct FakeWriter {
         pub head: String,
         pub replies: Mutex<Vec<Reply>>,
         pub pull_request_calls: Mutex<u32>,
-        pub accept_posts: bool,
-        pub posts: Mutex<Vec<(String, u32, String)>>,
-        /// Lines `post_finding` refuses even when posts are accepted.
-        pub refuse_lines: Vec<u32>,
-        pub updates: Mutex<Vec<(String, String)>>,
-        pub resolved: Mutex<Vec<String>>,
         /// What `diff` returns.
         pub patches: Vec<henk_platform::FilePatch>,
         /// Every outcome `finish_review` was given.
@@ -185,63 +177,6 @@ pub(crate) mod testing {
             Ok(self.patches.clone())
         }
 
-        async fn existing_findings(
-            &self,
-            _: &ReviewTarget,
-        ) -> Result<Vec<ExistingFinding>, PlatformError> {
-            Ok(Vec::new())
-        }
-
-        async fn existing_summaries(
-            &self,
-            _: &ReviewTarget,
-        ) -> Result<Vec<ExistingSummary>, PlatformError> {
-            Ok(Vec::new())
-        }
-
-        async fn post_finding(
-            &self,
-            _: &ReviewTarget,
-            _: &CommitSha,
-            path: &str,
-            line: u32,
-            _: DiffSide,
-            body: &str,
-        ) -> Result<PostedComment, PlatformError> {
-            if !self.accept_posts || self.refuse_lines.contains(&line) {
-                return Err(PlatformError::Decode("not in the fake".into()));
-            }
-            let mut posts = self.posts.lock().unwrap();
-            posts.push((path.to_owned(), line, body.to_owned()));
-            Ok(PostedComment {
-                id: format!("c{}", posts.len()),
-                node_id: None,
-                url: String::new(),
-            })
-        }
-
-        async fn update_finding(
-            &self,
-            _: &ReviewTarget,
-            comment_id: &str,
-            body: &str,
-        ) -> Result<(), PlatformError> {
-            self.updates
-                .lock()
-                .unwrap()
-                .push((comment_id.to_owned(), body.to_owned()));
-            Ok(())
-        }
-
-        async fn resolve_finding(
-            &self,
-            _: &ReviewTarget,
-            comment_id: &str,
-        ) -> Result<(), PlatformError> {
-            self.resolved.lock().unwrap().push(comment_id.to_owned());
-            Ok(())
-        }
-
         async fn post_comment(
             &self,
             _: &ReviewTarget,
@@ -276,22 +211,6 @@ pub(crate) mod testing {
                 node_id: None,
                 url: String::new(),
             })
-        }
-
-        async fn fold_summary(
-            &self,
-            _: &ReviewTarget,
-            _: &ExistingSummary,
-        ) -> Result<(), PlatformError> {
-            Ok(())
-        }
-
-        async fn fold_finding(
-            &self,
-            _: &ReviewTarget,
-            _: &ExistingFinding,
-        ) -> Result<(), PlatformError> {
-            Ok(())
         }
 
         async fn finish_review(

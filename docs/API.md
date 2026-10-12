@@ -144,12 +144,18 @@ One run with everything the run record holds about it:
 - `run`: the summary above; a review replaced by a review of a newer
   commit has status `superseded` and names that run in `superseded_by`;
 - `summary`, `error`, `check_id`, `heartbeat_at`;
-- `lanes`: every session (lanes, checks, planner, address) with turns and
-  tokens, and its `status`: `running`, `finished`, `timed_out` (stopped at
-  its time limit; what it drafted counts) or `did_not_finish` (`error` says
-  why);
-- `findings`: what was done on the platform;
-- `drafts`: each draft and its `decision` (#189);
+- `lanes`: every model session (a review loop's `reviewer` and `fixer`,
+  the `planner`, `address`) with turns and tokens, and its `status`:
+  `running`, `finished`, `timed_out` (stopped at its time limit) or
+  `did_not_finish` (`error` says why). Reviews made by lanes, before #309,
+  have their lanes and `check-N` fact-check sessions here;
+- `findings`: what was done with a finding comment on the platform. Only
+  reviews made by lanes have any: a review loop posts nothing;
+- `drafts`: a review loop's findings, `kind` `loop_finding` from the
+  `reviewer`, each with the fixer's `decision`: `fixed` (its commit in
+  `comment_id`), `rejected`, `wont_fix`, or `unsettled` when the loop ended
+  first (#285). Reviews made by lanes hold the lanes' drafts and the
+  fact-check's decisions instead (#189);
 - `transcripts`: the sessions whose conversation is kept (#191);
 - `tool_usage`: calls per session and tool (#190);
 - `events`: the timeline;
@@ -159,7 +165,10 @@ One run with everything the run record holds about it:
   `started_at`, `ended_at` and `detail`, one line in Henk's own words
   (`12 files, +340 -25; 1 not reviewed`). A review goes `requested`,
   `queued` (the wait for a review slot), `started`, `diff`, `checkout`,
-  `lanes`, `fact_check`, `publish`, `done`; a plan goes `requested`,
+  `lanes` (the review loop's rounds), `push` (when the loop pushed, or
+  skipped when it may not), `publish` (skipped: a review posts nothing),
+  `done`. Runs from before #309 can have a `fact_check` stage after
+  `lanes`. A plan goes `requested`,
   `started`, `session`, `publish`, `done`; an address run `requested`,
   `started`, `workspace`, `session`, `commit`, `push`, `replies`, `done`.
   Runs from before stages were kept have none.
@@ -169,20 +178,20 @@ Each lane also has `started_at` and `finished_at`.
 ```json
 {
   "run": {"id": "r-...", "kind": "review", "status": "finished", "...": "..."},
-  "summary": "Not bad. 2 findings.", "error": null, "check_id": "4711", "heartbeat_at": "...",
-  "lanes": [{"name": "lane-a", "model": "deepseek-v4-flash-0731", "status": "finished",
+  "summary": "No issues found.\n\nThe review loop ran 2 rounds, settled 1 finding, pushed 1 commit and stopped: converged, the reviewer found nothing more.",
+  "error": null, "check_id": "4711", "heartbeat_at": "...",
+  "lanes": [{"name": "reviewer", "model": "claude-opus-5-5", "status": "finished",
              "turns": 22, "input_tokens": 452700, "output_tokens": 3500, "error": null}],
-  "findings": [{"at": "...", "lane": "lane-a", "path": "src/a.rs", "line": 4,
-                "comment_id": "c-77", "action": "posted"}],
-  "drafts": [{"at": "...", "id": "d1", "lane": "lane-a", "model": "...", "kind": "finding",
-              "path": "src/a.rs", "line": 4, "target": "", "body": "...",
-              "decision": {"at": "...", "verdict": "confirmed", "checker": "claude-opus-5-5",
-                           "reason": "...", "same_as": "", "comment_id": "c-77"}}],
-  "transcripts": [{"at": "...", "session": "lane-a", "model": "...", "stop": "EndTurn",
+  "findings": [],
+  "drafts": [{"at": "...", "id": "f1", "lane": "reviewer", "model": "claude-opus-5-5",
+              "kind": "loop_finding", "path": "src/a.rs", "line": 4, "target": "", "body": "...",
+              "decision": {"at": "...", "verdict": "fixed", "checker": "fixer",
+                           "reason": "...", "same_as": "", "comment_id": "9f8e7d6c5b4a"}}],
+  "transcripts": [{"at": "...", "session": "reviewer", "model": "...", "stop": "EndTurn",
                    "turns": 22, "bytes": 182044}],
-  "tool_usage": [{"session": "lane-a", "tool": "read_file", "calls": 9, "errors": 0,
+  "tool_usage": [{"session": "reviewer", "tool": "read_file", "calls": 9, "errors": 0,
                   "refusals": 1, "other": 0, "total_ms": 812}],
-  "events": [{"at": "...", "level": "info", "message": "lane-a: EndTurn after 22 turns"}],
+  "events": [{"at": "...", "level": "info", "message": "..."}],
   "requests": [{"id": "e-...", "received_at": "...", "source": "github_webhook",
                 "kind": "pull_request", "repo": "...", "target": 70, "requester": null}]
 }
@@ -199,7 +208,7 @@ The run's tool calls in order. Filter by `session`, `tool` and `outcome`
 `malformed_arguments`, `not_run`, `cancelled`).
 
 ```json
-[{"at": "...", "session": "lane-a", "model": "...", "turn": 2, "tool": "read_file",
+[{"at": "...", "session": "reviewer", "model": "...", "turn": 2, "tool": "read_file",
   "origin": "henk", "outcome": "refused_scope", "arguments": "{\"path\":\"../x\"}",
   "arguments_len": 15, "result_chars": 80, "elapsed_ms": 1}]
 ```
@@ -211,7 +220,7 @@ One session's whole conversation. Each message has `parts` tagged by
 
 ```json
 {
-  "session": "lane-a", "model": "...", "stop": "EndTurn", "turns": 1,
+  "session": "reviewer", "model": "...", "stop": "EndTurn", "turns": 1,
   "prompt_tokens": 15, "output_tokens": 3, "system": "You are Hendrik ...",
   "messages": [
     {"role": "user", "turn": 0, "parts": [{"type": "text", "text": "Review ..."}]},
@@ -233,10 +242,10 @@ above; `RunMessage` in `types.ts` is the union.
 |---|---|---|
 | `snapshot` | `RunDetail` | First, and whenever the stream cannot replay what was missed |
 | `run` | `RunUpdate`: the run, summary, error, check id | The run started, ended or got its check |
-| `lanes` | `Lane[]`, every lane | A lane started or ended |
+| `lanes` | `Lane[]`, every session | A session started or ended |
 | `tool_call` | `ToolCall` | A session called a tool |
-| `draft` | `Draft` | A lane queued it, or the check decided it |
-| `finding` | `Finding` | Something was done with a finding |
+| `draft` | `Draft` | The reviewer reported a finding, or the fixer gave its verdict |
+| `finding` | `Finding` | Something was done with a finding comment; only a review by lanes did that |
 | `event` | `RunEvent` | A line on the timeline |
 | `transcript` | `TranscriptRef` | A session's conversation was kept |
 | `stages` | `Stage[]`, every stage | A stage began or ended |
@@ -255,8 +264,8 @@ above; `RunMessage` in `types.ts` is the union.
 - A run another Henk process works on (two replicas on one PostgreSQL) is
   not on this process's feed: its stream sends a fresh `snapshot` every 5
   seconds until the run ends.
-- Turns and tokens of a lane are stored when it ends. While it runs,
-  `last_call_turn` on the lane (from its latest tool call) says how far it
+- Turns and tokens of a session are stored when it ends. While it runs,
+  `last_call_turn` on its lane (from its latest tool call) says how far it
   has come.
 - A client that falls far behind is dropped and reconnects; it never holds
   up a run. A comment line every 15 seconds keeps the connection open.
@@ -329,12 +338,17 @@ every day from `from` to `to` with:
   failed. Cancelled, superseded and running runs are in neither, so
   `failed` of `finished + failed` is the share that did not complete;
 - `findings_posted`: new comments, checked (`posted`) or not
-  (`unverified`); improved comments are not new;
-- `drafts`: drafts the lanes wrote.
+  (`unverified`); improved comments are not new. Only reviews by lanes,
+  before #309, posted any;
+- `drafts`: drafts the lanes wrote. A review loop's findings are left out
+  (#285), so days since #309 have none.
 
 ### `GET /stats/lanes`
 
 How each lane and fact-check session of the recent reviews ended (#229).
+Since #309 a review's sessions are the loop's `reviewer` and `fixer`; they
+show here as lanes of kind `lane`, and `check` sessions are only in
+reviews by lanes.
 `last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
 3339) for every review started since then, the newest 1000 of them. Not
 both. Only reviews that ended on their own count: running ones are left
@@ -358,7 +372,9 @@ Each lane has:
 ### `GET /quality`
 
 What the fact-check made of the lanes' drafts across runs (#205), one row
-per group, the largest first.
+per group, the largest first. This is data from reviews by lanes: a review
+loop's findings are left out (#285), so reviews since #309 add nothing
+here, nor to `/quality/daily`.
 
 | Query | Meaning |
 |---|---|
@@ -396,7 +412,9 @@ How many drafts `/drafts`'s query matches over every page: `{"count": 72}`.
 ### `GET /drafts`
 
 Drafts across runs, newest first, a page at a time: each with its run,
-repository, pull request and what became of it.
+repository, pull request and what became of it. Like `/quality`, these are
+the lanes' drafts: a review loop's findings are left out, here and in
+`/drafts/count`; the run's own `drafts` have them.
 
 | Query | Meaning |
 |---|---|
@@ -418,7 +436,9 @@ repository, pull request and what became of it.
 ### `GET /tool-calls/summary`
 
 How each tool fared across runs (#203): one row per tool, model and kind of
-session (`lane`, `check`, `planner`, `address`), the most calls first.
+session (`lane`, `check`, `planner`, `address`), the most calls first. A
+review loop's `reviewer` and `fixer` count as `lane`; `check` is the
+fact-check, only in reviews by lanes before #309.
 
 | Query | Meaning |
 |---|---|
@@ -451,7 +471,7 @@ keeps that session's conversation; transcripts are pruned on their own.
 
 ```json
 {"items": [{"run_id": "r-...", "repo": "o/r", "target": 70, "target_url": "...",
-            "call": {"session": "lane-b", "turn": 12, "tool": "github__get_file_contents",
+            "call": {"session": "reviewer", "turn": 12, "tool": "github__get_file_contents",
                      "outcome": "refused_scope", "arguments": "{...}", "...": "..."},
             "transcript_kept": true}],
  "next": null}

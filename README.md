@@ -2,8 +2,9 @@
 
 The team's AI colleague: a strict, dry, senior software engineer and code
 reviewer who works on GitHub pull requests, GitLab merge requests and
-issues. He is advisory. He never approves, blocks, merges, pushes or
-changes code.
+issues. He is advisory. He never approves, blocks or merges. He changes
+code only on a pull request's own branch: the fixes of his review loop and
+the commit of an address run.
 
 What Henk does and promises is in [docs/SPEC.md](docs/SPEC.md). This
 repository is how he is built. This version covers code review (§3) and
@@ -20,39 +21,64 @@ processes over stdio:
 
 | Platform | Server | Used for |
 |---|---|---|
-| GitHub | `github-mcp-server` (read-only toolsets, GitHub App auth) | What review lanes and the planner read |
+| GitHub | `github-mcp-server` (read-only toolsets, GitHub App auth) | What the planner reads |
 | GitHub | REST and GraphQL as the App, in `henk-platform` | Everything Henk writes: line comments at a commit, summaries, replies, reactions, check runs, folding outdated comments, issue edits |
-| GitLab | `@zereight/mcp-gitlab` in `readonly` mode | What review lanes and the planner read |
+| GitLab | `@zereight/mcp-gitlab` in `readonly` mode | What the planner reads |
 | GitLab | `@zereight/mcp-gitlab` in `modify` mode with an allow-list of tools | Everything Henk writes, driven by Henk's code only |
 
-No model ever holds a write tool or a credential (§8.4). A model gets the
-read-only session, filtered and pinned by a guard that rewrites every
-call to its own repository and pull request (§8.5), plus a few tools of
-Henk's own whose implementations enforce the rules of the spec in code.
+No model ever holds a platform write tool or a credential (§8.4). The
+planner gets the read-only session, filtered and pinned by a guard that
+rewrites every call to its own repository (§8.5). Every model gets tools
+of Henk's own whose implementations enforce the rules of the spec in code.
 
-A review lane works from the diff Henk fetched once: `list_changed_files`,
-`get_file_diff` (every line numbered on both sides), `read_file` (a
-numbered line range at the reviewed commit), `list_existing_findings`,
-`post_finding` (refused for a line that is not in the diff) and
-`improve_finding`. The planner has `write_plan`, the tracker tools and
-`web_fetch`. On GitLab it plans work items: it can set the type (issue or
-task), fill empty fields (weight, start and due date, health) with
-`set_fields`, link parent, child, blocking and related items, and create
-tasks under an issue. The `gitlab-write` server needs the work item tools
-in `GITLAB_TOOLS`: `get_work_item`, `update_work_item`, `create_work_item`,
+A review is a loop of two sessions (#284, #309), a reviewer and a fixer,
+taking turns in one workspace at the pull request's head. The reviewer
+works from the diff Henk fetched once (`list_changed_files`,
+`get_file_diff`, every line numbered on both sides) and the workspace
+(`list_files`, `search`, `read_file`, and `bash` on a backend apart from
+Henk). It hands each finding to the fixer with `report_finding` and ends
+its round with `finish_round`; nothing is posted on the pull request. The
+fixer reads them (`list_findings`), checks each against the code, fixes
+what holds with an address run's tools (`edit_file`, `write_file`,
+`run_checks`, and `bash` on a backend apart from Henk) and gives each its
+verdict with `give_verdict`: fixed, rejected (it does not hold) or won't
+fix. Henk runs `[address].check_commands`, checks the changeset as for an
+address run and pushes it as one commit to the pull request's branch. The
+next round each resumes its own conversation: the reviewer sees the commit
+and the verdicts, may contest a rejection once with new evidence, and
+reviews again. The loop stops when the reviewer finds nothing more, at
+`max_rounds` or its time limit, when the checks fail or a push is refused,
+when the reviewer reports again what was fixed, or when a session breaks
+off. A finding without a verdict by then ends unsettled.
+
+A pull request the loop may not push to (a fork, the default or a
+protected branch) or whose branch moved after the review was queued gets
+the reviewer alone (#307): one round at the reviewed commit, nothing
+pushed. The record of a review is its run: the run page and `henk runs
+show` list the rounds, every finding with its verdict and the commits
+pushed, and the check's summary carries the loop's report.
+
+The planner has `write_plan`, the tracker tools and `web_fetch`. On GitLab
+it plans work items: it can set the type (issue or task), fill empty fields
+(weight, start and due date, health) with `set_fields`, link parent, child,
+blocking and related items, and create tasks under an issue. The
+`gitlab-write` server needs the work item tools in `GITLAB_TOOLS`:
+`get_work_item`, `update_work_item`, `create_work_item`,
 `convert_work_item_type` and `create_work_item_note` (see
-`henk.example.toml`). Lanes are kept honest and cheap by four things in
-`henk-agent`: once the conversation passes a size budget
-(`review.max_conversation_chars` and `review.keep_recent_turns`), old tool
-results are replaced by one-line stubs until it is well under it, so the
-history stays append-only for several turns and the provider's prompt cache
-keeps paying (Anthropic models are marked for caching), a lane that ends without opening every
-changed file is asked once to look at them, an answer cut off at the
-output cap gets one chance to post what it was sure of, and a session
-that repeats one tool call with the same arguments is refused and then
-stopped as stuck (`agent.max_repeated_calls`, for every session, recorded
-on the run). Code search is
-withheld for a repository GitHub does not index.
+`henk.example.toml`). Its code search is withheld for a repository GitHub
+does not index.
+
+The loop's sessions are kept honest and cheap by three things: once the
+conversation passes a size budget (`review.max_conversation_chars` and
+`review.keep_recent_turns`), old tool results are replaced by one-line
+stubs until it is well under it, so the history stays append-only for
+several turns and the provider's prompt cache keeps paying (Anthropic
+models are marked for caching); a reviewer that ends its turn without
+finishing its round, or is cut off at the output cap, and a fixer that
+leaves a finding without a verdict, are asked again, at most twice a
+round; and a session that repeats one tool call with the same arguments
+is refused and then stopped as stuck (`agent.max_repeated_calls`, for
+every session, recorded on the run).
 
 Every comment Henk writes ends in two hidden HTML comments: the marker
 (run, model, kind) that lets Henk recognise his own comments later, and a
@@ -62,11 +88,12 @@ as information. People see only the text.
 
 GitHub writes go through REST rather than the MCP server's write tools on
 purpose: that server's pending-review model is a per-user singleton, which
-is unsafe when several lanes post findings as soon as they are sure.
+is unsafe when several runs write at once.
 
 Models are reached through two hand-written adapters behind one trait: the
 OpenAI-compatible chat API (the local proxy, OpenAI, Ollama) and the
-Anthropic Messages API. Lanes and their models are configuration.
+Anthropic Messages API. Which model reviews and which fixes is
+configuration.
 
 ### Crates
 
@@ -79,7 +106,7 @@ Anthropic Messages API. Lanes and their models are configuration.
 | `henk-session` | One way to run a model session: `SessionSpec`, `run_session` with run bookkeeping, scope-guarded platform tools |
 | `henk-events` | The event model, the webhook parsers, the bus that delivers events to listeners, and the local record of both |
 | `henk-platform` | Webhook verification and parsing, GitHub App auth and API, the GitHub and GitLab writers for pull requests and issues |
-| `henk-store` | Run records in SQLite or PostgreSQL: runs, lanes, findings, events |
+| `henk-store` | Run records in SQLite or PostgreSQL: runs, sessions, findings, events |
 | `henk` | The binary: configuration, hooks, listeners, review and planning orchestration, coordinator, HTTP server, CLI |
 
 ## Build and test
@@ -100,8 +127,8 @@ cargo run -- config example > henk.toml   # then edit
 cargo run -- --config henk.toml config check
 ```
 
-`henk.toml` holds ids, the allowlist, models, lanes and the MCP server
-commands. It never holds a secret: every secret is named by the
+`henk.toml` holds ids, the allowlist, models, the review loop and the MCP
+server commands. It never holds a secret: every secret is named by the
 environment variable that carries it. The deployment fills those from
 OpenBao.
 
@@ -109,7 +136,7 @@ OpenBao.
 |---|---|
 | `LLM3_API_KEY`, `ANTHROPIC_API_KEY`, ... | Whatever `[models.*].api_key_env` names |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | The GitHub App key, for check runs, comments and the read session |
-| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and address runs on GitLab: git push and three REST reads |
+| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews and address runs on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
 | `HENK_API_TOKEN` | `POST /review`, `POST /plan`, `POST /address` |
@@ -134,33 +161,102 @@ Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
 the list (see `henk.example.toml`), and a change made only of such files is
 reported as nothing to review.
 
-Lanes draft their findings; nothing is posted while they work. When
-`[review.fact_check]` names a second model (the example uses Claude Opus 5.5
-at `effort = "high"`, with Claude Sonnet 5.5 as the backup), it checks the
-drafts of all lanes together once the lanes have finished: one session per
-checking model and ten drafts, with the diff once, never the lane's own model
-first (#189). It confirms or rejects each draft, or calls it the same as an
-earlier draft or an existing finding, which is then merged. Only what it
-confirms is posted. `henk runs show <id>` lists the checks as `check-<n>`
-sessions and every draft with its verdict, checker and comment; so does the
-dashboard's run page. `effort` on an Anthropic model sets how much it
-thinks; it needs a `max_tokens` of 16384 or so and a longer `timeout_secs`.
+A review needs `[review.loop]`: `reviewer` and `fixer` name models from
+`[models]` (they may be the same), `max_rounds` (50 by default) caps the
+rounds, `round_timeout_secs` (600) and `round_max_turns` (40) limit each
+session in each round, and `run_timeout_secs` (3600) limits the whole loop:
+no round starts after it, and a round under way gets only what is left.
+The loop pushes like an address run, so it needs `[address]` too: its
+`check_commands`, `max_changed_files`, identity and trailers apply to every
+commit the loop pushes, and its `requester_id` is who those commits are
+requested by. Without `[review.loop]` reviews are off: `config check`
+prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
+`reviews` check. A configuration from before #309 that still has lanes or
+a fact-check is refused; see "Migrating from lanes" below. `effort` on an
+Anthropic model sets how much it thinks; it needs a `max_tokens` of 16384
+or so and a longer `timeout_secs`.
 
-Skills give lanes, the fact-checker and the planner the team's own
-instructions for one kind of work, such as reviewing SQL migrations. Each
-skill is a folder with a `SKILL.md` in the Agent Skills format: front matter
-with a `name` (the folder's name) and a one-line `description`, then
-Markdown. `[skills].dir` names the folder that holds them, and `skills =
-[...]` on a lane, `[review.fact_check]` or `[planning]` says who gets which.
-An agent sees the names and descriptions of its own skills and loads one
-with `load_skill`; a prompt without skills is unchanged. Only `SKILL.md` is
-read, never scripts or other files, and the text follows the style rules
-(no emoji, no em-dash). `config check` loads every skill and lists what it
-did not read.
+Skills give the planner the team's own instructions for one kind of work,
+such as splitting a migration into steps. Each skill is a folder with a
+`SKILL.md` in the Agent Skills format: front matter with a `name` (the
+folder's name) and a one-line `description`, then Markdown. `[skills].dir`
+names the folder that holds them, and `skills = [...]` on `[planning]` says
+which it gets; the review loop takes none. The planner sees the names and
+descriptions of its skills and loads one with `load_skill`; a prompt
+without skills is unchanged. Only `SKILL.md` is read, never scripts or
+other files, and the text follows the style rules (no emoji, no em-dash).
+`config check` loads every skill and lists what it did not read.
 
 The external servers must be installed where Henk runs: the
 `github-mcp-server` binary (or Docker, see the example config) and Node
 for `npx @zereight/mcp-gitlab`.
+
+### Migrating from lanes
+
+Before #309 a review ran lanes: several models each made one pass and
+drafted findings, a second model checked the drafts (the fact-check), and
+what it confirmed was posted on the pull request as comments. Lanes and
+the fact-check are gone. A configuration that still has `[review].lanes`,
+`[review].lane_timeout_secs`, `[review].lane_max_turns` or
+`[review.fact_check]` fails `henk config check` with `<key> was removed: a
+review is now the reviewer↔fixer loop`. Before:
+
+```toml
+[review]
+lanes = [
+  { name = "lane-a", model = "proxy-fast" },
+  { name = "lane-b", model = "claude" },
+]
+lane_timeout_secs = 900
+lane_max_turns = 40
+max_concurrent = 3
+
+[review.fact_check]
+model = "opus"
+backup_model = "claude"
+timeout_secs = 180
+max_turns = 12
+```
+
+After:
+
+```toml
+[review]
+max_concurrent = 3
+
+[review.loop]
+reviewer = "opus"
+fixer = "claude"
+round_timeout_secs = 900   # was lane_timeout_secs
+round_max_turns = 40       # was lane_max_turns
+# max_rounds = 50, run_timeout_secs = 3600
+
+[address]
+model = "claude"
+requester_id = 523456789012345678
+check_commands = [["cargo", "test", "--offline"]]
+```
+
+- `lanes` becomes `reviewer` and `fixer`: one model reviews, one checks
+  and fixes; they may be the same model.
+- `lane_timeout_secs` becomes `round_timeout_secs` and `lane_max_turns`
+  becomes `round_max_turns`, now per session per round. Their defaults are
+  the old ones, 600 and 40.
+- `[review.fact_check]` goes with nothing in its place: the fixer checks
+  each finding against the code and rejects what does not hold. Skills on
+  a lane or the fact-check go too; only `[planning]` takes skills.
+- `[address]` is required, since the loop pushes like an address run: on
+  GitHub the App needs `Contents: write`, on GitLab Henk needs
+  `[gitlab].token_env`. Its `check_commands` decide whether a round's fixes
+  are pushed.
+- `[workspace] review = true` is no longer needed: every review works in a
+  workspace.
+- Nothing is posted on the pull request any more. The run page, `henk runs
+  show` and the check's summary say what the loop found, fixed and pushed.
+
+Runs from before #309 stay readable: the run page and `henk runs show`
+still show their lanes, drafts, the fact-check's verdicts and the findings
+they posted. Markers on comments Henk already posted are still recognised.
 
 ## Check a deployment
 
@@ -177,26 +273,31 @@ id can be copied into the config.
 ## First live run
 
 The order that gets Henk from a fresh checkout to his first real review,
-on one machine, with one lane:
+on one machine, with one review loop:
 
 1. Install the external servers: the `github-mcp-server` release binary
    (the version the `Dockerfile` pins; verify the release checksum) on the
    `PATH`, and Node for `npx @zereight/mcp-gitlab` if GitLab is in play.
-2. Export the secrets named in `henk.toml` in the shell that runs Henk:
+2. Configure `[review.loop]` and `[address]` (see "Configure"); the loop
+   pushes its fixes, so on GitHub the App needs `Contents: write`.
+3. Export the secrets named in `henk.toml` in the shell that runs Henk:
    at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
    reads them; they are never written anywhere.
-3. `henk llm models --model <id>` lists what the endpoint serves; put the
+4. `henk llm models --model <id>` lists what the endpoint serves; put the
    chosen name in `[models.<id>].model`.
-4. `henk doctor --probe` until it reports `0 failing check(s)`.
-5. `henk mcp probe --server github --show pull_request_read` shows what a
-   lane will see.
-6. `RUST_LOG=info,henk=debug henk review <url>` on a pull request in an
-   allowlisted repository. The run id is printed first; `henk runs show <id>`
-   prints the run, lanes, tool calls, transcripts, findings and timeline
-   afterwards, and `henk runs show <id> --transcript lane-a` what that lane's
-   model saw and said.
+5. `henk doctor --probe` until it reports `0 failing check(s)`.
+6. `henk mcp probe --server github --show pull_request_read` shows what the
+   planner's read-only session will see.
+7. `RUST_LOG=info,henk=debug henk review <url>` on a pull request in an
+   allowlisted repository, one whose branch may take Henk's fixes (on a
+   fork, the default or a protected branch the reviewer reviews alone and
+   nothing is pushed). The run id is printed first; `henk runs show <id>`
+   prints the run, its rounds, sessions, tool calls, transcripts, findings
+   with their verdicts and timeline afterwards, and `henk runs show <id>
+   --transcript reviewer` what the reviewer's model saw and said (`fixer`
+   for the fixer's).
 
-Every tool call of every session (review lanes, fact-checks, the planner,
+Every tool call of every session (the reviewer, the fixer, the planner,
 address runs) is on the run record (#190): the session, model, turn, tool
 and where it comes from, how it ended (`ok`, `error`, refused by the scope
 or the repeat guard, an unknown tool, malformed arguments, not run,
@@ -204,8 +305,8 @@ cancelled), how long it ran, the size of its result, and its arguments as
 the model sent them, cut at `[agent] record_argument_bytes` (4096 by
 default, 0 for none) with their full length kept. Arguments are code, paths
 and commands from the repository, never a credential (§8.4). The calls are
-kept with the run, like its lanes and findings. `henk runs show` and the
-dashboard's run page count them per lane and tool, each session logs one
+kept with the run, like its sessions and findings. `henk runs show` and the
+dashboard's run page count them per session and tool, each session logs one
 `tool usage` line at info, and the `tool_calls` table answers questions
 across runs.
 
@@ -213,13 +314,13 @@ Every session's whole conversation is stored with its run too (#191): the
 system prompt, every message, each tool call with its arguments and what it
 returned, kept whole. `henk runs show <id>` lists them by session, and
 `henk runs show <id> --transcript <session>` prints one. On the dashboard,
-each lane on the run page links to its transcript at
+each session on the run page links to its transcript at
 `/dashboard/runs/{id}/transcripts/{session}`, behind the same sign-in. A
 transcript holds what the model was shown: code, diffs, comments and
 command output from the repository, never a credential (§8.4); a test
 fetches with a known token and checks that no transcript or tool call holds
 it. Transcripts are large, so they follow `server.keep_events_days` like
-inbound events; the run, its lanes, findings and tool calls are kept.
+inbound events; the run, its sessions, findings and tool calls are kept.
 `HENK_TRANSCRIPT_DIR` still writes a local copy of each as a file.
 
 ### Reviewing a pull request from a laptop
@@ -252,15 +353,15 @@ installations when the token is refused). Variants:
 
 ```sh
 RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
-cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head
-cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, lanes, findings, timeline
-cargo run -q -- runs show r-20261005-8f8b812b --transcript lane-a                        # what lane-a's model saw and said
+cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head: the reviewer alone, nothing pushed
+cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, rounds, findings, timeline
+cargo run -q -- runs show r-20261005-8f8b812b --transcript reviewer                      # what the reviewer's model saw and said
 cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
 ```
 
 Another model is a name from `llm models` in `[models.<id>].model`, or a
-second `[models.*]` block and a second lane under `[review].lanes`; lane
-names must not equal a model name. Another repository is one more entry in
+second `[models.*]` block named as `reviewer` or `fixer` in
+`[review.loop]`. Another repository is one more entry in
 `[allowlist].github_repositories`.
 
 ## Container image
@@ -308,7 +409,7 @@ henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
 henk mcp probe --server other --platform gitlab    # an alias [github] and [gitlab] do not name
 henk runs show r-20261005-1a2b3c4d                 # a run from the configured database
-henk runs show r-20261005-1a2b3c4d --transcript lane-a   # one session's conversation
+henk runs show r-20261005-1a2b3c4d --transcript reviewer   # one session's conversation
 ```
 
 In serve mode everything is an event. Hooks receive and publish; listeners
@@ -320,33 +421,33 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 `Authorization: Bearer $HENK_API_TOKEN` publish events too and answer
 `202 {"event": id}`.
 
-`henk address` (spec §3.5) is the one thing that changes code. Asked by a
-colleague, Henk reads every unresolved review thread of a GitHub pull
-request or GitLab merge request, fixes what the feedback is right about
-in a workspace, runs the configured `[address].check_commands` there, and
-pushes one commit to the pull request's branch. Only a changeset leaves the workspace: Henk
-refuses it whole when a path leads into `.git` or out of the repository,
-becomes a symbolic link or a submodule, or the run changed more files than
-allowed, and otherwise applies it to a fresh checkout nothing ran in and
-commits from there. The push is a fast-forward only. A fork, the default branch, a
-protected branch or a branch that moved while he worked gets nothing.
-Then he replies in each thread (fixed with the commit link, declined with
-why, or a question), resolves only the threads of his own findings that he
-fixed, and sums up with the run link. The model never holds the token or a
-git command; Henk's code commits and pushes. `[workspace]` picks the
-backend and its limits, per repository through profiles. `host` runs the
-checks as Henk's user with an empty environment, so they see none of
-Henk's secrets, but nothing else isolates them. `ssh` runs each run as a
-throwaway user on a sandbox host (see "Sandbox host" below). `henk config
-check` warns about what each one does not isolate. Every command is on the
-run's timeline (`henk runs show`). On GitHub the App
-needs `Contents: write`. On GitLab Henk reads `[gitlab].token_env`
-himself: git pushes with it as `oauth2`, and the merge request's projects,
-the branch's protection and his account id come from the REST API with it
-in the `PRIVATE-TOKEN` header, because the MCP server's merge request
-leaves the project ids out. Without it GitLab reviews still run and
-address runs are refused. The token's account needs Developer access to
-push.
+Besides the review loop, `henk address` (spec §3.5) is what changes code.
+Asked by a colleague, Henk reads every unresolved review thread of a GitHub
+pull request or GitLab merge request, fixes what the feedback is right
+about in a workspace, runs the configured `[address].check_commands` there,
+and pushes one commit to the pull request's branch. Only a changeset leaves
+the workspace: Henk refuses it whole when a path leads into `.git` or out
+of the repository, becomes a symbolic link or a submodule, or the run
+changed more files than allowed, and otherwise applies it to a fresh
+checkout nothing ran in and commits from there. The push is a fast-forward
+only. A fork, the default branch, a protected branch or a branch that moved
+while he worked gets nothing. Then he replies in each thread (fixed with
+the commit link, declined with why, or a question), resolves only the
+threads of his own findings that he fixed, and sums up with the run link.
+The model never holds the token or a git command; Henk's code commits and
+pushes. `[workspace]` picks the backend and its limits, per repository
+through profiles. `host` runs the checks as Henk's user with an empty
+environment, so they see none of Henk's secrets, but nothing else isolates
+them. `ssh` runs each run as a throwaway user on a sandbox host (see
+"Sandbox host" below). `henk config check` warns about what each one does
+not isolate. Every command is on the run's timeline (`henk runs show`). On
+GitHub the App needs `Contents: write`. On GitLab Henk reads
+`[gitlab].token_env` himself: git pushes with it as `oauth2`, and the merge
+request's projects, the branch's protection and his account id come from
+the REST API with it in the `PRIVATE-TOKEN` header, because the MCP
+server's merge request leaves the project ids out. Without it GitLab
+reviews fail and address runs are refused. The token's account needs
+Developer access to push.
 
 The commit ends in a trailer block, in this order: `Henk-Run` (the run),
 `Requested-by` (the requester's Discord id), the requester's
@@ -460,25 +561,28 @@ needs it and it is missing.
 backend = "ssh"
 toolchain = "mise"
 setup = [["npm", "ci"]]
-review = true
 ```
 
-With `review = true` on a profile, reviews of its repositories get
-workspaces too: every lane and the fact-checker get their own, holding the
-reviewed commit (fetched by its sha, so a push during the review changes
-nothing), set up as above before the lanes start. They are opened in
-parallel, so a review waits about one setup, and closed when the lanes
-end. A review workspace is never exported, and a lane whose workspace
-could not be opened or set up reviews through the platform as before, with
-the reason on the run's timeline. In its workspace a lane, and the
-fact-checker, list files (`list_files`, with a glob), search them by
+Every review works in a workspace (#284): the reviewer and the fixer
+share one, holding the pull request's head, set up as above before the
+reviewer starts; a reviewer alone gets the reviewed commit, fetched by its
+sha, so a push during the review changes nothing. The reviewer's changes
+are never exported, and a reviewer that changes a file stops the loop; only
+the fixer's changes, checked like an address run's, become a commit. In
+the workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
-(`read_file`), the same code tools an address run has, and run a command
-of their own (`bash`, #85): one test, a build or a grep, as the
-workspace's user, with the repository's toolchain and the profile's time
-and output limits. Each command is on the run's timeline with the lane
-that ran it, so `henk runs show <id>` lists what a review ran. Without a
-workspace a lane reads through the platform as before.
+(`read_file`), the same code tools an address run has, and on a backend
+apart from Henk run a command of their own (`bash`, #85): one test, a
+build or a grep, as the workspace's user, with the repository's toolchain
+and the profile's time and output limits. Each command is on the run's
+timeline, so `henk runs show <id>` lists what a review ran. A review whose
+workspace cannot be opened or set up fails before any session starts.
+
+`review = true` on a profile once gave the lanes workspaces (#170). The
+loop opens its workspace whether or not it is set, so the flag no longer
+changes how a review runs; `config check` still lists it and refuses it on
+the `host` backend, and the dashboard's health page counts how many recent
+reviews under such a profile got their workspace.
 
 With `plan = true` on a profile, the planner gets a workspace too (#172):
 one copy of the repository at its default branch, fetched by the sha Henk
@@ -494,10 +598,11 @@ own user: `plan = true` is refused there, and an address run there keeps
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
 
-A review runs the setup stage on code that anyone who can open a pull
-request chose, from a fork too, so `review = true` needs a backend apart
-from Henk: `henk config check` refuses it on the `host` backend, where that
-code would run as Henk's own user next to his configuration and keys.
+A review runs the profile's setup on code that anyone who can open a pull
+request chose, from a fork too, and the fixer's checks on what it pushes.
+On the `host` backend that code runs as Henk's own user, next to his
+configuration and keys, so give repositories that take pull requests from
+people you do not trust a profile on a backend apart from Henk.
 
 `henk doctor --probe` connects and reports the connection, the host key and
 the tools the script needs on lines of their own.
@@ -557,7 +662,6 @@ To set it up, apply `deploy/kubernetes/`:
 ```toml
 [workspace]
 backend = "kubernetes"
-review = true
 [workspace.kubernetes]
 namespace = "henk-sandbox"
 image = "registry.example/henk-sandbox@sha256:…"
@@ -582,17 +686,20 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 `dashboard/`) built into the binary:
 - the runs, with what is running now updating itself, filters by kind,
   status, platform and repository, and paging;
-- each run with its lanes, tool calls, drafts and their verdicts, findings,
-  timeline and the events that led to it, and each lane's whole
-  conversation; a running run updates as it happens: lanes start and end,
-  tool calls, drafts and verdicts appear, without a reload;
+- each run with its sessions, tool calls, the review loop's findings and
+  the fixer's verdicts, timeline and the events that led to it, and each
+  session's whole conversation; a running run updates as it happens:
+  sessions start and end, tool calls, findings and verdicts appear,
+  without a reload. A review from before #309 still shows its lanes, their
+  drafts with the fact-check's verdicts, and the findings it posted;
 - the inbound events with what each listener did;
 - tools: how each tool fared per model and kind of session, with error
   and refusal rates, the calls that went wrong with their arguments, and on
   each run every call by turn, linked to that turn of the conversation;
-- review quality: what the fact-check made of the lanes' drafts per model,
-  lane, repository or pull request, the rejection rate, and the rejected
-  drafts with the checker's reason;
+- review quality: what the fact-check made of the lanes' drafts in reviews
+  from before #309, per model, lane, repository or pull request, the
+  rejection rate, and the rejected drafts with the checker's reason; new
+  reviews have no fact-check;
 - a health page from configuration and the database, including whether
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
@@ -603,9 +710,9 @@ Starting works exactly like `POST /review`, `/plan` and `/address`: the
 request becomes an event, the listeners apply the allowlist and every
 refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
-`cancelled`, with a neutral check for a review and one comment saying which
-GitHub account cancelled it; an address run cancelled before its push
-pushes nothing.
+`cancelled`: a review with a neutral check saying which GitHub account
+cancelled it, a plan or address run with one comment saying so; an address
+run cancelled before its push pushes nothing.
 
 The app reads and acts only through the JSON API at `/dashboard/api/v1`,
 behind the same sign-in; every action carries the session's CSRF token in a
@@ -718,13 +825,12 @@ line in `docs/SPEC.md` once the team confirms it.
 - §3.1 GitHub drafts are not reviewed until marked ready (`review.github_drafts`).
 - §3.1 One review per pull/merge request at a time: the same commit joins
   the running review, a newer commit supersedes it.
-- §3.2 When two lanes claim the same line, the first claim posts.
-- §3.3 Dropped lanes are named by their configured lane name, never a model.
-- §3.3 A lane that reaches its time limit stops: a tool call in flight
-  finishes, no new model turn starts, what it posted stands, and the
-  review completes on it. The summary says the lane stopped at the time
-  limit. A plan that reaches its time limit still fails (§4).
-- §3.3 Findings in resolved threads do not count towards N.
+- §3.2 A review is the reviewer and fixer loop (#309): nothing is posted
+  on the pull request, and the check's summary carries the loop's report.
+- §3.3 A session that reaches its round's time limit, or a loop that
+  reaches `run_timeout_secs`, stops the loop: what was pushed stands,
+  every finding still open ends unsettled, and the check says why the loop
+  stopped. A plan that reaches its time limit still fails (§4).
 - §3.3 A review a restart interrupted, running or waiting for a slot, or
   closed as orphaned after its process died, is reviewed again after the
   next start, on the pull request's current head, once per pull request
