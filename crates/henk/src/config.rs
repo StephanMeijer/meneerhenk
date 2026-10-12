@@ -17,7 +17,7 @@ use henk_domain::mail::EmailAddress;
 use henk_domain::role::Role;
 use henk_domain::skill::SkillName;
 use henk_domain::workspace::{BackendKind, Limits, Profile, Toolchain, WorkspacePolicy};
-use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
+use henk_llm::{Api, Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
 
 /// An example configuration, printed by `henk config example`.
@@ -447,6 +447,11 @@ fn default_gitlab_write_mcp() -> String {
 pub struct EndpointFileConfig {
     /// Wire format.
     pub provider: Provider,
+    /// Which OpenAI API an `openai` endpoint is called through:
+    /// `chat_completions` (the default, which every OpenAI-compatible
+    /// server speaks) or `responses` (#365).
+    #[serde(default)]
+    pub api: Option<Api>,
     /// Base URL.
     pub base_url: String,
     /// Env var with the API key.
@@ -481,9 +486,10 @@ pub struct ModelFileConfig {
     /// Per-attempt timeout in seconds.
     #[serde(default = "default_model_timeout_secs")]
     pub timeout_secs: u64,
-    /// Which parameter carries the output cap (OpenAI style only).
+    /// Which parameter carries the output cap (OpenAI Chat Completions
+    /// only).
     #[serde(default)]
-    pub max_tokens_param: MaxTokensParam,
+    pub max_tokens_param: Option<MaxTokensParam>,
     /// Thinking effort (Anthropic style only): `low`, `medium`, `high`,
     /// `xhigh` or `max`. Left out, the model's own default applies.
     #[serde(default)]
@@ -1913,6 +1919,12 @@ fn validate_endpoints(endpoints: &BTreeMap<String, EndpointFileConfig>) -> Resul
         if endpoint.api_key_env.trim().is_empty() {
             return fail("api_key_env is empty".to_owned());
         }
+        if endpoint.api.is_some() && endpoint.provider != Provider::OpenAi {
+            return fail(format!(
+                "api applies to provider \"openai\" only; {} has one API",
+                endpoint.provider.as_str()
+            ));
+        }
         for (name, value) in &endpoint.headers {
             if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
                 return fail(format!("header name {name:?} is not a valid header name"));
@@ -1967,6 +1979,15 @@ fn validate_models(
             return Err(ConfigError::Model(
                 id.clone(),
                 "model name is empty".to_owned(),
+            ));
+        }
+        if model.max_tokens_param.is_some() && endpoint.api == Some(Api::Responses) {
+            return Err(ConfigError::Model(
+                id.clone(),
+                format!(
+                    "max_tokens_param applies to Chat Completions only; endpoint {} uses the Responses API, which always sends max_output_tokens",
+                    model.endpoint
+                ),
             ));
         }
         if model.effort.is_some() && endpoint.provider != Provider::Anthropic {
@@ -2218,7 +2239,7 @@ impl Settings {
             .ok_or_else(|| format!("environment variable {} is not set", endpoint.api_key_env))?;
         Ok(henk_llm::ModelConfig {
             provider: endpoint.provider,
-            api: henk_llm::Api::default(),
+            api: endpoint.api.unwrap_or_default(),
             base_url: endpoint.base_url.clone(),
             api_key: key.into(),
             model: String::new(),
@@ -2256,7 +2277,7 @@ impl Settings {
             model: model.model.clone(),
             max_tokens: model.max_tokens,
             timeout: Duration::from_secs(model.timeout_secs),
-            max_tokens_param: model.max_tokens_param,
+            max_tokens_param: model.max_tokens_param.unwrap_or_default(),
             effort: model.effort,
             prompt_cache: model.prompt_cache,
             ..self.endpoint_config(&model.endpoint, lookup_env)?
@@ -2674,9 +2695,16 @@ impl Settings {
                 1 => ", 1 header".to_owned(),
                 n => format!(", {n} headers"),
             };
+            let api = match endpoint.provider {
+                Provider::OpenAi => format!(
+                    " ({})",
+                    endpoint.api.unwrap_or_default().as_str().replace('_', " ")
+                ),
+                Provider::Anthropic => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "  {id}: {} at {} (key from ${}{headers})",
+                "  {id}: {}{api} at {} (key from ${}{headers})",
                 endpoint.provider.as_str(),
                 endpoint.base_url,
                 endpoint.api_key_env
@@ -4180,7 +4208,7 @@ github_owners = ["docspec"]
         );
         let said = settings.describe();
         for line in [
-            "Endpoints:\n  a: openai at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai at https://b.test/v1 (key from $KEY_B)\n",
+            "Endpoints:\n  a: openai (chat completions) at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai (chat completions) at https://b.test/v1 (key from $KEY_B)\n",
             "Models:\n  gpt-a: gpt-5.5 on a\n  gpt-b: gpt-5.5 on b\n",
             "warning: used by no role: gpt-a, gpt-b",
         ] {
@@ -4259,7 +4287,7 @@ github_owners = ["docspec"]
         assert!(
             settings
                 .describe()
-                .contains("  m: openai at https://x (key from $K)"),
+                .contains("  m: openai (chat completions) at https://x (key from $K)"),
             "config check names it as configured: {}",
             settings.describe()
         );
@@ -4288,6 +4316,115 @@ github_owners = ["docspec"]
         assert_eq!(settings.models.get("m").unwrap().effort, Some(Effort::High));
         let bad = text.replace("\"high\"", "\"extreme\"");
         assert!(matches!(Config::parse(&bad), Err(ConfigError::Syntax(_))));
+    }
+
+    fn on_api(endpoint_extra: &str, model_extra: &str) -> Result<Settings, ConfigError> {
+        let text = format!(
+            "{MINIMAL}\n[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n{endpoint_extra}[models.m]\nendpoint = \"o\"\nmodel = \"gpt\"\n{model_extra}"
+        );
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn an_openai_endpoint_speaks_chat_completions_unless_it_says_responses() {
+        let api = |settings: &Settings| {
+            settings
+                .client_config("m", |_| Some("k".to_owned()))
+                .unwrap()
+                .api
+        };
+        let default = on_api("", "").unwrap();
+        assert_eq!(api(&default), Api::ChatCompletions);
+        assert!(
+            default
+                .describe()
+                .contains("  o: openai (chat completions) at https://x.test/v1"),
+            "{}",
+            default.describe()
+        );
+        let responses = on_api("api = \"responses\"\n", "").unwrap();
+        assert_eq!(api(&responses), Api::Responses);
+        assert!(
+            responses
+                .describe()
+                .contains("  o: openai (responses) at https://x.test/v1")
+        );
+        assert_eq!(
+            api(&on_api("api = \"chat_completions\"\n", "").unwrap()),
+            Api::ChatCompletions
+        );
+        assert!(matches!(
+            on_api("api = \"completions\"\n", ""),
+            Err(ConfigError::Syntax(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn each_api_is_called_where_it_lives() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "chat"}}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "responses"}]}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (api, answer) in [("", "chat"), ("api = \"responses\"\n", "responses")] {
+            let settings = on_api(api, "").unwrap();
+            let mut config = settings
+                .client_config("m", |_| Some("k".to_owned()))
+                .unwrap();
+            config.base_url = format!("{}/v1", server.uri());
+            let completion = henk_llm::client_for(config)
+                .unwrap()
+                .complete(&henk_llm::CompletionRequest {
+                    messages: vec![henk_llm::ChatMessage::user("hi")],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(completion.message.text(), answer);
+        }
+    }
+
+    #[test]
+    fn the_api_is_only_chosen_where_it_means_something() {
+        let anthropic = format!(
+            "{MINIMAL}\n[endpoints.a]\nprovider = \"anthropic\"\nbase_url = \"https://x.test\"\napi_key_env = \"K\"\napi = \"responses\"\n"
+        );
+        assert!(matches!(
+            Config::parse(&anthropic).and_then(Config::into_settings),
+            Err(ConfigError::Endpoint(..))
+        ));
+        let error = on_api(
+            "api = \"responses\"\n",
+            "max_tokens_param = \"max_completion_tokens\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Model(_, why) if why.contains("max_output_tokens")),
+            "{error}"
+        );
+        let chat = on_api("", "max_tokens_param = \"max_completion_tokens\"\n").unwrap();
+        assert_eq!(
+            chat.client_config("m", |_| Some("k".to_owned()))
+                .unwrap()
+                .max_tokens_param,
+            MaxTokensParam::MaxCompletionTokens
+        );
     }
 
     #[test]

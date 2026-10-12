@@ -51,6 +51,13 @@ provider = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 
+# OpenAI's Responses API, for reasoning models (#365); the README says why.
+# [endpoints.openai]
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# api_key_env = "OPENAI_API_KEY"
+# api = "responses"
+
 [models.proxy-fast]
 endpoint = "proxy"
 model = "fast-model"

@@ -979,10 +979,14 @@ variable before the first webhook arrives.
   are alphas without MCP client wiring, the crate with the Agent is unpublished
   and reads global configuration, and its MCP layer is rmcp anyway. Owning the
   dispatcher is what makes §8.4 and §8.5 properties of code.
-- **Hand-written model adapters.** Two wire formats cover the proxy, Anthropic,
-  OpenAI and Ollama in about a thousand lines, including the details an MCP
-  host needs that the libraries lack: error flags on tool results, tool-name
-  mapping, untouched schemas, opaque thinking blocks echoed back.
+- **Hand-written model adapters.** Three wire formats cover the proxy, Anthropic,
+  OpenAI and Ollama in about fifteen hundred lines, including the details an
+  MCP host needs that the libraries lack: error flags on tool results,
+  tool-name mapping, untouched schemas, opaque thinking blocks and reasoning
+  items echoed back. OpenAI Chat Completions (`openai.rs`) is the default for
+  an `openai` endpoint; `api = "responses"` uses the Responses API
+  (`responses.rs`, #365), statelessly (`store: false`, encrypted reasoning
+  passed back as `Block::Opaque`).
 - **GitHub writes over REST.** See section 10.
 - **GitLab's built-in MCP server is not used.** It is OAuth-only in its
   documentation and lacks commit statuses and award emoji; `mcp-gitlab` takes a
