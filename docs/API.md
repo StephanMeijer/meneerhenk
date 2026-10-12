@@ -345,21 +345,21 @@ every day from `from` to `to` with:
 
 ### `GET /stats/lanes`
 
-How each lane and fact-check session of the recent reviews ended (#229).
-Since #309 a review's sessions are the loop's `reviewer` and `fixer`; they
-show here as lanes of kind `lane`, and `check` sessions are only in
-reviews by lanes.
+How each session of the recent reviews ended (#229): the review loop's
+`reviewer` and `fixer`, and in reviews from before the loop (#309), the
+lanes and the `check-N` fact-check sessions. The path keeps its name.
 `last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
 3339) for every review started since then, the newest 1000 of them. Not
 both. Only reviews that ended on their own count: running ones are left
-out, and so are cancelled and superseded ones, whose lanes were cancelled
-for them by a person or for a newer commit.
+out, and so are cancelled and superseded ones, whose sessions were
+cancelled for them by a person or for a newer commit.
 
 The answer has `reviews` (`run_id`, `started_at`), oldest first, and
-`lanes`: the review lanes by name, then the `check-N` sessions by number.
-Each lane has:
+`lanes`: the sessions, the `reviewer` and the `fixer` first, then the
+review lanes by name, then the `check-N` sessions by number. Each has:
 
-- `kind`: `lane` or `check`; `models`: the models it ran, newest first;
+- `kind`: `reviewer`, `fixer`, `lane` or `check`; `models`: the models it
+  ran, newest first;
 - `outcomes`: one per review in `reviews`, in the same order: `run_id`,
   the `model` it ran there, `status` (`finished`, `timed_out`,
   `did_not_finish`) and `reason`, or `null` where it did not run;
@@ -367,84 +367,20 @@ Each lane has:
 - `reasons`: why it timed out or did not finish, counted: `time_limit`,
   `rate_limit`, `provider_error`, `cancelled`, `declined` (the model
   declined) and `stuck` (it kept repeating a call). The reason is read
-  from the error the lane ended with.
-
-### `GET /quality`
-
-What the fact-check made of the lanes' drafts across runs (#205), one row
-per group, the largest first. This is data from reviews by lanes: a review
-loop's findings are left out (#285), so reviews since #309 add nothing
-here, nor to `/quality/daily`.
-
-| Query | Meaning |
-|---|---|
-| `group` | `model` (default), `lane`, `repo` or `target` (a pull request) |
-| `since`, `until` | Drafts queued at or after `since`, and before `until` (RFC 3339) |
-| `repo` | `owner/name`, exactly |
-
-Each row has the counts per verdict (`confirmed`, `rejected`, `same_as`,
-`unchecked`, `not_checked`, `cancelled`, `failed`), `waiting` for drafts not
-decided yet, `judged` (confirmed, rejected and repeats: what a checker
-decided) and `rejection_rate`: rejected of judged, from 0 to 1, or `null`
-when nothing was judged. Grouped by `target`, a row also has `repo`,
-`target` and `target_url`.
-
-```json
-[{"key": "mistral-medium-3-5", "repo": null, "target": null, "target_url": null,
-  "drafts": 82, "confirmed": 3, "rejected": 72, "same_as": 4, "unchecked": 1,
-  "not_checked": 0, "cancelled": 0, "failed": 0, "waiting": 2,
-  "judged": 79, "rejection_rate": 0.911}]
-```
-
-### `GET /quality/daily`
-
-The rejection rate per UTC day (#228), for the six largest groups of
-`/quality`'s query (same `group`, `repo`, `since`, `until`), largest
-first. Each has `key` and `days`: every day from `since` (or the first day
-with a draft, at most 90 days back) to today, each with `day`, `judged`,
-`rejected` and `rate` (rejected of judged, `null` on a day nothing was
-judged: a gap, not 0%).
-
-### `GET /drafts/count`
-
-How many drafts `/drafts`'s query matches over every page: `{"count": 72}`.
-
-### `GET /drafts`
-
-Drafts across runs, newest first, a page at a time: each with its run,
-repository, pull request and what became of it. Like `/quality`, these are
-the lanes' drafts: a review loop's findings are left out, here and in
-`/drafts/count`; the run's own `drafts` have them.
-
-| Query | Meaning |
-|---|---|
-| `verdict` | `confirmed`, `rejected`, `same_as`, `unchecked`, `not_checked`, `cancelled`, `failed`, or `waiting` for undecided |
-| `model`, `lane`, `repo` | Exactly |
-| `since`, `until` | As for `/quality` |
-| `limit`, `cursor` | Paging |
-
-```json
-{"items": [{"run_id": "r-...", "repo": "o/r", "target": 70,
-            "target_url": "https://github.com/o/r/pull/70",
-            "draft": {"id": "d3", "lane": "lane-b", "model": "mistral-medium-3-5",
-                      "kind": "finding", "path": "src/a.rs", "line": 91, "body": "...",
-                      "decision": {"verdict": "rejected", "checker": "claude-opus-5-5",
-                                   "reason": "...", "...": "..."}, "...": "..."}}],
- "next": "..."}
-```
+  from the error the session ended with.
 
 ### `GET /tool-calls/summary`
 
 How each tool fared across runs (#203): one row per tool, model and kind of
-session (`lane`, `check`, `planner`, `address`), the most calls first. A
-review loop's `reviewer` and `fixer` count as `lane`; `check` is the
-fact-check, only in reviews by lanes before #309.
+session (`reviewer`, `fixer`, `planner`, `address`, `lane`, `check`), the
+most calls first. `lane` and `check` (the fact-check) are sessions of
+reviews from before the loop (#309).
 
 | Query | Meaning |
 |---|---|
 | `since`, `until` | Calls made at or after `since`, and before `until` (RFC 3339) |
 | `tool`, `model` | Exactly |
-| `session_kind` | `lane`, `check`, `planner` or `address` |
+| `session_kind` | `reviewer`, `fixer`, `planner`, `address`, `lane` or `check` |
 
 Each row has `calls`, `errors` (the tool failed), `refusals` (the scope
 guard or the repeat guard stopped it), `other` (never ran: an unknown tool,
@@ -452,7 +388,7 @@ malformed arguments, a cancel), `total_ms`, and `error_rate` and
 `refusal_rate`, from 0 to 1.
 
 ```json
-[{"tool": "read_file", "model": "mistral-medium-3-5", "session_kind": "lane",
+[{"tool": "read_file", "model": "claude-opus-5-5", "session_kind": "reviewer",
   "calls": 40, "errors": 4, "refusals": 0, "other": 0, "total_ms": 1600,
   "error_rate": 0.1, "refusal_rate": 0.0}]
 ```

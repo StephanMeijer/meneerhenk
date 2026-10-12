@@ -4,7 +4,6 @@
 import { noteServerDate } from '../clock';
 import type {
   Cancelled,
-  DraftItem,
   ErrorBody,
   EventDetail,
   EventFacets,
@@ -14,9 +13,6 @@ import type {
   Me,
   OverviewStats,
   Page,
-  QualityRow,
-  QualitySeries,
-  DraftCount,
   RunCount,
   RunDetail,
   RunSummary,
@@ -175,26 +171,6 @@ export function startRun(request: StartRequest): Promise<Started> {
 /** Cancels a running run. */
 export function cancelRun(id: string): Promise<Cancelled> {
   return postJson<Cancelled>(`/runs/${encodeURIComponent(id)}/cancel`, {});
-}
-
-/** What became of the drafts per group; `query` is the `GET /quality` query. */
-export function quality(query = ''): Promise<QualityRow[]> {
-  return getJson<QualityRow[]>(`/quality${query === '' ? '' : `?${query}`}`);
-}
-
-/** The rejection rate per day of the largest groups; the `GET /quality` query. */
-export function qualityDaily(query = ''): Promise<QualitySeries[]> {
-  return getJson<QualitySeries[]>(`/quality/daily${query === '' ? '' : `?${query}`}`);
-}
-
-/** How many drafts the `GET /drafts` query matches, over every page. */
-export function draftCount(query = ''): Promise<DraftCount> {
-  return getJson<DraftCount>(`/drafts/count${query === '' ? '' : `?${query}`}`);
-}
-
-/** Drafts across runs, newest first; `query` is the `GET /drafts` query. */
-export function drafts(query = ''): Promise<Page<DraftItem>> {
-  return getJson<Page<DraftItem>>(`/drafts${query === '' ? '' : `?${query}`}`);
 }
 
 /** Tool calls per tool, model and kind of session; `query` is the `GET /tool-calls/summary` query. */

@@ -26,10 +26,12 @@
 
   const KINDS: Record<string, string> = {
     all: 'every kind',
-    lane: 'review lanes',
-    check: 'fact-checks',
+    reviewer: 'reviewers',
+    fixer: 'fixers',
     planner: 'planner',
     address: 'address runs',
+    lane: 'review lanes (before the loop)',
+    check: 'fact-checks (before the loop)',
   };
   const OUTCOMES = [
     'problems',

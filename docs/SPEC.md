@@ -55,7 +55,7 @@ branch or a protected branch.
 | **Team Lead** (listed by Discord user id) | Discord user id, never a name | Additionally: *sudo* (§5.4). Their decisions are final to Henk |
 | **Known people** (a roster by Discord user id) | Discord user id | Henk knows their name and role |
 | **Anyone on the internet** | Email sender | Have their email answered |
-| **MCP clients** (agents with a configured token) | A named bearer token, never a name | With a *read* token: read runs, events, quality and health. With a *write* token: additionally start reviews, plans and address runs, and cancel runs. Recorded as `mcp:<token name>` |
+| **MCP clients** (agents with a configured token) | A named bearer token, never a name | With a *read* token: read runs, events and health. With a *write* token: additionally start reviews, plans and address runs, and cancel runs. Recorded as `mcp:<token name>` |
 
 Rules:
 
@@ -650,6 +650,8 @@ surprising reading of the earlier wording; veto any that is wrong.
   the others do not change. The A.1 gap on lanes repeating each other is
   gone with the promise. Comments posted by lanes stay, and their markers
   are still read.
+- §2: an MCP read token reads runs, events and health; the fact-check's
+  quality figures are removed with the fact-check (#310).
 
 ## Revision notes (2026-10-07)
 

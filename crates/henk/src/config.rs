@@ -110,7 +110,7 @@ pub struct McpTokenConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpScope {
-    /// List and read runs, events, review quality and health.
+    /// List and read runs, events and health.
     Read,
     /// Also start and cancel runs.
     Write,

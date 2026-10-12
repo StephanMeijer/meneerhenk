@@ -29,7 +29,7 @@ const OUTCOMES: &[&str] = &[
 ];
 
 /// Every kind of session.
-const KINDS: &[&str] = &["lane", "check", "planner", "address"];
+const KINDS: &[&str] = &["reviewer", "fixer", "planner", "address", "lane", "check"];
 
 /// What `GET /tool-calls/summary` and `GET /tool-calls` take. Every
 /// filter is optional.

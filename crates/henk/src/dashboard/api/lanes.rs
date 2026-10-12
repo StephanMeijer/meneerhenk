@@ -1,7 +1,8 @@
-//! Lane reliability (#229): how each lane and fact-check session of the
-//! recent reviews ended. A review stands on the lanes that finished
-//! (§3.2), so a lane that keeps dropping out makes reviews thinner; this
-//! shows it without opening runs one by one.
+//! Session reliability (#229): how each session of the recent reviews
+//! ended, the review loop's reviewer and fixer, and the lanes and
+//! fact-checks of reviews from before the loop (#310). A session that
+//! keeps dropping out makes reviews thinner; this shows it without opening
+//! runs one by one.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -141,11 +142,14 @@ fn tally(row: &mut LaneRow, ending: &LaneEnding) {
     }
 }
 
-/// Lanes first, by name; then the fact-check sessions, by number.
-fn order(name: &str) -> (bool, u32, String) {
-    match name.strip_prefix("check-") {
-        Some(number) => (true, number.parse().unwrap_or(u32::MAX), name.to_owned()),
-        None => (false, 0, name.to_owned()),
+/// The reviewer, then the fixer; then lanes, by name; then the
+/// fact-check sessions, by number.
+fn order(name: &str) -> (u8, u32, String) {
+    match (name, name.strip_prefix("check-")) {
+        ("reviewer", _) => (0, 0, String::new()),
+        ("fixer", _) => (1, 0, String::new()),
+        (_, Some(number)) => (3, number.parse().unwrap_or(u32::MAX), name.to_owned()),
+        (_, None) => (2, 0, name.to_owned()),
     }
 }
 
@@ -312,6 +316,34 @@ mod tests {
         assert_eq!(check.kind, "check");
         assert_eq!((check.timed_out, check.reasons.time_limit), (1, 1));
         assert_eq!(check.outcomes.len(), 3);
+    }
+
+    #[test]
+    fn a_review_loops_reviewer_and_fixer_come_first_as_their_own_kinds() {
+        // r-2 ran the loop; r-1 ran lanes before it (#310).
+        let endings = [
+            ending("r-2", "fixer", "m-f", LaneStatus::TimedOut, None),
+            ending("r-2", "reviewer", "m-r", LaneStatus::Finished, None),
+            ending("r-1", "check-1", "c", LaneStatus::Finished, None),
+            ending("r-1", "lane-a", "m-a", LaneStatus::Finished, None),
+        ];
+        let stats = lane_stats(&endings);
+        let rows: Vec<_> = stats
+            .lanes
+            .iter()
+            .map(|l| (l.name.as_str(), l.kind.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("reviewer", "reviewer"),
+                ("fixer", "fixer"),
+                ("lane-a", "lane"),
+                ("check-1", "check"),
+            ]
+        );
+        assert!(stats.lanes[0].outcomes[0].is_none(), "no reviewer in r-1");
+        assert_eq!(stats.lanes[1].reasons.time_limit, 1);
     }
 
     #[test]

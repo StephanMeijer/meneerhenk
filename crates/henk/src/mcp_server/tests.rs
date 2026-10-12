@@ -187,7 +187,6 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
             "health",
             "list_runs",
             "list_tool_calls",
-            "review_quality",
             "start_address",
             "start_plan",
             "start_review",
@@ -212,8 +211,6 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
     assert_eq!(events["items"][0]["message"], "diff: 3 files");
     let (_, calls, _) = call(&session, "list_tool_calls", json!({ "run_id": "r-1" })).await;
     assert_eq!(calls["items"], json!([]));
-    let (_, quality, _) = call(&session, "review_quality", json!({})).await;
-    assert_eq!(quality["items"], json!([]));
     let (error, health, _) = call(&session, "health", json!({})).await;
     assert!(!error);
     assert!(
@@ -424,7 +421,7 @@ async fn doctor_says_which_tokens_are_set_and_probe_lists_the_tools() {
             .contains("not set; MCP client reader cannot connect")
     );
     assert!(
-        said[2].0.contains("12 tools at http://127.0.0.1:"),
+        said[2].0.contains("11 tools at http://127.0.0.1:"),
         "{said:?}"
     );
     assert!(said[2].0.ends_with("as claude\")"), "{said:?}");

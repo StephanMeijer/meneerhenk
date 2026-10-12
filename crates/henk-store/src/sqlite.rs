@@ -13,13 +13,12 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::store::RunStore;
 use crate::types::{
-    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
-    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
-    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
+    LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
+    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str,
     lane_dots, lane_endings, merge_days, now, platform_parse, platform_str, stage_dots,
     stage_records, status_str, to_i64, to_u64,
 };
@@ -558,174 +557,6 @@ impl RunStore for SqliteStore {
                 },
             )
             .collect()
-    }
-
-    async fn draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DraftRates>, StoreError> {
-        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
-        let (key, columns, by) = match group {
-            DraftGroup::Model => ("d.model", "NULL, NULL, NULL", "d.model"),
-            DraftGroup::Lane => ("d.lane", "NULL, NULL, NULL", "d.lane"),
-            DraftGroup::Repo => ("r.repo", "NULL, NULL, NULL", "r.repo"),
-            DraftGroup::Target => (
-                "r.repo || ' #' || r.target",
-                "r.repo, r.target, r.platform",
-                "r.repo, r.target, r.platform",
-            ),
-        };
-        self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT {key}, {columns}, COUNT(*), {VERDICT_SUMS}
-                 FROM drafts d JOIN runs r ON r.id = d.run_id
-                 WHERE {DRAFT_FILTER}
-                 GROUP BY {by} ORDER BY COUNT(*) DESC, 1"
-            ))?;
-            let rows = statement
-                .query_map(
-                    params![filter.model, filter.lane, filter.repo, since, until],
-                    |row| {
-                        let count = |i: usize| -> rusqlite::Result<u64> {
-                            let n: i64 = row.get(i)?;
-                            Ok(u64::try_from(n).unwrap_or_default())
-                        };
-                        let target: Option<i64> = row.get(2)?;
-                        Ok(DraftRates {
-                            key: row.get(0)?,
-                            repo: row.get(1)?,
-                            target: target.and_then(|t| u64::try_from(t).ok()),
-                            platform: row
-                                .get::<_, Option<String>>(3)?
-                                .as_deref()
-                                .and_then(platform_parse),
-
-                            drafts: count(4)?,
-                            confirmed: count(5)?,
-                            rejected: count(6)?,
-                            same_as: count(7)?,
-                            unchecked: count(8)?,
-                            not_checked: count(9)?,
-                            cancelled: count(10)?,
-                            failed: count(11)?,
-                            waiting: count(12)?,
-                        })
-                    },
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-    }
-
-    async fn daily_draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DayRates>, StoreError> {
-        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
-        let key = match group {
-            DraftGroup::Model => "d.model",
-            DraftGroup::Lane => "d.lane",
-            DraftGroup::Repo => "r.repo",
-            DraftGroup::Target => "r.repo || ' #' || r.target",
-        };
-        self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT {key}, substr(d.created_at, 1, 10),
-                        SUM(CASE WHEN d.verdict IN ('confirmed', 'rejected', 'same_as') THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN d.verdict = 'rejected' THEN 1 ELSE 0 END)
-                 FROM drafts d JOIN runs r ON r.id = d.run_id
-                 WHERE {DRAFT_FILTER}
-                 GROUP BY 1, 2 ORDER BY 1, 2"
-            ))?;
-            let rows = statement
-                .query_map(
-                    params![filter.model, filter.lane, filter.repo, since, until],
-                    |row| {
-                        let count = |i: usize| -> rusqlite::Result<u64> {
-                            let n: i64 = row.get(i)?;
-                            Ok(u64::try_from(n).unwrap_or_default())
-                        };
-                        Ok(DayRates {
-                            key: row.get(0)?,
-                            day: row.get(1)?,
-                            judged: count(2)?,
-                            rejected: count(3)?,
-                        })
-                    },
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-    }
-
-    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
-        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
-        let verdict = VerdictFilter::param(filter.verdict);
-        self.with(|c| {
-            let count: i64 = c.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE {DRAFT_FILTER}
-                       AND (?6 IS NULL OR (?6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = ?6)"
-                ),
-                params![
-                    filter.model,
-                    filter.lane,
-                    filter.repo,
-                    since,
-                    until,
-                    verdict
-                ],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(count).unwrap_or_default())
-        })
-    }
-
-    async fn list_drafts(
-        &self,
-        filter: &DraftFilter,
-        page: Page,
-    ) -> Result<Vec<DraftListing>, StoreError> {
-        let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
-        let verdict = VerdictFilter::param(filter.verdict);
-        let (before_at, before_id) = filter
-            .before
-            .as_ref()
-            .map(|k| (k.created_at.as_str(), k.id))
-            .unzip();
-        let rows: Vec<DraftRow> = self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT d.id, d.run_id, r.repo, r.target, d.created_at, d.draft, d.lane, d.model,
-                        d.kind, d.path, d.line, d.target, d.body, d.verdict, d.checker, d.reason,
-                        d.same_as, d.comment_id, d.decided_at, r.platform
-                 FROM drafts d JOIN runs r ON r.id = d.run_id
-                 WHERE {DRAFT_FILTER}
-                   AND (?6 IS NULL OR (?6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = ?6)
-                   AND (?7 IS NULL OR d.created_at < ?7 OR (d.created_at = ?7 AND d.id < ?8))
-                 ORDER BY d.created_at DESC, d.id DESC LIMIT ?9 OFFSET ?10"
-            ))?;
-            let rows = statement.query_map(
-                params![
-                    filter.model,
-                    filter.lane,
-                    filter.repo,
-                    since,
-                    until,
-                    verdict,
-                    before_at,
-                    before_id,
-                    page.limit(),
-                    page.offset()
-                ],
-                draft_row,
-            )?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)
-        })?;
-        rows.into_iter().map(DraftRow::into_listing).collect()
     }
 
     async fn record_transcript(
@@ -1425,109 +1256,7 @@ const ORPHANED: &str = concat!(
 /// The order of a run listing: newest first as a time, then by id.
 const RUN_ORDER: &str = concat!(instant_of!("started_at"), " DESC, id DESC");
 
-/// A row of a draft listing as read, before its texts are checked.
-struct DraftRow {
-    id: i64,
-    run_id: String,
-    repo: String,
-    target: i64,
-    platform: String,
-    draft: DraftRecord,
-    verdict: Option<String>,
-    decision: [String; 4],
-    decided: Option<String>,
-}
-
-/// Reads the columns `list_drafts` selects, in order.
-fn draft_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftRow> {
-    Ok(DraftRow {
-        id: row.get(0)?,
-        run_id: row.get(1)?,
-        repo: row.get(2)?,
-        target: row.get(3)?,
-        draft: DraftRecord {
-            at: row.get(4)?,
-            draft: row.get(5)?,
-            lane: row.get(6)?,
-            model: row.get(7)?,
-            kind: row.get(8)?,
-            path: row.get(9)?,
-            line: row.get(10)?,
-            target: row.get(11)?,
-            body: row.get(12)?,
-            decision: None,
-        },
-        verdict: row.get(13)?,
-        decision: [row.get(14)?, row.get(15)?, row.get(16)?, row.get(17)?],
-        decided: row.get(18)?,
-        platform: row.get(19)?,
-    })
-}
-
-impl DraftRow {
-    fn into_listing(self) -> Result<DraftListing, StoreError> {
-        let Self {
-            id,
-            run_id,
-            repo,
-            target,
-            platform,
-            mut draft,
-            verdict,
-            decision: [checker, reason, same_as, comment_id],
-            decided,
-        } = self;
-        if let Some(verdict) = verdict {
-            draft.decision = Some(DraftDecision {
-                at: decided.unwrap_or_default(),
-                verdict: draft_verdict(&verdict)?,
-                checker,
-                reason,
-                same_as,
-                comment_id,
-            });
-        }
-        Ok(DraftListing {
-            id,
-            run_id,
-            repo,
-            target: to_u64("runs.target", target)?,
-            platform: platform_parse(&platform).ok_or_else(|| StoreError::Corrupt {
-                column: "runs.platform",
-                value: platform.clone(),
-            })?,
-            draft,
-        })
-    }
-}
-
-/// The `WHERE` of a draft count or listing over `drafts d JOIN runs r`,
-/// over parameters 1 to 5: model, lane, repo, since and until, the last
-/// two as [`instant`]s.
-const DRAFT_FILTER: &str = concat!(
-    "(?1 IS NULL OR d.model = ?1) AND (?2 IS NULL OR d.lane = ?2) AND (?3 IS NULL OR r.repo = ?3)",
-    " AND (?4 IS NULL OR ",
-    instant_of!("d.created_at"),
-    " >= ?4) AND (?5 IS NULL OR ",
-    instant_of!("d.created_at"),
-    " < ?5)",
-    // A review loop's findings are the fixer's to judge, not the
-    // fact-check's (#285).
-    " AND d.kind <> 'loop_finding'"
-);
-
-/// One count per verdict, and the waiting ones, in [`DraftRates`] order.
-const VERDICT_SUMS: &str = "SUM(CASE WHEN d.verdict = 'confirmed' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'rejected' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'same_as' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'unchecked' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'not_checked' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'cancelled' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict = 'failed' THEN 1 ELSE 0 END),
-     SUM(CASE WHEN d.verdict IS NULL THEN 1 ELSE 0 END)";
-
-/// The time bounds of a draft or tool call count or listing, as
-/// [`instant`]s.
+/// The time bounds of a tool call count or listing, as [`instant`]s.
 fn window(
     since: Option<&str>,
     until: Option<&str>,
@@ -1616,8 +1345,8 @@ const DAY_DRAFTS: &str = concat!(
 const CALL_FILTER: &str = concat!(
     "(?1 IS NULL OR c.tool = ?1) AND (?2 IS NULL OR c.model = ?2)",
     " AND (?3 IS NULL OR (?3 = 'check' AND c.session LIKE 'check-%')",
-    " OR (?3 = c.session AND c.session IN ('planner', 'address'))",
-    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address')))",
+    " OR (?3 = c.session AND c.session IN ('planner', 'address', 'reviewer', 'fixer'))",
+    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address', 'reviewer', 'fixer')))",
     " AND (?4 IS NULL OR ",
     instant_of!("c.at"),
     " >= ?4) AND (?5 IS NULL OR ",
