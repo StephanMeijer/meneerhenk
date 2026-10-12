@@ -1,5 +1,5 @@
-//! A throwaway checkout of one pull request's branch, for an address run
-//! (§3.5): clone, see what changed, commit, push. Git runs as a child
+//! A throwaway checkout of one pull request's branch, for a push: clone,
+//! see what changed, commit, push. Git runs as a child
 //! process with an empty environment. The credential reaches git through its
 //! environment, never its arguments, so it is not in a process listing, a
 //! log line or anything a model sees.
@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use henk_domain::review::CommitSha;
 use henk_domain::workspace::{Change, ChangeKind};
-use henk_platform::address::{CommitIdentity, GitCredential};
+use henk_platform::push::{CommitIdentity, GitCredential};
 use secrecy::ExposeSecret as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
@@ -805,7 +805,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_changeset_is_applied_and_links_are_not_followed() {
-        use henk_domain::address::WorkspacePath;
+        use henk_domain::path::WorkspacePath;
         use std::os::unix::fs::PermissionsExt as _;
 
         let (remote, head) = bare_remote("henk-git-apply").await;

@@ -15,8 +15,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use henk_domain::address::WorkspacePath;
 use henk_domain::ignore::PathFilter;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::Profile;
 use tokio::process::Command;
 

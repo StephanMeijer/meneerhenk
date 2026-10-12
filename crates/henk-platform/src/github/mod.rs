@@ -1,9 +1,9 @@
 //! GitHub: App authentication, a small REST and GraphQL client, and the writer.
 
-pub mod address;
 pub mod api;
 pub mod app;
 pub mod issues;
+pub mod push;
 pub mod writer;
 
 pub use api::{GitHubApi, NewCheckRun};

@@ -69,7 +69,7 @@ impl GitLabWriter {
 
     /// Whether this writer can do an address run.
     #[must_use]
-    pub fn can_address(&self) -> bool {
+    pub fn can_push(&self) -> bool {
         self.rest.is_some()
     }
 

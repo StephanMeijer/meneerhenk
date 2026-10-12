@@ -13,7 +13,7 @@ use henk_domain::allowlist::RepoRef;
 use henk_domain::review::CommitSha;
 use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Limits, Profile};
-use henk_platform::address::AddressWriter;
+use henk_platform::push::PushWriter;
 use henk_store::RunStore;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -30,7 +30,7 @@ const PLANNER: &str = "planner";
 /// credential, which stays in git's environment on Henk's side and never
 /// reaches a workspace (§8.4).
 async fn fetched(
-    writer: &dyn AddressWriter,
+    writer: &dyn PushWriter,
     remote: &str,
     commit: &CommitSha,
     run: &RunId,
@@ -60,7 +60,7 @@ pub async fn open_for_plan(
         return None;
     }
     let opening = async {
-        let writer = app.address_writer(repo.platform())?;
+        let writer = app.push_writer(repo.platform())?;
         let head = writer
             .repo_head(repo)
             .await

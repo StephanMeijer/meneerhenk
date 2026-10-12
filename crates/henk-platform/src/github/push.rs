@@ -1,16 +1,16 @@
-//! What an address run (§3.5) needs from GitHub beyond the review writer.
+//! What pushing to a pull request needs from GitHub beyond the review writer.
 
-use henk_domain::address::PushFacts;
+use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::Value;
 
 use henk_domain::allowlist::RepoRef;
 
-use crate::address::{
-    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, RepoHead, ThreadNote,
-};
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
+use crate::push::{
+    CommitIdentity, GitCredential, OpenThread, PullFacts, PushWriter, RepoHead, ThreadNote,
+};
 use crate::writer::{PlatformWriter as _, PostedComment, ReviewTarget};
 
 fn text(value: &Value, pointer: &str) -> String {
@@ -28,7 +28,7 @@ fn path_segment(branch: &str) -> String {
 }
 
 #[async_trait::async_trait]
-impl AddressWriter for GitHubWriter {
+impl PushWriter for GitHubWriter {
     async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
         let threads = self
             .api()

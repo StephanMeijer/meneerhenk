@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use henk_domain::address::WorkspacePath;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::{FileMode, Limits, Profile};
 
 use henk_domain::ignore::PathFilter;

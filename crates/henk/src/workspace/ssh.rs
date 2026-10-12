@@ -353,7 +353,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::git::ScratchDir;
     use crate::workspace::Pattern;
-    use henk_domain::address::WorkspacePath;
+    use henk_domain::path::WorkspacePath;
 
     #[tokio::test]
     async fn the_ssh_backend_keeps_the_workspace_contract() {

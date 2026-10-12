@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::address::push_refusal;
 use henk_domain::diff::ReviewDiff;
+use henk_domain::push::push_refusal;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::role::Role;
@@ -32,18 +32,18 @@ use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Profile};
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, GitCredential, PullFacts};
+use henk_platform::push::{GitCredential, PullFacts, PushWriter};
 use henk_session::{ResumableSession, RoundOutcome};
 use henk_store::{Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::address_tools::{AddressContext, AddressState, edit_tools};
 use crate::app::App;
 use crate::cancel::is_cancelled;
 use crate::checks::{describe, run_checks};
 use crate::config::LoopConfig;
 use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
+use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::git::{Checkout, ScratchDir, git_command};
 use crate::loop_tools::{
     FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding,
@@ -110,7 +110,7 @@ pub(crate) async fn run_loop(
         .as_ref()
         .ok_or_else(|| anyhow!("the review loop is not configured"))?;
     let store = &*app.store;
-    let writer = app.address_writer(target.repo.platform())?;
+    let writer = app.push_writer(target.repo.platform())?;
     let facts = writer
         .pull_facts(target)
         .await
@@ -225,14 +225,14 @@ struct Rounds<'a> {
     on: LoopTarget<'a>,
     config: &'a LoopConfig,
     workspace: Arc<dyn Workspace>,
-    fixing: Arc<AddressContext>,
+    fixing: Arc<EditContext>,
     handoff: Arc<Handoff>,
     reviewer: ResumableSession,
     /// None when the reviewer reviews alone.
     executor: Option<ResumableSession>,
     /// Why the reviewer reviews alone, if it does (#307).
     alone: Option<String>,
-    writer: Arc<dyn AddressWriter>,
+    writer: Arc<dyn PushWriter>,
     credential: Option<GitCredential>,
     requester: String,
     /// The round under way, or the last one.
@@ -254,7 +254,7 @@ impl<'a> Rounds<'a> {
         profile: &Profile,
         workspace: &Arc<dyn Workspace>,
         diff: &Arc<ReviewDiff>,
-        writer: Arc<dyn AddressWriter>,
+        writer: Arc<dyn PushWriter>,
         credential: Option<GitCredential>,
     ) -> anyhow::Result<Self> {
         let app = on.app;
@@ -289,16 +289,14 @@ impl<'a> Rounds<'a> {
             &reviewer.tools(Role::Reviewer),
         );
 
-        // The executor edits and checks, as an address run does, without the
-        // review threads.
-        let fixing = Arc::new(AddressContext {
+        // The executor edits and checks.
+        let fixing = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
-            threads: Vec::new(),
             check_commands: address.check_commands.clone(),
             check_timeout: command_limit,
             max_changed_files: address.max_changed_files,
             bash,
-            state: Mutex::new(AddressState::default()),
+            state: Mutex::new(EditState::default()),
         });
         let mut executor_system = format!(
             "{}\n\n{}",
@@ -313,7 +311,7 @@ impl<'a> Rounds<'a> {
             )
         );
         if bash {
-            executor_system = format!("{executor_system}\n\n{}", prompts::ADDRESS_BASH);
+            executor_system = format!("{executor_system}\n\n{}", prompts::EXECUTOR_BASH);
         }
         let mut executor_tools = edit_tools(&fixing);
         executor_tools.add(ListFindings(Arc::clone(&handoff)));

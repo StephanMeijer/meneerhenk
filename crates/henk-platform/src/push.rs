@@ -1,8 +1,9 @@
-//! What an address run (§3.5) reads from a pull request: its open review
-//! threads and the facts that decide whether Henk may push to it.
+//! What Henk reads and writes on a platform to push to a pull request's
+//! branch: the facts that decide whether he may, his commit identity and
+//! git credential, and the open review threads address runs (§3.5) settle.
 
-use henk_domain::address::PushFacts;
 use henk_domain::allowlist::RepoRef;
+use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use secrecy::SecretString;
 
@@ -117,9 +118,11 @@ impl GitCredential {
     }
 }
 
-/// What an address run reads and writes on a platform, besides git.
+/// What Henk reads and writes on a platform to push, besides git: for the
+/// review loop's executor, the planner's copy of the default branch, and
+/// address runs.
 #[async_trait::async_trait]
-pub trait AddressWriter: Send + Sync {
+pub trait PushWriter: Send + Sync {
     /// The facts that decide whether Henk may push, and where to.
     async fn pull_facts(&self, target: &ReviewTarget) -> Result<PullFacts, PlatformError>;
 

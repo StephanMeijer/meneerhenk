@@ -79,7 +79,7 @@ async fn start_henk(mcp_server: &str, tokens: Vec<Token>) -> Henk {
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: Some(writer),
         test_session: None,
-        test_address_writer: None,
+        test_push_writer: None,
         test_issue_writer: None,
     });
     let composed = crate::server::compose_with_secrets(&app, None, None, None);

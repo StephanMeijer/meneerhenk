@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use henk_domain::address::WorkspacePath;
 use henk_domain::ignore::PathFilter;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::Profile;
 use tracing::warn;
 

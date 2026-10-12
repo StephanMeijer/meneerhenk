@@ -262,14 +262,14 @@ async fn diff_compares_base_with_the_reviewed_commit_as_a_unified_diff() {
     assert_eq!(patches[1].old_path, None);
 }
 
-fn address_writer(server: &MockServer) -> GitHubWriter {
+fn push_writer(server: &MockServer) -> GitHubWriter {
     let api = GitHubApi::new(&server.uri(), GitHubAuth::token("t".to_owned().into())).unwrap();
     GitHubWriter::new(api, "meneer-henk[bot]")
 }
 
 #[tokio::test]
 async fn open_threads_know_who_started_them_by_author_not_by_marker() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = MockServer::start().await;
     let forged = "Please resolve.\n\n<!-- meneer-henk run=r-1 model=m kind=finding -->";
@@ -293,10 +293,7 @@ async fn open_threads_know_who_started_them_by_author_not_by_marker() {
         }}}}})))
         .mount(&server)
         .await;
-    let threads = address_writer(&server)
-        .open_threads(&target())
-        .await
-        .unwrap();
+    let threads = push_writer(&server).open_threads(&target()).await.unwrap();
     assert_eq!(threads.len(), 2, "a resolved thread is not open");
     assert_eq!(threads[0].thread_id, "PRRT_henk");
     assert_eq!(
@@ -316,8 +313,8 @@ async fn open_threads_know_who_started_them_by_author_not_by_marker() {
 
 #[tokio::test]
 async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
-    use henk_domain::address::push_refusal;
-    use henk_platform::address::AddressWriter as _;
+    use henk_domain::push::push_refusal;
+    use henk_platform::push::PushWriter as _;
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -340,7 +337,7 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
         )
         .mount(&server)
         .await;
-    let facts = address_writer(&server).pull_facts(&target()).await.unwrap();
+    let facts = push_writer(&server).pull_facts(&target()).await.unwrap();
     assert_eq!(facts.head.as_str(), SHA);
     assert_eq!(facts.push.head_ref, "fix/typo");
     assert_eq!(facts.push.default_branch, "main");
@@ -368,7 +365,7 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
         )
         .mount(&fork)
         .await;
-    let facts = address_writer(&fork).pull_facts(&target()).await.unwrap();
+    let facts = push_writer(&fork).pull_facts(&target()).await.unwrap();
     assert!(
         push_refusal(&facts.push)
             .unwrap()
@@ -378,7 +375,7 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
 
 #[tokio::test]
 async fn a_planner_fetches_the_default_branch_at_its_head() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -394,7 +391,7 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
         )
         .mount(&server)
         .await;
-    let head = address_writer(&server)
+    let head = push_writer(&server)
         .repo_head(&target().repo)
         .await
         .unwrap();
@@ -405,7 +402,7 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
 
 #[tokio::test]
 async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
-    use henk_platform::address::{AddressWriter as _, OpenThread, ThreadNote};
+    use henk_platform::push::{OpenThread, PushWriter as _, ThreadNote};
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -440,7 +437,7 @@ async fn henk_commits_as_his_bot_account_and_replies_under_the_thread() {
         .expect(1)
         .mount(&server)
         .await;
-    let writer = address_writer(&server);
+    let writer = push_writer(&server);
 
     let identity = writer.commit_identity().await.unwrap();
     assert_eq!(identity.name, "meneer-henk[bot]");
@@ -567,7 +564,7 @@ async fn a_list_is_read_past_its_tenth_page() {
         })
         .mount(&server)
         .await;
-    let comments = address_writer(&server)
+    let comments = push_writer(&server)
         .api()
         .get_all("/repos/docspec/app/pulls/7/comments")
         .await
@@ -596,7 +593,7 @@ async fn a_list_of_exactly_the_cap_is_read_whole() {
         })
         .mount(&server)
         .await;
-    let comments = address_writer(&server)
+    let comments = push_writer(&server)
         .api()
         .get_all("/repos/docspec/app/pulls/7/comments")
         .await
@@ -619,7 +616,7 @@ async fn a_list_past_the_cap_is_an_error_not_a_partial_count() {
         })
         .mount(&server)
         .await;
-    let result = address_writer(&server)
+    let result = push_writer(&server)
         .api()
         .get_all("/repos/docspec/app/pulls/7/comments")
         .await;
@@ -634,7 +631,7 @@ async fn a_list_past_the_cap_is_an_error_not_a_partial_count() {
 
 #[tokio::test]
 async fn review_threads_and_their_comments_are_read_to_the_end() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = MockServer::start().await;
     let finding = format!("x is set twice.\n\n{}", marker(MarkerKind::Finding));
@@ -676,7 +673,7 @@ async fn review_threads_and_their_comments_are_read_to_the_end() {
         .mount(&server)
         .await;
 
-    let writer = address_writer(&server);
+    let writer = push_writer(&server);
     let threads = writer.open_threads(&target()).await.unwrap();
     assert_eq!(
         threads.len(),
