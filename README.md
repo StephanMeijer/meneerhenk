@@ -696,10 +696,8 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - tools: how each tool fared per model and kind of session, with error
   and refusal rates, the calls that went wrong with their arguments, and on
   each run every call by turn, linked to that turn of the conversation;
-- review quality: what the fact-check made of the lanes' drafts in reviews
-  from before #309, per model, lane, repository or pull request, the
-  rejection rate, and the rejected drafts with the checker's reason; new
-  reviews have no fact-check;
+- sessions: how often the reviewer and the fixer (and the lanes of
+  reviews from before #309) finished, timed out or did not, and why;
 - a health page from configuration and the database, including whether
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
@@ -775,7 +773,7 @@ such as Claude Code can work with Henk:
 - `cancel_run`;
 - `list_runs`, `get_run`, `get_run_events`, `list_tool_calls`,
   `get_transcript`, `get_event`: what the dashboard shows, as JSON;
-- `review_quality` and `health`.
+- `health`.
 
 Each client has its own token, named in the configuration and kept in an
 environment variable; `scope = "read"` may only read, `"write"` may also
