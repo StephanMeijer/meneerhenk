@@ -187,6 +187,7 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
             "health",
             "list_runs",
             "list_tool_calls",
+            "start_execute",
             "start_plan",
             "start_review",
         ]
@@ -262,6 +263,34 @@ async fn a_write_token_starts_a_review_as_its_own_requester_and_a_read_token_may
 
     let reader = client(&henk, READ).await;
     let (error, _, text) = call(&reader, "start_review", json!({ "url": url })).await;
+    assert!(error);
+    assert_eq!(
+        text,
+        "This token may only read: starting and cancelling need a write token."
+    );
+    henk.app.shutdown.cancel();
+}
+
+/// #329: `start_execute` goes through the execute listener, which says why
+/// nothing started when this Henk takes no issues to pull requests.
+#[tokio::test]
+async fn start_execute_answers_with_the_execute_listeners_outcome() {
+    let henk = start_henk(ON, both()).await;
+    let writer = client(&henk, WRITE).await;
+    let url = "https://github.com/docspec/app/issues/9";
+    let (error, _, text) = call(&writer, "start_execute", json!({ "url": url })).await;
+    assert!(error, "{text}");
+    assert_eq!(text, "Not started: execution is not configured.");
+    let (error, _, text) = call(
+        &writer,
+        "start_execute",
+        json!({ "url": "https://github.com/docspec/app/pull/9" }),
+    )
+    .await;
+    assert!(error, "a pull request is not an issue: {text}");
+
+    let reader = client(&henk, READ).await;
+    let (error, _, text) = call(&reader, "start_execute", json!({ "url": url })).await;
     assert!(error);
     assert_eq!(
         text,
@@ -420,7 +449,7 @@ async fn doctor_says_which_tokens_are_set_and_probe_lists_the_tools() {
             .contains("not set; MCP client reader cannot connect")
     );
     assert!(
-        said[2].0.contains("10 tools at http://127.0.0.1:"),
+        said[2].0.contains("11 tools at http://127.0.0.1:"),
         "{said:?}"
     );
     assert!(said[2].0.ends_with("as claude\")"), "{said:?}");

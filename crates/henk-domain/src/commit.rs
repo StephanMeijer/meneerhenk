@@ -192,8 +192,11 @@ impl Default for TrailerPolicy {
     }
 }
 
-/// The message of a commit Henk pushes (§3.5, §8.6): a subject, what he fixed,
-/// then one blank line and the trailers in a fixed order: `Henk-Run`,
+/// The subject of the commits the review loop pushes (§3.5).
+pub const FIX_SUBJECT: &str = "Fix review findings";
+
+/// The message of a commit Henk pushes (§3.5, §8.6): `subject`, what he
+/// changed, then one blank line and the trailers in a fixed order: `Henk-Run`,
 /// `Requested-by`, the requester's `Co-authored-by` and `Signed-off-by`,
 /// and Henk's `Signed-off-by` last, as the committer's.
 ///
@@ -201,6 +204,7 @@ impl Default for TrailerPolicy {
 /// no line appears twice.
 #[must_use]
 pub fn commit_message(
+    subject: &str,
     fixed: &[String],
     run: &RunId,
     requested_by: Option<&str>,
@@ -208,7 +212,7 @@ pub fn commit_message(
     requester: Option<&CommitPerson>,
     policy: TrailerPolicy,
 ) -> String {
-    let mut message = String::from("Fix review findings\n");
+    let mut message = format!("{}\n", one_line(subject));
     if !fixed.is_empty() {
         message.push('\n');
         for note in fixed {
@@ -294,6 +298,7 @@ mod tests {
     #[test]
     fn the_default_is_henks_signoff_and_the_requesters_coauthor() {
         let message = commit_message(
+            FIX_SUBJECT,
             &["src/a.rs: off-by-one\nin the loop".to_owned()],
             &run(),
             Some("discord:3"),
@@ -323,6 +328,7 @@ mod tests {
             };
             for requester in [None, Some(alice())] {
                 let message = commit_message(
+                    FIX_SUBJECT,
                     &[],
                     &run(),
                     Some("discord:3"),
@@ -358,7 +364,15 @@ mod tests {
             requester_signoff: true,
         };
         for fixed in [vec![], vec!["a".to_owned(), "b".to_owned()]] {
-            let message = commit_message(&fixed, &run(), None, &henk(), Some(&alice()), all);
+            let message = commit_message(
+                FIX_SUBJECT,
+                &fixed,
+                &run(),
+                None,
+                &henk(),
+                Some(&alice()),
+                all,
+            );
             assert!(!message.contains("\n\n\n"), "{message}");
             let block = trailer_block(&message);
             assert_eq!(block.first(), Some(&"Henk-Run: r-20261006-0000beef"));
@@ -380,7 +394,7 @@ mod tests {
             requester_coauthor: true,
             requester_signoff: true,
         };
-        let message = commit_message(&[], &run(), None, &henk(), Some(&twin), all);
+        let message = commit_message(FIX_SUBJECT, &[], &run(), None, &henk(), Some(&twin), all);
         assert_eq!(
             trailer_block(&message),
             [
@@ -393,6 +407,7 @@ mod tests {
     #[test]
     fn a_note_that_looks_like_a_trailer_stays_in_the_body() {
         let message = commit_message(
+            FIX_SUBJECT,
             &["Signed-off-by: mallory <m@evil.example>".to_owned()],
             &run(),
             None,

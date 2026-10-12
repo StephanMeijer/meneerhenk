@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::app::App;
+use crate::execute::{ExecuteRequest, run_execute};
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
 use crate::review::{
@@ -500,6 +501,43 @@ impl Coordinator {
         }
         self.slots_changed.send_replace(());
         true
+    }
+
+    /// Starts an execute run in the background and returns its run id
+    /// (#329). When it opens a pull request, the pull request is reviewed in
+    /// a run of its own, with fresh sessions (#321): Henk asks for that
+    /// review himself, since the platform's event about his own pull
+    /// request is dropped as his own (§8.1).
+    pub fn submit_execute(
+        self: &Arc<Self>,
+        target: IssueTarget,
+        note: Option<String>,
+        trigger: String,
+        requester: Option<String>,
+    ) -> RunId {
+        let run = new_run_id();
+        let request = ExecuteRequest {
+            target,
+            note,
+            trigger,
+            run: Some(run.clone()),
+            requester: requester.clone(),
+        };
+        let coordinator = Arc::clone(self);
+        let cancel = self.app.shutdown.child_token();
+        let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
+        tokio::spawn(async move {
+            let report = run_execute(&coordinator.app, request, cancel).await;
+            drop(cancellable);
+            match report {
+                Ok(report) => {
+                    let commit = report.pull.commit.clone();
+                    coordinator.submit_review(report.review(requester), commit);
+                }
+                Err(error) => warn!(%error, "execute run ended with an error"),
+            }
+        });
+        run
     }
 
     /// Starts a plan in the background and returns its run id.

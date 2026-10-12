@@ -262,6 +262,23 @@ impl HenkMcp {
     }
 
     #[tool(
+        description = "Take a GitHub or GitLab issue to a pull request, as POST /execute does: Henk's executor makes the change on a new branch, opens the pull request and Henk then reviews it. Answers the event id, and the run id once the run started."
+    )]
+    async fn start_execute(
+        &self,
+        Parameters(input): Parameters<StartWithNote>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = StartRequest {
+            kind: "execute".to_owned(),
+            url: input.url,
+            commit: None,
+            note: input.note,
+        };
+        self.start(&parts, &request).await
+    }
+
+    #[tool(
         description = "Cancel a run this Henk process is running. A review ends cancelled with a neutral check."
     )]
     async fn cancel_run(
@@ -499,7 +516,7 @@ impl ServerHandler for HenkMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("meneer-henk", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Meneer Henk reviews pull requests, fixing what the review finds, and plans issues. Start work with start_review or start_plan, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
+                "Meneer Henk reviews pull requests, fixing what the review finds, plans issues, and takes issues to pull requests. Start work with start_review, start_plan or start_execute, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
             )
     }
 }

@@ -2,13 +2,15 @@
 
 use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use henk_domain::allowlist::RepoRef;
 
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
-use crate::push::{CommitIdentity, GitCredential, PullFacts, PushWriter, RepoHead};
+use crate::push::{
+    CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
+};
 use crate::writer::ReviewTarget;
 
 fn text(value: &Value, pointer: &str) -> String {
@@ -126,6 +128,34 @@ impl PushWriter for GitHubWriter {
 
     fn noreply_host(&self) -> Result<String, PlatformError> {
         Ok("github.com".to_owned())
+    }
+
+    async fn open_pull_request(
+        &self,
+        repo: &RepoRef,
+        pull: &NewPull,
+    ) -> Result<OpenedPull, PlatformError> {
+        let opened = self
+            .api()
+            .post(
+                &format!("/repos/{}/pulls", repo.path()),
+                &json!({
+                    "title": pull.title,
+                    "head": pull.head,
+                    "base": pull.base,
+                    "body": pull.body,
+                    "draft": false,
+                }),
+            )
+            .await?;
+        let number = opened
+            .get("number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PlatformError::Decode("pull request without a number".to_owned()))?;
+        Ok(OpenedPull {
+            number,
+            url: text(&opened, "/html_url"),
+        })
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {

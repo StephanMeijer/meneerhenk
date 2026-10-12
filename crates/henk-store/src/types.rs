@@ -1216,6 +1216,7 @@ pub(crate) fn kind_str(kind: RunKind) -> &'static str {
     match kind {
         RunKind::Review => "review",
         RunKind::Plan => "plan",
+        RunKind::Execute => "execute",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
         RunKind::Address => "address",
@@ -1226,6 +1227,7 @@ pub(crate) fn kind_parse(value: &str) -> Option<RunKind> {
     Some(match value {
         "review" => RunKind::Review,
         "plan" => RunKind::Plan,
+        "execute" => RunKind::Execute,
         "discord_turn" => RunKind::DiscordTurn,
         "mail_reply" => RunKind::MailReply,
         "address" => RunKind::Address,

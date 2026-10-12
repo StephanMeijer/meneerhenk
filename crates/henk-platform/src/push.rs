@@ -1,6 +1,7 @@
 //! What Henk reads on a platform to push to a pull request's branch: the
 //! facts that decide whether he may, his commit identity and his git
-//! credential.
+//! credential; and the one write it makes beside the push, opening the pull
+//! request for an issue the executor took on (#329).
 
 use henk_domain::allowlist::RepoRef;
 use henk_domain::push::PushFacts;
@@ -40,6 +41,28 @@ pub struct CommitIdentity {
     pub name: String,
     /// The noreply address that ties the commit to the App's account.
     pub email: String,
+}
+
+/// A pull or merge request Henk opens for a branch he pushed (#329).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPull {
+    /// The branch with the change.
+    pub head: String,
+    /// The branch it goes into: the default branch.
+    pub base: String,
+    /// Its title.
+    pub title: String,
+    /// Its description.
+    pub body: String,
+}
+
+/// The pull or merge request as opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPull {
+    /// Its number (GitLab: iid).
+    pub number: u64,
+    /// Where people read it.
+    pub url: String,
 }
 
 /// What git authenticates with: HTTP Basic with a user name and a token.
@@ -103,4 +126,11 @@ pub trait PushWriter: Send + Sync {
     /// Returns [`PlatformError`] when the writer has no API endpoint to take
     /// the host from.
     fn noreply_host(&self) -> Result<String, PlatformError>;
+
+    /// Opens a ready pull or merge request of `pull` in `repo` (#329).
+    async fn open_pull_request(
+        &self,
+        repo: &RepoRef,
+        pull: &NewPull,
+    ) -> Result<OpenedPull, PlatformError>;
 }

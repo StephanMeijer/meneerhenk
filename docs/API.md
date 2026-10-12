@@ -82,10 +82,11 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 ### `GET /me`
 
 Who is signed in, the CSRF token their actions send, and the kinds of run
-`POST /runs` can start: `review` and `plan`.
+`POST /runs` can start here, as configured: `review` with `[review.loop]`,
+`plan` with `[planning]` and `execute` with `[execution]` (#329).
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan"]}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute"]}
 ```
 
 ### `GET /health`
@@ -104,7 +105,7 @@ Runs, newest first, each with its `lanes` (`name`, `status`) and `stages`
 
 | Query | Meaning |
 |---|---|
-| `kind` | `review`, `plan`, `address` (runs from before #327), `discord_turn` or `mail_reply` |
+| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `address` (runs from before #327), `discord_turn` or `mail_reply` |
 | `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
@@ -178,7 +179,10 @@ One run with everything the run record holds about it:
   `started`, `session` (the planner's draft and the review's rounds),
   `publish` (nothing reaches the issue before it), `done`. A run's
   `loop_stop` and `loop_rounds` say why and after how many rounds a review
-  loop or a plan's review stopped. An address run, from before
+  loop or a plan's review stopped. An execute run goes `requested`,
+  `started`, `checkout`, `session` (the executor), `commit` (the checks
+  and the changeset), `push` (the new branch), `publish` (the pull request
+  opened), `done`; its `summary` names the pull request. An address run, from before
   #327, went `requested`, `started`, `workspace`, `session`, `commit`,
   `push`, `replies`, `done`.
   Runs from before stages were kept have none.
@@ -454,7 +458,7 @@ kept) and its outcomes.
 
 ### `POST /runs`
 
-Starts a review or a plan, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
+Starts a review, a plan or an execute run, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
 apply the allowlist and every refusal. Read the event to see what came of
 it.
 
@@ -462,8 +466,9 @@ it.
 {"kind": "review", "url": "https://github.com/o/r/pull/7", "commit": "abc1234"}
 ```
 
-`kind` is `review` or `plan`. `commit` (reviews) and `note` (plans) are
-optional.
+`kind` is `review`, `plan` or `execute`. `url` is a pull request for a
+review and an issue for the others. `commit` (reviews) and `note` (plans
+and execute runs) are optional.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
 ### `POST /runs/{id}/cancel`

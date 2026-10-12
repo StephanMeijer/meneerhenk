@@ -167,6 +167,15 @@ run_timeout_secs = 3600
 # CLI and API plans run on behalf of this Team Lead.
 requester_id = 523456789012345678
 
+# Taking an issue to a pull request (#329), on request only: the executor
+# works on the default branch, Henk pushes a new branch under branch_prefix
+# and opens a ready pull request that closes the issue, then reviews it. It
+# needs [roles.executor] below; on GitHub the App needs "Pull requests:
+# write", on GitLab create_merge_request in GITLAB_TOOLS.
+[execution]
+run_timeout_secs = 3600
+branch_prefix = "henk/"
+
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then
 # Markdown). dir is relative to this file. A role gets only the skills it
@@ -325,7 +334,7 @@ call_timeout_secs = 60
 [mcp.gitlab-write]
 command = "npx"
 args = ["-y", "@zereight/mcp-gitlab@2.1.68"]
-env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_merge_request_diffs,resolve_merge_request_thread,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels,get_work_item,update_work_item,create_work_item,convert_work_item_type,create_work_item_note" }
+env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "modify", GITLAB_TOOLS = "get_merge_request,mr_discussions,create_merge_request_thread,create_merge_request_note,update_merge_request_note,create_merge_request_discussion_note,create_merge_request_emoji_reaction,create_merge_request_note_emoji_reaction,create_commit_status,get_merge_request_diffs,resolve_merge_request_thread,get_issue,update_issue,create_issue,create_issue_note,create_issue_link,list_labels,get_work_item,update_work_item,create_work_item,convert_work_item_type,create_work_item_note,create_merge_request" }
 pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
 call_timeout_secs = 60
 

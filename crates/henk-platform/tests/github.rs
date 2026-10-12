@@ -357,6 +357,39 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
 }
 
 #[tokio::test]
+async fn an_executor_opens_a_ready_pull_request_for_its_branch() {
+    use henk_platform::push::{NewPull, PushWriter as _};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/docspec/app/pulls"))
+        .and(body_partial_json(json!({
+            "title": "Export runs", "head": "henk/9-export-runs", "base": "main",
+            "body": "Closes #9", "draft": false
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "number": 12, "html_url": "https://github.com/docspec/app/pull/12"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let opened = push_writer(&server)
+        .open_pull_request(
+            &target().repo,
+            &NewPull {
+                head: "henk/9-export-runs".to_owned(),
+                base: "main".to_owned(),
+                title: "Export runs".to_owned(),
+                body: "Closes #9".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.number, 12);
+    assert_eq!(opened.url, "https://github.com/docspec/app/pull/12");
+}
+
+#[tokio::test]
 async fn henk_commits_as_his_bot_account() {
     use henk_platform::push::PushWriter as _;
 

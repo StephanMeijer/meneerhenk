@@ -22,7 +22,7 @@ use henk_events::{
 use henk_store::RunStore;
 
 use super::testing::{FakeWriter, FakeWriters};
-use super::{MentionListener, PlanListener, ReviewListener, Writers};
+use super::{ExecuteListener, MentionListener, PlanListener, ReviewListener, Writers};
 use crate::app::App;
 use crate::config::Config;
 use crate::coordinator::Coordinator;
@@ -59,7 +59,11 @@ impl Harness {
     }
 
     async fn with_writer(writer: FakeWriter) -> Self {
-        let settings = Config::parse(CONFIG).unwrap().into_settings().unwrap();
+        Self::configured(writer, CONFIG).await
+    }
+
+    async fn configured(writer: FakeWriter, config: &str) -> Self {
+        let settings = Config::parse(config).unwrap().into_settings().unwrap();
         let app = Arc::new(
             App::build(settings, Some(Path::new(":memory:")))
                 .await
@@ -80,6 +84,7 @@ impl Harness {
                     writers,
                 )),
                 Arc::new(PlanListener::new(Arc::clone(&coordinator))),
+                Arc::new(ExecuteListener::new(Arc::clone(&coordinator))),
             ],
         );
         Self {
@@ -235,13 +240,14 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     };
     assert!(matches!(out.of("mention"), Handled::Ignored(_)));
     assert!(matches!(out.of("plan"), Handled::Ignored(_)));
+    assert!(matches!(out.of("execute"), Handled::Ignored(_)));
 
     let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
     assert_eq!(recorded.kind, "pull_request");
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
     let outcomes = h.store.outcomes(&out.id).await.unwrap();
-    assert_eq!(outcomes.len(), 3);
+    assert_eq!(outcomes.len(), 4);
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
     assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
@@ -501,4 +507,52 @@ async fn a_plan_request_starts_a_plan() {
         })
         .await;
     assert!(matches!(outside.of("plan"), Handled::Ignored(r) if r.contains("allowlist")));
+}
+
+fn execute_request(owner: &str) -> EventKind {
+    EventKind::ExecuteRequested {
+        target: IssueTarget {
+            repo: repo(&format!("{owner}/app")),
+            number: 9,
+        },
+        note: None,
+        requester: Some("github:1234".into()),
+    }
+}
+
+/// #329: an execute request starts an execute run where `[execution]` is
+/// configured, for an issue on the allowlist, and nothing else does.
+#[tokio::test]
+async fn an_execute_request_starts_an_execute_run_where_execution_is_configured() {
+    let h = Harness::new().await;
+    let off = h.deliver(execute_request("docspec")).await;
+    assert!(
+        matches!(off.of("execute"), Handled::Ignored(r) if r == "execution is not configured"),
+        "{:?}",
+        off.by_listener
+    );
+
+    // App::build reads the model's key: PATH is set wherever tests run.
+    let executor = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\nmodel = \"m\"\n[execution]\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    let h = Harness::configured(
+        FakeWriter {
+            head: SHA.to_owned(),
+            ..FakeWriter::default()
+        },
+        &format!("{CONFIG}{executor}"),
+    )
+    .await;
+    let out = h.deliver(execute_request("docspec")).await;
+    assert!(
+        matches!(out.of("execute"), Handled::Started(_)),
+        "{:?}",
+        out.by_listener
+    );
+    for other in ["review", "plan", "mention"] {
+        assert!(matches!(out.of(other), Handled::Ignored(_)), "{other}");
+    }
+    let outside = h.deliver(execute_request("evil")).await;
+    assert!(matches!(outside.of("execute"), Handled::Ignored(r) if r.contains("allowlist")));
+    let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
+    assert_eq!(recorded.kind, "execute_requested");
 }

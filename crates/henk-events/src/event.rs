@@ -153,6 +153,16 @@ pub enum EventKind {
         /// Who asked, as a stable id.
         requester: Option<String>,
     },
+    /// An issue was asked to be taken to a pull request (#329): API,
+    /// dashboard or MCP.
+    ExecuteRequested {
+        /// The issue.
+        target: IssueTarget,
+        /// A note from the requester.
+        note: Option<String>,
+        /// Who asked, as a stable id.
+        requester: Option<String>,
+    },
     /// A delivery of a kind no parser models. The payload is on the event.
     Unmodelled {
         /// The platform's name for the event.
@@ -171,6 +181,7 @@ impl EventKind {
             Self::Comment { .. } => "comment",
             Self::ReviewRequested { .. } => "review_requested",
             Self::PlanRequested { .. } => "plan_requested",
+            Self::ExecuteRequested { .. } => "execute_requested",
             Self::Unmodelled { .. } => "unmodelled",
             Self::Ignored(_) => "ignored",
         }
@@ -184,7 +195,9 @@ impl EventKind {
                 Some((repo, *number))
             }
             Self::ReviewRequested { target, .. } => Some((&target.repo, target.number)),
-            Self::PlanRequested { target, .. } => Some((&target.repo, target.number)),
+            Self::PlanRequested { target, .. } | Self::ExecuteRequested { target, .. } => {
+                Some((&target.repo, target.number))
+            }
             Self::Unmodelled { .. } | Self::Ignored(_) => None,
         }
     }

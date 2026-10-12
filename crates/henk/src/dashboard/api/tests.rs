@@ -261,7 +261,7 @@ async fn me_says_who_is_signed_in_with_their_token_and_nothing_is_cached() {
     assert_eq!(me.status, StatusCode::OK);
     assert_eq!(
         me.json(),
-        json!({"github_id": ALLOWED, "login": "alice", "csrf": csrf, "startable": ["review", "plan"]})
+        json!({"github_id": ALLOWED, "login": "alice", "csrf": csrf, "startable": []})
     );
     assert_eq!(me.headers[header::CACHE_CONTROL], "no-store");
     assert_eq!(me.headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
@@ -1289,7 +1289,38 @@ async fn a_start_through_the_api_is_an_event_with_who_asked() {
     assert_eq!(event.source, "dashboard");
     assert_eq!(event.requester.as_deref(), Some("github:1234"));
 
+    // #329: an issue taken to a pull request, the same way.
+    let started = act(
+        &f,
+        "/dashboard/api/v1/runs",
+        &cookie,
+        &csrf,
+        &json!({"kind": "execute", "url": "https://github.com/docspec/app/issues/12"}),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::ACCEPTED, "{}", started.body);
+    let id = EventId::parse(started.json()["event_id"].as_str().unwrap()).unwrap();
+    assert!(!outcomes_of(&f, &id, 1).await.is_empty());
+    let event = f
+        .dashboard
+        .app
+        .store
+        .inbound_event(&id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.kind, "execute_requested");
+    assert_eq!(event.requester.as_deref(), Some("github:1234"));
+
     for (body, why) in [
+        (
+            json!({"kind": "execute", "url": "https://github.com/docspec/app/pull/7"}),
+            "a pull request is not an issue",
+        ),
+        (
+            json!({"kind": "execute", "url": "https://github.com/docspec/app/issues/7", "commit": "0123456789abcdef0123456789abcdef01234567"}),
+            "only a review takes a commit",
+        ),
         (
             json!({"kind": "lunch", "url": "https://github.com/docspec/app/pull/7"}),
             "kind",
@@ -1751,11 +1782,35 @@ fn api_types_are_current() {
 }
 
 #[tokio::test]
-async fn a_review_and_a_plan_are_what_can_be_started() {
+async fn what_can_be_started_is_what_this_henk_is_configured_for() {
     let f = fixture("https://127.0.0.1:9");
     let (cookie, _) = viewer(&f);
     let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
-    assert_eq!(me["startable"], json!(["review", "plan"]));
+    assert_eq!(me["startable"], json!([]), "nothing is configured");
+
+    let f = crate::dashboard::tests::fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.review.r#loop = Some(toml::from_str("").unwrap());
+            s.planning = Some(toml::from_str("requester_id = 3").unwrap());
+            s.execution = Some(toml::from_str("").unwrap());
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
+    assert_eq!(me["startable"], json!(["review", "plan", "execute"]));
+
+    let f = crate::dashboard::tests::fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.execution = Some(toml::from_str("").unwrap());
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
+    assert_eq!(me["startable"], json!(["execute"]));
 }
 
 #[tokio::test]

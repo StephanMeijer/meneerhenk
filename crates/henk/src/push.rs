@@ -1,23 +1,27 @@
-//! Committing a checked changeset as Henk and pushing it to a pull
-//! request's branch as a fast-forward, for the review loop (#284, §3.5).
+//! Committing a checked changeset as Henk and pushing it: to a pull
+//! request's branch as a fast-forward, for the review loop (#284, §3.5), or
+//! as a new branch for an issue, for an execute run (#329, §4a).
 //!
-//! Every guard is here, so both get all of them: the branch is read again
-//! just before the push and must not have moved, Henk must still be allowed
-//! to push, the checkout must change exactly the changeset's files, and a
-//! cancel stops it up to the last moment. Nothing is ever forced.
+//! Every guard is here, so both get all of them. A pull request's branch is
+//! read again just before the push and must not have moved, and Henk must
+//! still be allowed to push; a new branch must carry the configured prefix,
+//! must not be the default branch and must not exist yet. The checkout must
+//! change exactly the changeset's files, and a cancel stops it up to the
+//! last moment. Nothing is ever forced.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use henk_domain::allowlist::Platform;
+use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
 use henk_domain::push::push_refusal;
+use henk_domain::review::CommitSha;
 use henk_domain::run::RunId;
 use henk_domain::workspace::Change;
 use henk_platform::ReviewTarget;
-use henk_platform::push::{CommitIdentity, GitCredential, PullFacts, PushWriter};
+use henk_platform::push::{CommitIdentity, GitCredential, PullFacts, PushWriter, RepoHead};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -36,47 +40,74 @@ pub(crate) fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancel
     }
 }
 
-/// Who pushes for one run, to one pull request.
+/// Where a push goes.
+pub(crate) enum PushTo<'a> {
+    /// A pull request's own branch, as the review loop read it.
+    Pull {
+        /// The pull request.
+        target: &'a ReviewTarget,
+        /// What the loop read of it.
+        facts: &'a PullFacts,
+    },
+    /// A new branch for an issue, off the default branch's head (#329).
+    NewBranch {
+        /// The branch's name, under `[execution] branch_prefix`.
+        branch: &'a str,
+        /// The default branch and the head it was taken from.
+        base: &'a RepoHead,
+    },
+}
+
+/// Who pushes for one run, to one repository.
 pub(crate) struct Pusher<'a> {
     pub(crate) app: &'a App,
     pub(crate) writer: Arc<dyn PushWriter>,
-    pub(crate) target: &'a ReviewTarget,
+    pub(crate) repo: &'a RepoRef,
     pub(crate) run: &'a RunId,
     /// Who asked, as the commit message names them.
     pub(crate) requester: &'a str,
 }
 
 impl Pusher<'_> {
-    /// A fresh checkout of the pull request at `facts.head` that nothing
-    /// ran in: only a checked changeset reaches it, and it is what Henk
-    /// commits and pushes.
-    /// `name` names its scratch directory.
+    /// A fresh checkout of `branch` of `remote` at `head` that nothing ran
+    /// in: only a checked changeset reaches it, and it is what Henk commits
+    /// and pushes. `name` names its scratch directory.
     pub(crate) async fn checkout(
+        &self,
+        name: &str,
+        remote: &str,
+        branch: &str,
+        head: &CommitSha,
+        credential: Option<GitCredential>,
+    ) -> anyhow::Result<Checkout> {
+        let dir = ScratchDir::new(name).context("making the checkout directory")?;
+        Checkout::clone_at(dir, remote, branch, head, credential)
+            .await
+            .context("checking out the branch to push")
+    }
+
+    /// [`Pusher::checkout`] of a pull request's branch at the head the loop
+    /// read.
+    pub(crate) async fn checkout_pull(
         &self,
         name: &str,
         facts: &PullFacts,
         credential: Option<GitCredential>,
     ) -> anyhow::Result<Checkout> {
-        let dir = ScratchDir::new(name).context("making the checkout directory")?;
-        Checkout::clone_at(
-            dir,
-            &facts.remote,
-            &facts.push.head_ref,
-            &facts.head,
-            credential,
-        )
-        .await
-        .context("checking out the pull request to push")
+        let (remote, branch) = (&facts.remote, &facts.push.head_ref);
+        self.checkout(name, remote, branch, &facts.head, credential)
+            .await
     }
 
-    /// Applies the changeset to the checkout, commits as Henk with `notes`
-    /// in the message, makes sure the branch has not moved, and pushes.
-    /// Returns the commit, which is in [`App::own_pushes`] before it leaves
-    /// when the run reviews it itself.
+    /// Applies the changeset to the checkout, commits as Henk with `subject`
+    /// and `notes` in the message, makes sure Henk may push there, and
+    /// pushes. Returns the commit, which is in [`App::own_pushes`] before it
+    /// leaves.
     pub(crate) async fn commit_and_push(
         &self,
         checkout: &Checkout,
-        facts: &PullFacts,
+        to: &PushTo<'_>,
+        subject: &str,
         notes: &[String],
         changes: &[Change],
         cancel: &CancellationToken,
@@ -85,13 +116,14 @@ impl Pusher<'_> {
             return Err(anyhow!("pushing needs [roles.executor]"));
         };
         let henk = self.henk_identity(config).await?;
-        let policy = config.trailer_policy(&self.target.repo);
+        let policy = config.trailer_policy(self.repo);
         let requester = if policy.requester_coauthor || policy.requester_signoff {
             self.requester_identity(config).await?
         } else {
             None
         };
         let message = commit_message(
+            subject,
             notes,
             self.run,
             Some(self.requester),
@@ -103,22 +135,7 @@ impl Pusher<'_> {
             name: henk.name().to_owned(),
             email: henk.email().to_string(),
         };
-        // Read again just before pushing: a head that moved means someone
-        // else pushed, and their work is not overwritten.
-        let now = self
-            .writer
-            .pull_facts(self.target)
-            .await
-            .context("reading the pull request again")?;
-        if now.head != facts.head {
-            return Err(anyhow!(
-                "the branch moved to {} while I worked",
-                now.head.short()
-            ));
-        }
-        if let Some(why) = push_refusal(&now.push) {
-            return Err(anyhow!("I may no longer push: {why}"));
-        }
+        let branch = self.may_push(checkout, to).await?;
         checkout.apply(changes).context("applying the change")?;
         let mut in_checkout = checkout
             .changed_files()
@@ -143,12 +160,62 @@ impl Pusher<'_> {
         // Known before the platform tells anyone, so its event about this
         // commit finds it (#284).
         self.app.own_pushes.record(&sha);
-        checkout
-            .push(&facts.push.head_ref)
-            .await
-            .context("pushing")?;
+        checkout.push(branch).await.context("pushing")?;
         info!(commit = %sha, files = changes.len(), "pushed");
         Ok(sha)
+    }
+
+    /// The branch Henk pushes to, once it is sure he may.
+    async fn may_push<'b>(
+        &self,
+        checkout: &Checkout,
+        to: &'b PushTo<'_>,
+    ) -> anyhow::Result<&'b str> {
+        match to {
+            PushTo::Pull { target, facts } => {
+                // Read again just before pushing: a head that moved means
+                // someone else pushed, and their work is not overwritten.
+                let now = self
+                    .writer
+                    .pull_facts(target)
+                    .await
+                    .context("reading the pull request again")?;
+                if now.head != facts.head {
+                    return Err(anyhow!(
+                        "the branch moved to {} while I worked",
+                        now.head.short()
+                    ));
+                }
+                if let Some(why) = push_refusal(&now.push) {
+                    return Err(anyhow!("I may no longer push: {why}"));
+                }
+                Ok(facts.push.head_ref.as_str())
+            }
+            PushTo::NewBranch { branch, base } => {
+                let prefix = self
+                    .app
+                    .settings
+                    .execution
+                    .as_ref()
+                    .map(|e| e.branch_prefix.as_str())
+                    .ok_or_else(|| anyhow!("a new branch needs [execution]"))?;
+                if !branch.starts_with(prefix) || branch.len() == prefix.len() {
+                    return Err(anyhow!("{branch} is not under {prefix}"));
+                }
+                if *branch == base.default_branch {
+                    return Err(anyhow!("{branch} is the default branch"));
+                }
+                // Somebody's branch, or an earlier run's: never pushed over.
+                if checkout
+                    .remote_has_branch(branch)
+                    .await
+                    .context("looking for the branch")?
+                {
+                    return Err(anyhow!("the branch {branch} already exists"));
+                }
+                Ok(branch)
+            }
+        }
     }
 
     /// Who Henk commits and signs off as: `[address.identity]`, or the
@@ -179,7 +246,7 @@ impl Pusher<'_> {
         if let Some(person) = committer.and_then(|c| c.commit_as.clone()) {
             return Ok(Some(person));
         }
-        let platform = self.target.repo.platform();
+        let platform = self.repo.platform();
         let account = committer.and_then(|c| match platform {
             Platform::GitHub => c.github_id,
             Platform::GitLab => c.gitlab_id,

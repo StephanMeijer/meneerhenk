@@ -15,7 +15,8 @@ login: string,
  */
 csrf: string, 
 /**
- * What `POST /runs` can start here: `review` and `plan`.
+ * What `POST /runs` can start here, as configured: `review` with
+ * `[review.loop]`, `plan` with `[planning]`, `execute` with `[execution]`.
  */
 startable: Array<string>, };
 
@@ -1008,7 +1009,7 @@ detail: string, };
 
 export type StartRequest = { 
 /**
- * `review`, `plan` or `address`.
+ * `review`, `plan` or `execute` (#329).
  */
 kind: string, 
 /**
@@ -1020,7 +1021,7 @@ url: string,
  */
 commit?: string | null, 
 /**
- * A note for a plan.
+ * A note for a plan or an execute run.
  */
 note?: string | null, };
 

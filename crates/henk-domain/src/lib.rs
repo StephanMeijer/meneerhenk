@@ -11,6 +11,7 @@ pub mod allowlist;
 pub mod commit;
 pub mod diff;
 pub mod discord;
+pub mod execute;
 pub mod identity;
 pub mod ignore;
 pub mod mail;

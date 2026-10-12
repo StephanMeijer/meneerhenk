@@ -26,8 +26,13 @@
       line: "The reviewer and the executor fix what holds on the pull request's branch.",
     },
     { kind: 'plan', label: 'Plan an issue', line: 'Henk writes a plan on the issue.' },
+    {
+      kind: 'execute',
+      label: 'Take an issue to a pull request',
+      line: 'The executor makes the change on a new branch, Henk opens the pull request and reviews it.',
+    },
   ];
-  const BUTTONS: Record<Start, string> = { review: 'Start review', plan: 'Start plan' };
+  const BUTTONS: Record<Start, string> = { review: 'Start review', plan: 'Start plan', execute: 'Take it on' };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
   let kind: Start = $state('review');
@@ -85,7 +90,7 @@
   </fieldset>
 
   <label class="field">
-    <span>{kind === 'plan' ? 'Issue URL' : 'Pull request URL'}</span>
+    <span>{kind === 'review' ? 'Pull request URL' : 'Issue URL'}</span>
     <input
       name="url"
       required
@@ -93,7 +98,7 @@
       bind:value={url}
       aria-invalid={!fits}
       aria-describedby="start-url-check"
-      placeholder={kind === 'plan' ? 'https://github.com/owner/name/issues/52' : 'https://github.com/owner/name/pull/7'}
+      placeholder={kind === 'review' ? 'https://github.com/owner/name/pull/7' : 'https://github.com/owner/name/issues/52'}
     >
     <span id="start-url-check" class="check" aria-live="polite">
       {#if check !== null && 'ok' in check}
@@ -111,7 +116,7 @@
     </label>
   {:else}
     <label class="field">
-      <span>Note <span class="muted">optional, Henk reads it with the {kind === 'plan' ? 'issue' : 'pull request'}</span></span>
+      <span>Note <span class="muted">optional, Henk reads it with the issue</span></span>
       <textarea name="note" rows="3" bind:value={note}></textarea>
     </label>
   {/if}

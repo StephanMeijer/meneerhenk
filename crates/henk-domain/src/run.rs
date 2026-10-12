@@ -124,6 +124,8 @@ pub enum RunKind {
     Review,
     /// A plan for one issue (§4).
     Plan,
+    /// One issue taken to a pull request by the executor (§4a, #329).
+    Execute,
     /// One Discord turn (§5.2).
     DiscordTurn,
     /// One mail reply (§6).
@@ -133,11 +135,20 @@ pub enum RunKind {
     Address,
 }
 
+impl RunKind {
+    /// Whether the run's target is an issue rather than a pull request.
+    #[must_use]
+    pub fn is_about_an_issue(self) -> bool {
+        matches!(self, Self::Plan | Self::Execute)
+    }
+}
+
 impl fmt::Display for RunKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Review => "review",
             Self::Plan => "plan",
+            Self::Execute => "execute",
             Self::DiscordTurn => "discord turn",
             Self::MailReply => "mail reply",
             Self::Address => "address",

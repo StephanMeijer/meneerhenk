@@ -36,6 +36,10 @@ pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
 /// `{{repo}}` and `{{max_files}}` are filled in.
 pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 
+/// Instructions for the executor taking an issue to a pull request (#329).
+/// `{{ref}}`, `{{repo}}`, `{{branch}}` and `{{max_files}}` are filled in.
+pub const EXECUTE: &str = include_str!("../prompts/execute.md");
+
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
 pub const SKILLS: &str = include_str!("../prompts/skills.md");
@@ -86,6 +90,10 @@ mod tests {
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
         assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
+        assert!(henk_domain::text::is_in_style(EXECUTE));
+        for tool in ["edit_file", "run_checks", "propose_pull_request"] {
+            assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");
+        }
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER_WORKSPACE));
         for tool in ["raise_point", "finish_round", "reopens"] {
             assert!(PLAN_REVIEWER.contains(&format!("`{tool}`")), "{tool}");

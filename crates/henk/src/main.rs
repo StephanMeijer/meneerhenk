@@ -16,9 +16,12 @@ mod dashboard;
 mod diff_tools;
 mod doctor;
 mod edit_tools;
+mod execute;
+mod execute_tools;
 mod git;
 mod hooks;
 mod ids;
+mod issue_runs;
 mod listeners;
 mod live;
 mod live_session;
@@ -105,6 +108,14 @@ enum Command {
         /// Issue URL, such as <https://github.com/owner/repo/issues/9>
         url: String,
         /// A note for the planner, as a colleague would give in conversation.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Take one issue to a pull request now, then review it (§4a, #329).
+    Execute {
+        /// Issue URL, such as <https://github.com/owner/repo/issues/9>
+        url: String,
+        /// A note for the executor, as a colleague would give in conversation.
         #[arg(long)]
         note: Option<String>,
     },
@@ -291,6 +302,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Review { urls, commit } => cmd_review(&cli.config, &urls, commit).await,
         Command::Plan { url, note } => cmd_plan(&cli.config, &url, note).await,
+        Command::Execute { url, note } => cmd_execute(&cli.config, &url, note).await,
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
@@ -475,6 +487,38 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
     println!("plan written: {}", report.planned);
     for change in report.changes {
         println!("- {change}");
+    }
+    Ok(())
+}
+
+async fn cmd_execute(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let target = parse_issue_url(url, &urls::Hosts::from_settings(&settings))?;
+    let app = App::build(settings, None).await?;
+    liveness::reap_orphans(&app).await;
+    interrupt_on_ctrl_c(app.shutdown.clone());
+    let report = execute::run_execute(
+        &app,
+        execute::ExecuteRequest {
+            target,
+            note,
+            trigger: "cli".to_owned(),
+            run: None,
+            requester: None,
+        },
+        app.shutdown.child_token(),
+    )
+    .await?;
+    println!("run {}", report.run);
+    println!(
+        "pull request #{} opened: {}",
+        report.pull.target.number, report.pull.url
+    );
+    // The pull request is reviewed in a run of its own, as any is (#321).
+    let review = review::run_review(&app, report.review(None), app.shutdown.child_token()).await?;
+    println!("review run {}", review.run);
+    if let Some(summary) = review.summary {
+        println!("{summary}");
     }
     Ok(())
 }
