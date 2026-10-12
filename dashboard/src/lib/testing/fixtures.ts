@@ -49,8 +49,8 @@ export function runDetail(status = 'finished'): RunDetail {
     check_id: '4711',
     heartbeat_at: null,
     sessions: [
-      { name: 'lane-a', role: 'lane', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 15, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
-      { name: 'lane-b', role: 'lane', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
+      { name: 'lane-a', role: 'lane', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 15, reasoning_tokens: 0, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
+      { name: 'lane-b', role: 'lane', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
     ],
     rounds: [],
     findings: [{ at: '2026-10-07T10:02:00Z', session: 'lane-a', path: 'src/a.rs', line: 4, comment_id: 'c-77', action: 'posted' }],
@@ -84,6 +84,7 @@ function session(name: string, role: string, overrides: Partial<Session> = {}): 
     output_tokens: 100,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
+    reasoning_tokens: 0,
     error: null,
     last_call_turn: null,
     started_at: '2026-10-07T10:01:00Z',

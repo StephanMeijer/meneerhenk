@@ -109,6 +109,7 @@ fn stored_usage(usage: &Usage) -> TokenUsage {
         output: usage.output_tokens,
         cache_read: usage.cache_read_tokens,
         cache_write: usage.cache_write_tokens,
+        reasoning: usage.reasoning_tokens,
     }
 }
 
