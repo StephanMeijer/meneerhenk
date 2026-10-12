@@ -125,7 +125,9 @@ loop did and the findings that still stand are in the check and the run. A
 pull request the loop may not push to (a fork, the default or a protected
 branch) or whose branch moved after the review was queued is reviewed by
 the reviewer alone: one round at the reviewed commit, nothing pushed, and
-its findings stand in the check with why they were not fixed (#307).
+its findings stand in the check with why they were not fixed (#307). On
+GitLab, whose commit status carries only the count, that summary is the
+summary note instead, as a lane review's is.
 
 ### 3.3 What the pull/merge request shows
 
@@ -626,7 +628,8 @@ surprising reading of the earlier wording; veto any that is wrong.
   the same refusals, and Henk's persona says so instead of "never change
   code". A pull request the loop may not push to is reviewed by the
   reviewer alone, not by the lanes, and the check carries the loop's
-  report and the findings that still stand (#307). The lanes go in #309.
+  report and the findings that still stand (#307); on GitLab the reviewer
+  alone posts them as the summary note. The lanes go in #309.
 
 ## Revision notes (2026-10-07)
 
