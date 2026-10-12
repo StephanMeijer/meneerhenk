@@ -88,8 +88,7 @@ where
 }
 
 /// Builds the HTTP client one endpoint's models share (#368). It has no
-/// overall timeout: each model sets its own on every request
-/// ([`prepared`]).
+/// overall timeout: each model sets its own on every request.
 ///
 /// # Errors
 ///
