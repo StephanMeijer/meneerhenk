@@ -2532,8 +2532,11 @@ impl Settings {
         for (id, model) in &self.models {
             let _ = writeln!(
                 out,
-                "  {id}: {:?} {} at {} (key from ${})",
-                model.provider, model.model, model.base_url, model.api_key_env
+                "  {id}: {} {} at {} (key from ${})",
+                model.provider.as_str(),
+                model.model,
+                model.base_url,
+                model.api_key_env
             );
         }
         self.describe_limits(&mut out);
@@ -2833,7 +2836,7 @@ github_owners = ["docspec"]
         );
 
         let address = Config::parse(&format!(
-            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
+            "{MINIMAL}[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
         ))
         .and_then(Config::into_settings)
         .unwrap();
@@ -2843,7 +2846,7 @@ github_owners = ["docspec"]
     #[test]
     fn the_executor_is_configured_and_checked() {
         let with_model = format!(
-            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
+            "{MINIMAL}[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
         );
         let parse = |extra: &str| {
             Config::parse(&format!("{with_model}{extra}")).and_then(Config::into_settings)
@@ -2947,7 +2950,7 @@ github_owners = ["docspec"]
         assert!(!described.contains("no requester trailers"), "{described}");
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     fn address(person: &str, extra: &str) -> Result<Settings, ConfigError> {
         let text = format!("{MINIMAL}{}{extra}", ADDRESS.replace("PERSON", person));
@@ -3922,14 +3925,37 @@ github_owners = ["docspec"]
     }
 
     #[test]
+    fn the_openai_provider_is_spelled_openai() {
+        let model = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\n";
+        let text = format!("{MINIMAL}\n{model}");
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.models.get("m").unwrap().provider, Provider::OpenAi);
+        assert!(
+            settings.describe().contains("  m: openai gpt at https://x"),
+            "config check names it as configured: {}",
+            settings.describe()
+        );
+        let old = text.replace("\"openai\"", "\"open_ai\"");
+        let error = Config::parse(&old).unwrap_err();
+        let said = error.to_string();
+        assert!(matches!(error, ConfigError::Syntax(_)), "{said}");
+        assert!(
+            said.contains("open_ai") && said.contains("`openai`"),
+            "no alias: the message names the spelling to use (#364): {said}"
+        );
+    }
+
+    #[test]
     fn effort_is_for_anthropic_models_only() {
-        let model = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\neffort = \"high\"\n";
+        let model = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\neffort = \"high\"\n";
         let text = format!("{MINIMAL}\n{model}");
         assert!(matches!(
             Config::parse(&text).and_then(Config::into_settings),
             Err(ConfigError::Model(..))
         ));
-        let text = text.replace("open_ai", "anthropic");
+        let text = text.replace("openai", "anthropic");
         let settings = Config::parse(&text)
             .and_then(Config::into_settings)
             .unwrap();

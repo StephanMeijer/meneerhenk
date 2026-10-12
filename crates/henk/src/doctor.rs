@@ -741,14 +741,14 @@ mod tests {
             .unwrap()
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     #[tokio::test]
     async fn a_model_only_address_runs_use_is_not_unused() {
         let checks = check_models(&settings(ADDRESS), false).await;
         assert!(checks.iter().all(|c| c.name != "models"), "{checks:?}");
         let spare = format!(
-            "{ADDRESS}[models.spare]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"y\"\n"
+            "{ADDRESS}[models.spare]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"y\"\n"
         );
         let checks = check_models(&settings(&spare), false).await;
         let unused = checks.iter().find(|c| c.name == "models").unwrap();

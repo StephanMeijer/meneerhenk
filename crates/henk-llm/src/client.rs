@@ -26,10 +26,23 @@ pub trait ModelClient: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
-    /// OpenAI chat completions, and everything compatible with it.
+    /// OpenAI chat completions, and everything compatible with it. Spelled
+    /// `openai` in configuration, as everyone writes it (#364).
+    #[serde(rename = "openai")]
     OpenAi,
     /// Anthropic Messages.
     Anthropic,
+}
+
+impl Provider {
+    /// The name configuration spells it with: `openai` or `anthropic`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
 }
 
 /// Which parameter carries the output cap on OpenAI-compatible endpoints.

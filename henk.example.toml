@@ -64,7 +64,7 @@ write_mcp_server = "gitlab-write"
 # Models. The roles (the reviewer, the executor and the planner) refer to
 # one of these by id.
 [models.proxy-fast]
-provider = "open_ai"
+provider = "openai"
 base_url = "https://llm3.9xx.nl/v1"
 api_key_env = "LLM3_API_KEY"
 model = "fast-model"

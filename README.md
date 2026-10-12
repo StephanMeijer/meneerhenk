@@ -385,6 +385,17 @@ email = "henk@example.com"
   refused. The reviewer reviews plans as well as pull requests, with the
   same `[roles.reviewer]` settings.
 
+### The OpenAI provider is `openai`
+
+Since #364 the provider for OpenAI and compatible endpoints is spelled
+`openai`, as everyone writes it. `provider = "open_ai"` is refused when the
+configuration loads, with a message that names `openai`; there is no alias.
+
+```toml
+[models.gpt]
+provider = "openai"
+```
+
 ## Check a deployment
 
 ```sh
