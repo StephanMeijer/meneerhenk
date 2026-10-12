@@ -19,5 +19,5 @@ pub use types::{
     Page, PruneCounts, RoundRecord, RunFilter, RunKey, RunRecord, RunStatus, SessionEnding,
     SessionRecord, SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite,
     StoreError, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallListing, ToolCallRecord,
-    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary,
+    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, UNKNOWN_TOOL, counted_as,
 };

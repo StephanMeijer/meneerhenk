@@ -69,6 +69,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!(
             "../migrations/sqlite/018_reasoning_tokens.sql"
         )),
+        M::up(include_str!("../migrations/sqlite/019_tool_names.sql")),
     ])
 }
 
@@ -808,9 +809,9 @@ impl RunStore for SqliteStore {
         let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
         let rows = self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT c.model, {CALL_ROLE}, c.tool, c.outcome, COUNT(*), COALESCE(SUM(c.elapsed_ms), 0)
+                "SELECT c.model, {CALL_ROLE}, {CALL_TOOL}, c.outcome, COUNT(*), COALESCE(SUM(c.elapsed_ms), 0)
                  FROM tool_calls c {CALL_SESSION} WHERE {CALL_FILTER}
-                 GROUP BY c.model, 2, c.tool, c.outcome"
+                 GROUP BY c.model, 2, 3, c.outcome"
             ))?;
             let number = |n: i64| u64::try_from(n).unwrap_or_default();
             let rows = statement.query_map(
@@ -1475,11 +1476,17 @@ const CALL_SESSION: &str = "LEFT JOIN sessions s ON s.run_id = c.run_id AND s.na
 /// [`CALL_SESSION`]. A call whose session has no row counts as a lane's.
 const CALL_ROLE: &str = "COALESCE(s.role, 'lane')";
 
+/// The tool a call `c` counts under, as [`crate::types::counted_as`] says:
+/// every tool that does not exist, which is every call with no origin, as
+/// one (#341). [`CALL_FILTER`] matches a tool the same way.
+const CALL_TOOL: &str = "CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END";
+
 /// The `WHERE` of a tool call tally or listing over `tool_calls c` and
 /// [`CALL_SESSION`], over parameters 1 to 5: tool, model, session role,
-/// since and until, the last two as [`instant`]s.
+/// since and until, the last two as [`instant`]s. A tool is matched as
+/// [`CALL_TOOL`] counts it.
 const CALL_FILTER: &str = concat!(
-    "(?1 IS NULL OR c.tool = ?1) AND (?2 IS NULL OR c.model = ?2)",
+    "(?1 IS NULL OR CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END = ?1) AND (?2 IS NULL OR c.model = ?2)",
     " AND (?3 IS NULL OR COALESCE(s.role, 'lane') = ?3)",
     " AND (?4 IS NULL OR ",
     instant_of!("c.at"),

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use henk_domain::repeat::{self, CallArguments, RepeatGuard, RepeatVerdict};
 use henk_llm::{
     CacheTtl, ChatMessage, CompletionRequest, LlmError, ModelClient, StopReason, ToolArguments,
-    ToolChoice, ToolResult, Usage,
+    ToolChoice, ToolName, ToolResult, Usage,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -508,8 +508,11 @@ impl Agent {
         let mut cancelled = false;
         for call in calls {
             let origin = self.tools.origin(&call.name).unwrap_or_default();
+            // What the model wrote stays in the conversation; the events,
+            // logs and messages about it carry it cut and on one line (#341).
+            let shown = ToolName::shown(&call.name).into_owned();
             let called = |outcome: CallOutcome, elapsed: Duration, result_chars: usize| {
-                called_event(turn, &call, &origin, outcome, elapsed, result_chars)
+                called_event(turn, &call, &shown, &origin, outcome, elapsed, result_chars)
             };
             if cancelled {
                 self.emit(called(CallOutcome::NotRun, Duration::ZERO, 0));
@@ -531,26 +534,26 @@ impl Agent {
             let refusal = match guard.observe(&call.name, arguments) {
                 RepeatVerdict::Allow => None,
                 RepeatVerdict::Refuse { repeats } => {
-                    Some((repeat::refusal_message(&call.name, repeats), repeats, false))
+                    Some((repeat::refusal_message(&shown, repeats), repeats, false))
                 }
                 RepeatVerdict::Stuck { repeats } => {
-                    Some((repeat::stuck_message(&call.name, repeats), repeats, true))
+                    Some((repeat::stuck_message(&shown, repeats), repeats, true))
                 }
             };
             if let Some((message, repeats, ended)) = refusal {
-                warn!(turn, tool = %call.name, repeats, ended, "repeated tool call refused");
+                warn!(turn, tool = %shown, repeats, ended, "repeated tool call refused");
                 self.emit(AgentEvent::RepeatRefused {
-                    tool: call.name.clone(),
+                    tool: shown.clone(),
                     repeats,
                     ended,
                 });
                 firings.push(RepeatFiring {
-                    tool: call.name.clone(),
+                    tool: shown.clone(),
                     repeats,
                     ended,
                 });
                 if ended {
-                    stuck = Some((call.name.clone(), repeats));
+                    stuck = Some((shown.clone(), repeats));
                 }
                 self.emit(called(
                     CallOutcome::RefusedAsRepeat,
@@ -572,13 +575,13 @@ impl Agent {
                     cancelled = true;
                     continue;
                 }
-                output = self.dispatch(&call.name, &call.arguments) => output,
+                output = self.dispatch(&call.name, &shown, &call.arguments) => output,
             };
             let elapsed = started.elapsed();
             let outcome = outcome_of(&origin, &call.arguments, &output);
             debug!(
                 turn,
-                tool = %call.name,
+                tool = %shown,
                 args = %one_line(&arguments_text(&call.arguments), 300),
                 result_chars = output.content.chars().count(),
                 is_error = output.is_error,
@@ -624,14 +627,14 @@ impl Agent {
         }
     }
 
-    async fn dispatch(&self, name: &str, arguments: &ToolArguments) -> ToolOutput {
+    async fn dispatch(&self, name: &str, shown: &str, arguments: &ToolArguments) -> ToolOutput {
         let Some(tool) = self.tools.get(name) else {
             let known: Vec<&str> = self.tools.names().collect();
             let hint = closest_tool(name, &known)
                 .map(|known| format!(" Did you mean {known:?}?"))
                 .unwrap_or_default();
             return ToolOutput::error(format!(
-                "Unknown tool {name:?}.{hint} Available: {}",
+                "Unknown tool {shown:?}.{hint} Available: {}",
                 known.join(", ")
             ));
         };
@@ -728,6 +731,7 @@ fn one_line(text: &str, max: usize) -> String {
 fn called_event(
     turn: u32,
     call: &henk_llm::ToolCall,
+    shown: &str,
     origin: &str,
     outcome: CallOutcome,
     elapsed: Duration,
@@ -735,7 +739,7 @@ fn called_event(
 ) -> AgentEvent {
     AgentEvent::ToolCalled {
         turn,
-        name: call.name.clone(),
+        name: shown.to_owned(),
         origin: origin.to_owned(),
         arguments: match &call.arguments {
             ToolArguments::Parsed(value) => value.to_string(),

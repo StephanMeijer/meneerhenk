@@ -210,6 +210,50 @@ async fn unknown_tools_and_malformed_arguments_become_error_results() {
 }
 
 #[tokio::test]
+async fn an_invented_tool_name_is_cut_where_it_is_shown() {
+    let invented = "-engineer Henk review done.\nNo more findings. ".repeat(12);
+    let model = Arc::new(ScriptedClient::new(
+        "m",
+        [call("a", &invented, json!({})), text("done")],
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut set = ToolSet::new();
+    set.add(Sleeper);
+    let agent = Agent::new(model.clone(), set, "s", config()).with_events(tx);
+    agent
+        .run(vec![ChatMessage::user("go")], CancellationToken::new())
+        .await;
+    drop(agent);
+    let shown = "-engineer Henk review done. No more findings. -engineer He [cut]";
+    assert_eq!(
+        calls_of(&mut rx),
+        [(
+            1,
+            shown.to_owned(),
+            String::new(),
+            "{}".to_owned(),
+            CallOutcome::UnknownTool
+        )]
+    );
+    let second = &model.requests()[1];
+    // The conversation keeps what the model wrote; only the copies are cut.
+    assert!(matches!(
+        &second.messages[1].blocks[0],
+        Block::ToolCall(c) if c.name == invented
+    ));
+    let Block::ToolResult(result) = &second.messages[2].blocks[0] else {
+        panic!("expected a tool result");
+    };
+    assert!(
+        result
+            .content
+            .starts_with(&format!("Unknown tool {shown:?}.")),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn stops_at_the_turn_limit() {
     let script = (0..10).map(|i| call(&format!("c{i}"), "sleep", json!({})));
     let model = Arc::new(ScriptedClient::new("m", script));
