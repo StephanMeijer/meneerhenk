@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
+use henk_domain::commit::FIX_SUBJECT;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::push::push_refusal;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
@@ -49,11 +50,10 @@ use crate::loop_tools::{
     FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding,
     executor_continuation, finding_text, reviewer_continuation, verdict_text,
 };
-use crate::push::{Pusher, stop_if_cancelled};
+use crate::push::{PushTo, Pusher, stop_if_cancelled};
 use crate::roles::equip_and_grant;
 use crate::stages;
-use crate::workspace::traced::Traced;
-use crate::workspace::{Workspace, checked_changeset, never_exported, setup};
+use crate::workspace::{Workspace, checked_changeset, never_exported};
 
 /// The most of a pushed commit's patch the reviewer is shown in its resume
 /// message; the rest it reads in the workspace.
@@ -204,20 +204,7 @@ async fn open_workspace(
         }
     }
     .context("checking out the pull request")?;
-    let opened = app
-        .workspace_provider
-        .open(checkout.path(), profile)
-        .await
-        .context("opening the workspace")?;
-    let traced: Arc<dyn Workspace> =
-        Arc::new(Traced::new(opened, Arc::clone(&app.store), run.clone()));
-    match setup::prepare(&traced, profile).await {
-        Ok(ready) => Ok(ready),
-        Err(error) => {
-            traced.close().await;
-            Err(error)
-        }
-    }
+    crate::workspace::open_prepared(app, run, &checkout, profile).await
 }
 
 /// The loop's state across rounds.
@@ -745,19 +732,21 @@ impl<'a> Rounds<'a> {
         let pusher = Pusher {
             app,
             writer: Arc::clone(&self.writer),
-            target: self.on.target,
+            repo: &self.on.target.repo,
             run: self.on.run,
             requester: &self.requester,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher
-            .checkout(&name, facts, self.credential.clone())
+            .checkout_pull(&name, facts, self.credential.clone())
             .await?;
         let notes = [format!("review loop round {}", self.round)];
-        let sha = match pusher
-            .commit_and_push(&checkout, facts, &notes, &changes, cancel)
-            .await
-        {
+        let to = PushTo::Pull {
+            target: self.on.target,
+            facts,
+        };
+        let pushing = pusher.commit_and_push(&checkout, &to, FIX_SUBJECT, &notes, &changes, cancel);
+        let sha = match pushing.await {
             Ok(sha) => sha,
             Err(error) if is_cancelled(&error) => return Err(error),
             Err(error) => {

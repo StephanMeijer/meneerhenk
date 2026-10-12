@@ -199,9 +199,19 @@ pub async fn not_found() -> ApiError {
     ApiError::not_found("No such API route.")
 }
 
-/// Who is signed in, their CSRF token, and what they can start here.
+/// Who is signed in, their CSRF token, and what they can start here: what
+/// this Henk is configured for.
 async fn me(State(dashboard): State<Arc<Dashboard>>, ApiViewer(viewer): ApiViewer) -> Json<Me> {
-    let startable = vec!["review".to_owned(), "plan".to_owned()];
+    let settings = &dashboard.app.settings;
+    let startable = [
+        ("review", settings.review.r#loop.is_some()),
+        ("plan", settings.planning.is_some()),
+        ("execute", settings.execution.is_some()),
+    ]
+    .into_iter()
+    .filter(|(_, on)| *on)
+    .map(|(kind, _)| kind.to_owned())
+    .collect();
     Json(Me {
         github_id: viewer.github_id,
         csrf: dashboard.signer.csrf(&viewer),

@@ -15,7 +15,8 @@ pub enum Role {
     /// Reviews a pull request and hands its findings to the executor, or a
     /// drafted plan and hands its points to the planner (#328).
     Reviewer,
-    /// Changes the code: fixes what the reviewer found.
+    /// Changes the code: fixes what the reviewer found, or takes an issue
+    /// to a pull request (#329).
     Executor,
 }
 
@@ -36,14 +37,15 @@ const REVIEWER: &[&str] = &[
     "raise_point",
     "finish_round",
 ];
-/// What only the executor has: editing, the checks and its side of the
-/// handoff.
+/// What only the executor has: editing, the checks, its side of the
+/// handoff, and proposing the pull request for an issue (#329).
 const EXECUTOR: &[&str] = &[
     "edit_file",
     "write_file",
     "run_checks",
     "list_findings",
     "give_verdict",
+    "propose_pull_request",
 ];
 /// What only the planner has: the tracker tools, which draft until the
 /// review is done, and its side of the plan's handoff.

@@ -15,22 +15,25 @@ pub enum Start {
     Review,
     /// A plan for an issue.
     Plan,
+    /// An issue taken to a pull request (#329).
+    Execute,
 }
 
 impl Start {
-    /// The kind named in a form or path: `review` or `plan`.
+    /// The kind named in a form or path: `review`, `plan` or `execute`.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "review" => Some(Self::Review),
             "plan" => Some(Self::Plan),
+            "execute" => Some(Self::Execute),
             _ => None,
         }
     }
 }
 
 /// The event for a start request, or why the request is not one. `commit`
-/// applies to a review, `note` to a plan; the URL must
+/// applies to a review, `note` to a plan or an execute run; the URL must
 /// be on one of `hosts` (#58).
 ///
 /// # Errors
@@ -55,10 +58,15 @@ pub fn start_event(
                 .map_err(|e| e.to_string())?,
             requester,
         },
-        Start::Plan if commit.is_some() => {
+        Start::Plan | Start::Execute if commit.is_some() => {
             return Err("only a review takes a commit".to_owned());
         }
         Start::Plan => EventKind::PlanRequested {
+            target: parse_issue_url(url, hosts).map_err(|e| e.to_string())?,
+            note,
+            requester,
+        },
+        Start::Execute => EventKind::ExecuteRequested {
             target: parse_issue_url(url, hosts).map_err(|e| e.to_string())?,
             note,
             requester,

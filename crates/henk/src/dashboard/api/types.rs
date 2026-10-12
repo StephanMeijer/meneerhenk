@@ -27,7 +27,8 @@ pub struct Me {
     pub login: String,
     /// The CSRF token every action sends in `X-CSRF-Token`.
     pub csrf: String,
-    /// What `POST /runs` can start here: `review` and `plan`.
+    /// What `POST /runs` can start here, as configured: `review` with
+    /// `[review.loop]`, `plan` with `[planning]`, `execute` with `[execution]`.
     pub startable: Vec<String>,
 }
 
@@ -869,7 +870,7 @@ pub struct HealthCheck {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct StartRequest {
-    /// `review`, `plan` or `address`.
+    /// `review`, `plan` or `execute` (#329).
     pub kind: String,
     /// The pull request, merge request or issue.
     pub url: String,
@@ -877,7 +878,7 @@ pub struct StartRequest {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub commit: Option<String>,
-    /// A note for a plan.
+    /// A note for a plan or an execute run.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub note: Option<String>,
@@ -923,6 +924,7 @@ pub fn kind_name(kind: RunKind) -> &'static str {
     match kind {
         RunKind::Review => "review",
         RunKind::Plan => "plan",
+        RunKind::Execute => "execute",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
         RunKind::Address => "address",
@@ -1137,7 +1139,7 @@ impl From<&EventWithOutcomes> for EventItem {
 
 /// A link to the pull request, merge request or issue a run is about.
 fn target_url(settings: &Settings, run: &RunRecord) -> Option<String> {
-    let issue = run.kind == RunKind::Plan;
+    let issue = run.kind.is_about_an_issue();
     link_to(settings, run.platform, &run.repo, run.target, issue)
 }
 

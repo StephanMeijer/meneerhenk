@@ -8,7 +8,8 @@
 //! run is no longer the newest and a restart loop never resumes it twice.
 //! A resumed review that was itself reaped is not resumed again: its
 //! process died while it ran, perhaps because of it, and resuming it once
-//! more could take Henk down on every start. Plans are not resumed.
+//! more could take Henk down on every start. Plans and execute runs are not
+//! resumed.
 
 use std::sync::Arc;
 use std::time::Duration;

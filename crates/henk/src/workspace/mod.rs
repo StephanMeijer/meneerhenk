@@ -534,6 +534,35 @@ impl WorkspaceProvider for Backends {
     }
 }
 
+/// A workspace opened from `checkout`, recording every command on `run`,
+/// set up as `profile` says: what the review loop and an execute run (#329)
+/// work in. One whose setup failed is closed again.
+pub(crate) async fn open_prepared(
+    app: &crate::app::App,
+    run: &henk_domain::run::RunId,
+    checkout: &crate::git::Checkout,
+    profile: &henk_domain::workspace::Profile,
+) -> anyhow::Result<Arc<dyn Workspace>> {
+    use anyhow::Context as _;
+    let opened = app
+        .workspace_provider
+        .open(checkout.path(), profile)
+        .await
+        .context("opening the workspace")?;
+    let traced: Arc<dyn Workspace> = Arc::new(traced::Traced::new(
+        opened,
+        Arc::clone(&app.store),
+        run.clone(),
+    ));
+    match setup::prepare(&traced, profile).await {
+        Ok(ready) => Ok(ready),
+        Err(error) => {
+            traced.close().await;
+            Err(error)
+        }
+    }
+}
+
 /// `workspace` with its changes never taken out, as the reviewer's and the
 /// planner's are (#170): it refuses `export`, so no tool or later change
 /// can turn what was done there into a commit (§8.2). The executor's is

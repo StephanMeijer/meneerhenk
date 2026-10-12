@@ -454,8 +454,26 @@ impl Checkout {
         self.head().await
     }
 
-    /// Pushes the checkout's head to `branch` as a fast-forward. Never forced:
-    /// when the branch moved, the push is refused and nothing changes.
+    /// Whether `origin` has a branch named `branch` (#329).
+    ///
+    /// # Errors
+    ///
+    /// When git cannot reach the remote.
+    pub async fn remote_has_branch(&self, branch: &str) -> Result<bool, GitError> {
+        let refname = format!("refs/heads/{branch}");
+        let listed = run(
+            self.path(),
+            &["ls-remote", "--heads", "origin", &refname],
+            self.credential.as_ref(),
+            None,
+        )
+        .await?;
+        Ok(!listed.trim().is_empty())
+    }
+
+    /// Pushes the checkout's head to `branch` as a fast-forward, or as a new
+    /// branch when there is none by that name. Never forced: when the branch
+    /// moved, the push is refused and nothing changes.
     ///
     /// # Errors
     ///
@@ -595,10 +613,37 @@ pub(crate) mod tests {
 
     /// The last commit of `feature` on a bare remote, in `git log` `format`.
     pub(crate) async fn remote_log(remote: &Path, format: &str) -> String {
+        remote_branch_log(remote, "feature", format).await
+    }
+
+    /// The last commit of `branch` on a bare remote, in `git log` `format`.
+    pub(crate) async fn remote_branch_log(remote: &Path, branch: &str, format: &str) -> String {
         let format = format!("--format={format}");
-        run(remote, &["log", "-1", &format, "feature"], None, None)
+        let branch = format!("refs/heads/{branch}");
+        run(remote, &["log", "-1", &format, &branch], None, None)
             .await
             .unwrap()
+    }
+
+    /// The content of `path` at the head of `branch` on a bare remote.
+    pub(crate) async fn remote_branch_file(remote: &Path, branch: &str, path: &str) -> String {
+        let spec = format!("refs/heads/{branch}:{path}");
+        run(remote, &["show", &spec], None, None).await.unwrap()
+    }
+
+    /// The branches of a bare remote, sorted.
+    pub(crate) async fn remote_branches(remote: &Path) -> Vec<String> {
+        let listed = run(
+            remote,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut branches: Vec<String> = listed.lines().map(str::to_owned).collect();
+        branches.sort();
+        branches
     }
 
     fn identity() -> CommitIdentity {

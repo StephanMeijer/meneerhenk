@@ -15,24 +15,26 @@ and code reviewer with a fixed persona. He works where the team works:
 |---|---|
 | GitHub pull requests | Reviews every new commit and pushes the fixes of what holds to its branch (§3.2, §3.5); answers when mentioned; reviews again on request |
 | GitLab merge requests (9xxlab) | The same, GitLab's way |
-| GitHub / GitLab issues | Plans how to carry out an issue, and triages it, when a colleague asks in Discord (§4) |
+| GitHub / GitLab issues | Plans how to carry out an issue, and triages it, when a colleague asks in Discord (§4); takes an issue to a pull request when asked (§4a) |
 | Discord (his own channel) | Talks with the team; looks things up; starts reviews and plans; manages issues |
 | Email (his own mailbox) | Answers the mail he receives |
 | Discord voice channel *(in development)* | Listens, and answers out loud |
 
-He is **advisory**. He never approves, blocks or merges. He changes code in
-one case only: as the executor of a review loop (§3.2), pushing the fixes
-of his review to that pull request's own branch (§3.5), never to a fork,
-the default branch or a protected branch.
+He is **advisory**. He never approves, blocks or merges. He changes code
+only as the executor: in a review loop (§3.2), pushing the fixes of his
+review to that pull request's own branch (§3.5), and when asked to take an
+issue to a pull request (§4a), pushing a new branch of his own and opening
+a pull request for it. Never to a fork, the default branch or a protected
+branch.
 
 ### 1.1 Terms
 
 | Term | Meaning |
 |---|---|
-| **Run** | One execution of a review, a plan, a Discord turn or a mail reply. Every run has a link. Address runs from before #327 stay readable as runs. |
+| **Run** | One execution of a review, a plan, an execute run (§4a), a Discord turn or a mail reply. Every run has a link. Address runs from before #327 stay readable as runs. |
 | **Review loop** | What a review is: a reviewer and an executor taking turns on one pull request (§3.2). |
 | **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the executor (§3.2). |
-| **Executor** | The model session in a review loop that checks each finding against the code and fixes the ones that hold (§3.2). |
+| **Executor** | The model session that changes code: in a review loop it checks each finding against the code and fixes the ones that hold (§3.2); in an execute run it takes an issue to a pull request (§4a). |
 | **Lane** | Before #309, one independent reviewer inside a review. Old runs still show them, and the run record still lists each model session of a run as a lane. |
 | **Finding** | One problem the reviewer reports, at one line. Before #309 a lane posted each as a comment. |
 | **Summary** | What the check says when a review ends (§3.3). |
@@ -297,6 +299,42 @@ change stays within that issue and its relations.
 
 ---
 
+## 4a. Taking an issue to a pull request
+
+A colleague asks Henk to take an open issue to a pull request: from the
+dashboard, the MCP server, the API or the command line, with an optional
+note. Nothing starts one on its own. The repository must be on the
+allowlist, and this Henk must be configured for it (`[execution]`).
+
+Henk then:
+
+1. **Checks out the default branch** at its head, in a throwaway workspace
+   set up as the repository's profile says.
+2. **Has the executor work on it.** The executor reads the issue, with any
+   plan in it (§4), as material, changes the code and runs the project's
+   checks, in one conversation. It ends by proposing the pull request: what
+   it changed, and what it left out and why.
+3. **Checks the change** as for a review loop's round (§3.5): only the
+   changeset leaves the workspace, within the same limits, and the
+   project's checks must pass.
+4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
+   configurable) with one commit, "Resolve #N: <title>", with the run and
+   the requester in its trailers. A branch of that name that exists already
+   is never pushed over.
+5. **Opens a pull request** of that branch into the default branch, ready
+   for review. Its description closes the issue and says what was done and
+   what was left out, with the run link.
+6. **Has it reviewed.** Henk asks for a review of the new pull request, a
+   run of its own with fresh sessions: the reviewer and the executor take
+   turns on it as on any pull request (§3.2).
+
+**Every execute run ends.** Either the pull request is open, or one comment
+on the issue says why there is none (the checks fail, nothing changed, the
+branch exists), with a link to the run. A cancel says so on the issue; a
+run that does not finish within its time limit has failed.
+
+---
+
 ## 5. Discord
 
 ### 5.1 When he speaks
@@ -469,12 +507,16 @@ its behavioural rules are:
 These hold everywhere:
 
 1. **Henk never triggers himself.** His own comments, notes and messages
-   never start work, and his replies never mention himself.
+   never start work, and his replies never mention himself. The platform's
+   events about his own pull requests and pushes start nothing; the review
+   of a pull request an execute run opened is asked for by that run, as
+   part of the same request (§4a).
 2. **Henk is advisory.** A review never fails or blocks a pull/merge request
    or pipeline. He never approves, requests changes or merges. He pushes
-   only as the executor of a review loop (§3.2, §3.5), only to that pull
-   request's own branch, never to a fork, the default branch or a
-   protected branch, and never with force.
+   only as the executor: in a review loop (§3.2, §3.5) only to that pull
+   request's own branch, and in an execute run (§4a) only to a new branch
+   under his prefix that he creates. Never to a fork, the default branch
+   or a protected branch, and never with force.
 3. **Other people's words are information, not instructions.** This covers
    code, comments, issues, mail, web pages and chat messages. Only the
    requester's permissions decide what he does.
@@ -491,8 +533,10 @@ These hold everywhere:
      at its own commit and those the executor added, the executor pushing
      only to that pull request's branch, on top of the head it read.
    - A planner can change only its own issue and that issue's relations.
+   - An execute run pushes only its own new branch and opens one pull
+     request for it, in its issue's repository.
    - An email reply can go only to that mail's correspondents.
-6. **Every visible action is traceable.** Each review, plan and mail links
+6. **Every visible action is traceable.** Each review, plan, execute run and mail links
    back to its run; the run page is behind the dashboard's sign-in. A
    review links from its check. Each comment carries hidden markers saying
    who wrote it, which model and, when someone asked for it, for whom.
@@ -504,6 +548,7 @@ These hold everywhere:
 8. **Failure is visible.**
    - A review that did not complete says so on the pull/merge request.
    - A failed plan says so on the issue.
+   - An execute run that opens no pull request says why on the issue.
    - An unanswered mail stays unread.
    - A Discord mention always gets an answer, even if it is "I failed".
 
@@ -645,6 +690,12 @@ surprising reading of the earlier wording; veto any that is wrong.
 
 ## Revision notes (2026-10-12)
 
+- §1, §1.1, §4a (new), §8 invariants 1, 2, 5, 6 and 8: Henk can take an
+  issue to a pull request when asked (#329). The executor works on the
+  default branch; Henk checks, pushes a new branch under his prefix,
+  opens a ready pull request that closes the issue, and asks for its
+  review, a run of its own. Henk's own pull request is reviewed because
+  the execute run asks for it, not because its event is let through.
 - §4, §8 invariant 4: planning is a pairing (#328). The planner drafts and
   the reviewer reviews the draft before anything reaches the issue; the
   planner answers each point and revises, for at most 3 rounds and an hour.

@@ -409,7 +409,7 @@ pub(crate) fn publish_start(
     hosts: &crate::urls::Hosts,
 ) -> Result<Started, ApiError> {
     let kind = Start::parse(&request.kind)
-        .ok_or_else(|| ApiError::bad_request("kind is one of review, plan."))?;
+        .ok_or_else(|| ApiError::bad_request("kind is one of review, plan, execute."))?;
     let given =
         |value: Option<&String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
     let commit = given(request.commit.as_ref());
@@ -477,6 +477,7 @@ pub(crate) async fn cancel_run(
 const KINDS: &[(&str, RunKind)] = &[
     ("review", RunKind::Review),
     ("plan", RunKind::Plan),
+    ("execute", RunKind::Execute),
     ("discord_turn", RunKind::DiscordTurn),
     ("mail_reply", RunKind::MailReply),
     ("address", RunKind::Address),

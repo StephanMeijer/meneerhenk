@@ -60,6 +60,9 @@ pub struct Config {
     /// Planning settings.
     #[serde(default)]
     pub planning: Option<PlanningConfig>,
+    /// Execute runs: an issue taken to a pull request (#329).
+    #[serde(default)]
+    pub execution: Option<ExecutionConfig>,
     /// The address run's section before roles (#322), read only to refuse
     /// it with a message that says what replaced it.
     #[serde(default)]
@@ -740,8 +743,24 @@ impl PlanningConfig {
     }
 }
 
+/// Execute runs (#329): the executor takes an issue to a pull request on a
+/// branch of its own. Needs `[roles.executor]`, whose limits, checks,
+/// identity and requester they use.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionConfig {
+    /// The time the executor has for one issue, in seconds.
+    #[serde(default = "default_execution_run_timeout_secs")]
+    pub run_timeout_secs: u64,
+    /// What every branch Henk makes starts with: `henk/` makes
+    /// `henk/329-the-executor-takes-an-issue`.
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+}
+
 /// The agents Henk runs (#322), one section each. The review loop needs
-/// the reviewer and the executor; planning needs the planner.
+/// the reviewer and the executor; planning needs the planner and the
+/// reviewer; execution needs the executor.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RolesConfig {
@@ -1308,6 +1327,12 @@ fn default_change_budget() -> u32 {
 fn default_sub_issue_cap() -> u32 {
     5
 }
+fn default_execution_run_timeout_secs() -> u64 {
+    3600
+}
+fn default_branch_prefix() -> String {
+    "henk/".to_owned()
+}
 fn default_plan_max_rounds() -> u32 {
     3
 }
@@ -1476,6 +1501,8 @@ pub struct Settings {
     pub roles: RolesConfig,
     /// Planning.
     pub planning: Option<PlanningConfig>,
+    /// Execute runs (#329).
+    pub execution: Option<ExecutionConfig>,
     /// Where a model's tools and the project's checks run, per repository.
     pub workspace: WorkspacePolicy,
     /// The sandbox host of the `ssh` backend, when configured.
@@ -1539,6 +1566,9 @@ impl Config {
         if let Some(planning) = &self.planning {
             validate_planning(planning, &self.roles, &self.discord.team_lead_ids)?;
         }
+        if let Some(execution) = &self.execution {
+            validate_execution(execution, &self.roles)?;
+        }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
         let skills_dir = self.skills.map(|s| s.dir);
         validate_skill_references(skills_dir.as_deref(), &self.roles)?;
@@ -1595,6 +1625,7 @@ impl Config {
             review: self.review,
             roles: self.roles,
             planning: self.planning,
+            execution: self.execution,
             workspace,
             workspace_ssh,
             workspace_kubernetes,
@@ -1812,6 +1843,37 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
                 "effort applies to provider \"anthropic\" only".to_owned(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Execute runs need the executor, and a branch prefix git takes and no
+/// person's branch is likely to use (#329).
+fn validate_execution(execution: &ExecutionConfig, roles: &RolesConfig) -> Result<(), ConfigError> {
+    if roles.executor.is_none() {
+        return Err(ConfigError::Role(
+            "[execution] needs [roles.executor]".to_owned(),
+        ));
+    }
+    let prefix = &execution.branch_prefix;
+    let valid = prefix.ends_with('/')
+        && prefix.len() > 1
+        && !prefix.starts_with('/')
+        && !prefix.starts_with('-')
+        && !prefix.contains("//")
+        && !prefix.contains("..")
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
+    if !valid {
+        return Err(ConfigError::Role(format!(
+            "execution.branch_prefix {prefix:?} must be letters, digits, -, _ or . ending in /, such as \"henk/\""
+        )));
+    }
+    if execution.run_timeout_secs == 0 {
+        return Err(ConfigError::Role(
+            "execution.run_timeout_secs must be at least 1".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2045,6 +2107,9 @@ impl Settings {
         if self.roles.executor.is_some() {
             reasons.push("the executor's pushes".to_owned());
         }
+        if self.execution.is_some() {
+            reasons.push("the executor's branches for issues".to_owned());
+        }
         reasons
     }
 
@@ -2228,6 +2293,13 @@ impl Settings {
                 planning.sub_issue_cap,
                 planning.max_rounds,
                 planning.run_timeout_secs
+            );
+        }
+        if let Some(execution) = &self.execution {
+            let _ = writeln!(
+                out,
+                "Execution:       executor takes issues to pull requests on {}<issue>-<title>; {}s each",
+                execution.branch_prefix, execution.run_timeout_secs
             );
         }
         if let Some(executor) = &self.roles.executor {
@@ -2982,6 +3054,43 @@ github_owners = ["docspec"]
             assert!(message.contains("Migrating to roles"), "{message}");
             assert!(henk_domain::text::is_in_style(&message), "{message}");
         }
+    }
+
+    #[test]
+    fn execution_needs_the_executor_and_a_branch_prefix_git_takes() {
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let execution = |extra: &str| {
+            Config::parse(&format!("{MINIMAL}{models}{extra}")).and_then(Config::into_settings)
+        };
+        let executor = "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+        let error = execution("[execution]\n").unwrap_err();
+        assert_eq!(error.to_string(), "[execution] needs [roles.executor]");
+        let settings = execution(&format!("[execution]\n{executor}")).unwrap();
+        let config = settings.execution.as_ref().unwrap();
+        assert_eq!(
+            (config.run_timeout_secs, config.branch_prefix.as_str()),
+            (3600, "henk/")
+        );
+        for bad in ["henk", "/henk/", "-x/", "a//b/", "a..b/", "h nk/", "/"] {
+            let error = execution(&format!(
+                "[execution]\nbranch_prefix = \"{bad}\"\n{executor}"
+            ))
+            .unwrap_err();
+            assert!(
+                error.to_string().starts_with("execution.branch_prefix"),
+                "{bad}: {error}"
+            );
+        }
+        let settings = execution(&format!(
+            "[execution]\nbranch_prefix = \"bots/henk/\"\n{executor}"
+        ))
+        .unwrap();
+        let mut out = String::new();
+        settings.describe_agents(&mut out);
+        assert!(
+            out.contains("Execution:       executor takes issues to pull requests on bots/henk/<issue>-<title>; 3600s each"),
+            "{out}"
+        );
     }
 
     #[test]

@@ -227,6 +227,23 @@ describe('Run', () => {
     }
   });
 
+  it('says what cancelling an execute run does (#329)', async () => {
+    const detail = runDetail('running');
+    detail.run = { ...detail.run, kind: 'execute' };
+    render(Run, { id: 'r-1', who: 'github:5821', load: () => Promise.resolve(detail), cancel: vi.fn(), connect: fakeConnect().connect });
+    await settle();
+    expect(document.querySelector('h1')?.textContent).toBe('execute r-1');
+    expect(buttonNamed('Review again')).toBeUndefined();
+    cancelButton()?.click();
+    await settle(1);
+    const dialog = document.querySelector('dialog[open]');
+    const effects = [...(dialog?.querySelectorAll('li') ?? [])].map((li) => li.textContent);
+    expect(effects).toEqual([
+      'The executor stops now. Nothing is pushed and no pull request is opened, unless that already happened.',
+      'On the issue, one comment says it was cancelled and names you, github:5821.',
+    ]);
+  });
+
   it('names the run that replaced a superseded one', async () => {
     const detail = { ...runDetail(), run: { ...runDetail().run, status: 'superseded', superseded_by: 'r-2' } };
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });

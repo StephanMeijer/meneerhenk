@@ -133,7 +133,7 @@ flowchart TB
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `push`, `issue`, `github/{app,api,writer,push,issues}`, `gitlab/{writer,push,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `plan_pairing`, `plan_review_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan,execute}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `plan_pairing`, `plan_review_tools`, `execute`, `execute_tools`, `issue_runs`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -352,6 +352,14 @@ sequenceDiagram
     L->>DB: the commit on the finding's verdict
 ```
 
+`Pusher::commit_and_push` takes where the push goes, a `PushTo`:
+`PushTo::Pull` is the loop's, guarded as above; `PushTo::NewBranch` is an
+execute run's (section 7b): the branch must start with `[execution]
+branch_prefix`, must not be the default branch and must not exist on the
+remote (`Checkout::remote_has_branch`), and the push of the new ref is never
+forced. The commit's subject is the caller's: "Fix review findings" for the
+loop, "Resolve #N: <title>" for an execute run.
+
 The rules of the changeset are pure functions in `henk-domain`:
 `henk_domain::workspace::changeset_refusal` (`.git`, escapes, links,
 submodules, `max_changed_files`), `henk_domain::path` (a path that stays in
@@ -505,7 +513,7 @@ flowchart LR
     subgraph hooks["Hooks (henk/hooks)"]
         GHH["GitHubHook<br/>POST /webhooks/github"]
         GLH["GitLabHook<br/>POST /webhooks/gitlab"]
-        API["ApiHook<br/>POST /review, POST /plan"]
+        API["ApiHook<br/>POST /review, /plan, /execute"]
         LATER["Discord, mail, timers"]:::later
     end
     BUS["EventBus<br/>record, deliver, record outcomes"]
@@ -514,6 +522,7 @@ flowchart LR
         RL["ReviewListener"]
         ML["MentionListener"]
         PL["PlanListener"]
+        EL["ExecuteListener"]
     end
     COORD["Coordinator"]
     GHH --> BUS
@@ -524,15 +533,17 @@ flowchart LR
     BUS --> RL
     BUS --> ML
     BUS --> PL
+    BUS --> EL
     RL --> COORD
     PL --> COORD
+    EL --> COORD
     classDef later stroke-dasharray: 5 5,fill:none
 ```
 
 The event model (`henk-events`): `Event { id, received_at, source, kind, payload }`,
 `EventSource` (GitHub webhook with delivery id, GitLab webhook, API with
 requester), `EventKind` (pull request change, comment, review requested, plan
-requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
+requested, execute requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
 superseded, greeted, failed with a reason). A webhook kind no parser models is
 `Unmodelled` and still recorded, so a future listener can be written against
 real recordings. Recordings never leave the service.
@@ -540,7 +551,7 @@ real recordings. Recordings never leave the service.
 A session (`henk-session`) is the other abstraction: `SessionSpec` says what
 varies (model, system prompt, opening messages, tools, limits) and
 `run_session` does what every session shares (the lane row, the loop, the stop
-mapping, the timeline line). A plan is one session.
+mapping, the timeline line). An execute run is one session.
 A review is two `ResumableSession`s, the reviewer and the executor (only the
 reviewer when it reviews alone), each resumed once per round with its own
 conversation. The table that holds a session's row is still called `lanes`,
@@ -617,6 +628,57 @@ The plan section and the session log are a region delimited by HTML comments,
 parsed and rendered by `henk_domain::plan`. A drafted description keeps that
 region intact; the plan keeps the session log and replaces the plan; the
 session entry is appended by code after the run, never by the model.
+
+## 7b. Taking an issue to a pull request
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as dashboard, MCP, POST /execute or CLI
+    participant C as Coordinator
+    participant E as execute.rs
+    participant I as IssueWriter
+    participant K as Workspace
+    participant X as executor session
+    participant P as push.rs
+    participant W as PushWriter (GitHub, GitLab)
+    participant R as review run
+
+    U->>C: ExecuteRequested, through the ExecuteListener
+    C->>E: run_execute(issue, note)
+    E->>I: issue: open, not a pull request
+    E->>W: repo_head: the default branch and its head
+    E->>K: clone_at the head, open_prepared (setup)
+    E->>X: the issue as material, edit tools, run_checks, propose_pull_request
+    X->>K: read, edit, run_checks
+    X->>E: propose_pull_request(summary, left_out)
+    E->>K: export, run_checks, checked_changeset
+    alt no change, failing checks, refused changeset or the branch exists
+        E->>I: comment: no pull request, why, run link
+    else
+        E->>P: commit_and_push(PushTo::NewBranch henk/N-title, "Resolve #N: title")
+        P->>W: push the new branch, never forced
+        E->>W: open_pull_request: ready, "Closes #N", what changed and what was left out
+        E-->>C: the pull request and its head
+        C->>R: submit_review(pull request, head): a run of its own, fresh sessions
+    end
+```
+
+An execute run (`execute.rs`) is one `run_session` of the executor, from the
+issue to its proposal, with a fixed prompt and tools (#321). Its workspace
+comes from `workspace::open_prepared`, shared with the review loop: a clone
+of the default branch's head, set up as the profile says. The executor's
+tools are the loop's edit tools plus `propose_pull_request`
+(`execute_tools.rs`); nothing it holds reaches git or the platform. Henk's
+code then runs the checks, checks the changeset, and pushes and opens as
+above. GitHub opens the pull request with `POST /repos/{repo}/pulls`;
+GitLab through the `gitlab-write` MCP server's `create_merge_request`.
+
+Henk's own pull request is reviewed because the coordinator asks for it
+(`ExecuteReport::review`), not because its "opened" event gets through: that
+event is still dropped as Henk's own by the filter (section 9). A run that
+opens nothing ends on the issue the way a plan does (`issue_runs.rs`): one
+comment for a failure or a cancel, nothing for a shutdown.
 
 ## 8. Run records
 

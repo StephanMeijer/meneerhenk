@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::marker::{Marker, MarkerKind, ModelId};
+use henk_domain::marker::ModelId;
 use henk_domain::plan::{ChangeBudget, SessionEntry, extract_plan, with_plan_section};
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::scope::Scope;
@@ -17,11 +17,12 @@ use henk_platform::{IssueTarget, IssueUpdate};
 use henk_session::{ResumableSession, model_id, platform_tools};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::app::App;
-use crate::cancel::{Cancelled, is_cancelled};
+use crate::cancel::Cancelled;
 use crate::ids::new_run_id;
+use crate::issue_runs::{OnIssue, open_issue};
 use crate::liveness::KeepAlive;
 use crate::plan_pairing::{IssueMaterial, Pairing, reviewer_workspace};
 use crate::plan_review_tools::{
@@ -33,7 +34,6 @@ use crate::plan_tools::{
     SetFields, SetIssueType, SetTitle, WithdrawChange, WritePlan,
 };
 use crate::plan_workspace::{PlanWorkspace, open_for_plan};
-use crate::review::Interrupted;
 use crate::stages;
 use crate::web_fetch::WebFetch;
 
@@ -92,22 +92,7 @@ pub async fn run_plan(
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
 
-    let issue = writer
-        .issue(&request.target)
-        .await
-        .context("reading the issue")?;
-    if issue.is_pull_request {
-        return Err(anyhow!(
-            "#{} is a pull request; I plan issues, not pull requests",
-            request.target.number
-        ));
-    }
-    if !issue.open {
-        return Err(anyhow!(
-            "#{} is closed; I plan open issues",
-            request.target.number
-        ));
-    }
+    let issue = open_issue(writer.as_ref(), &request.target, "plan").await?;
 
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
@@ -148,11 +133,19 @@ pub async fn run_plan(
     )
     .await;
 
-    if let Err(failure) = &result
-        && let Some(ended) =
-            ended_early(app, &writer, &request, &run, &link, &context.model, failure).await
-    {
-        return ended;
+    if let Err(failure) = &result {
+        let on_issue = OnIssue {
+            app,
+            writer: &writer,
+            target: &request.target,
+            run: &run,
+            link: &link,
+            model: &context.model,
+            what: "planning",
+        };
+        if let Some(ended) = on_issue.ended_early(failure).await {
+            return Err(ended);
+        }
     }
 
     let (plan, changes) = match context.state.lock() {
@@ -264,92 +257,23 @@ async fn finish_plan(
                 Ok(()) => "the model ended without writing a plan".to_owned(),
                 Err(error) => format!("{error:#}"),
             };
-            error!(reason = %reason, "planning failed");
-            let body = Marker {
-                run: run.clone(),
-                model: model_id.clone(),
-                requested_by: None,
-                kind: Some(MarkerKind::Failure),
-                checked_by: None,
-                withdrawn: None,
-            }
-            .attach(&format!(
-                "Planning failed. That is my failure, not the issue's.\n\nRun: {link}"
-            ));
-            if let Err(post_error) = writer.comment(&request.target, &body).await {
-                error!(%post_error, "could not post the failure comment");
-            }
-            stages::failed(&*app.store, run).await;
-            app.store
-                .finish_run(run, RunStatus::Failed, None, Some(&reason))
-                .await?;
-            Err(anyhow!("planning failed: {reason}"))
+            let on_issue = OnIssue {
+                app,
+                writer,
+                target: &request.target,
+                run,
+                link,
+                model: model_id,
+                what: "planning",
+            };
+            Err(on_issue
+                .failed(
+                    "Planning failed. That is my failure, not the issue's.",
+                    &reason,
+                )
+                .await)
         }
     }
-}
-
-/// How a plan that failed ends when it was stopped rather than failing:
-/// cancelled by a person, or interrupted by a shutdown. `None` when it
-/// simply failed. It is cancelled only when the session stopped for its
-/// token; a real failure after someone asked for a cancel stays a failure.
-async fn ended_early(
-    app: &App,
-    writer: &Arc<dyn henk_platform::IssueWriter>,
-    request: &PlanRequest,
-    run: &RunId,
-    link: &str,
-    model_id: &ModelId,
-    failure: &anyhow::Error,
-) -> Option<anyhow::Result<PlanReport>> {
-    if is_cancelled(failure)
-        && let Some(by) = app.cancels.cancelled_by(run)
-    {
-        return Some(end_cancelled(app, writer, request, run, link, model_id, &by).await);
-    }
-    if app.shutdown.is_cancelled() {
-        return Some(end_interrupted(app, run).await);
-    }
-    None
-}
-
-/// A person cancelled the plan from the dashboard (#69): one comment saying
-/// who, no failure, and the run ends `cancelled`.
-async fn end_cancelled(
-    app: &App,
-    writer: &Arc<dyn henk_platform::IssueWriter>,
-    request: &PlanRequest,
-    run: &RunId,
-    link: &str,
-    model_id: &ModelId,
-    by: &str,
-) -> anyhow::Result<PlanReport> {
-    info!(run = %run, by, "planning {}", crate::cancel::cancelled_reason(by));
-    let body = Marker {
-        run: run.clone(),
-        model: model_id.clone(),
-        requested_by: None,
-        kind: Some(MarkerKind::Reply),
-        checked_by: None,
-        withdrawn: None,
-    }
-    .attach(&crate::cancel::cancelled_notice(by, link));
-    if let Err(post_error) = writer.comment(&request.target, &body).await {
-        error!(%post_error, "could not post that planning was cancelled");
-    }
-    let reason = crate::cancel::cancelled_reason(by);
-    let cancelled = format!("cancelled by {by}");
-    stages::end(
-        &*app.store,
-        run,
-        StageState::Skipped,
-        &cancelled,
-        &cancelled,
-    )
-    .await;
-    app.store
-        .finish_run(run, RunStatus::Cancelled, None, Some(&reason))
-        .await?;
-    Err(anyhow!(reason))
 }
 
 /// The first stages of a plan run: who asked, what it plans, and the
@@ -372,24 +296,6 @@ async fn begin_stages(
     stages::mark(store, run, Stage::Started, StageState::Done, what).await;
     let session = format!("planner, {model}");
     stages::mark(store, run, Stage::Session, StageState::Running, session).await;
-}
-
-/// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
-/// posted; the run ends with the reason (#7).
-async fn end_interrupted(app: &App, run: &RunId) -> anyhow::Result<PlanReport> {
-    warn!(run = %run, "planning interrupted");
-    stages::end(
-        &*app.store,
-        run,
-        StageState::Failed,
-        "interrupted",
-        "interrupted",
-    )
-    .await;
-    app.store
-        .finish_run(run, RunStatus::Failed, None, Some(&Interrupted.to_string()))
-        .await?;
-    Err(Interrupted.into())
 }
 
 async fn planner_tools(
@@ -1008,6 +914,13 @@ model = "r"
             Err(unused())
         }
         fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
+            Err(unused())
+        }
+        async fn open_pull_request(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+            _: &henk_platform::push::NewPull,
+        ) -> Result<henk_platform::push::OpenedPull, henk_platform::PlatformError> {
             Err(unused())
         }
         async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {

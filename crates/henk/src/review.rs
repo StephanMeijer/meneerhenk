@@ -2727,6 +2727,13 @@ requester_id = 3
         fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
             Err(unused())
         }
+        async fn open_pull_request(
+            &self,
+            _: &henk_domain::allowlist::RepoRef,
+            _: &henk_platform::push::NewPull,
+        ) -> Result<henk_platform::push::OpenedPull, henk_platform::PlatformError> {
+            Err(unused())
+        }
         /// Account 77 is `alice`, the requester of [`PEOPLE`]; no other
         /// login can be read.
         async fn user_login(&self, id: u64) -> Result<String, henk_platform::PlatformError> {

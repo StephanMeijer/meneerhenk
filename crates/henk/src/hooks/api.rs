@@ -79,6 +79,7 @@ impl HttpHook for ApiHook {
         Router::new()
             .route("/review", post(review))
             .route("/plan", post(plan))
+            .route("/execute", post(execute))
             .with_state(self)
     }
 }
@@ -123,6 +124,20 @@ async fn plan(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes)
     }
 }
 
+async fn execute(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes) -> Response {
+    match serde_json::from_slice::<NoteBody>(&body) {
+        Ok(request) => start(
+            &hook,
+            &headers,
+            Start::Execute,
+            &request.url,
+            None,
+            request.note,
+        ),
+        Err(error) => bad_body(&hook, &headers, &error),
+    }
+}
+
 /// A body that does not parse; still `401` first when the token is wrong.
 fn bad_body(hook: &ApiHook, headers: &HeaderMap, error: &serde_json::Error) -> Response {
     hook.unauthorized(headers)
@@ -146,15 +161,12 @@ fn start(
     let source = EventSource::Api {
         requester: hook.requester.clone(),
     };
-    match start_event(
-        start,
-        url,
-        commit,
-        note,
-        source,
-        hook.requester.clone(),
-        &hook.hosts,
-    ) {
+    // The token names nobody: an execute run is then for the executor's
+    // own Team Lead, `[roles.executor] requester_id` (#329).
+    let requester = (start != Start::Execute)
+        .then(|| hook.requester.clone())
+        .flatten();
+    match start_event(start, url, commit, note, source, requester, &hook.hosts) {
         Ok(event) => {
             let id = publish(&hook.bus, event);
             (StatusCode::ACCEPTED, axum::Json(json!({"event": id}))).into_response()

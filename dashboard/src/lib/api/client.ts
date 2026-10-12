@@ -163,7 +163,7 @@ export function event(id: string): Promise<EventDetail> {
   return getJson<EventDetail>(`/events/${encodeURIComponent(id)}`);
 }
 
-/** Starts a review, plan or address run. */
+/** Starts a review, plan or execute run. */
 export function startRun(request: StartRequest): Promise<Started> {
   return postJson<Started>('/runs', request);
 }

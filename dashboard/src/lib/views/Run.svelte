@@ -149,12 +149,15 @@
     if (detail.run.kind === 'review') {
       return 'The reviewer and the executor take turns until the reviewer finds nothing more.';
     }
+    if (detail.run.kind === 'execute') {
+      return 'The executor works on the issue; Henk checks, pushes a new branch and opens the pull request, which a review run then takes.';
+    }
     if (detail.run.kind === 'address') return 'One commit to the branch, then replies on the threads (before #327).';
     return '';
   }
 
   /** What a cancel does, by kind of run: the facts of `review.rs`,
-   * `plan.rs` and `cancel.rs` (#230). */
+   * `plan.rs`, `execute.rs` and `cancel.rs` (#230). */
   function cancelEffects(detail: RunDetail): string[] {
     const you = who === null ? 'you' : `you, ${who}`;
     const where = detail.run.platform === 'gitlab' ? 'merge request' : 'pull request';
@@ -167,6 +170,12 @@
     }
     if (detail.run.kind === 'plan') {
       return ['The planner stops now.', `On the issue, one comment says it was cancelled and names ${you}.`];
+    }
+    if (detail.run.kind === 'execute') {
+      return [
+        'The executor stops now. Nothing is pushed and no pull request is opened, unless that already happened.',
+        `On the issue, one comment says it was cancelled and names ${you}.`,
+      ];
     }
     return [`Henk stops now and says it was cancelled, naming ${you}.`];
   }

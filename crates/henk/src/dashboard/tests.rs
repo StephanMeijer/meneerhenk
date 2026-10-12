@@ -109,6 +109,9 @@ pub(super) fn fixture_with(
             Arc::new(crate::listeners::PlanListener::new(Arc::clone(
                 &coordinator,
             ))),
+            Arc::new(crate::listeners::ExecuteListener::new(Arc::clone(
+                &coordinator,
+            ))),
         ],
     ));
     let secrets = DashboardSecrets {

@@ -35,6 +35,31 @@ describe('StartForm', () => {
     expect(button()?.textContent).toBe('Start review');
   });
 
+  it('takes an issue to a pull request with a note (#329)', async () => {
+    const start = vi.fn(() => Promise.resolve({ event_id: 'e-10' }));
+    render(StartForm, { startable: ['review', 'plan', 'execute'], start, go: vi.fn() });
+    await settle();
+    expect(document.body.textContent).toContain('Take an issue to a pull request');
+    choose('execute');
+    await settle(1);
+    expect(label()).toBe('Issue URL');
+    expect(button()?.textContent).toBe('Take it on');
+    fill('url', 'https://github.com/docspec/app/pull/3');
+    await settle(1);
+    expect(check()).toBe('This is a pull request. Taking one to a pull request needs an issue URL.');
+    fill('url', 'https://github.com/docspec/app/issues/3');
+    fill('note', 'keep it small');
+    await settle(1);
+    document.querySelector('form')?.requestSubmit();
+    await settle();
+    expect(start).toHaveBeenCalledWith({
+      kind: 'execute',
+      url: 'https://github.com/docspec/app/issues/3',
+      commit: null,
+      note: 'keep it small',
+    });
+  });
+
   it('says what the URL names, and why it does not fit, as you type', async () => {
     render(StartForm, { startable: ['review', 'plan'], start: vi.fn(), go: vi.fn() });
     await settle();

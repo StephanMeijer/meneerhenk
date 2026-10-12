@@ -1,9 +1,11 @@
-//! What reacts to events: reviews, greetings and plans (§3.1, §3.4, §4).
+//! What reacts to events: reviews, greetings, plans and execute runs (§3.1,
+//! §3.4, §4, §4a).
 //!
 //! Each listener decides on its own whether an event concerns it, and says
 //! so in its outcome. The rules every listener applies first live in
 //! [`filter`].
 
+pub mod execute;
 pub mod filter;
 pub mod mention;
 pub mod plan;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_platform::PlatformWriter;
 
+pub use execute::ExecuteListener;
 pub use mention::MentionListener;
 pub use plan::PlanListener;
 pub use review::ReviewListener;

@@ -24,7 +24,7 @@ use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
 use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
-use crate::listeners::{MentionListener, PlanListener, ReviewListener, Writers};
+use crate::listeners::{ExecuteListener, MentionListener, PlanListener, ReviewListener, Writers};
 use crate::pages;
 use crate::recorder::StoreRecorder;
 
@@ -146,6 +146,7 @@ pub fn compose_with_secrets(
             )),
             Arc::new(MentionListener::new(settings, writers)),
             Arc::new(PlanListener::new(Arc::clone(&coordinator))),
+            Arc::new(ExecuteListener::new(Arc::clone(&coordinator))),
         ],
     ));
     let requester = app
@@ -536,7 +537,7 @@ github_owners = ["docspec"]
             .to_owned();
         assert_eq!(
             wait_for_outcomes(&app, &event).await,
-            3,
+            4,
             "every listener recorded an outcome"
         );
         let recorded = app
@@ -813,7 +814,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 3);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -822,6 +823,39 @@ github_owners = ["docspec"]
             .unwrap();
         assert_eq!(recorded.kind, "plan_requested");
         assert_eq!(recorded.source, "api");
+
+        // #329: an issue taken to a pull request; a pull request URL is
+        // not an issue.
+        let execute = Request::post("/execute")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/issues/9","note":"small"}"#,
+            ))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, execute).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "execute_requested");
+        let pull = Request::post("/execute")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/pull/9"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            call(composed(&app).router, pull).await.0,
+            StatusCode::BAD_REQUEST
+        );
 
         let gone = Request::post("/address")
             .header("authorization", "Bearer apitok")

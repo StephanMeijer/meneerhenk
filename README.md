@@ -194,7 +194,8 @@ limits the whole loop: no round starts after it, and a round under way
 gets only what is left. The executor's `check_commands`,
 `max_changed_files`, identity and trailers apply to every commit the loop
 pushes, and its `requester_id` is who those commits are requested by.
-Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`.
+Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`;
+execute runs need `[execution]` with `[roles.executor]`.
 Without `[review.loop]`
 reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
@@ -514,6 +515,7 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
 henk review URL1 URL2 URL3                        # several: at most 50, max_concurrent at a time
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
+henk execute https://github.com/owner/repo/issues/9   # issue to pull request, then its review
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
@@ -527,7 +529,8 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
-`POST /plan {"url", "note"?}` with `Authorization: Bearer $HENK_API_TOKEN`
+`POST /plan {"url", "note"?}` and `POST /execute {"url", "note"?}` with
+`Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
 
 Every inbound event is recorded in Henk's own database with what each listener
@@ -538,6 +541,36 @@ an hour, and session transcripts of that age with them. Runs are kept, since
 their links are posted on the platforms. An
 event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
 run and the events that led to it at `/dashboard/runs/{id}`.
+
+### Taking an issue to a pull request
+
+With `[execution]` configured, a colleague can ask Henk to take an open
+issue to a pull request (spec §4a, #329): from the dashboard's start form,
+MCP `start_execute`, `POST /execute` or `henk execute <issue-url>`. Nothing
+starts one on its own. The executor works in a workspace on the default
+branch's head, reads the issue and any plan in it, changes the code, runs
+the checks and ends with `propose_pull_request`: what it changed and what
+it left out. Henk then checks the changeset as for a review loop's round
+(below), commits it as "Resolve #N: <title>" with the same identity and
+trailers, pushes it to a new branch `henk/<issue>-<title>`, never over a
+branch that exists, and opens a ready pull request whose description
+closes the issue. Then he asks for its review, a run of its own: the
+reviewer and the executor work on it as on any pull request. When the
+checks fail, nothing changed or the branch exists, there is no pull
+request and one comment on the issue says why, with the run link.
+
+```toml
+[execution]
+run_timeout_secs = 3600   # the executor's time for one issue
+branch_prefix = "henk/"   # every branch Henk makes starts with it
+```
+
+`[execution]` needs `[roles.executor]`, whose model, `max_turns`, checks,
+`max_changed_files`, identity and trailers it uses. On GitHub the App also
+needs `Pull requests: write`. On GitLab Henk opens the merge request
+through the `gitlab-write` MCP server, so `create_merge_request` must be in
+its `GITLAB_TOOLS`. The bot's own "opened" event is ignored as Henk's own;
+the review starts because the execute run asks for it.
 
 ### Pushing a review's fixes
 
@@ -814,15 +847,17 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - a health page from configuration and the database, including whether
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
-- a form that starts a review or a plan, and a button that cancels a
+- a form that starts what this Henk is configured for: a review, a plan,
+  or an issue taken to a pull request (#329); and a button that cancels a
   running one.
 
-Starting works exactly like `POST /review` and `/plan`: the
+Starting works exactly like `POST /review`, `/plan` and `/execute`: the
 request becomes an event, the listeners apply the allowlist and every
 refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
 `cancelled`: a review with a neutral check saying which GitHub account
-cancelled it, a plan with one comment saying so.
+cancelled it, a plan or an execute run with one comment on the issue
+saying so.
 
 The app reads and acts only through the JSON API at `/dashboard/api/v1`,
 behind the same sign-in; every action carries the session's CSRF token in a
@@ -878,8 +913,8 @@ cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
 With `[mcp_server] enabled = true` and at least one token, `henk serve` also
 serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
 such as Claude Code can work with Henk:
-- `start_review`, `start_plan`: start work, exactly as `POST /review` and
-  `/plan` do. The request becomes an event,
+- `start_review`, `start_plan`, `start_execute`: start work, exactly as
+  `POST /review`, `/plan` and `/execute` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
 - `cancel_run`;

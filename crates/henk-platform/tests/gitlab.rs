@@ -522,11 +522,17 @@ const PROJECT: &str = "/api/v4/projects/9xxlab%2Ftools%2Fcli";
 /// The merge request the way `@zereight/mcp-gitlab` returns it: its iid as
 /// a string.
 fn push_fake() -> FakeServer {
-    let tools = vec![FakeServer::tool("get_merge_request", "", &[])];
+    let tools = vec![
+        FakeServer::tool("get_merge_request", "", &[]),
+        FakeServer::tool("create_merge_request", "", &[]),
+    ];
     FakeServer::new(tools, |name, _| match name {
         "get_merge_request" => text(json!({
             "iid": "5", "state": "opened", "source_branch": "feature", "target_branch": "main",
             "sha": SHA, "diff_refs": {"base_sha": BASE, "start_sha": BASE, "head_sha": SHA}
+        })),
+        "create_merge_request" => text(json!({
+            "iid": "6", "web_url": "https://gitlab.example/9xxlab/tools/cli/-/merge_requests/6"
         })),
         other => CallToolResult::error(vec![ContentBlock::text(format!("unexpected {other}"))]),
     })
@@ -604,6 +610,40 @@ async fn push_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
         fake,
         GitLabWriter::new(session, "meneerhenk").with_rest(rest),
     )
+}
+
+#[tokio::test]
+async fn an_executor_opens_its_merge_request_through_mcp() {
+    use henk_platform::push::{NewPull, PushWriter as _};
+
+    let server = gitlab_rest(mr("opened", 11), None, None).await;
+    let (fake, writer) = push_writer(&server).await;
+    let opened = writer
+        .open_pull_request(
+            &target().repo,
+            &NewPull {
+                head: "henk/9-export-runs".to_owned(),
+                base: "main".to_owned(),
+                title: "Export runs".to_owned(),
+                body: "Closes #9".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.number, 6);
+    assert!(opened.url.ends_with("/merge_requests/6"), "{}", opened.url);
+    let call = fake
+        .calls()
+        .into_iter()
+        .find(|c| c.name == "create_merge_request")
+        .unwrap();
+    assert_eq!(
+        call.arguments,
+        json!({
+            "project_id": "9xxlab/tools/cli", "source_branch": "henk/9-export-runs",
+            "target_branch": "main", "title": "Export runs", "description": "Closes #9"
+        })
+    );
 }
 
 #[tokio::test]

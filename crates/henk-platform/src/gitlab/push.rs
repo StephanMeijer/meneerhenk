@@ -6,14 +6,16 @@
 use henk_domain::commit::noreply;
 use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use henk_domain::allowlist::RepoRef;
 
 use crate::error::PlatformError;
 use crate::gitlab::rest::path_segment;
 use crate::gitlab::writer::GitLabWriter;
-use crate::push::{CommitIdentity, GitCredential, PullFacts, PushWriter, RepoHead};
+use crate::push::{
+    CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
+};
 use crate::writer::ReviewTarget;
 
 fn text(value: &Value, key: &str) -> String {
@@ -170,6 +172,33 @@ impl PushWriter for GitLabWriter {
 
     fn noreply_host(&self) -> Result<String, PlatformError> {
         Ok(self.rest()?.host())
+    }
+
+    async fn open_pull_request(
+        &self,
+        repo: &RepoRef,
+        pull: &NewPull,
+    ) -> Result<OpenedPull, PlatformError> {
+        // Through the gitlab-write MCP server, like Henk's other GitLab
+        // writes; its token needs Developer on the project.
+        let opened = self
+            .call_tool(
+                "create_merge_request",
+                json!({
+                    "project_id": repo.path(),
+                    "source_branch": pull.head,
+                    "target_branch": pull.base,
+                    "title": pull.title,
+                    "description": pull.body,
+                }),
+            )
+            .await?;
+        let number = number(opened.get("iid"))
+            .ok_or_else(|| PlatformError::Decode("merge request without an iid".to_owned()))?;
+        Ok(OpenedPull {
+            number,
+            url: text(&opened, "web_url"),
+        })
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
