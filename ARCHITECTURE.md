@@ -288,6 +288,20 @@ prompt and the end of the conversation carry a cache marker, so each turn
 reads what the last one wrote; the run timeline records how much of the
 prompt came from the cache.
 
+The warm-cache rule of a pairing (#321, #330): within a pairing each role's
+conversation is append-only, with a fixed system prompt and tool list, and
+each resume adds only the other's update, so its next request starts with
+its last one byte for byte (`henk_llm::testing::assert_resumed_with_only_the_update`
+holds the loop and the plan pairing to it). Both kinds of compaction are a
+last resort, and each is a `warn` event on the run: the agent's stubbing
+(`AgentEvent::Compacted`) and the dropping of rounds (`RoundsDropped`). The
+cache's lifetime is per request (`CompletionRequest::cache_ttl`, set from
+`AgentConfig`): a role whose partner's round may last longer than 5 minutes
+(`henk_session::cache_ttl_for`) asks for the 1-hour cache on both markers,
+so a longer one never follows a shorter. A new stage (planning, execution,
+review) starts fresh sessions; no cache is carried between stages. Each
+session's row keeps its cache reads and writes beside its tokens in.
+
 ### The workspace
 
 The models' tools talk only to a `Workspace` (`crates/henk/src/workspace`);
@@ -717,8 +731,10 @@ erDiagram
         text model
         text status "running, finished, timed_out, did_not_finish"
         int turns
-        int input_tokens
+        int input_tokens "the whole prompt"
         int output_tokens
+        int cache_read_tokens "of input, from the prompt cache"
+        int cache_write_tokens "of input, into it"
         text error
     }
     drafts {

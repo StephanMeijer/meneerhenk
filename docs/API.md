@@ -148,7 +148,9 @@ One run with everything the run record holds about it:
   `fixer` in runs before #323,
   a plan's `planner` and `reviewer`, and `address` in address runs from
   before #327) with
-  turns and tokens, and its `status`:
+  turns and tokens (`input_tokens` the whole prompt, of which
+  `cache_read_tokens` came from the model's prompt cache and
+  `cache_write_tokens` went into it, #330), and its `status`:
   `running`, `finished`, `timed_out` (stopped at its time limit) or
   `did_not_finish` (`error` says why). Reviews made by lanes, before #309,
   have their lanes and `check-N` fact-check sessions here;
@@ -195,7 +197,8 @@ Each lane also has `started_at` and `finished_at`.
   "summary": "No issues found.\n\nThe review loop ran 2 rounds, settled 1 finding, pushed 1 commit and stopped: converged, the reviewer found nothing more.",
   "error": null, "check_id": "4711", "heartbeat_at": "...",
   "lanes": [{"name": "reviewer", "model": "claude-opus-5-5", "status": "finished",
-             "turns": 22, "input_tokens": 452700, "output_tokens": 3500, "error": null}],
+             "turns": 22, "input_tokens": 452700, "output_tokens": 3500,
+             "cache_read_tokens": 431000, "cache_write_tokens": 21000, "error": null}],
   "findings": [],
   "drafts": [{"at": "...", "id": "f1", "lane": "reviewer", "model": "claude-opus-5-5",
               "kind": "loop_finding", "path": "src/a.rs", "line": 4, "target": "", "body": "...",

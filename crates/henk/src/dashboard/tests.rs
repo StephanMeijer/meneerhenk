@@ -226,7 +226,14 @@ pub(super) async fn seed(f: &Fixture) {
         .await
         .unwrap();
     store
-        .finish_lane(&review, "lane-a", LaneStatus::Finished, 3, 100, 20, None)
+        .finish_lane(
+            &review,
+            "lane-a",
+            LaneStatus::Finished,
+            3,
+            henk_store::TokenUsage::new(100, 20),
+            None,
+        )
         .await
         .unwrap();
     store

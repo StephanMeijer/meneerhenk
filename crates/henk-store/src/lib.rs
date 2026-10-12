@@ -17,7 +17,7 @@ pub use types::{
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LOOP_FINDING_KIND,
     LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun,
     OutcomeFilter, OutcomeRecord, PLAN_POINT_KIND, Page, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallKey,
-    ToolCallListing, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary,
-    session_kind,
+    RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter,
+    ToolCallKey, ToolCallListing, ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord,
+    TranscriptSummary, session_kind,
 };

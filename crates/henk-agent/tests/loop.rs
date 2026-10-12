@@ -66,6 +66,7 @@ fn config() -> AgentConfig {
         keep_recent_turns: 2,
         max_repeated_calls: 3,
         record_argument_bytes: 4096,
+        cache_ttl: henk_llm::CacheTtl::Short,
     }
 }
 
@@ -368,6 +369,7 @@ async fn old_tool_results_are_elided_once_the_conversation_is_over_budget() {
     ));
     let mut set = ToolSet::new();
     set.add(Big);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let agent = Agent::new(
         model.clone(),
         set,
@@ -378,11 +380,27 @@ async fn old_tool_results_are_elided_once_the_conversation_is_over_budget() {
             keep_recent_turns: 1,
             ..config()
         },
-    );
+    )
+    .with_events(tx);
     let outcome = agent
         .run(vec![ChatMessage::user("go")], CancellationToken::new())
         .await;
+    drop(agent);
     assert!(matches!(outcome.stop, StopCause::EndTurn));
+    // #330: every shortening is an event, so the run can say the prompt
+    // cache was written again from there.
+    let mut compacted = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if let henk_agent::AgentEvent::Compacted { turn, stubbed, .. } = event {
+            compacted.push((turn, stubbed));
+        }
+    }
+    assert!(!compacted.is_empty());
+    assert_eq!(
+        compacted.iter().map(|(_, n)| n).sum::<usize>(),
+        2,
+        "{compacted:?}"
+    );
     // What the model saw on its last call: the first two results stubbed,
     // the third intact.
     let last_request = model.requests().last().unwrap().clone();

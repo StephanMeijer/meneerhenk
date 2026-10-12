@@ -3,6 +3,7 @@ import {
   about,
   ago,
   average,
+  cacheRead,
   clockTime,
   count,
   draftPlace,
@@ -120,5 +121,13 @@ describe('tool helpers', () => {
     expect(prettyPayload('{"a":1,"b":["<img src=x>"]}')).toBe('{\n  "a": 1,\n  "b": [\n    "<img src=x>"\n  ]\n}');
     expect(prettyPayload('not json {')).toBe('not json {');
     expect(prettyPayload('')).toBe('');
+  });
+});
+
+describe('cacheRead', () => {
+  it('says what the cache served and its share, or nothing', () => {
+    expect(cacheRead({ input_tokens: 10000, cache_read_tokens: 8150, cache_write_tokens: 1200 })).toBe('8,150 (81%)');
+    expect(cacheRead({ input_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 300 })).toBe('0 (0%)');
+    expect(cacheRead({ input_tokens: 500, cache_read_tokens: 0, cache_write_tokens: 0 })).toBe('');
   });
 });

@@ -49,8 +49,8 @@ export function runDetail(status = 'finished'): RunDetail {
     check_id: '4711',
     heartbeat_at: null,
     lanes: [
-      { name: 'lane-a', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
-      { name: 'lane-b', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
+      { name: 'lane-a', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 15, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
+      { name: 'lane-b', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
     ],
     findings: [{ at: '2026-10-07T10:02:00Z', lane: 'lane-a', path: 'src/a.rs', line: 4, comment_id: 'c-77', action: 'posted' }],
     drafts: [

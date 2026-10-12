@@ -402,7 +402,14 @@ async fn a_superseded_run_says_so_and_names_its_replacement_and_lanes_say_how_th
         store.start_lane(&old, lane, "m").await.unwrap();
     }
     store
-        .finish_lane(&old, "lane-a", LaneStatus::TimedOut, 30, 1, 1, None)
+        .finish_lane(
+            &old,
+            "lane-a",
+            LaneStatus::TimedOut,
+            30,
+            henk_store::TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     store.drop_running_lanes(&old, "cancelled").await.unwrap();
@@ -543,7 +550,14 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     for (lane, model) in [("lane-a", "model-x"), ("check-1", "model-y")] {
         store.start_lane(&run, lane, model).await.unwrap();
         store
-            .finish_lane(&run, lane, LaneStatus::Finished, 4, 100, 10, None)
+            .finish_lane(
+                &run,
+                lane,
+                LaneStatus::Finished,
+                4,
+                henk_store::TokenUsage::new(100, 10),
+                None,
+            )
             .await
             .unwrap();
     }
@@ -710,7 +724,14 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
     for (session, model) in [("reviewer", "model-r"), ("fixer", "model-f")] {
         store.start_lane(&run, session, model).await.unwrap();
         store
-            .finish_lane(&run, session, LaneStatus::Finished, 2, 50, 5, None)
+            .finish_lane(
+                &run,
+                session,
+                LaneStatus::Finished,
+                2,
+                henk_store::TokenUsage::new(50, 5),
+                None,
+            )
             .await
             .unwrap();
     }
@@ -829,7 +850,14 @@ async fn an_address_run_from_before_its_removal_still_reads_in_full() {
         .unwrap();
     store.start_lane(&run, "address", "model-a").await.unwrap();
     store
-        .finish_lane(&run, "address", LaneStatus::Finished, 6, 300, 30, None)
+        .finish_lane(
+            &run,
+            "address",
+            LaneStatus::Finished,
+            6,
+            henk_store::TokenUsage::new(300, 30),
+            None,
+        )
         .await
         .unwrap();
     store
@@ -2028,8 +2056,7 @@ async fn a_running_run_streams_what_happens_in_order_and_ends() {
             "lane-a",
             henk_store::LaneStatus::Finished,
             4,
-            100,
-            9,
+            henk_store::TokenUsage::new(100, 9),
             None,
         )
         .await
@@ -2476,7 +2503,14 @@ async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
             .unwrap();
         store.start_lane(&id, "lane-a", "m").await.unwrap();
         store
-            .finish_lane(&id, "lane-a", lane_status, 1, 1, 1, error)
+            .finish_lane(
+                &id,
+                "lane-a",
+                lane_status,
+                1,
+                henk_store::TokenUsage::new(1, 1),
+                error,
+            )
             .await
             .unwrap();
         store
@@ -2607,7 +2641,14 @@ async fn a_running_session_streams_what_it_says_as_text_and_ends_with_it() {
     assert_eq!(other.next().await.unwrap().event, "snapshot");
 
     store
-        .finish_lane(&run, "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+        .finish_lane(
+            &run,
+            "lane-a",
+            LaneStatus::Finished,
+            1,
+            henk_store::TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     let end = events.next().await.unwrap();

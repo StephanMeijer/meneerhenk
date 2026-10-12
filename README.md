@@ -92,6 +92,19 @@ round; and a session that repeats one tool call with the same arguments
 is refused and then stopped as stuck (`agent.max_repeated_calls`, for
 every session, recorded on the run).
 
+In a pairing (the reviewer and the executor of a review, the planner and
+the reviewer of a plan) each role keeps its conversation for the whole
+pairing and is resumed with only an update, so every resumed turn reads its
+history from the prompt cache (#330). On Anthropic models a role whose
+partner's round may outlast the 5-minute cache (`timeout_secs` over 300,
+600 by default) asks for the 1-hour cache, so it does not expire while the
+role waits; a session on its own, such as an execute run, keeps the 5-minute
+one. A compaction rewrites that history and writes the cache again, so each
+one is a warning on the run, naming the session and the round. The run
+page and `henk runs show` give every session's cache reads and writes and
+the share of its tokens in the cache served (`input_tokens` stays the whole
+prompt).
+
 Every comment Henk writes ends in two hidden HTML comments: the marker
 (run, model, kind) that lets Henk recognise his own comments later, and a
 short note for AI agents that pick the comment up: reply in the thread, do

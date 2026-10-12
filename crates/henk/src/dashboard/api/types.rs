@@ -559,7 +559,8 @@ pub struct ToolCallItem {
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Lane {
-    /// `lane-a`, `check-1`, `planner`, `address`.
+    /// `reviewer`, `executor`, `planner`; `lane-a`, `check-1` and
+    /// `address` in older runs.
     pub name: String,
     /// The model.
     pub model: String,
@@ -568,10 +569,15 @@ pub struct Lane {
     pub status: String,
     /// Model calls made.
     pub turns: u64,
-    /// Tokens in, not read from a cache.
+    /// Tokens in: the whole prompt of every model call, cache reads and
+    /// writes included.
     pub input_tokens: u64,
     /// Tokens out.
     pub output_tokens: u64,
+    /// Of `input_tokens`, read from the model's prompt cache (#330).
+    pub cache_read_tokens: u64,
+    /// Of `input_tokens`, written into the prompt cache (#330).
+    pub cache_write_tokens: u64,
     /// Why it did not finish.
     pub error: Option<String>,
     /// The turn of its latest tool call: how far a running lane has come,
@@ -968,6 +974,8 @@ impl From<&LaneRecord> for Lane {
             turns: lane.turns,
             input_tokens: lane.input_tokens,
             output_tokens: lane.output_tokens,
+            cache_read_tokens: lane.cache_read_tokens,
+            cache_write_tokens: lane.cache_write_tokens,
             error: lane.error.clone(),
             last_call_turn: None,
             started_at: lane.started_at.clone(),

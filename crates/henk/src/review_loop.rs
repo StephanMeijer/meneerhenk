@@ -31,10 +31,10 @@ use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::role::Role;
 use henk_domain::run::RunId;
 use henk_domain::workspace::Profile;
-use henk_llm::ChatMessage;
+use henk_llm::{CacheTtl, ChatMessage};
 use henk_platform::ReviewTarget;
 use henk_platform::push::{GitCredential, PullFacts, PushWriter};
-use henk_session::{ResumableSession, RoundOutcome};
+use henk_session::{ResumableSession, RoundOutcome, cache_ttl_for};
 use henk_store::{Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -250,7 +250,7 @@ impl<'a> Rounds<'a> {
         let bash = profile.backend.runs_model_commands();
         let reference = format!("#{}", on.target.number);
         let repo = on.target.repo.path();
-        let limits = |max_turns, timeout_secs| round_limits(&app.settings, max_turns, timeout_secs);
+        let settings = &app.settings;
         let reviewer_round = reviewer.timeout_secs(Role::Reviewer);
 
         let reviewer_model = app.model(&reviewer.model)?;
@@ -285,32 +285,22 @@ impl<'a> Rounds<'a> {
             bash,
             state: Mutex::new(EditState::default()),
         });
-        let mut executor_system = format!(
-            "{}\n\n{}",
-            prompts::PERSONA,
-            prompts::render(
-                prompts::LOOP_EXECUTOR,
-                &[
-                    ("ref", &reference),
-                    ("repo", &repo),
-                    ("max_files", &address.max_changed_files.to_string()),
-                ],
-            )
-        );
-        if bash {
-            executor_system = format!("{executor_system}\n\n{}", prompts::EXECUTOR_BASH);
-        }
-        let mut executor_tools = edit_tools(&fixing);
-        executor_tools.add(ListFindings(Arc::clone(&handoff)));
-        executor_tools.add(GiveVerdict(Arc::clone(&handoff)));
-        let executor_tools = equip_and_grant(
-            Role::Executor,
-            &mut executor_system,
-            executor_tools,
-            app.settings.skills.select(&address.skills),
-            &address.tools(),
-        );
+        let (executor_system, executor_tools) =
+            executor_setup(app, address, &fixing, &handoff, &reference, &repo);
 
+        let reviewer_turns = reviewer.max_turns(Role::Reviewer);
+        let reviewer_limits = round_limits(
+            settings,
+            reviewer_turns,
+            reviewer_round,
+            address.timeout_secs,
+        );
+        let executor_limits = round_limits(
+            settings,
+            address.max_turns,
+            address.timeout_secs,
+            reviewer_round,
+        );
         Ok(Self {
             on,
             config,
@@ -320,7 +310,7 @@ impl<'a> Rounds<'a> {
                 reviewer_model,
                 reviewer_system,
                 reviewer_tools,
-                limits(reviewer.max_turns(Role::Reviewer), reviewer_round),
+                reviewer_limits,
             )
             .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
             executor: Some(
@@ -329,7 +319,7 @@ impl<'a> Rounds<'a> {
                     app.model(&address.model)?,
                     executor_system,
                     executor_tools,
-                    limits(address.max_turns, address.timeout_secs),
+                    executor_limits,
                 )
                 .with_continuation(executor_continuation(Arc::clone(&handoff))),
             ),
@@ -447,7 +437,7 @@ impl<'a> Rounds<'a> {
             self.round = round;
             self.handoff.start_round(round);
             if round > 1 {
-                self.compact(&first, round);
+                self.compact(&first, round).await;
             }
             let doing = format!("round {round}: reviewer");
             stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
@@ -570,7 +560,9 @@ impl<'a> Rounds<'a> {
     /// reviewer's summary starts with its task, `opening`; the executor never
     /// had that task or its tools, so its summary is the findings and the
     /// commits alone.
-    fn compact(&mut self, opening: &str, round: u32) {
+    /// A compaction is a last resort: it is on the run, with the round,
+    /// since the prompt cache is written again from there (#330).
+    async fn compact(&mut self, opening: &str, round: u32) {
         let ledger = self.handoff.ledger();
         let commits = if self.pushed.is_empty() {
             "none".to_owned()
@@ -581,10 +573,21 @@ impl<'a> Rounds<'a> {
             "The findings so far and their verdicts:\n{}\n\nCommits pushed: {commits}.",
             ledger.summary(round)
         );
-        self.reviewer
-            .compact_rounds(&format!("{opening}\n\n{earlier}"), 1);
+        let mut dropped = Vec::new();
+        dropped.extend(
+            self.reviewer
+                .compact_rounds(&format!("{opening}\n\n{earlier}"), 1),
+        );
         if let Some(executor) = &mut self.executor {
-            executor.compact_rounds(&earlier, 1);
+            dropped.extend(executor.compact_rounds(&earlier, 1));
+        }
+        for rounds in dropped {
+            let _ = self
+                .on
+                .app
+                .store
+                .event(self.on.run, "warn", &rounds.note())
+                .await;
         }
     }
 
@@ -615,7 +618,10 @@ impl<'a> Rounds<'a> {
     /// The reviewer reviews alone, without an executor, when `why` says why.
     fn alone(mut self, why: Option<String>) -> Self {
         if why.is_some() {
+            // Alone, the reviewer waits for nobody: each turn refreshes the
+            // short cache.
             self.executor = None;
+            self.reviewer.set_cache_ttl(CacheTtl::Short);
         }
         self.alone = why;
         self
@@ -786,6 +792,45 @@ impl<'a> Rounds<'a> {
     }
 }
 
+/// The executor's system prompt and tools: editing and the checks in
+/// `fixing`'s workspace, and its side of the handoff, cut to what its role
+/// grants.
+fn executor_setup(
+    app: &App,
+    address: &crate::config::ExecutorConfig,
+    fixing: &Arc<EditContext>,
+    handoff: &Arc<Handoff>,
+    reference: &str,
+    repo: &str,
+) -> (String, ToolSet) {
+    let mut system = format!(
+        "{}\n\n{}",
+        prompts::PERSONA,
+        prompts::render(
+            prompts::LOOP_EXECUTOR,
+            &[
+                ("ref", reference),
+                ("repo", repo),
+                ("max_files", &address.max_changed_files.to_string()),
+            ],
+        )
+    );
+    if fixing.bash {
+        system = format!("{system}\n\n{}", prompts::EXECUTOR_BASH);
+    }
+    let mut tools = edit_tools(fixing);
+    tools.add(ListFindings(Arc::clone(handoff)));
+    tools.add(GiveVerdict(Arc::clone(handoff)));
+    let tools = equip_and_grant(
+        Role::Executor,
+        &mut system,
+        tools,
+        app.settings.skills.select(&address.skills),
+        &address.tools(),
+    );
+    (system, tools)
+}
+
 /// The reviewer's tools: the diff, the workspace to read and, when the
 /// backend allows it (`bash` is its command limit), to run commands in,
 /// and the handoff. What it changes in the workspace is never exported.
@@ -827,15 +872,19 @@ fn loop_roles(
     }
 }
 
-/// One session's limits per round: its role's turns and time, and the
-/// review's conversation budget.
+/// One session's limits per round: its role's turns and time, the
+/// review's conversation budget, and its prompt cache's lifetime: each
+/// waits for the other's round, so past 5 minutes it keeps the cache for
+/// the hour (#330).
 fn round_limits(
     settings: &crate::config::Settings,
     max_turns: u32,
     timeout_secs: u64,
+    partner_secs: u64,
 ) -> AgentConfig {
     AgentConfig {
         max_turns,
+        cache_ttl: cache_ttl_for(partner_secs),
         timeout: Duration::from_secs(timeout_secs),
         max_conversation_chars: settings.review.max_conversation_chars,
         keep_recent_turns: settings.review.keep_recent_turns,

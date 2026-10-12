@@ -3606,6 +3606,104 @@ requester_id = 3
         assert!(first.contains("f2 at src/a.rs:1"), "{first}");
         assert!(!first.contains("Review pull request"), "{first}");
         assert!(!first.contains("get_file_diff"), "{first}");
+        // #330: a compaction is on the run, with the round, never quiet.
+        let events = f.app.store.events(&run).await.unwrap();
+        let dropped: Vec<&str> = events
+            .iter()
+            .filter(|e| e.level == "warn" && e.message.contains("from its conversation"))
+            .map(|e| e.message.as_str())
+            .collect();
+        assert_eq!(
+            dropped,
+            [
+                "reviewer: dropped round 1 from its conversation before round 3 to stay under max_conversation_chars; the prompt cache is written again from there",
+                "executor: dropped round 1 from its conversation before round 3 to stay under max_conversation_chars; the prompt cache is written again from there",
+            ],
+            "{events:?}"
+        );
+    }
+
+    /// #330: in a three-round loop, each resumed round of the reviewer and
+    /// of the executor starts with the round before byte for byte, both
+    /// keep their prompt cache for the hour since each waits for the
+    /// other, and behind a cache every turn after the first reads its
+    /// history from it; the run keeps what each session read.
+    #[tokio::test]
+    async fn a_pairing_resumes_on_its_unchanged_history_and_reads_it_from_the_cache() {
+        let (mut f, _, _, _remote) = looping(
+            "review-loop-warm",
+            ScriptedClient::new("unused", []),
+            ScriptedClient::new("unused", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let reviewer = Arc::new(henk_llm::testing::CachingClient::new(ScriptedClient::new(
+            "r",
+            [
+                report(2, "x must be 3", None),
+                finish_round(),
+                say("Done."),
+                report(1, "main must return a value", None),
+                finish_round(),
+                say("Done."),
+                finish_round(),
+                say("Nothing more."),
+            ],
+        )));
+        let executor = Arc::new(henk_llm::testing::CachingClient::new(ScriptedClient::new(
+            "f",
+            [
+                judge("f1", "rejected", "x is never divided by."),
+                say("Settled."),
+                judge("f2", "rejected", "main returns ()."),
+                say("Settled."),
+            ],
+        )));
+        f.app.models.insert(
+            "r".to_owned(),
+            Arc::clone(&reviewer) as Arc<dyn ModelClient>,
+        );
+        f.app.models.insert(
+            "f".to_owned(),
+            Arc::clone(&executor) as Arc<dyn ModelClient>,
+        );
+        let run = RunId::parse("r-loop-warm").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let reviews = reviewer.requests();
+        assert_eq!(reviews.len(), 8);
+        henk_llm::testing::assert_resumed_with_only_the_update(&reviews[2], &reviews[3]);
+        henk_llm::testing::assert_resumed_with_only_the_update(&reviews[5], &reviews[6]);
+        let fixes = executor.requests();
+        assert_eq!(fixes.len(), 4);
+        henk_llm::testing::assert_resumed_with_only_the_update(&fixes[1], &fixes[2]);
+        for request in reviews.iter().chain(&fixes) {
+            assert_eq!(request.cache_ttl, henk_llm::CacheTtl::Long);
+        }
+
+        for (who, usage) in [
+            ("reviewer", reviewer.cache_usage()),
+            ("executor", executor.cache_usage()),
+        ] {
+            assert_eq!(usage[0].0, 0, "{who}: the first turn writes the cache");
+            for (turn, (read, _)) in usage.iter().enumerate().skip(1) {
+                assert!(*read > 0, "{who}: turn {turn} read nothing: {usage:?}");
+            }
+        }
+        let lanes = f.app.store.lanes(&run).await.unwrap();
+        for lane in &lanes {
+            assert!(
+                lane.cache_read_tokens > 0 && lane.cache_read_tokens < lane.input_tokens,
+                "{lane:?}"
+            );
+            assert_eq!(
+                lane.input_tokens,
+                lane.cache_read_tokens + lane.cache_write_tokens,
+                "tokens in stay the whole prompt: {lane:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3805,7 +3903,7 @@ requester_id = 3
     /// A reviewer alone that finds nothing passes the check.
     #[tokio::test]
     async fn a_pull_request_from_a_fork_with_nothing_to_find_passes() {
-        let (f, _, executor, _remote) = looping_from(
+        let (f, reviewer, executor, _remote) = looping_from(
             "review-loop-fork-clean",
             "someone/r",
             ScriptedClient::new("m", []),
@@ -3826,6 +3924,14 @@ requester_id = 3
         assert!(summary.contains("reviewed only, since"), "{summary}");
         assert!(!summary.contains("Open findings"), "{summary}");
         assert!(executor.requests().is_empty());
+        // Alone, the reviewer waits for nobody: each turn refreshes the
+        // short cache (#330).
+        assert!(
+            reviewer
+                .requests()
+                .iter()
+                .all(|r| r.cache_ttl == henk_llm::CacheTtl::Short)
+        );
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.loop_stop.as_deref(), Some("review_only"));
     }

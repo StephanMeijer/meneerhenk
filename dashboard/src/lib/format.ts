@@ -154,6 +154,16 @@ export function count(n: number): string {
   return NUMBER.format(n);
 }
 
+/**
+ * What the prompt cache served a session (#330): its reads and the share of
+ * its prompt they were, `8,150 (81%)`; empty when it used no cache.
+ */
+export function cacheRead(lane: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number }): string {
+  if (lane.cache_read_tokens === 0 && lane.cache_write_tokens === 0) return '';
+  const hit = lane.input_tokens === 0 ? 0 : Math.floor((lane.cache_read_tokens * 100) / lane.input_tokens);
+  return `${count(lane.cache_read_tokens)} (${hit}%)`;
+}
+
 /** A share with its base: `96% of 75`; a dash of nothing. */
 export function share(part: number, whole: number): string {
   return whole === 0 ? '-' : `${Math.round((part / whole) * 100)}% of ${count(whole)}`;

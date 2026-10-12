@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use henk_llm::{
-    Block, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig, Provider,
-    RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName, ToolResult,
-    anthropic, client_for, openai,
+    Block, CacheTtl, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig,
+    Provider, RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName,
+    ToolResult, anthropic, client_for, openai,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -282,6 +282,7 @@ fn openai_encodes_the_conversation_in_wire_order() {
         tool_choice: ToolChoice::Auto,
         max_tokens: None,
         temperature: Some(0.2),
+        cache_ttl: CacheTtl::Long,
     };
     let body = client.body(&request);
     assert_eq!(body["model"], "test-model");
@@ -420,6 +421,7 @@ fn anthropic_encodes_system_top_level_and_echoes_thinking() {
         tool_choice: ToolChoice::Required,
         max_tokens: Some(256),
         temperature: None,
+        cache_ttl: CacheTtl::Short,
     };
     let body = client.body(&request);
     assert_eq!(
@@ -448,6 +450,32 @@ fn anthropic_encodes_system_top_level_and_echoes_thinking() {
     );
     assert!(messages[1]["content"][0].get("cache_control").is_none());
     assert!(body["tools"][0]["input_schema"].get("$schema").is_none());
+}
+
+/// #330: a session that waits for another between its rounds asks for the
+/// 1-hour cache, on both markers, so a longer one never follows a shorter;
+/// the OpenAI adapter has no such choice and sends nothing for it.
+#[test]
+fn a_waiting_session_asks_for_the_hour_long_cache_on_both_markers() {
+    let request = CompletionRequest {
+        system: Some("You are Henk.".to_owned()),
+        messages: conversation(),
+        cache_ttl: CacheTtl::Long,
+        ..CompletionRequest::default()
+    };
+    let client =
+        anthropic::AnthropicClient::new(config(Provider::Anthropic, "https://x.test")).unwrap();
+    let body = client.body(&request);
+    let long = json!({"type": "ephemeral", "ttl": "1h"});
+    assert_eq!(body["system"][0]["cache_control"], long);
+    let last = body["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["content"][0]["cache_control"], long);
+    let openai = openai::OpenAiClient::new(config(Provider::OpenAi, "https://x.test/v1")).unwrap();
+    let text = openai.body(&request).to_string();
+    assert!(
+        !text.contains("ttl") && !text.contains("cache_control"),
+        "{text}"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
     LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus, Stage,
-    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
+    StageRecord, StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
     ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
@@ -153,18 +153,13 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one argument per column of a single UPDATE"
-    )]
     async fn finish_lane(
         &self,
         run: &RunId,
         name: &str,
         status: LaneStatus,
         turns: u64,
-        input_tokens: u64,
-        output_tokens: u64,
+        tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError>;
 
