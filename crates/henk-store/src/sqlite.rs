@@ -1335,7 +1335,7 @@ const DAY_FINDINGS: &str = concat!(
 const DAY_DRAFTS: &str = concat!(
     "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
     instant_of!("created_at"),
-    " >= ?1 AND kind <> 'loop_finding' GROUP BY 1"
+    " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point') GROUP BY 1"
 );
 
 /// The `WHERE` of a tool call tally or listing over `tool_calls c`, over

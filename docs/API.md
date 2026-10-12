@@ -145,7 +145,8 @@ One run with everything the run record holds about it:
 - `summary`, `error`, `check_id`, `heartbeat_at`;
 - `lanes`: every model session (a review loop's `reviewer` and `executor`,
   `fixer` in runs before #323,
-  the `planner`, and `address` in address runs from before #327) with
+  a plan's `planner` and `reviewer`, and `address` in address runs from
+  before #327) with
   turns and tokens, and its `status`:
   `running`, `finished`, `timed_out` (stopped at its time limit) or
   `did_not_finish` (`error` says why). Reviews made by lanes, before #309,
@@ -155,7 +156,11 @@ One run with everything the run record holds about it:
 - `drafts`: a review loop's findings, `kind` `loop_finding` from the
   `reviewer`, each with the executor's `decision`: `fixed` (its commit in
   `comment_id`), `rejected`, `wont_fix`, or `unsettled` when the loop ended
-  first (#285). Reviews made by lanes hold the lanes' drafts and the
+  first (#285). A plan's drafts are its reviewer's points, `kind`
+  `plan_point`, with `path` the part of the plan the point is about, `line`
+  0, `target` the rejected point it contests if any, and the planner's
+  `decision`: `taken`, `rejected`, or `unsettled` when the review ended
+  first (#328). Reviews made by lanes hold the lanes' drafts and the
   fact-check's decisions instead (#189);
 - `transcripts`: the sessions whose conversation is kept (#191);
 - `tool_usage`: calls per session and tool (#190);
@@ -170,7 +175,10 @@ One run with everything the run record holds about it:
   skipped when it may not), `publish` (skipped: a review posts nothing),
   `done`. Runs from before #309 can have a `fact_check` stage after
   `lanes`. A plan goes `requested`,
-  `started`, `session`, `publish`, `done`. An address run, from before
+  `started`, `session` (the planner's draft and the review's rounds),
+  `publish` (nothing reaches the issue before it), `done`. A run's
+  `loop_stop` and `loop_rounds` say why and after how many rounds a review
+  loop or a plan's review stopped. An address run, from before
   #327, went `requested`, `started`, `workspace`, `session`, `commit`,
   `push`, `replies`, `done`.
   Runs from before stages were kept have none.
@@ -246,7 +254,7 @@ above; `RunMessage` in `types.ts` is the union.
 | `run` | `RunUpdate`: the run, summary, error, check id | The run started, ended or got its check |
 | `lanes` | `Lane[]`, every session | A session started or ended |
 | `tool_call` | `ToolCall` | A session called a tool |
-| `draft` | `Draft` | The reviewer reported a finding, or the executor gave its verdict |
+| `draft` | `Draft` | The reviewer reported a finding or raised a point on a plan, or the executor or planner answered it |
 | `finding` | `Finding` | Something was done with a finding comment; only a review by lanes did that |
 | `event` | `RunEvent` | A line on the timeline |
 | `transcript` | `TranscriptRef` | A session's conversation was kept |
@@ -342,8 +350,9 @@ every day from `from` to `to` with:
 - `findings_posted`: new comments, checked (`posted`) or not
   (`unverified`); improved comments are not new. Only reviews by lanes,
   before #309, posted any;
-- `drafts`: drafts the lanes wrote. A review loop's findings are left out
-  (#285), so days since #309 have none.
+- `drafts`: drafts the lanes wrote. A review loop's findings and a plan
+  review's points are left out (#285, #328), so days since #309 have
+  none.
 
 ### `GET /stats/lanes`
 

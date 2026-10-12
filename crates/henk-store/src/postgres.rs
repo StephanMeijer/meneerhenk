@@ -548,7 +548,7 @@ impl RunStore for PgStore {
             .query(
                 &format!(
                     "SELECT {}, COUNT(*) FROM drafts
-                     WHERE created_at >= $1 AND kind <> 'loop_finding' GROUP BY 1",
+                     WHERE created_at >= $1 AND kind NOT IN ('loop_finding', 'plan_point') GROUP BY 1",
                     day("created_at")
                 ),
                 &[&since],

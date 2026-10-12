@@ -18,9 +18,9 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction,
     InboundEvent, LOOP_FINDING_KIND, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
-    OutcomeRecord, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore,
-    SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey, ToolCallRecord,
-    TranscriptRecord,
+    OutcomeRecord, PLAN_POINT_KIND, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
+    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey,
+    ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -483,6 +483,7 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
         DraftVerdict::Rejected,
         DraftVerdict::WontFix,
         DraftVerdict::Unsettled,
+        DraftVerdict::Taken,
     ];
     for (n, verdict) in verdicts.into_iter().enumerate() {
         let id = format!("f{}", n + 1);
@@ -499,6 +500,9 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
         };
         store.decide_draft(&run.id, &id, &decision).await.unwrap();
     }
+    let mut point = draft("p1", "reviewer", 0, "step 2 misses the migration");
+    PLAN_POINT_KIND.clone_into(&mut point.kind);
+    store.record_draft(&run.id, &point).await.unwrap();
     let stored: Vec<_> = store
         .drafts(&run.id)
         .await
@@ -513,7 +517,7 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
     assert_eq!(
         days.iter().map(|d| d.drafts).sum::<u64>(),
         1,
-        "the overview's drafts per day leave loop findings out too"
+        "the overview's drafts per day leave loop findings and plan points out too"
     );
 }
 

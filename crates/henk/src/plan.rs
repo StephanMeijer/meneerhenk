@@ -14,7 +14,7 @@ use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
 use henk_mcp::McpSession;
 use henk_platform::{IssueTarget, IssueUpdate};
-use henk_session::{SessionSpec, model_id, platform_tools, run_session};
+use henk_session::{ResumableSession, model_id, platform_tools};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -23,9 +23,14 @@ use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
+use crate::plan_pairing::{IssueMaterial, Pairing, reviewer_workspace};
+use crate::plan_review_tools::{
+    AnswerPoint, FinishReview, ListPoints, PlanHandoff, RaisePoint, planner_continuation,
+    reviewer_continuation,
+};
 use crate::plan_tools::{
     AddLabels, AskQuestions, CreateSubIssue, LinkIssue, PlanContext, PlanState, SetDescription,
-    SetFields, SetIssueType, SetTitle, WritePlan,
+    SetFields, SetIssueType, SetTitle, WithdrawChange, WritePlan,
 };
 use crate::plan_workspace::{PlanWorkspace, open_for_plan};
 use crate::review::Interrupted;
@@ -129,13 +134,7 @@ pub async fn run_plan(
         requester: Some(requester.get()),
         target: request.target.clone(),
         writer: Arc::clone(&writer),
-        state: Mutex::new(PlanState {
-            budget: ChangeBudget::new(planning.change_budget),
-            changes: Vec::new(),
-            sub_issues: Vec::new(),
-            plan: None,
-            asked: false,
-        }),
+        state: Mutex::new(PlanState::new(ChangeBudget::new(planning.change_budget))),
         sub_issue_cap: planning.sub_issue_cap,
     });
     let result = plan_body(
@@ -398,6 +397,7 @@ async fn planner_tools(
     platform: henk_domain::allowlist::Platform,
     scope: &Scope,
     context: Arc<PlanContext>,
+    handoff: &Arc<PlanHandoff>,
     workspace: Option<&PlanWorkspace>,
 ) -> anyhow::Result<ToolSet> {
     let tools = platform_tools(session, platform, scope.clone(), &[])
@@ -429,7 +429,92 @@ async fn planner_tools(
     set.add(CreateSubIssue(Arc::clone(&context)));
     set.add(AskQuestions(Arc::clone(&context)));
     set.add(WritePlan(Arc::clone(&context)));
+    set.add(WithdrawChange(Arc::clone(&context)));
+    set.add(ListPoints(Arc::clone(handoff)));
+    set.add(AnswerPoint(Arc::clone(handoff)));
 
+    Ok(set)
+}
+
+/// What the plan reviewer is built from.
+struct PlanReviewerSetup<'a> {
+    session: Arc<dyn McpSession>,
+    target: &'a IssueTarget,
+    scope: &'a Scope,
+    reference: &'a str,
+    handoff: &'a Arc<PlanHandoff>,
+    workspace: Option<&'a PlanWorkspace>,
+}
+
+/// The plan reviewer's system prompt and tools (#328), cut to what its role
+/// grants.
+async fn plan_reviewer_setup(
+    app: &App,
+    reviewer: &crate::config::RoleConfig,
+    setup: PlanReviewerSetup<'_>,
+) -> anyhow::Result<(String, ToolSet)> {
+    let (repo, platform) = (setup.target.repo.path(), setup.target.repo.platform());
+    let at = setup
+        .workspace
+        .map(|w| (w.branch.as_str(), w.commit.as_str()));
+    let mut system = format!(
+        "{}\n\n{}",
+        prompts::PERSONA,
+        prompts::render(
+            prompts::PLAN_REVIEWER,
+            &[
+                ("ref", setup.reference),
+                ("repo", &repo),
+                ("workspace", &reviewer_workspace(at)),
+            ],
+        )
+    );
+    let tools = plan_reviewer_tools(
+        setup.session,
+        platform,
+        setup.scope,
+        setup.handoff,
+        setup.workspace,
+    )
+    .await?;
+    let tools = crate::roles::equip_and_grant(
+        Role::Reviewer,
+        &mut system,
+        tools,
+        app.settings.skills.select(&reviewer.skills),
+        &reviewer.tools(Role::Reviewer),
+    );
+    Ok((system, tools))
+}
+
+/// The plan reviewer's tools (#328): the platform's read tools, the
+/// planner's copy of the repository to read and run commands in, and its
+/// side of the handoff. Nothing it changes in the copy goes anywhere.
+async fn plan_reviewer_tools(
+    session: Arc<dyn McpSession>,
+    platform: henk_domain::allowlist::Platform,
+    scope: &Scope,
+    handoff: &Arc<PlanHandoff>,
+    workspace: Option<&PlanWorkspace>,
+) -> anyhow::Result<ToolSet> {
+    let tools = platform_tools(session, platform, scope.clone(), &[])
+        .await
+        .context("listing MCP tools")?;
+    let mut set = ToolSet::new();
+    for tool in tools {
+        set.add(tool);
+    }
+    if let Some(workspace) = workspace {
+        crate::code_tools::add(&mut set, &workspace.workspace);
+        crate::code_tools::add_bash(
+            &mut set,
+            &workspace.workspace,
+            Duration::from_secs(workspace.limits.command_secs),
+            crate::code_tools::BashUse::Plan,
+        );
+    }
+    set.add(RaisePoint(Arc::clone(handoff)));
+    set.add(FinishReview(Arc::clone(handoff)));
     Ok(set)
 }
 
@@ -595,28 +680,36 @@ async fn plan_session(
         .planning
         .as_ref()
         .ok_or_else(|| anyhow!("planning is not configured"))?;
-    let planner = planner(app)?;
+    let (planner, reviewer) = (planner(app)?, plan_reviewer(app)?);
     let platform = request.target.repo.platform();
     let session = app.read_session(platform).await?;
     let scope = Scope::Plan {
         repo: request.target.repo.clone(),
         issue: request.target.number,
     };
+    let reviewer_model = app.model(&reviewer.model)?;
+    let handoff = Arc::new(PlanHandoff::new(
+        context.run.clone(),
+        Arc::clone(&app.store),
+        reviewer_model.model().to_owned(),
+    ));
     let set = planner_tools(
         Arc::clone(&session),
         platform,
         &scope,
         Arc::clone(&context),
+        &handoff,
         workspace,
     )
     .await?;
 
     let reference = format!("#{}", request.target.number);
+    let repo = request.target.repo.path();
     let granted = planner.tools(Role::Planner);
     let (mut system, opening) = planner_prompts(
         &PlannerPrompt {
             reference: &reference,
-            repo: &request.target.repo.path(),
+            repo: &repo,
             title,
             note: request.note.as_deref(),
             sub_issue_cap: planning.sub_issue_cap,
@@ -633,25 +726,76 @@ async fn plan_session(
         app.settings.skills.select(&planner.skills),
         &granted,
     );
-    let limits = AgentConfig {
-        max_turns: planner.max_turns(Role::Planner),
-        timeout: Duration::from_secs(planner.timeout_secs(Role::Planner)),
+
+    let (reviewer_system, reviewer_set) = plan_reviewer_setup(
+        app,
+        reviewer,
+        PlanReviewerSetup {
+            session,
+            target: &request.target,
+            scope: &scope,
+            reference: &reference,
+            handoff: &handoff,
+            workspace,
+        },
+    )
+    .await?;
+
+    let planner_round = planner.timeout_secs(Role::Planner);
+    let reviewer_round = reviewer.timeout_secs(Role::Reviewer);
+    let pairing = Pairing {
+        app,
+        run: &context.run,
+        config: planning,
+        context: Arc::clone(&context),
+        handoff: Arc::clone(&handoff),
+        planner: ResumableSession::new(
+            "planner",
+            model,
+            system,
+            set,
+            role_limits(app, planner.max_turns(Role::Planner), planner_round),
+        )
+        .with_continuation(planner_continuation(Arc::clone(&handoff))),
+        reviewer: ResumableSession::new(
+            "reviewer",
+            reviewer_model,
+            reviewer_system,
+            reviewer_set,
+            role_limits(app, reviewer.max_turns(Role::Reviewer), reviewer_round),
+        )
+        .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
+        planner_round: Duration::from_secs(planner_round),
+        reviewer_round: Duration::from_secs(reviewer_round),
+        deadline: tokio::time::Instant::now() + Duration::from_secs(planning.run_timeout_secs),
+        round: 0,
+    };
+    let issue = IssueMaterial {
+        reference,
+        title: title.to_owned(),
+        description: henk_domain::plan::body_without_plan(body),
+    };
+    pairing.run(opening, &issue, &cancel).await
+}
+
+/// A session's limits per turn: its role's turns and time.
+fn role_limits(app: &App, max_turns: u32, timeout_secs: u64) -> AgentConfig {
+    AgentConfig {
+        max_turns,
+        timeout: Duration::from_secs(timeout_secs),
         max_repeated_calls: app.settings.agent.max_repeated_calls,
         record_argument_bytes: app.settings.agent.record_argument_bytes,
         ..AgentConfig::default()
-    };
-    let spec = SessionSpec {
-        name: "planner".to_owned(),
-        model,
-        system,
-        opening: vec![opening],
-        tools: set,
-        limits,
-        continuation: None,
-        turn_warning: None,
-    };
-    let outcome = run_session(app.store.as_ref(), &context.run, spec, cancel).await;
-    session_result(outcome.stop, planner.timeout_secs(Role::Planner))
+    }
+}
+
+/// The reviewer of a plan (#328): the same role that reviews pull requests.
+fn plan_reviewer(app: &App) -> anyhow::Result<&crate::config::RoleConfig> {
+    app.settings
+        .roles
+        .reviewer
+        .as_ref()
+        .ok_or_else(|| anyhow!("planning needs [roles.reviewer]"))
 }
 
 /// The planner's role: model, limits, tools and skills (#322).
@@ -665,7 +809,7 @@ fn planner(app: &App) -> anyhow::Result<&crate::config::RoleConfig> {
 
 /// Whether the planner's session ended in a way a plan can come from. A
 /// refusal is a failed plan, said on the issue, not a quiet success (#40).
-fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
+pub(crate) fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
     match stop {
         StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
         StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
@@ -684,7 +828,8 @@ mod tests {
         clippy::panic,
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::too_many_lines
     )]
 
     use std::collections::BTreeMap;
@@ -724,10 +869,17 @@ provider = "open_ai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"
+[models.r]
+provider = "open_ai"
+base_url = "https://x.test/v1"
+api_key_env = "UNUSED"
+model = "scripted-reviewer"
 [planning]
 requester_id = 3
 [roles.planner]
 model = "m"
+[roles.reviewer]
+model = "r"
 "#;
 
     fn done() -> Completion {
@@ -757,6 +909,17 @@ model = "m"
         app: App,
         tracker: Arc<FakeIssueWriter>,
         model: Arc<ScriptedClient>,
+        reviewer: Arc<ScriptedClient>,
+    }
+
+    /// A reviewer that has nothing to raise, round after round.
+    fn satisfied() -> Vec<Completion> {
+        let mut script = Vec::new();
+        for _ in 0..3 {
+            script.push(call("finish_round", json!({})));
+            script.push(done());
+        }
+        script
     }
 
     async fn fixture(tracker: FakeIssueWriter, script: Vec<Completion>) -> Fixture {
@@ -779,6 +942,18 @@ model = "m"
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
         source: Option<Arc<dyn henk_platform::push::PushWriter>>,
     ) -> Fixture {
+        fixture_paired(tracker, script, satisfied(), config, provider, source).await
+    }
+
+    /// [`fixture_on`] with the reviewer's own `reviewer` script.
+    async fn fixture_paired(
+        tracker: FakeIssueWriter,
+        script: Vec<Completion>,
+        reviewer: Vec<Completion>,
+        config: &str,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+        source: Option<Arc<dyn henk_platform::push::PushWriter>>,
+    ) -> Fixture {
         let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -790,6 +965,14 @@ model = "m"
         let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
         let mut models: BTreeMap<String, Arc<dyn henk_llm::ModelClient>> = BTreeMap::new();
         models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
+        let reviewer = Arc::new(ScriptedClient::new(
+            "scripted-reviewer",
+            reviewer.into_iter().map(Ok),
+        ));
+        models.insert(
+            "r".to_owned(),
+            Arc::clone(&reviewer) as Arc<dyn ModelClient>,
+        );
         let tracker = Arc::new(tracker);
         Fixture {
             app: App {
@@ -811,6 +994,7 @@ model = "m"
             },
             tracker,
             model,
+            reviewer,
         }
     }
 
@@ -1496,6 +1680,305 @@ model = "m"
                 .is_none(),
             "and records no run"
         );
+    }
+
+    /// A reviewer's model that notes, at every call, whether anything
+    /// reached the tracker yet.
+    struct Watching {
+        inner: Arc<ScriptedClient>,
+        tracker: Arc<FakeIssueWriter>,
+        untouched: std::sync::Mutex<Vec<bool>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for Watching {
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+        async fn complete(
+            &self,
+            request: &henk_llm::CompletionRequest,
+        ) -> Result<Completion, henk_llm::LlmError> {
+            let untouched = self.tracker.updates.lock().unwrap().is_empty()
+                && self.tracker.comments.lock().unwrap().is_empty()
+                && self.tracker.links.lock().unwrap().is_empty();
+            self.untouched.lock().unwrap().push(untouched);
+            self.inner.complete(request).await
+        }
+    }
+
+    fn raise(about: &str) -> Completion {
+        call(
+            "raise_point",
+            json!({"about": about, "claim": "it misses the export test", "why": "the CSV writer is untested"}),
+        )
+    }
+
+    fn answer(point: &str, verdict: &str, reason: &str) -> Completion {
+        call(
+            "answer_point",
+            json!({"point": point, "answer": verdict, "reason": reason}),
+        )
+    }
+
+    /// `henk runs show` of `run`.
+    async fn shown(f: &Fixture, run: &RunId) -> String {
+        let store = &f.app.store;
+        crate::runs::render(
+            &store.run(run).await.unwrap().unwrap(),
+            &store.lanes(run).await.unwrap(),
+            &henk_store::ToolUsage::from_calls(&store.tool_calls(run).await.unwrap()),
+            &store.transcripts(run).await.unwrap(),
+            &store.drafts(run).await.unwrap(),
+            &store.findings(run).await.unwrap(),
+            &store.events(run).await.unwrap(),
+        )
+    }
+
+    /// `after`, the first request of a round, holds `before`, the last of
+    /// the round before, unchanged, then only the answer to it and the
+    /// update; the system prompt and tools are the same (#321).
+    fn resumed_with_only_the_update(
+        before: &henk_llm::CompletionRequest,
+        after: &henk_llm::CompletionRequest,
+    ) {
+        assert_eq!(before.system, after.system);
+        assert_eq!(before.tools, after.tools);
+        assert_eq!(
+            after.messages[..before.messages.len()],
+            before.messages[..],
+            "the earlier round is unchanged"
+        );
+        assert_eq!(
+            after.messages.len(),
+            before.messages.len() + 2,
+            "its answer and the update"
+        );
+    }
+
+    /// #328: the reviewer raises a point, the planner takes it and revises,
+    /// the reviewer raises nothing more, and only then does anything reach
+    /// the tracker.
+    #[tokio::test]
+    async fn a_reviewed_plan_is_revised_and_published_after_two_rounds() {
+        let mut f = fixture_paired(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs as CSV."),
+            vec![
+                call(
+                    "set_title",
+                    json!({"title": "Export runs as CSV", "reason": "sharper"}),
+                ),
+                write_plan("## Goal\n\nExport runs."),
+                done(),
+                answer("p1", "taken", "step 2 tests the CSV writer"),
+                write_plan("## Goal\n\nExport runs.\n\n## Steps\n\n2. Test the CSV writer."),
+                done(),
+            ],
+            vec![
+                raise("step 2"),
+                call("finish_round", json!({})),
+                done(),
+                call("finish_round", json!({})),
+                done(),
+            ],
+            CONFIG,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        let watching = Arc::new(Watching {
+            inner: Arc::clone(&f.reviewer),
+            tracker: Arc::clone(&f.tracker),
+            untouched: std::sync::Mutex::default(),
+        });
+        f.app.models.insert(
+            "r".to_owned(),
+            Arc::clone(&watching) as Arc<dyn ModelClient>,
+        );
+        let report = run_plan(&f.app, request("r-plan-pair"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.planned);
+
+        let untouched = watching.untouched.lock().unwrap().clone();
+        assert_eq!(untouched.len(), 5);
+        assert!(
+            untouched.iter().all(|u| *u),
+            "nothing went out during the review"
+        );
+        let issue = f.tracker.issue.lock().unwrap().clone();
+        assert_eq!(
+            issue.title, "Export runs as CSV",
+            "the drafted title, once published"
+        );
+        let section = extract_plan(&issue.body).unwrap();
+        assert!(
+            section.plan.ends_with("2. Test the CSV writer."),
+            "{}",
+            issue.body
+        );
+        assert!(!issue.body.contains("Points still open"), "{}", issue.body);
+        assert!(
+            section.sessions[0].contains("retitled"),
+            "{:?}",
+            section.sessions
+        );
+
+        let run = RunId::parse("r-plan-pair").unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("converged"), Some(2))
+        );
+        let drafts = f.app.store.drafts(&run).await.unwrap();
+        assert_eq!(drafts.len(), 1, "{drafts:?}");
+        assert_eq!(drafts[0].kind, henk_store::PLAN_POINT_KIND);
+        let decision = drafts[0].decision.as_ref().unwrap();
+        assert_eq!(decision.verdict, henk_store::DraftVerdict::Taken);
+        assert_eq!(decision.checker, "planner");
+        let shown = shown(&f, &run).await;
+        for line in [
+            "  review     converged after 2 rounds",
+            "  p1   reviewer     step 2  taken by planner: step 2 tests the CSV writer",
+            "The plan review ran 2 rounds, raised 1 point and stopped: converged",
+            "planner",
+            "reviewer",
+        ] {
+            assert!(shown.contains(line), "{line}\n{shown}");
+        }
+
+        // The reviewer reads the platform and raises points; it drafts nothing.
+        let reviews = f.reviewer.requests();
+        let names: Vec<String> = reviews[0]
+            .tools
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        for tool in ["github__issue_read", "raise_point", "finish_round"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        for tool in ["write_plan", "set_title", "edit_file", "report_finding"] {
+            assert!(!names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        let opening = reviews[0].messages[0].text();
+        assert!(opening.contains("Export runs as CSV."), "{opening}");
+        assert!(opening.contains("c1: retitled to"), "{opening}");
+        let second = reviews[3].messages.last().unwrap().text();
+        assert!(
+            second.starts_with("Round 2. The planner's answers"),
+            "{second}"
+        );
+        assert!(second.contains("p1 about step 2"), "{second}");
+        assert!(second.contains("2. Test the CSV writer."), "{second}");
+
+        // #321: each round resumes both conversations with only the update.
+        let plans = f.model.requests();
+        resumed_with_only_the_update(&plans[2], &plans[3]);
+        resumed_with_only_the_update(&reviews[2], &reviews[3]);
+        let handed = plans[3].messages.last().unwrap().text();
+        assert!(
+            handed.starts_with("Round 1. The reviewer's points"),
+            "{handed}"
+        );
+    }
+
+    /// #328: a review that runs out of rounds publishes the plan with what
+    /// it left open.
+    #[tokio::test]
+    async fn a_plan_review_out_of_rounds_publishes_with_the_open_points() {
+        let config = CONFIG.replace(
+            "[planning]\nrequester_id = 3\n",
+            "[planning]\nrequester_id = 3\nmax_rounds = 1\n",
+        );
+        let f = fixture_paired(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs as CSV."),
+            vec![
+                write_plan("## Goal\n\nExport runs."),
+                done(),
+                answer("p1", "rejected", "the writer is tested in #12"),
+                done(),
+            ],
+            vec![raise("step 2"), call("finish_round", json!({})), done()],
+            &config,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        run_plan(&f.app, request("r-plan-max"), CancellationToken::new())
+            .await
+            .unwrap();
+        let body = f.tracker.issue.lock().unwrap().body.clone();
+        let section = extract_plan(&body).unwrap();
+        assert!(
+            section.plan.starts_with("## Goal\n\nExport runs."),
+            "{body}"
+        );
+        assert!(
+            section.plan.contains("### Points still open after review"),
+            "{body}"
+        );
+        assert!(section.plan.contains("it reached max_rounds (1)"), "{body}");
+        assert!(
+            section
+                .plan
+                .contains("- step 2 (it misses the export test)"),
+            "{body}"
+        );
+        assert!(
+            section
+                .plan
+                .contains("Planner: rejected (the writer is tested in #12)."),
+            "{body}"
+        );
+        let record = f
+            .app
+            .store
+            .run(&RunId::parse("r-plan-max").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("max_rounds"), Some(1))
+        );
+        assert_eq!(record.status, RunStatus::Finished);
+    }
+
+    /// A planner that breaks off in a review round, its point unanswered,
+    /// has it settled for them, and the last draft is published with why.
+    #[tokio::test]
+    async fn a_planner_that_breaks_off_mid_review_still_publishes_its_draft_with_why() {
+        let f = fixture_paired(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs as CSV."),
+            // Nudged for its answer, the planner's model has nothing more.
+            vec![write_plan("## Goal\n\nExport runs."), done(), done()],
+            vec![raise("step 2"), call("finish_round", json!({})), done()],
+            CONFIG,
+            Arc::new(crate::workspace::host::HostProvider),
+            None,
+        )
+        .await;
+        run_plan(&f.app, request("r-plan-broke"), CancellationToken::new())
+            .await
+            .unwrap();
+        let run = RunId::parse("r-plan-broke").unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.loop_stop.as_deref(), Some("session_failed"));
+        assert_eq!(
+            record.status,
+            RunStatus::Finished,
+            "the plan is still written"
+        );
+        let drafts = f.app.store.drafts(&run).await.unwrap();
+        let decision = drafts[0].decision.as_ref().unwrap();
+        assert_eq!(decision.verdict, henk_store::DraftVerdict::Unsettled);
+        let body = f.tracker.issue.lock().unwrap().body.clone();
+        assert!(
+            body.contains("The review stopped before the reviewer was done"),
+            "{body}"
+        );
+        assert!(body.contains("Planner: unsettled"), "{body}");
     }
 
     #[test]

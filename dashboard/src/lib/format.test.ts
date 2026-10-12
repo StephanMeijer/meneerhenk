@@ -5,6 +5,7 @@ import {
   average,
   clockTime,
   count,
+  draftPlace,
   draftWhat,
   duration,
   kindText,
@@ -41,6 +42,12 @@ describe('format', () => {
   it('names the comment a rewrite or withdrawal is about', () => {
     expect(draftWhat(draft('d1'))).toBe('The loop never ends.');
     expect(draftWhat(draft('d2', { kind: 'rewrite', target: 'c-9', body: 'Better.' }))).toBe('rewrite of c-9: Better.');
+    expect(draftWhat(draft('f1', { kind: 'loop_finding', body: 'x is never set.' }))).toBe('x is never set.');
+    expect(draftWhat(draft('p2', { kind: 'plan_point', target: 'p1', body: 'Step 2 is too big.' }))).toBe(
+      'contests p1: Step 2 is too big.',
+    );
+    expect(draftPlace(draft('p2', { kind: 'plan_point', path: 'step 2', line: 0 }))).toBe('step 2');
+    expect(draftPlace(draft('d3', { path: 'src/a.rs', line: 4 }))).toBe('src/a.rs:4');
   });
 
   it('counts lines and says kinds', () => {

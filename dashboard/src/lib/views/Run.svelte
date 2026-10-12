@@ -2,7 +2,7 @@
   import { ApiError, cancelRun, run as loadRun, runToolCalls, startRun } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Cancelled, RunDetail, RunMessage, StartRequest, Started, ToolCall } from '$lib/api/types';
-  import { about, clockTime, count, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
+  import { about, clockTime, count, draftPlace, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
   import { applyRun, connectionAfter, type Connection } from '$lib/live';
   import { eventPath, href, link, navigate, runPath, transcriptPath } from '$lib/router';
   import Commit from '$lib/ui/Commit.svelte';
@@ -282,7 +282,7 @@
         {/if}
         {#if d.run.loop_stop !== null && d.run.loop_rounds !== null}
           <div>
-            <dt>Loop</dt>
+            <dt>{d.run.kind === 'plan' ? 'Review' : 'Loop'}</dt>
             <dd>{d.run.loop_stop.replaceAll('_', ' ')} after {d.run.loop_rounds} {d.run.loop_rounds === 1 ? 'round' : 'rounds'}</dd>
           </div>
         {/if}
@@ -455,7 +455,7 @@
               <tr>
                 <td class="mono">{draft.id}</td>
                 <td class="mono">{draft.lane}</td>
-                <td><code>{draft.path}:{draft.line}</code></td>
+                <td><code>{draftPlace(draft)}</code></td>
                 <td class="text">{draftWhat(draft)}</td>
                 <td><Status word={draft.decision?.verdict ?? 'waiting'} vocabulary="verdict" kind="verdict" text={verdictText(draft)} /></td>
                 <td class="mono">{draft.decision?.checker ?? ''}</td>
