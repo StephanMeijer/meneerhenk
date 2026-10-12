@@ -250,6 +250,7 @@ async fn review_lifecycle_posts_check_run_findings_summary_and_folds() {
         nothing_to_review: false,
         stopped: None,
         not_reviewed: None,
+        findings_left: false,
     };
     writer
         .finish_review(

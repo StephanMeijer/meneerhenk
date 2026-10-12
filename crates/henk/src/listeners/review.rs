@@ -77,6 +77,15 @@ impl Listener for ReviewListener {
                 draft,
                 sender,
             } => {
+                // A review loop reviews the commits it pushes in the run
+                // that pushed them; a new run would supersede it (#284).
+                // Only its pushes are recorded: an address run's commit is
+                // reviewed as usual (§3.5).
+                if *action == PullRequestAction::Synchronized
+                    && self.coordinator.app().own_pushes.contains(head.as_str())
+                {
+                    return Handled::Ignored("Henk's own push".to_owned());
+                }
                 if let Some(reason) = rejected(settings, repo, sender, None) {
                     return Handled::Ignored(reason);
                 }

@@ -96,6 +96,8 @@ pub(crate) mod testing {
         pub started: Mutex<Vec<Option<String>>>,
         /// The link each `finish_review` was given, in order.
         pub finished_links: Mutex<Vec<String>>,
+        /// The commit each `finish_review` reported on, in order.
+        pub finished_commits: Mutex<Vec<String>>,
         /// The state `pull_request` answers; open when unset.
         pub state: Option<PullRequestState>,
         /// `pull_request` fails instead, with this error text.
@@ -293,12 +295,16 @@ pub(crate) mod testing {
         async fn finish_review(
             &self,
             _: &ReviewTarget,
-            _: &CommitSha,
+            commit: &CommitSha,
             handle: Option<&ReviewHandle>,
             outcome: &ReviewOutcome,
             link: &str,
         ) -> Result<(), PlatformError> {
             self.finished_links.lock().unwrap().push(link.to_owned());
+            self.finished_commits
+                .lock()
+                .unwrap()
+                .push(commit.as_str().to_owned());
             self.finished.lock().unwrap().push(outcome.clone());
             self.finished_checks
                 .lock()

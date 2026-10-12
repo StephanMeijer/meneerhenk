@@ -90,6 +90,7 @@ pub(super) fn fixture_with(
         feed,
         cancels: crate::cancel::Cancels::default(),
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
+        own_pushes: crate::push::OwnPushes::default(),
         test_writer: None,
         test_session: None,
         test_address_writer: None,

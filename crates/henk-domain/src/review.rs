@@ -268,6 +268,10 @@ pub struct ReviewOutcome {
     /// [`Stopped::Cancelled`], where the cancel came from, such as "over
     /// MCP" (#293).
     pub not_reviewed: Option<String>,
+    /// A review loop (#284) ran out of rounds with the reviewer's last
+    /// findings still open. They are not on the pull request, so
+    /// `open_findings` does not count them, and the review is no pass.
+    pub findings_left: bool,
 }
 
 /// Why a review stopped before it ended. They exclude each other.
@@ -297,6 +301,7 @@ impl ReviewOutcome {
             nothing_to_review: false,
             stopped: Some(why),
             not_reviewed,
+            findings_left: false,
         }
     }
 
@@ -365,7 +370,7 @@ impl ReviewOutcome {
             CheckConclusion::Neutral
         } else if !self.completed() {
             CheckConclusion::Failure
-        } else if self.open_findings == 0 {
+        } else if self.open_findings == 0 && !self.findings_left {
             CheckConclusion::Success
         } else {
             CheckConclusion::Neutral
@@ -405,6 +410,7 @@ impl ReviewOutcome {
             return "Nothing to review: every changed file is in review.ignore.".to_owned();
         }
         match self.open_findings {
+            0 if self.findings_left => "The review loop left findings open.".to_owned(),
             0 => "No issues found.".to_owned(),
             1 => "1 issue found.".to_owned(),
             n => format!("{n} issues found."),
@@ -494,6 +500,7 @@ mod tests {
             nothing_to_review: false,
             stopped: None,
             not_reviewed: None,
+            findings_left: false,
         }
     }
 
@@ -548,6 +555,25 @@ mod tests {
         );
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Success);
         assert_eq!(outcome.summary(), "No issues found.");
+    }
+
+    #[test]
+    fn findings_a_review_loop_left_open_are_neutral_not_a_pass() {
+        let mut left = outcome(
+            &[
+                ("fixer", LaneOutcome::Finished),
+                ("reviewer", LaneOutcome::Finished),
+            ],
+            0,
+        );
+        left.findings_left = true;
+        assert!(left.completed());
+        assert_eq!(left.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(left.summary(), "The review loop left findings open.");
+        assert!(crate::text::is_in_style(&left.summary()));
+        left.open_findings = 2;
+        assert_eq!(left.summary(), "2 issues found.");
+        assert_eq!(left.check_conclusion(), CheckConclusion::Neutral);
     }
 
     #[test]
