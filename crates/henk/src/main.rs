@@ -138,7 +138,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RunsCommand {
-    /// Print one run: lanes, findings and timeline.
+    /// Print one run: sessions, findings and timeline.
     Show {
         /// The run id, such as `r-20261005-1a2b3c4d`.
         run: String,
@@ -355,7 +355,7 @@ async fn cmd_runs_show(config: &Path, run: &str, transcript: Option<&str>) -> an
         "{}",
         runs::render(
             &record,
-            &store.lanes(&id).await?,
+            &store.sessions(&id).await?,
             &henk_store::ToolUsage::from_calls(&store.tool_calls(&id).await?),
             &transcripts,
             &store.drafts(&id).await?,

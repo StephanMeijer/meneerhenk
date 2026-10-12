@@ -17,10 +17,10 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction,
-    InboundEvent, LOOP_FINDING_KIND, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
-    OutcomeRecord, PLAN_POINT_KIND, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, TokenUsage, ToolCallFilter,
-    ToolCallKey, ToolCallRecord, TranscriptRecord,
+    InboundEvent, LOOP_FINDING_KIND, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
+    PLAN_POINT_KIND, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore,
+    SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite, TokenUsage,
+    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -77,18 +77,18 @@ macro_rules! for_each_scenario {
         $tests!(
             run_round_trips,
             a_superseded_run_names_the_run_that_replaced_it,
-            lanes_that_timed_out_or_did_not_finish_say_so,
+            sessions_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
             days_count_runs_findings_and_drafts,
             event_facets_are_the_sources_and_kinds_seen,
-            lanes_and_stages_of_many_runs_come_in_one_read,
-            lane_endings_are_the_ended_reviews_newest_first,
+            sessions_and_stages_of_many_runs_come_in_one_read,
+            session_endings_are_the_ended_reviews_newest_first,
             a_heartbeat_moves_and_a_check_id_is_kept,
             only_running_runs_with_a_stale_heartbeat_are_orphaned,
             the_newest_review_of_each_pull_request_is_read_for_resuming,
             a_resume_is_claimed_once,
-            dropping_running_lanes_leaves_finished_ones_alone,
-            lanes_findings_and_events_attach_to_a_run,
+            dropping_running_sessions_leaves_finished_ones_alone,
+            sessions_findings_and_events_attach_to_a_run,
             events_and_outcomes_round_trip,
             old_events_and_their_outcomes_are_pruned,
             outcomes_and_linked_events_keep_their_order,
@@ -106,17 +106,204 @@ macro_rules! for_each_scenario {
             loop_findings_keep_their_verdicts,
             a_loop_run_keeps_why_it_stopped,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
-            a_review_loops_sessions_are_their_own_kinds,
+            a_session_s_calls_count_under_its_stored_role,
             a_session_keeps_what_the_cache_served,
         );
     };
 }
 
-fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
+/// The last schema version with a `lanes` table, per backend (#324).
+const SQLITE_LANE_ERA: usize = 15;
+const POSTGRES_LANE_ERA: usize = 11;
+
+/// Runs as Henk wrote them before sessions had a role (#324): a review
+/// with two lanes and a fact-check, an address run, a review loop whose
+/// executor was named `fixer`, and a plan. The same SQL for both backends.
+const LANE_ERA: &str = "
+INSERT INTO runs (id, kind, platform, repo, target, trigger, status, started_at, finished_at, link)
+VALUES
+ ('r-lanes', 'review', 'github', 'o/r', 7, 'opened', 'finished', '2026-10-01T10:00:00Z', '2026-10-01T10:30:00Z', 'l'),
+ ('r-address', 'address', 'github', 'o/r', 7, 'dashboard', 'finished', '2026-10-02T10:00:00Z', '2026-10-02T10:30:00Z', 'l'),
+ ('r-loop', 'review', 'github', 'o/r', 7, 'synchronize', 'finished', '2026-10-03T10:00:00Z', '2026-10-03T10:30:00Z', 'l'),
+ ('r-plan', 'plan', 'github', 'o/r', 8, 'labeled', 'finished', '2026-10-04T10:00:00Z', '2026-10-04T10:30:00Z', 'l');
+UPDATE runs SET loop_stop = 'clean', loop_rounds = 2 WHERE id = 'r-loop';
+INSERT INTO lanes (run_id, name, model, status, turns, input_tokens, output_tokens, started_at, finished_at, error, cache_read_tokens, cache_write_tokens)
+VALUES
+ ('r-lanes', 'lane-a', 'm-a', 'finished', 3, 100, 10, '2026-10-01T10:01:00Z', '2026-10-01T10:10:00Z', NULL, 0, 0),
+ ('r-lanes', 'lane-b', 'm-b', 'dropped', 2, 50, 5, '2026-10-01T10:01:00Z', '2026-10-01T10:05:00Z', 'gave up', 0, 0),
+ ('r-lanes', 'check-1', 'm-c', 'timed_out', 4, 70, 7, '2026-10-01T10:11:00Z', '2026-10-01T10:20:00Z', NULL, 0, 0),
+ ('r-address', 'address', 'm-d', 'finished', 6, 300, 30, '2026-10-02T10:01:00Z', '2026-10-02T10:20:00Z', NULL, 0, 0),
+ ('r-loop', 'reviewer', 'm-r', 'finished', 5, 100, 10, '2026-10-03T10:01:00Z', '2026-10-03T10:20:00Z', NULL, 80, 20),
+ ('r-loop', 'fixer', 'm-f', 'finished', 4, 90, 9, '2026-10-03T10:02:00Z', '2026-10-03T10:20:00Z', NULL, 0, 0),
+ ('r-plan', 'planner', 'm-p', 'finished', 2, 40, 4, '2026-10-04T10:01:00Z', '2026-10-04T10:20:00Z', NULL, 0, 0);
+INSERT INTO stages (run_id, stage, state, started_at, ended_at, detail)
+VALUES
+ ('r-lanes', 'lanes', 'done', '2026-10-01T10:01:00Z', '2026-10-01T10:10:00Z', '1 of 2 lanes finished'),
+ ('r-lanes', 'fact_check', 'done', '2026-10-01T10:11:00Z', '2026-10-01T10:20:00Z', '1 draft checked'),
+ ('r-loop', 'lanes', 'done', '2026-10-03T10:01:00Z', '2026-10-03T10:20:00Z', '2 rounds');
+INSERT INTO drafts (run_id, draft, lane, model, kind, path, line, target, body, created_at)
+VALUES ('r-lanes', 'd1', 'lane-a', 'm-a', 'finding', 'a.rs', 4, '', 'x is never set.', '2026-10-01T10:05:00Z');
+INSERT INTO findings (run_id, lane, path, line, comment_id, action, created_at)
+VALUES ('r-lanes', 'lane-a', 'a.rs', 4, 'c-1', 'posted', '2026-10-01T10:21:00Z');
+INSERT INTO tool_calls (run_id, session, model, turn, tool, origin, outcome, arguments, arguments_len, result_chars, elapsed_ms, at)
+VALUES
+ ('r-lanes', 'lane-a', 'm-a', 1, 'read_file', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-01T10:02:00Z'),
+ ('r-lanes', 'check-1', 'm-c', 1, 'read_file', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-01T10:12:00Z'),
+ ('r-address', 'address', 'm-d', 1, 'edit_file', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-02T10:02:00Z'),
+ ('r-loop', 'reviewer', 'm-r', 1, 'read_file', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-03T10:02:00Z'),
+ ('r-loop', 'fixer', 'm-f', 1, 'edit_file', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-03T10:03:00Z'),
+ ('r-plan', 'planner', 'm-p', 1, 'bash', 'henk', 'ok', '{}', 2, 10, 1, '2026-10-04T10:02:00Z');
+";
+
+/// After migrating, the runs of [`LANE_ERA`] read back in full: every
+/// session with the role its name gave it, drafts and findings by
+/// session, the old stages, and tool calls by role. A new session is
+/// written as before.
+async fn a_lane_era_database_reads_back_in_full(store: &dyn RunStore) {
+    let sessions = |run: &'static str| async move {
+        store
+            .sessions(&id(run))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.name, s.role, s.status))
+            .collect::<Vec<_>>()
+    };
+    let row = |name: &str, role, status| (name.to_owned(), role, status);
+    assert_eq!(
+        sessions("r-lanes").await,
+        [
+            row("check-1", SessionRole::Check, SessionStatus::TimedOut),
+            row("lane-a", SessionRole::Lane, SessionStatus::Finished),
+            row("lane-b", SessionRole::Lane, SessionStatus::DidNotFinish),
+        ]
+    );
+    assert_eq!(
+        sessions("r-address").await,
+        [row(
+            "address",
+            SessionRole::Address,
+            SessionStatus::Finished
+        )]
+    );
+    assert_eq!(
+        sessions("r-loop").await,
+        [
+            row("fixer", SessionRole::Executor, SessionStatus::Finished),
+            row("reviewer", SessionRole::Reviewer, SessionStatus::Finished),
+        ]
+    );
+    assert_eq!(
+        sessions("r-plan").await,
+        [row(
+            "planner",
+            SessionRole::Planner,
+            SessionStatus::Finished
+        )]
+    );
+    let reviewer = store.sessions(&id("r-loop")).await.unwrap().pop().unwrap();
+    assert_eq!(
+        (
+            reviewer.turns,
+            reviewer.input_tokens,
+            reviewer.cache_read_tokens,
+            reviewer.cache_write_tokens
+        ),
+        (5, 100, 80, 20),
+        "counts and cache kept"
+    );
+
+    let drafts = store.drafts(&id("r-lanes")).await.unwrap();
+    assert_eq!(
+        (drafts[0].draft.as_str(), drafts[0].session.as_str()),
+        ("d1", "lane-a")
+    );
+    let findings = store.findings(&id("r-lanes")).await.unwrap();
+    assert_eq!(
+        (
+            findings[0].session.as_str(),
+            findings[0].comment_id.as_str()
+        ),
+        ("lane-a", "c-1")
+    );
+    let stages: Vec<_> = store
+        .stages(&id("r-lanes"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.stage)
+        .collect();
+    assert_eq!(stages, [Stage::Lanes, Stage::FactCheck]);
+
+    let runs = [id("r-lanes"), id("r-address"), id("r-loop"), id("r-plan")];
+    assert_eq!(store.sessions_of(&runs).await.unwrap().len(), 7);
+    let endings: Vec<_> = store
+        .session_endings(None, 30)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.run_id.as_str().to_owned(), e.name, e.role))
+        .collect();
+    let ending = |run: &str, name: &str, role| (run.to_owned(), name.to_owned(), role);
+    assert_eq!(
+        endings,
+        [
+            ending("r-loop", "fixer", SessionRole::Executor),
+            ending("r-loop", "reviewer", SessionRole::Reviewer),
+            ending("r-lanes", "check-1", SessionRole::Check),
+            ending("r-lanes", "lane-a", SessionRole::Lane),
+            ending("r-lanes", "lane-b", SessionRole::Lane),
+        ],
+        "reviews only, newest first"
+    );
+
+    for (role, session) in [
+        (SessionRole::Lane, "lane-a"),
+        (SessionRole::Check, "check-1"),
+        (SessionRole::Address, "address"),
+        (SessionRole::Executor, "fixer"),
+        (SessionRole::Reviewer, "reviewer"),
+        (SessionRole::Planner, "planner"),
+    ] {
+        let filter = ToolCallFilter {
+            role: Some(role),
+            ..ToolCallFilter::default()
+        };
+        let listed: Vec<_> = store
+            .list_tool_calls(&filter, Page::new(50, 0))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.call.session)
+            .collect();
+        assert_eq!(listed, [session], "{role}");
+        let usage = store.tool_usage(&filter).await.unwrap();
+        assert_eq!(
+            usage
+                .iter()
+                .map(|u| (u.session.as_str(), u.tally.calls))
+                .collect::<Vec<_>>(),
+            [(role.as_str(), 1)],
+            "{role}"
+        );
+    }
+
+    store
+        .start_session(&id("r-plan"), "reviewer", SessionRole::Reviewer, "m-r")
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions("r-plan").await[1],
+        row("reviewer", SessionRole::Reviewer, SessionStatus::Running),
+        "a new session is written with its role"
+    );
+}
+
+fn draft(number: &str, session: &str, row: u32, body: &str) -> DraftRecord {
     DraftRecord {
         at: String::new(),
         draft: number.into(),
-        lane: lane.into(),
+        session: session.into(),
         model: "opus".into(),
         kind: "finding".into(),
         path: "src/a.rs".into(),
@@ -127,12 +314,23 @@ fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
     }
 }
 
-/// The reviewer and executor of a review loop are kinds of their own, not
-/// lanes (#310); the `fixer` of a run before #323 counts as the executor,
-/// and a lane of an older review stays a lane.
-async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
+/// A session's calls count under the role stored with it (#324), not one
+/// read from its name: `x` ran as the reviewer, and the `fixer` of a run
+/// before #323 was migrated to the executor.
+async fn a_session_s_calls_count_under_its_stored_role(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
-    for (turn, session) in (1u32..).zip(["reviewer", "executor", "fixer", "lane-a"]) {
+    let sessions = [
+        ("reviewer", SessionRole::Reviewer),
+        ("x", SessionRole::Reviewer),
+        ("executor", SessionRole::Executor),
+        ("fixer", SessionRole::Executor),
+        ("lane-a", SessionRole::Lane),
+    ];
+    for (turn, (session, role)) in (1u32..).zip(sessions) {
+        store
+            .start_session(&id("r-1"), session, role, "opus")
+            .await
+            .unwrap();
         store
             .record_tool_call(
                 &id("r-1"),
@@ -153,10 +351,14 @@ async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
             .await
             .unwrap();
     }
-    for (kind, calls) in [("reviewer", 1), ("executor", 2), ("lane", 1)] {
+    for (role, calls) in [
+        (SessionRole::Reviewer, 2),
+        (SessionRole::Executor, 2),
+        (SessionRole::Lane, 1),
+    ] {
         let usage = store
             .tool_usage(&ToolCallFilter {
-                session_kind: Some(kind.into()),
+                role: Some(role),
                 ..ToolCallFilter::default()
             })
             .await
@@ -166,9 +368,20 @@ async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
                 .into_iter()
                 .map(|u| (u.session, u.tally.calls))
                 .collect::<Vec<_>>(),
-            [(kind.to_owned(), calls)],
-            "{kind}"
+            [(role.as_str().to_owned(), calls)],
+            "{role}"
         );
+        let listed = store
+            .list_tool_calls(
+                &ToolCallFilter {
+                    role: Some(role),
+                    ..ToolCallFilter::default()
+                },
+                Page::new(50, 0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(u64::try_from(listed.len()).unwrap(), calls, "{role}");
     }
 }
 
@@ -183,6 +396,19 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
         })
         .await
         .unwrap();
+    for (run, session, role) in [
+        ("r-1", "lane-a", SessionRole::Lane),
+        ("r-1", "check-1", SessionRole::Check),
+        ("r-2", "lane-b", SessionRole::Lane),
+        ("r-2", "planner", SessionRole::Planner),
+        ("r-3", "address", SessionRole::Address),
+        ("r-3", "lane-a", SessionRole::Lane),
+    ] {
+        store
+            .start_session(&id(run), session, role, "m")
+            .await
+            .unwrap();
+    }
     // (run, session, model, tool, outcome, minute)
     let calls = [
         ("r-1", "lane-a", "mistral", "read_file", "ok", 1),
@@ -273,7 +499,7 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
     );
     let checks = store
         .tool_usage(&ToolCallFilter {
-            session_kind: Some("check".into()),
+            role: Some(SessionRole::Check),
             ..ToolCallFilter::default()
         })
         .await
@@ -290,19 +516,19 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
             0
         )]
     );
-    let lanes = store
+    let lane_usage = store
         .tool_usage(&ToolCallFilter {
-            session_kind: Some("lane".into()),
+            role: Some(SessionRole::Lane),
             since: Some("2026-10-07T10:02:00Z".into()),
             until: Some("2026-10-07T10:06:00Z".into()),
             ..ToolCallFilter::default()
         })
         .await
         .unwrap();
-    let mut lanes = tallies(lanes);
-    lanes.sort();
+    let mut lane_usage = tallies(lane_usage);
+    lane_usage.sort();
     assert_eq!(
-        lanes,
+        lane_usage,
         [
             (
                 "deepseek".into(),
@@ -362,7 +588,7 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
     assert_eq!(
         listed(ToolCallFilter {
             outcome: Some(OutcomeFilter::Is("ok".into())),
-            session_kind: Some("planner".into()),
+            role: Some(SessionRole::Planner),
             ..ToolCallFilter::default()
         })
         .await,
@@ -390,7 +616,7 @@ async fn tool_calls_are_tallied_and_listed_across_runs_by_filter(store: &dyn Run
     let planner = store
         .list_tool_calls(
             &ToolCallFilter {
-                session_kind: Some("planner".into()),
+                role: Some(SessionRole::Planner),
                 ..ToolCallFilter::default()
             },
             Page::new(50, 0),
@@ -679,6 +905,13 @@ async fn tool_calls_are_kept_in_order_and_add_up_across_runs(store: &dyn RunStor
     let (one, two) = (new_run("r-tools-1"), new_run("r-tools-2"));
     store.create_run(&one).await.unwrap();
     store.create_run(&two).await.unwrap();
+    for (run, session, role) in [
+        (&one.id, "lane-a", SessionRole::Lane),
+        (&one.id, "check-lane-a-1", SessionRole::Check),
+        (&two.id, "lane-b", SessionRole::Lane),
+    ] {
+        store.start_session(run, session, role, "m").await.unwrap();
+    }
     let mut cut = tool_call("lane-a", "opus", "bash", "ok", 120);
     cut.arguments = "x".repeat(16);
     cut.arguments_len = 9000;
@@ -885,8 +1118,14 @@ async fn a_superseded_run_names_the_run_that_replaced_it(store: &dyn RunStore) {
 /// which stay the whole prompt; a session that used no cache reads 0.
 async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
     store.create_run(&new_run("r-cache")).await.unwrap();
-    for lane in ["reviewer", "executor"] {
-        store.start_lane(&id("r-cache"), lane, "m").await.unwrap();
+    for (session, role) in [
+        ("reviewer", SessionRole::Reviewer),
+        ("executor", SessionRole::Executor),
+    ] {
+        store
+            .start_session(&id("r-cache"), session, role, "m")
+            .await
+            .unwrap();
     }
     let cached = TokenUsage {
         input: 10_000,
@@ -895,10 +1134,10 @@ async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
         cache_write: 1_500,
     };
     store
-        .finish_lane(
+        .finish_session(
             &id("r-cache"),
             "reviewer",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             4,
             cached,
             None,
@@ -906,40 +1145,48 @@ async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &id("r-cache"),
             "executor",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             2,
             TokenUsage::new(500, 50),
             None,
         )
         .await
         .unwrap();
-    let lanes = store.lanes(&id("r-cache")).await.unwrap();
+    let sessions = store.sessions(&id("r-cache")).await.unwrap();
     let read = |name: &str| {
-        let lane = lanes.iter().find(|l| l.name == name).unwrap();
+        let session = sessions.iter().find(|s| s.name == name).unwrap();
         (
-            lane.input_tokens,
-            lane.output_tokens,
-            lane.cache_read_tokens,
-            lane.cache_write_tokens,
+            session.input_tokens,
+            session.output_tokens,
+            session.cache_read_tokens,
+            session.cache_write_tokens,
         )
     };
+    assert_eq!(
+        sessions.iter().map(|s| s.role).collect::<Vec<_>>(),
+        [SessionRole::Executor, SessionRole::Reviewer],
+        "by name, each with the role it started in"
+    );
     assert_eq!(read("reviewer"), (10_000, 300, 8_000, 1_500));
     assert_eq!(read("executor"), (500, 50, 0, 0));
 }
 
-async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
+async fn sessions_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
     for lane in ["a", "b", "c"] {
-        store.start_lane(&id("r-1"), lane, "m").await.unwrap();
+        store
+            .start_session(&id("r-1"), lane, SessionRole::Lane, "m")
+            .await
+            .unwrap();
     }
     store
-        .finish_lane(
+        .finish_session(
             &id("r-1"),
             "a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             9,
             TokenUsage::new(1, 1),
             None,
@@ -947,10 +1194,10 @@ async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &id("r-1"),
             "b",
-            LaneStatus::TimedOut,
+            SessionStatus::TimedOut,
             30,
             TokenUsage::new(1, 1),
             None,
@@ -958,24 +1205,24 @@ async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &id("r-1"),
             "c",
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             2,
             TokenUsage::new(1, 1),
             Some("rate limited"),
         )
         .await
         .unwrap();
-    let lanes = store.lanes(&id("r-1")).await.unwrap();
+    let lanes = store.sessions(&id("r-1")).await.unwrap();
     let statuses: Vec<_> = lanes.iter().map(|l| (l.name.as_str(), l.status)).collect();
     assert_eq!(
         statuses,
         [
-            ("a", LaneStatus::Finished),
-            ("b", LaneStatus::TimedOut),
-            ("c", LaneStatus::DidNotFinish),
+            ("a", SessionStatus::Finished),
+            ("b", SessionStatus::TimedOut),
+            ("c", SessionStatus::DidNotFinish),
         ]
     );
     assert_eq!(lanes[2].error.as_deref(), Some("rate limited"));
@@ -1002,7 +1249,7 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
     store
         .stage(
             &run,
-            &StageWrite::now(Stage::Lanes, StageState::Running, ""),
+            &StageWrite::now(Stage::Rounds, StageState::Running, ""),
         )
         .await
         .unwrap();
@@ -1029,7 +1276,7 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
     let stages = store.stages(&run).await.unwrap();
     assert_eq!(
         stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
-        [Stage::Queued, Stage::Diff, Stage::Lanes],
+        [Stage::Queued, Stage::Diff, Stage::Rounds],
         "in the order the stages come, not as written"
     );
     let queued = &stages[0];
@@ -1059,22 +1306,25 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
     assert!(lanes.ended_at.is_some());
     assert_eq!(store.stages(&id("r-none")).await.unwrap(), []);
 
-    store.start_lane(&run, "a", "m").await.unwrap();
-    let lane = &store.lanes(&run).await.unwrap()[0];
+    store
+        .start_session(&run, "a", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    let lane = &store.sessions(&run).await.unwrap()[0];
     assert!(OffsetDateTime::parse(&lane.started_at, &Rfc3339).is_ok());
     assert_eq!(lane.finished_at, None);
     store
-        .finish_lane(
+        .finish_session(
             &run,
             "a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             1,
             TokenUsage::new(1, 1),
             None,
         )
         .await
         .unwrap();
-    assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
+    assert!(store.sessions(&run).await.unwrap()[0].finished_at.is_some());
 }
 
 async fn event_facets_are_the_sources_and_kinds_seen(store: &dyn RunStore) {
@@ -1136,7 +1386,7 @@ async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
                 &DraftRecord {
                     at: String::new(),
                     draft: draft.into(),
-                    lane: "a".into(),
+                    session: "a".into(),
                     model: "m".into(),
                     kind: "finding".into(),
                     path: "x.rs".into(),
@@ -1170,7 +1420,7 @@ async fn days_count_runs_findings_and_drafts(store: &dyn RunStore) {
     assert!(store.daily_stats(later).await.unwrap().is_empty());
 }
 
-async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
+async fn session_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
     // r-1 and r-2 are ended reviews, r-3 was cancelled, r-4 runs, r-5 was
     // superseded, r-6 is a plan; each has a lane-a, and r-2 a lane-b and a
     // check-1 too.
@@ -1189,12 +1439,15 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
             })
             .await
             .unwrap();
-        store.start_lane(&id(run), "lane-a", "m-1").await.unwrap();
         store
-            .finish_lane(
+            .start_session(&id(run), "lane-a", SessionRole::Lane, "m-1")
+            .await
+            .unwrap();
+        store
+            .finish_session(
                 &id(run),
                 "lane-a",
-                LaneStatus::Finished,
+                SessionStatus::Finished,
                 1,
                 TokenUsage::new(1, 1),
                 None,
@@ -1208,12 +1461,15 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
                 .unwrap();
         }
     }
-    store.start_lane(&id("r-2"), "lane-b", "m-2").await.unwrap();
     store
-        .finish_lane(
+        .start_session(&id("r-2"), "lane-b", SessionRole::Lane, "m-2")
+        .await
+        .unwrap();
+    store
+        .finish_session(
             &id("r-2"),
             "lane-b",
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             1,
             TokenUsage::new(1, 1),
             Some("rate limited by the model endpoint"),
@@ -1221,14 +1477,14 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .start_lane(&id("r-2"), "check-1", "m-3")
+        .start_session(&id("r-2"), "check-1", SessionRole::Check, "m-3")
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &id("r-2"),
             "check-1",
-            LaneStatus::TimedOut,
+            SessionStatus::TimedOut,
             1,
             TokenUsage::new(1, 1),
             None,
@@ -1236,7 +1492,7 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
         .await
         .unwrap();
 
-    let all = store.lane_endings(None, 30).await.unwrap();
+    let all = store.session_endings(None, 30).await.unwrap();
     let seen: Vec<_> = all
         .iter()
         .map(|e| {
@@ -1251,10 +1507,10 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
     assert_eq!(
         seen,
         [
-            ("r-2", "check-1", "m-3", LaneStatus::TimedOut),
-            ("r-2", "lane-a", "m-1", LaneStatus::Finished),
-            ("r-2", "lane-b", "m-2", LaneStatus::DidNotFinish),
-            ("r-1", "lane-a", "m-1", LaneStatus::Finished),
+            ("r-2", "check-1", "m-3", SessionStatus::TimedOut),
+            ("r-2", "lane-a", "m-1", SessionStatus::Finished),
+            ("r-2", "lane-b", "m-2", SessionStatus::DidNotFinish),
+            ("r-1", "lane-a", "m-1", SessionStatus::Finished),
         ],
         "running, cancelled, superseded and plan runs are left out"
     );
@@ -1266,7 +1522,7 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
     assert!(OffsetDateTime::parse(&dropped.started_at, &Rfc3339).is_ok());
 
     let newest_two: Vec<_> = store
-        .lane_endings(None, 2)
+        .session_endings(None, 2)
         .await
         .unwrap()
         .iter()
@@ -1279,29 +1535,41 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
     );
 
     let hour_ago = OffsetDateTime::now_utc() - time::Duration::hours(1);
-    assert_eq!(store.lane_endings(Some(hour_ago), 30).await.unwrap(), all);
+    assert_eq!(
+        store.session_endings(Some(hour_ago), 30).await.unwrap(),
+        all
+    );
     let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
     assert!(
         store
-            .lane_endings(Some(later), 30)
+            .session_endings(Some(later), 30)
             .await
             .unwrap()
             .is_empty()
     );
 }
 
-async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
+async fn sessions_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
     for run in ["r-1", "r-2", "r-3"] {
         store.create_run(&new_run(run)).await.unwrap();
     }
-    store.start_lane(&id("r-1"), "b", "m").await.unwrap();
-    store.start_lane(&id("r-1"), "a", "m").await.unwrap();
-    store.start_lane(&id("r-2"), "a", "m").await.unwrap();
     store
-        .finish_lane(
+        .start_session(&id("r-1"), "b", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    store
+        .start_session(&id("r-1"), "a", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    store
+        .start_session(&id("r-2"), "a", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    store
+        .finish_session(
             &id("r-2"),
             "a",
-            LaneStatus::TimedOut,
+            SessionStatus::TimedOut,
             1,
             TokenUsage::new(1, 1),
             None,
@@ -1311,7 +1579,7 @@ async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
     store
         .stage(
             &id("r-1"),
-            &StageWrite::now(Stage::Lanes, StageState::Running, ""),
+            &StageWrite::now(Stage::Rounds, StageState::Running, ""),
         )
         .await
         .unwrap();
@@ -1324,7 +1592,7 @@ async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
         .unwrap();
 
     let lanes = store
-        .lanes_of(&[id("r-1"), id("r-2"), id("r-3")])
+        .sessions_of(&[id("r-1"), id("r-2"), id("r-3")])
         .await
         .unwrap();
     let lanes: Vec<_> = lanes
@@ -1334,9 +1602,9 @@ async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
     assert_eq!(
         lanes,
         [
-            ("r-1", "a", LaneStatus::Running),
-            ("r-1", "b", LaneStatus::Running),
-            ("r-2", "a", LaneStatus::TimedOut),
+            ("r-1", "a", SessionStatus::Running),
+            ("r-1", "b", SessionStatus::Running),
+            ("r-2", "a", SessionStatus::TimedOut),
         ]
     );
     let stages = store.stages_of(&[id("r-1"), id("r-2")]).await.unwrap();
@@ -1348,11 +1616,11 @@ async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
         stages,
         [
             ("r-1", Stage::Diff, StageState::Done),
-            ("r-1", Stage::Lanes, StageState::Running)
+            ("r-1", Stage::Rounds, StageState::Running)
         ],
         "each run's stages in the order they come"
     );
-    assert!(store.lanes_of(&[]).await.unwrap().is_empty());
+    assert!(store.sessions_of(&[]).await.unwrap().is_empty());
     assert!(store.stages_of(&[]).await.unwrap().is_empty());
 }
 
@@ -1507,15 +1775,21 @@ async fn a_resume_is_claimed_once(store: &dyn RunStore) {
     );
 }
 
-async fn dropping_running_lanes_leaves_finished_ones_alone(store: &dyn RunStore) {
+async fn dropping_running_sessions_leaves_finished_ones_alone(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
-    store.start_lane(&id("r-1"), "a", "m").await.unwrap();
-    store.start_lane(&id("r-1"), "b", "m").await.unwrap();
     store
-        .finish_lane(
+        .start_session(&id("r-1"), "a", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    store
+        .start_session(&id("r-1"), "b", SessionRole::Lane, "m")
+        .await
+        .unwrap();
+    store
+        .finish_session(
             &id("r-1"),
             "a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             3,
             TokenUsage::new(1, 1),
             None,
@@ -1523,28 +1797,34 @@ async fn dropping_running_lanes_leaves_finished_ones_alone(store: &dyn RunStore)
         .await
         .unwrap();
     store
-        .drop_running_lanes(&id("r-1"), "interrupted")
+        .drop_running_sessions(&id("r-1"), "interrupted")
         .await
         .unwrap();
-    let lanes = store.lanes(&id("r-1")).await.unwrap();
+    let lanes = store.sessions(&id("r-1")).await.unwrap();
     let a = lanes.iter().find(|l| l.name == "a").unwrap();
     let b = lanes.iter().find(|l| l.name == "b").unwrap();
-    assert_eq!(a.status, LaneStatus::Finished);
+    assert_eq!(a.status, SessionStatus::Finished);
     assert_eq!(a.error, None);
-    assert_eq!(b.status, LaneStatus::DidNotFinish);
+    assert_eq!(b.status, SessionStatus::DidNotFinish);
     assert_eq!(b.error.as_deref(), Some("interrupted"));
 }
 
-async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
+async fn sessions_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
     let run = new_run("r-2");
     store.create_run(&run).await.unwrap();
-    store.start_lane(&run.id, "b", "model-y").await.unwrap();
-    store.start_lane(&run.id, "a", "model-x").await.unwrap();
     store
-        .finish_lane(
+        .start_session(&run.id, "b", SessionRole::Lane, "model-y")
+        .await
+        .unwrap();
+    store
+        .start_session(&run.id, "a", SessionRole::Lane, "model-x")
+        .await
+        .unwrap();
+    store
+        .finish_session(
             &run.id,
             "a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             4,
             TokenUsage::new(1000, 200),
             None,
@@ -1552,10 +1832,10 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &run.id,
             "b",
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             1,
             TokenUsage::new(10, 0),
             Some("rate limited"),
@@ -1573,11 +1853,11 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
     store.event(&run.id, "info", "started").await.unwrap();
     store.event(&run.id, "warn", "slow").await.unwrap();
 
-    let lanes = store.lanes(&run.id).await.unwrap();
+    let lanes = store.sessions(&run.id).await.unwrap();
     assert_eq!(lanes.len(), 2);
     assert_eq!(lanes[0].name, "a", "lanes come back by name");
     assert_eq!(lanes[0].model, "model-x");
-    assert_eq!(lanes[0].status, LaneStatus::Finished);
+    assert_eq!(lanes[0].status, SessionStatus::Finished);
     assert_eq!(
         (
             lanes[0].turns,
@@ -1595,7 +1875,7 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
 
     let findings = store.findings(&run.id).await.unwrap();
     assert_eq!(findings.len(), 2);
-    assert_eq!(findings[0].lane, "a");
+    assert_eq!(findings[0].session, "a");
     assert_eq!(findings[0].path, "src/x.rs");
     assert_eq!(findings[0].line, 12);
     assert_eq!(findings[0].comment_id, "c1");
@@ -2198,6 +2478,18 @@ mod sqlite {
     }
 
     #[tokio::test]
+    async fn a_lane_era_database_reads_back_in_full_after_migrating() {
+        let file = File::new();
+        drop(SqliteStore::open_at(&file.0, SQLITE_LANE_ERA).unwrap());
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .execute_batch(LANE_ERA)
+            .unwrap();
+        let store = SqliteStore::open(&file.0).unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    #[tokio::test]
     async fn runs_in_one_second_list_by_time() {
         let file = File::new();
         let store = SqliteStore::open(&file.0).unwrap();
@@ -2264,6 +2556,11 @@ mod postgres {
     }
 
     pub(super) async fn schema() -> Schema {
+        schema_at(usize::MAX).await
+    }
+
+    /// A store in a fresh schema migrated only up to `version`.
+    pub(super) async fn schema_at(version: usize) -> Schema {
         let base = std::env::var(URL).unwrap_or_else(|_| panic!("{URL} is not set"));
         // The process id and counter keep tests apart, within one run and
         // across runs at once; the clock keeps a schema a crashed run left
@@ -2284,7 +2581,7 @@ mod postgres {
             .unwrap();
         let separator = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{separator}options=-c%20search_path%3D{name}");
-        let store = Arc::new(PgStore::connect(&url).await.unwrap());
+        let store = Arc::new(PgStore::connect_at(&url, version).await.unwrap());
         Schema {
             store,
             url,
@@ -2307,6 +2604,20 @@ mod postgres {
     }
 
     for_each_scenario!(tests);
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn a_lane_era_database_reads_back_in_full_after_migrating() {
+        let schema = schema_at(POSTGRES_LANE_ERA).await;
+        plain_client(&schema.url)
+            .await
+            .unwrap()
+            .batch_execute(LANE_ERA)
+            .await
+            .unwrap();
+        let store = PgStore::connect(&schema.url).await.unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
 
     #[tokio::test]
     #[ignore = "needs HENK_TEST_DATABASE_URL"]

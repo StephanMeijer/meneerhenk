@@ -1,5 +1,5 @@
-//! Tool calls across runs (#203): how each tool fares per model and kind
-//! of session, and the calls that went wrong. An `ok` call succeeded; an
+//! Tool calls across runs (#203): how each tool fares per model and session
+//! role, and the calls that went wrong. An `ok` call succeeded; an
 //! `error` failed in the tool; `refused_scope` and `refused_repeat` were
 //! refused by a guard; anything else never ran.
 
@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{OutcomeFilter, ToolCallFilter, ToolCallKey, ToolUsage};
+use henk_store::{OutcomeFilter, SessionRole, ToolCallFilter, ToolCallKey, ToolUsage};
 use serde::Deserialize;
 
 use super::types::{Page, ToolCall, ToolCallItem, ToolSummaryRow, link_to};
@@ -25,11 +25,6 @@ const OUTCOMES: &[&str] = &[
     "malformed_arguments",
     "not_run",
     "cancelled",
-];
-
-/// Every kind of session.
-const KINDS: &[&str] = &[
-    "reviewer", "executor", "planner", "address", "lane", "check",
 ];
 
 /// What `GET /tool-calls/summary` and `GET /tool-calls` take. Every
@@ -63,15 +58,13 @@ impl ToolQuery {
                 )));
             }
         };
-        let session_kind = given(self.session_kind.as_ref());
-        if let Some(kind) = &session_kind
-            && !KINDS.contains(&kind.as_str())
-        {
-            return Err(ApiError::bad_request(format!(
-                "session_kind is one of {}.",
-                KINDS.join(", ")
-            )));
-        }
+        let role = match given(self.session_kind.as_ref()) {
+            None => None,
+            Some(kind) => Some(SessionRole::parse(&kind).ok_or_else(|| {
+                let roles: Vec<&str> = SessionRole::ALL.iter().map(|r| r.as_str()).collect();
+                ApiError::bad_request(format!("session_kind is one of {}.", roles.join(", ")))
+            })?),
+        };
         let before = match self.cursor.as_deref() {
             None => None,
             Some(text) => {
@@ -86,7 +79,7 @@ impl ToolQuery {
             outcome,
             tool: given(self.tool.as_ref()),
             model: given(self.model.as_ref()),
-            session_kind,
+            role,
             since: self
                 .since
                 .as_deref()

@@ -227,7 +227,7 @@ both sessions take turns in it: after a push the workspace holds the new
 head, so nothing has to move.
 
 The reviewer and the executor are each a `henk_session::ResumableSession`: every
-round resumes its own conversation, and a session's lane row, timeline and
+round resumes its own conversation, and a session's row, timeline and
 transcript cover all its rounds. The reviewer reads the diff per file with
 line numbers (`diff_tools.rs`) and the code in the workspace
 (`code_tools.rs`), and hands over what it found with `report_finding`, then
@@ -268,10 +268,10 @@ and the findings that still stand (unsettled or won't fix). Nothing is
 posted on the pull request; `finish_checks` also reports the outcome on the
 last commit the loop pushed, the pull request's new head.
 
-A run's stages are requested, queued, started, diff, checkout, lanes (the
-loop's rounds; the stage keeps its stored name), push, publish (skipped: a
-loop posts nothing) and done. Runs from before #309 also show a fact_check
-stage.
+A run's stages are requested, queued, started, diff, checkout, rounds (the
+loop's rounds), push, publish (skipped: a loop posts nothing) and done.
+Reviews from before #324 have a lanes stage where rounds is, and runs from
+before #309 also a fact_check stage.
 
 Each session's conversation is kept under a size budget. Within a round old
 tool results are stubbed (`henk_agent::compact`); the diff a session reads
@@ -563,15 +563,14 @@ superseded, greeted, failed with a reason). A webhook kind no parser models is
 real recordings. Recordings never leave the service.
 
 A session (`henk-session`) is the other abstraction: `SessionSpec` says what
-varies (model, system prompt, opening messages, tools, limits) and
-`run_session` does what every session shares (the lane row, the loop, the stop
-mapping, the timeline line). An execute run is one session.
+varies (model, system prompt, opening messages, tools, limits) and the role
+that runs it, and `run_session` does what every session shares (the session
+row with its role, the loop, the stop mapping, the timeline line). An execute
+run is one session.
 A review is two `ResumableSession`s, the reviewer and the executor (only the
 reviewer when it reviews alone), each resumed once per round with its own
-conversation. The table that holds a session's row is still called `lanes`,
-after the review lanes it was made for: every session, reviewer, executor or
-planner, records one row there (section 8), as the `address` session of a
-run from before #327 did.
+conversation. Every session, planner, reviewer or executor, records one row
+in `sessions` with its role (section 8).
 
 ## 7. Planning
 
@@ -698,7 +697,7 @@ comment for a failure or a cancel, nothing for a shutdown.
 
 ```mermaid
 erDiagram
-    runs ||--o{ lanes : has
+    runs ||--o{ sessions : has
     runs ||--o{ drafts : holds
     runs ||--o{ stages : moves_through
     runs ||--o{ findings : records
@@ -725,9 +724,10 @@ erDiagram
         text loop_stop "why a review loop stopped"
         int loop_rounds
     }
-    lanes {
+    sessions {
         text run_id FK
-        text name "one row per session: reviewer, executor, planner"
+        text name "unique in the run: reviewer, executor, planner"
+        text role "planner, reviewer, executor; old rows: lane, check, address"
         text model
         text status "running, finished, timed_out, did_not_finish"
         int turns
@@ -741,7 +741,7 @@ erDiagram
         int id PK
         text run_id FK
         text draft "f1, f2, ..."
-        text lane "reviewer"
+        text session "reviewer"
         text model
         text kind "loop_finding"
         text path
@@ -764,7 +764,7 @@ erDiagram
     findings {
         int id PK
         text run_id FK
-        text lane
+        text session
         text path
         int line
         text comment_id
@@ -801,24 +801,30 @@ erDiagram
     }
 ```
 
-A plan records the same way: a `lanes` row for the planner and one for the
-reviewer, and in `drafts` the reviewer's points with the kind `plan_point`,
+A plan records the same way: a `sessions` row for the planner and one for
+the reviewer, and in `drafts` the reviewer's points with the kind `plan_point`,
 where `path` is the part of the plan a point is about and `line` is 0, and
 the planner's answer as the verdict (`taken`, `rejected` or `unsettled`).
 `runs.loop_stop` and `loop_rounds` say why and after how many rounds its
 review stopped.
 
-A review records one `lanes` row per session (the reviewer and the executor),
-its stages, and in `drafts` every finding the reviewer reported, with the
-kind `loop_finding`, and the verdict it ended with: `fixed` with the commit in
-`comment_id`, `rejected` or `wont_fix` by the executor, or `unsettled` when the
-loop gave it one. Its `findings` stay empty, since nothing is posted. The
-names are those of the review lanes the tables were made for (#309 removed
-the lanes and the fact-check): the `lanes`, `drafts`, `findings` and `stages`
-tables and their parsers are kept so a lane-era run, with its lanes, its
-drafts with fact-check verdicts (`confirmed`, `same_as`, `unchecked` and the
-rest), its posted findings and its `fact_check` stage, still reads back on
-the run page and in `henk runs show`.
+A review records one `sessions` row per session (the reviewer and the
+executor), its stages, and in `drafts` every finding the reviewer reported,
+with the kind `loop_finding`, and the verdict it ended with: `fixed` with the
+commit in `comment_id`, `rejected` or `wont_fix` by the executor, or
+`unsettled` when the loop gave it one. Its `findings` stay empty, since
+nothing is posted. An execution records one `sessions` row for the executor.
+
+Each session row says the role that ran it, written when the session starts
+(#324); filters on tool calls and session statistics read that column, not
+the name. New runs write only `planner`, `reviewer` and `executor`. Older
+rows were given theirs when the `lanes` table became `sessions`: a review
+lane is `lane`, a fact-check (`check-N`) is `check`, an address run's session
+is `address`, and the `fixer` of a run before #323 is `executor`. The tables
+and parsers keep what older runs wrote, so a lane-era run, with its lanes,
+its drafts with fact-check verdicts (`confirmed`, `same_as`, `unchecked` and
+the rest), its posted findings and its `lanes` and `fact_check` stages,
+still reads back on the run page and in `henk runs show`.
 
 Every comment Henk posts ends with a hidden marker
 (`<!-- meneer-henk run=... model=... kind=... -->`) rendered by

@@ -1,6 +1,6 @@
 [package]
 name = "henk-store"
-description = "Run records in SQLite or PostgreSQL: runs, lanes, findings and events"
+description = "Run records in SQLite or PostgreSQL: runs, sessions, findings and events"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,12 @@ time = { workspace = true }
 tokio-postgres = { workspace = true }
 tokio-postgres-rustls = { workspace = true }
 
+[features]
+# Opens a database at an older schema version, for tests that migrate it.
+testing = []
+
 [dev-dependencies]
+henk-store = { path = ".", features = ["testing"] }
 tokio = { workspace = true }
 
 [lints]

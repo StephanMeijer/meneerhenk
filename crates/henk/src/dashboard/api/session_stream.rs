@@ -11,7 +11,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::response::sse::Event;
-use henk_store::{LaneStatus, RunRecord, RunStatus};
+use henk_store::{RunRecord, RunStatus, SessionStatus};
 use tokio::sync::{broadcast, mpsc};
 
 use super::ApiError;
@@ -75,11 +75,16 @@ async fn runs_here(dashboard: &Dashboard, run: &RunRecord, session: &str) -> boo
     if !dashboard.app.live_runs.contains(&run.id) {
         return false;
     }
-    dashboard.app.store.lanes(&run.id).await.is_ok_and(|lanes| {
-        lanes
-            .iter()
-            .any(|l| l.name == session && l.status == LaneStatus::Running)
-    })
+    dashboard
+        .app
+        .store
+        .sessions(&run.id)
+        .await
+        .is_ok_and(|lanes| {
+            lanes
+                .iter()
+                .any(|l| l.name == session && l.status == SessionStatus::Running)
+        })
 }
 
 /// Sends what the follower missed since `last`, or a snapshot. The seq it

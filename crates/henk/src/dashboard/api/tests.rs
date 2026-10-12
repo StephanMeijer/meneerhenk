@@ -14,8 +14,8 @@ use axum::http::{Method, Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, LaneStatus, NewRun, RunStatus,
-    ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, NewRun, RunStatus, SessionRole,
+    SessionStatus, ToolCallRecord, TranscriptRecord,
 };
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
@@ -287,7 +287,7 @@ async fn seed_review_record(f: &Fixture) {
             &DraftRecord {
                 at: String::new(),
                 draft: "d1".into(),
-                lane: "lane-a".into(),
+                session: "lane-a".into(),
                 model: "model-x".into(),
                 kind: "finding".into(),
                 path: "src/a.rs".into(),
@@ -399,20 +399,26 @@ async fn a_superseded_run_says_so_and_names_its_replacement_and_lanes_say_how_th
         RunId::parse("r-new").unwrap(),
     );
     for lane in ["lane-a", "lane-b"] {
-        store.start_lane(&old, lane, "m").await.unwrap();
+        store
+            .start_session(&old, lane, SessionRole::Lane, "m")
+            .await
+            .unwrap();
     }
     store
-        .finish_lane(
+        .finish_session(
             &old,
             "lane-a",
-            LaneStatus::TimedOut,
+            SessionStatus::TimedOut,
             30,
             henk_store::TokenUsage::new(1, 1),
             None,
         )
         .await
         .unwrap();
-    store.drop_running_lanes(&old, "cancelled").await.unwrap();
+    store
+        .drop_running_sessions(&old, "cancelled")
+        .await
+        .unwrap();
     store
         .supersede_run(&old, &new, "superseded by a review of a newer commit")
         .await
@@ -547,13 +553,16 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
         })
         .await
         .unwrap();
-    for (lane, model) in [("lane-a", "model-x"), ("check-1", "model-y")] {
-        store.start_lane(&run, lane, model).await.unwrap();
+    for (lane, role, model) in [
+        ("lane-a", SessionRole::Lane, "model-x"),
+        ("check-1", SessionRole::Check, "model-y"),
+    ] {
+        store.start_session(&run, lane, role, model).await.unwrap();
         store
-            .finish_lane(
+            .finish_session(
                 &run,
                 lane,
-                LaneStatus::Finished,
+                SessionStatus::Finished,
                 4,
                 henk_store::TokenUsage::new(100, 10),
                 None,
@@ -575,7 +584,7 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
                 &DraftRecord {
                     at: String::new(),
                     draft: draft.into(),
-                    lane: "lane-a".into(),
+                    session: "lane-a".into(),
                     model: "model-x".into(),
                     kind: "finding".into(),
                     path: "src/a.rs".into(),
@@ -676,7 +685,7 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
 
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
-        &store.lanes(&run).await.unwrap(),
+        &store.sessions(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
@@ -684,7 +693,7 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
         &store.events(&run).await.unwrap(),
     );
     for line in [
-        "lanes (2)",
+        "sessions (2)",
         "check-1",
         "drafts (5)",
         "confirmed by model-y, comment c-1: Why d1.",
@@ -721,13 +730,19 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
         })
         .await
         .unwrap();
-    for (session, model) in [("reviewer", "model-r"), ("fixer", "model-f")] {
-        store.start_lane(&run, session, model).await.unwrap();
+    for (session, role, model) in [
+        ("reviewer", SessionRole::Reviewer, "model-r"),
+        ("fixer", SessionRole::Executor, "model-f"),
+    ] {
         store
-            .finish_lane(
+            .start_session(&run, session, role, model)
+            .await
+            .unwrap();
+        store
+            .finish_session(
                 &run,
                 session,
-                LaneStatus::Finished,
+                SessionStatus::Finished,
                 2,
                 henk_store::TokenUsage::new(50, 5),
                 None,
@@ -766,7 +781,7 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
     let finding = DraftRecord {
         at: String::new(),
         draft: "f1".into(),
-        lane: "reviewer".into(),
+        session: "reviewer".into(),
         model: "model-r".into(),
         kind: henk_store::LOOP_FINDING_KIND.into(),
         path: "src/a.rs".into(),
@@ -808,7 +823,7 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
 
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
-        &store.lanes(&run).await.unwrap(),
+        &store.sessions(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
@@ -816,7 +831,7 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
         &store.events(&run).await.unwrap(),
     );
     for line in [
-        "lanes (2)",
+        "sessions (2)",
         "transcripts (1)",
         "fixed by fixer in abc123: Set x.",
     ] {
@@ -848,12 +863,15 @@ async fn an_address_run_from_before_its_removal_still_reads_in_full() {
         })
         .await
         .unwrap();
-    store.start_lane(&run, "address", "model-a").await.unwrap();
     store
-        .finish_lane(
+        .start_session(&run, "address", SessionRole::Address, "model-a")
+        .await
+        .unwrap();
+    store
+        .finish_session(
             &run,
             "address",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             6,
             henk_store::TokenUsage::new(300, 30),
             None,
@@ -910,14 +928,14 @@ async fn an_address_run_from_before_its_removal_still_reads_in_full() {
 
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
-        &store.lanes(&run).await.unwrap(),
+        &store.sessions(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
         &store.findings(&run).await.unwrap(),
         &store.events(&run).await.unwrap(),
     );
-    for line in ["lanes (1)", "address", "transcripts (1)"] {
+    for line in ["sessions (1)", "address", "transcripts (1)"] {
         assert!(shown.contains(line), "{line}:\n{shown}");
     }
 }
@@ -2015,7 +2033,10 @@ async fn a_running_run_streams_what_happens_in_order_and_ends() {
             .starts_with(f.dashboard.app.feed.epoch())
     );
 
-    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    store
+        .start_session(&run, "lane-a", henk_store::SessionRole::Lane, "model-x")
+        .await
+        .unwrap();
     store.record_tool_call(&run, &tool_call(4)).await.unwrap();
     store
         .record_draft(
@@ -2023,7 +2044,7 @@ async fn a_running_run_streams_what_happens_in_order_and_ends() {
             &DraftRecord {
                 at: String::new(),
                 draft: "d1".into(),
-                lane: "lane-a".into(),
+                session: "lane-a".into(),
                 model: "model-x".into(),
                 kind: "finding".into(),
                 path: "src/a.rs".into(),
@@ -2051,10 +2072,10 @@ async fn a_running_run_streams_what_happens_in_order_and_ends() {
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &run,
             "lane-a",
-            henk_store::LaneStatus::Finished,
+            henk_store::SessionStatus::Finished,
             4,
             henk_store::TokenUsage::new(100, 9),
             None,
@@ -2118,7 +2139,10 @@ async fn a_reconnect_gets_exactly_what_it_missed_or_a_snapshot() {
 
     let mut first = stream(&f, uri, &cookie, None).await;
     first.next().await.unwrap();
-    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    store
+        .start_session(&run, "lane-a", henk_store::SessionRole::Lane, "model-x")
+        .await
+        .unwrap();
     let seen = first.next().await.unwrap();
     assert_eq!(seen.event, "lanes");
     drop(first);
@@ -2245,7 +2269,10 @@ async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on(
     let (cookie, _) = viewer(&f);
     let review = RunId::parse("r-review").unwrap();
     let store = &f.dashboard.app.store;
-    store.start_lane(&review, "lane-x", "m").await.unwrap();
+    store
+        .start_session(&review, "lane-x", SessionRole::Lane, "m")
+        .await
+        .unwrap();
     let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
     let snapshot = events.next().await.unwrap();
     assert_eq!(snapshot.event, "snapshot");
@@ -2452,7 +2479,7 @@ async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
     f.dashboard
         .app
         .store
-        .start_lane(&review, "lane-x", "m")
+        .start_session(&review, "lane-x", SessionRole::Lane, "m")
         .await
         .unwrap();
     let listed = get(&f, "/dashboard/api/v1/runs", &cookie).await.json();
@@ -2479,10 +2506,10 @@ async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
     let f = fixture("https://127.0.0.1:9");
     let store = &f.dashboard.app.store;
     for (run, lane_status, error) in [
-        ("r-1", LaneStatus::Finished, None),
+        ("r-1", SessionStatus::Finished, None),
         (
             "r-2",
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             Some("rate limited by the model endpoint"),
         ),
     ] {
@@ -2501,9 +2528,12 @@ async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
             })
             .await
             .unwrap();
-        store.start_lane(&id, "lane-a", "m").await.unwrap();
         store
-            .finish_lane(
+            .start_session(&id, "lane-a", henk_store::SessionRole::Lane, "m")
+            .await
+            .unwrap();
+        store
+            .finish_session(
                 &id,
                 "lane-a",
                 lane_status,
@@ -2594,7 +2624,10 @@ async fn a_running_session_streams_what_it_says_as_text_and_ends_with_it() {
     let (cookie, _) = viewer(&f);
     let (run, _alive) = live_run(&f, "r-live").await;
     let store = Arc::clone(&f.dashboard.app.store);
-    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    store
+        .start_session(&run, "lane-a", henk_store::SessionRole::Lane, "model-x")
+        .await
+        .unwrap();
     let opening = henk_llm::ChatMessage::user("<script>alert(1)</script> Review this.");
     store
         .session_message(&run, "lane-a", 0, &said(&opening))
@@ -2641,10 +2674,10 @@ async fn a_running_session_streams_what_it_says_as_text_and_ends_with_it() {
     assert_eq!(other.next().await.unwrap().event, "snapshot");
 
     store
-        .finish_lane(
+        .finish_session(
             &run,
             "lane-a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             1,
             henk_store::TokenUsage::new(1, 1),
             None,
@@ -2682,7 +2715,10 @@ async fn a_session_another_process_runs_ends_its_stream_at_once() {
         })
         .await
         .unwrap();
-    store.start_lane(&run, "lane-a", "model-x").await.unwrap();
+    store
+        .start_session(&run, "lane-a", henk_store::SessionRole::Lane, "model-x")
+        .await
+        .unwrap();
     let mut events = stream(
         &f,
         "/dashboard/api/v1/runs/r-there/sessions/lane-a/stream",
@@ -2742,6 +2778,17 @@ async fn the_quality_and_draft_listings_are_gone() {
 /// planner), seeded by `seed`: eight calls, four of them gone wrong.
 async fn seed_calls(f: &Fixture) {
     let store = &f.dashboard.app.store;
+    // The role a call counts under is its session's; `seed` started lane-a.
+    for (run, session, role) in [
+        ("r-review", "lane-b", SessionRole::Lane),
+        ("r-review", "check-1", SessionRole::Check),
+        ("r-plan", "planner", SessionRole::Planner),
+    ] {
+        store
+            .start_session(&RunId::parse(run).unwrap(), session, role, "m")
+            .await
+            .unwrap();
+    }
     let calls = [
         (
             "r-review",

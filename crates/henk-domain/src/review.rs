@@ -1,4 +1,4 @@
-//! Code review (§3): triggers, lanes, outcomes and what the platform shows.
+//! Code review (§3): triggers, sessions, outcomes and what the platform shows.
 
 use std::fmt::{self, Write as _};
 
@@ -167,14 +167,14 @@ impl ReviewTrigger {
     }
 }
 
-/// One independent reviewer inside a review (§1.1, §3.2).
+/// The name of one session of a review (§1.1, §3.2): `reviewer`, `executor`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct LaneName(String);
+pub struct SessionName(String);
 
-impl LaneName {
-    /// Names a lane. The name is what the summary shows when the lane does
-    /// not finish; it must not reveal the model (§3.2, open question 4).
+impl SessionName {
+    /// Names a session. The name is what the summary shows when the
+    /// session does not finish; it must not reveal the model (§3.2, open question 4).
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
@@ -187,31 +187,31 @@ impl LaneName {
     }
 }
 
-impl fmt::Display for LaneName {
+impl fmt::Display for SessionName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-/// How one lane ended (§3.3).
+/// How one session of a review ended (§3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LaneOutcome {
-    /// The lane read the change and posted what it found.
+pub enum SessionOutcome {
+    /// The session ran to its end.
     Finished,
-    /// The lane reached its time limit. What it posted stands; it posts
-    /// nothing more. The review completes on it like on a finished lane.
+    /// The session reached its time limit. What it did stands; it does
+    /// nothing more. The review completes on it like on a finished session.
     Stopped,
-    /// The lane failed after retries or hung, and was dropped.
+    /// The session failed after retries or hung, and was dropped.
     Dropped,
 }
 
-/// One lane's result.
+/// One session's result.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneResult {
-    /// Which lane.
-    pub lane: LaneName,
+pub struct SessionResult {
+    /// Which session.
+    pub session: SessionName,
     /// How it ended.
-    pub outcome: LaneOutcome,
+    pub outcome: SessionOutcome,
 }
 
 /// The conclusion of the GitHub check "Meneer Henk" (§3.3).
@@ -238,13 +238,13 @@ pub struct CommitStatus {
 pub struct ReviewOutcome {
     /// The commit that was reviewed.
     pub commit: CommitSha,
-    /// Every lane and how it ended.
-    pub lanes: Vec<LaneResult>,
+    /// Every session and how it ended.
+    pub sessions: Vec<SessionResult>,
     /// The number of Henk's distinct findings still open on the diff at this
     /// commit, including findings from earlier reviews whose line is still
     /// in the diff.
     pub open_findings: usize,
-    /// Every changed file was left out by `review.ignore`, so no lane ran
+    /// Every changed file was left out by `review.ignore`, so no session ran
     /// (§3.2). Such a review is complete.
     pub nothing_to_review: bool,
     /// Why the review stopped before it ended, if it did. A stopped review
@@ -287,7 +287,7 @@ impl ReviewOutcome {
     fn stopped_as(commit: CommitSha, why: Stopped, not_reviewed: Option<String>) -> Self {
         Self {
             commit,
-            lanes: Vec::new(),
+            sessions: Vec::new(),
             open_findings: 0,
             nothing_to_review: false,
             stopped: Some(why),
@@ -324,31 +324,34 @@ impl ReviewOutcome {
         Self::stopped_as(commit, Stopped::NotReviewed, Some(reason.into()))
     }
 
-    /// Whether the review completed: at least one lane finished, or there
+    /// Whether the review completed: at least one session finished, or there
     /// was nothing to review.
     #[must_use]
     pub fn completed(&self) -> bool {
         self.stopped.is_none()
             && (self.nothing_to_review
-                || self.lanes.iter().any(|lane| {
-                    matches!(lane.outcome, LaneOutcome::Finished | LaneOutcome::Stopped)
+                || self.sessions.iter().any(|session| {
+                    matches!(
+                        session.outcome,
+                        SessionOutcome::Finished | SessionOutcome::Stopped
+                    )
                 }))
     }
 
-    /// The lanes that reached their time limit, in order.
-    pub fn stopped_lanes(&self) -> impl Iterator<Item = &LaneName> + '_ {
-        self.lanes
+    /// The sessions that reached their time limit, in order.
+    pub fn stopped_sessions(&self) -> impl Iterator<Item = &SessionName> + '_ {
+        self.sessions
             .iter()
-            .filter(|lane| lane.outcome == LaneOutcome::Stopped)
-            .map(|lane| &lane.lane)
+            .filter(|session| session.outcome == SessionOutcome::Stopped)
+            .map(|session| &session.session)
     }
 
-    /// The lanes that were dropped, in order.
-    pub fn dropped_lanes(&self) -> impl Iterator<Item = &LaneName> + '_ {
-        self.lanes
+    /// The sessions that were dropped, in order.
+    pub fn dropped_sessions(&self) -> impl Iterator<Item = &SessionName> + '_ {
+        self.sessions
             .iter()
-            .filter(|lane| lane.outcome == LaneOutcome::Dropped)
-            .map(|lane| &lane.lane)
+            .filter(|session| session.outcome == SessionOutcome::Dropped)
+            .map(|session| &session.session)
     }
 
     /// The GitHub check conclusion.
@@ -414,26 +417,26 @@ impl ReviewOutcome {
     #[must_use]
     pub fn summary(&self) -> String {
         let mut text = self.headline();
-        let dropped: Vec<&str> = self.dropped_lanes().map(LaneName::as_str).collect();
+        let dropped: Vec<&str> = self.dropped_sessions().map(SessionName::as_str).collect();
         match dropped.as_slice() {
             [] => {}
             [one] => {
-                let _ = write!(text, " Lane {one} did not finish.");
+                let _ = write!(text, " Session {one} did not finish.");
             }
             many => {
-                let _ = write!(text, " Lanes {} did not finish.", many.join(", "));
+                let _ = write!(text, " Sessions {} did not finish.", many.join(", "));
             }
         }
-        let stopped: Vec<&str> = self.stopped_lanes().map(LaneName::as_str).collect();
+        let stopped: Vec<&str> = self.stopped_sessions().map(SessionName::as_str).collect();
         match stopped.as_slice() {
             [] => {}
             [one] => {
-                let _ = write!(text, " Lane {one} stopped at the time limit.");
+                let _ = write!(text, " Session {one} stopped at the time limit.");
             }
             many => {
                 let _ = write!(
                     text,
-                    " Lanes {} stopped at the time limit.",
+                    " Sessions {} stopped at the time limit.",
                     many.join(", ")
                 );
             }
@@ -481,13 +484,13 @@ mod tests {
         }
     }
 
-    fn outcome(lanes: &[(&str, LaneOutcome)], open_findings: usize) -> ReviewOutcome {
+    fn outcome(sessions: &[(&str, SessionOutcome)], open_findings: usize) -> ReviewOutcome {
         ReviewOutcome {
             commit: CommitSha::parse(SHA).unwrap_or_else(|e| panic!("{e}")),
-            lanes: lanes
+            sessions: sessions
                 .iter()
-                .map(|(name, outcome)| LaneResult {
-                    lane: LaneName::new(*name),
+                .map(|(name, outcome)| SessionResult {
+                    session: SessionName::new(*name),
                     outcome: *outcome,
                 })
                 .collect(),
@@ -546,7 +549,10 @@ mod tests {
     #[test]
     fn no_findings_is_success() {
         let outcome = outcome(
-            &[("a", LaneOutcome::Finished), ("b", LaneOutcome::Finished)],
+            &[
+                ("a", SessionOutcome::Finished),
+                ("b", SessionOutcome::Finished),
+            ],
             0,
         );
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Success);
@@ -557,8 +563,8 @@ mod tests {
     fn findings_a_review_loop_left_open_are_neutral_not_a_pass() {
         let mut left = outcome(
             &[
-                ("executor", LaneOutcome::Finished),
-                ("reviewer", LaneOutcome::Finished),
+                ("executor", SessionOutcome::Finished),
+                ("reviewer", SessionOutcome::Finished),
             ],
             0,
         );
@@ -579,19 +585,19 @@ mod tests {
 
     #[test]
     fn findings_are_neutral_never_failure() {
-        let outcome = outcome(&[("a", LaneOutcome::Finished)], 1);
+        let outcome = outcome(&[("a", SessionOutcome::Finished)], 1);
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Neutral);
         assert_eq!(outcome.summary(), "1 issue found.");
         assert_eq!(outcome.commit_status().description, "1 issue found.");
     }
 
     #[test]
-    fn partial_success_is_success_and_names_dropped_lanes() {
+    fn partial_success_is_success_and_names_dropped_sessions() {
         let outcome = outcome(
             &[
-                ("a", LaneOutcome::Finished),
-                ("b", LaneOutcome::Dropped),
-                ("c", LaneOutcome::Dropped),
+                ("a", SessionOutcome::Finished),
+                ("b", SessionOutcome::Dropped),
+                ("c", SessionOutcome::Dropped),
             ],
             3,
         );
@@ -599,16 +605,19 @@ mod tests {
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Neutral);
         assert_eq!(
             outcome.summary(),
-            "3 issues found. Lanes b, c did not finish."
+            "3 issues found. Sessions b, c did not finish."
         );
 
         let one = outcome_one_dropped();
-        assert_eq!(one.summary(), "No issues found. Lane b did not finish.");
+        assert_eq!(one.summary(), "No issues found. Session b did not finish.");
     }
 
     fn outcome_one_dropped() -> ReviewOutcome {
         outcome(
-            &[("a", LaneOutcome::Finished), ("b", LaneOutcome::Dropped)],
+            &[
+                ("a", SessionOutcome::Finished),
+                ("b", SessionOutcome::Dropped),
+            ],
             0,
         )
     }
@@ -622,11 +631,11 @@ mod tests {
         assert!(crate::text::is_in_style(&interrupted.summary()));
         let partway = ReviewOutcome {
             stopped: Some(Stopped::Interrupted),
-            ..outcome(&[("a", LaneOutcome::Finished)], 0)
+            ..outcome(&[("a", SessionOutcome::Finished)], 0)
         };
         assert!(
             !partway.completed(),
-            "a finished lane does not make it complete"
+            "a finished session does not make it complete"
         );
     }
 
@@ -671,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_review_is_a_complete_review_without_lanes() {
+    fn nothing_to_review_is_a_complete_review_without_sessions() {
         let skipped = ReviewOutcome {
             nothing_to_review: true,
             ..outcome(&[], 0)
@@ -691,38 +700,38 @@ mod tests {
         assert_eq!(open.check_conclusion(), CheckConclusion::Neutral);
         assert!(
             !outcome(&[], 0).completed(),
-            "no lanes and something to review"
+            "no sessions and something to review"
         );
     }
 
     #[test]
-    fn no_lane_finished_is_henks_failure() {
-        let stopped = outcome(&[("a", LaneOutcome::Stopped)], 2);
+    fn no_session_finished_is_henks_failure() {
+        let stopped = outcome(&[("a", SessionOutcome::Stopped)], 2);
         assert!(stopped.completed());
         assert_eq!(stopped.check_conclusion(), CheckConclusion::Neutral);
         assert_eq!(
             stopped.summary(),
-            "2 issues found. Lane a stopped at the time limit."
+            "2 issues found. Session a stopped at the time limit."
         );
         let mixed = outcome(
             &[
-                ("a", LaneOutcome::Stopped),
-                ("b", LaneOutcome::Dropped),
-                ("c", LaneOutcome::Stopped),
+                ("a", SessionOutcome::Stopped),
+                ("b", SessionOutcome::Dropped),
+                ("c", SessionOutcome::Stopped),
             ],
             0,
         );
         assert_eq!(mixed.check_conclusion(), CheckConclusion::Success);
         assert_eq!(
             mixed.summary(),
-            "No issues found. Lane b did not finish. Lanes a, c stopped at the time limit."
+            "No issues found. Session b did not finish. Sessions a, c stopped at the time limit."
         );
-        let outcome = outcome(&[("a", LaneOutcome::Dropped)], 0);
+        let outcome = outcome(&[("a", SessionOutcome::Dropped)], 0);
         assert!(!outcome.completed());
         assert_eq!(outcome.check_conclusion(), CheckConclusion::Failure);
         assert_eq!(
             outcome.summary(),
-            "Review did not complete. Lane a did not finish."
+            "Review did not complete. Session a did not finish."
         );
     }
 }

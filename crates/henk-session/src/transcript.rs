@@ -89,7 +89,7 @@ pub fn write(
     Ok(path)
 }
 
-/// Lane names are configuration, but a file name must not be a path.
+/// Session names come from the run, but a file name must not be a path.
 fn file_safe(name: &str) -> String {
     let safe: String = name
         .chars()

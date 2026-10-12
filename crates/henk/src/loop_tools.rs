@@ -250,7 +250,7 @@ impl Tool for ReportFinding {
         let record = DraftRecord {
             at: String::new(),
             draft: id.to_string(),
-            lane: "reviewer".to_owned(),
+            session: "reviewer".to_owned(),
             model: handoff.reviewer_model.clone(),
             kind: LOOP_FINDING_KIND.to_owned(),
             path: report.path,

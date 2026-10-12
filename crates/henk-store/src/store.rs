@@ -6,13 +6,14 @@ use time::OffsetDateTime;
 
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
-    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus, Stage,
-    StageRecord, StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
+    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
-/// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
+/// Run records (spec §1.1, §8.6): runs, sessions, findings, timelines, and
 /// inbound events with what each listener did with them. Implemented over
 /// `SQLite` ([`crate::SqliteStore`]) and `PostgreSQL`.
 #[async_trait]
@@ -111,12 +112,12 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         resumed: &str,
     ) -> Result<bool, StoreError>;
 
-    /// Drops the lanes of `run` that are still running, with `reason`.
+    /// Drops the sessions of `run` that are still running, with `reason`.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure.
-    async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError>;
+    async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError>;
 
     /// Records where a stage of a run stands (#226). The first write of a
     /// stage sets when it started; a write that ends it sets when.
@@ -141,34 +142,43 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError>;
 
-    /// Records a lane as running.
+    /// Records a session as running, in the role that runs it (#324). New
+    /// runs start sessions through henk-session, which knows only the
+    /// three roles of [`henk_domain::role::Role`]; the history roles are
+    /// for older rows.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure.
-    async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError>;
-
-    /// Ends a lane.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure.
-    async fn finish_lane(
+    async fn start_session(
         &self,
         run: &RunId,
         name: &str,
-        status: LaneStatus,
+        role: SessionRole,
+        model: &str,
+    ) -> Result<(), StoreError>;
+
+    /// Ends a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn finish_session(
+        &self,
+        run: &RunId,
+        name: &str,
+        status: SessionStatus,
         turns: u64,
         tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError>;
 
-    /// The lanes of a run.
+    /// The sessions of a run, by name.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
-    async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError>;
+    async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError>;
 
     /// Records what happened to a finding.
     ///
@@ -178,7 +188,7 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     async fn record_finding(
         &self,
         run: &RunId,
-        lane: &str,
+        session: &str,
         path: &str,
         line_number: u32,
         comment_id: &str,
@@ -192,8 +202,8 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure.
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError>;
 
-    /// Records a review lane's draft as queued (#189), or its new text when
-    /// the lane replaced it. Its `decision` is ignored.
+    /// Records a reviewer's draft as queued (#189), or its new text when
+    /// the session replaced it. Its `decision` is ignored.
     ///
     /// # Errors
     ///
@@ -233,8 +243,8 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn tool_calls(&self, run: &RunId) -> Result<Vec<ToolCallRecord>, StoreError>;
 
-    /// Tool usage across runs since `since`, per model, kind of session
-    /// ([`crate::session_kind`]) and tool: the data for metrics.
+    /// Tool usage across runs since `since`, per model, session role and
+    /// tool: the data for metrics.
     ///
     /// # Errors
     ///
@@ -251,7 +261,7 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         self.tool_usage(&filter).await
     }
 
-    /// Tool usage across runs, per model, kind of session and tool, for the
+    /// Tool usage across runs, per model, session role and tool, for the
     /// calls `filter` matches (#203). Its outcome and keyset do not apply.
     ///
     /// # Errors
@@ -367,7 +377,7 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
 
     /// Deletes inbound events received before `older_than`, with their
     /// outcomes, and session transcripts recorded before it (#191), in one
-    /// transaction. Runs, their lanes, findings and tool calls are kept:
+    /// transaction. Runs, their sessions, findings and tool calls are kept:
     /// links to runs are posted on the platforms (§8.6).
     ///
     /// # Errors
@@ -392,33 +402,33 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure.
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError>;
 
-    /// The lanes of each of `runs` as (run, lane, status), for lists that
-    /// show where each run's lanes stand, in one read.
+    /// The sessions of each of `runs` as (run, session, status), for lists
+    /// that show where each run's sessions stand, in one read.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
-    async fn lanes_of(
+    async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError>;
+    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError>;
 
-    /// How the lanes of the newest `reviews` reviews that ended (#229)
+    /// How the sessions of the newest `reviews` reviews that ended (#229)
     /// ended, the reviews started at or after `since` when given. Running,
-    /// cancelled and superseded reviews are left out: the lanes of a
+    /// cancelled and superseded reviews are left out: the sessions of a
     /// review someone cancelled or a newer commit replaced were cancelled
     /// for it, not by their own failing. Newest review
-    /// first, each review's lanes by name. `reviews` is capped at
-    /// [`crate::MOST_LANE_REVIEWS`].
+    /// first, each review's sessions by name. `reviews` is capped at
+    /// [`crate::MOST_SESSION_REVIEWS`].
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
-    async fn lane_endings(
+    async fn session_endings(
         &self,
         since: Option<OffsetDateTime>,
         reviews: u32,
-    ) -> Result<Vec<LaneEnding>, StoreError>;
+    ) -> Result<Vec<SessionEnding>, StoreError>;
 
     /// A message a session appended to its conversation, as it happens
     /// (#238): `message` is the message as JSON, as a stored transcript

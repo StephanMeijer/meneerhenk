@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use henk_domain::run::RunKind;
 use henk_store::{
-    DraftRecord, DraftVerdict, EventRecord, FindingRecord, LaneRecord, RunRecord, ToolTally,
+    DraftRecord, DraftVerdict, EventRecord, FindingRecord, RunRecord, SessionRecord, ToolTally,
     ToolUsage, TranscriptSummary,
 };
 use serde_json::Value;
@@ -249,15 +249,15 @@ fn indent(text: &str) -> String {
 /// What a session read from and wrote into the prompt cache, with the
 /// share of its prompt the cache served (#330): empty when it used none.
 #[must_use]
-pub fn cache_text(lane: &LaneRecord) -> String {
-    if lane.cache_read_tokens == 0 && lane.cache_write_tokens == 0 {
+pub fn cache_text(session: &SessionRecord) -> String {
+    if session.cache_read_tokens == 0 && session.cache_write_tokens == 0 {
         return String::new();
     }
     format!(
         "  cache read {} written {} ({}% hit)",
-        lane.cache_read_tokens,
-        lane.cache_write_tokens,
-        hit_percent(lane.cache_read_tokens, lane.input_tokens)
+        session.cache_read_tokens,
+        session.cache_write_tokens,
+        hit_percent(session.cache_read_tokens, session.input_tokens)
     )
 }
 
@@ -315,7 +315,7 @@ pub fn draft_text(draft: &DraftRecord) -> String {
     };
     format!(
         "{:<4} {:<12} {place}{what}  {fate}",
-        draft.draft, draft.lane
+        draft.draft, draft.session
     )
 }
 
@@ -384,12 +384,12 @@ fn render_run(out: &mut String, run: &RunRecord) {
     }
 }
 
-/// Renders one run with its lanes, tool calls, transcripts, drafts,
+/// Renders one run with its sessions, tool calls, transcripts, drafts,
 /// findings and timeline.
 #[must_use]
 pub fn render(
     run: &RunRecord,
-    lanes: &[LaneRecord],
+    sessions: &[SessionRecord],
     tools: &[ToolUsage],
     transcripts: &[TranscriptSummary],
     drafts: &[DraftRecord],
@@ -399,20 +399,21 @@ pub fn render(
     let mut out = String::new();
     render_run(&mut out, run);
 
-    let _ = writeln!(out, "\nlanes ({})", lanes.len());
-    for lane in lanes {
+    let _ = writeln!(out, "\nsessions ({})", sessions.len());
+    for session in sessions {
         let _ = write!(
             out,
-            "  {:<12} {:<14} {:<10} turns {:>3}  tokens in {:>7} out {:>6}",
-            lane.name,
-            words(lane.status.as_str()),
-            lane.model,
-            lane.turns,
-            lane.input_tokens,
-            lane.output_tokens
+            "  {:<12} {:<9} {:<14} {:<10} turns {:>3}  tokens in {:>7} out {:>6}",
+            session.name,
+            session.role,
+            words(session.status.as_str()),
+            session.model,
+            session.turns,
+            session.input_tokens,
+            session.output_tokens
         );
-        let _ = write!(out, "{}", cache_text(lane));
-        match &lane.error {
+        let _ = write!(out, "{}", cache_text(session));
+        match &session.error {
             Some(error) => {
                 let _ = writeln!(out, "  {error}");
             }
@@ -460,7 +461,7 @@ pub fn render(
             "  {} {:<8} {:<12} {}:{} comment {}",
             finding.at,
             finding.action,
-            finding.lane,
+            finding.session,
             finding.path,
             finding.line,
             finding.comment_id
@@ -486,16 +487,17 @@ mod tests {
 
     use henk_domain::allowlist::Platform;
     use henk_domain::run::{RunId, RunKind};
-    use henk_store::{LaneStatus, RunStatus};
+    use henk_store::{RunStatus, SessionRole, SessionStatus};
 
     use super::*;
 
     #[test]
     fn a_session_line_says_what_the_cache_served() {
-        let mut lane = LaneRecord {
+        let mut session = SessionRecord {
             name: "reviewer".into(),
+            role: SessionRole::Reviewer,
             model: "m".into(),
-            status: LaneStatus::Finished,
+            status: SessionStatus::Finished,
             turns: 4,
             input_tokens: 10_000,
             output_tokens: 300,
@@ -505,11 +507,11 @@ mod tests {
             started_at: "t0".into(),
             finished_at: Some("t1".into()),
         };
-        assert_eq!(cache_text(&lane), "", "no cache, nothing said");
-        lane.cache_read_tokens = 8_150;
-        lane.cache_write_tokens = 1_200;
+        assert_eq!(cache_text(&session), "", "no cache, nothing said");
+        session.cache_read_tokens = 8_150;
+        session.cache_write_tokens = 1_200;
         assert_eq!(
-            cache_text(&lane),
+            cache_text(&session),
             "  cache read 8150 written 1200 (81% hit)"
         );
     }
@@ -537,10 +539,11 @@ mod tests {
             loop_stop: None,
             loop_rounds: None,
         };
-        let lanes = vec![LaneRecord {
+        let sessions = vec![SessionRecord {
             name: "lane-a".into(),
+            role: SessionRole::Lane,
             model: "m".into(),
-            status: LaneStatus::DidNotFinish,
+            status: SessionStatus::DidNotFinish,
             turns: 3,
             input_tokens: 100,
             output_tokens: 20,
@@ -552,7 +555,7 @@ mod tests {
         }];
         let findings = vec![FindingRecord {
             at: "t".into(),
-            lane: "lane-a".into(),
+            session: "lane-a".into(),
             path: "src/x.rs".into(),
             line: 12,
             comment_id: "c1".into(),
@@ -575,7 +578,7 @@ mod tests {
             DraftRecord {
                 at: "t".into(),
                 draft: "d1".into(),
-                lane: "lane-a".into(),
+                session: "lane-a".into(),
                 model: "m".into(),
                 kind: "finding".into(),
                 path: "src/x.rs".into(),
@@ -593,7 +596,7 @@ mod tests {
             },
             DraftRecord {
                 draft: "d2".into(),
-                lane: "lane-b".into(),
+                session: "lane-b".into(),
                 kind: "rewrite".into(),
                 target: "c0".into(),
                 decision: Some(henk_store::DraftDecision {
@@ -607,7 +610,7 @@ mod tests {
                 ..DraftRecord {
                     at: "t".into(),
                     draft: String::new(),
-                    lane: String::new(),
+                    session: String::new(),
                     model: "n".into(),
                     kind: String::new(),
                     path: "src/x.rs".into(),
@@ -618,12 +621,23 @@ mod tests {
                 }
             },
         ];
-        let text = render(&run, &lanes, &[], &transcripts, &drafts, &findings, &events);
+        let text = render(
+            &run,
+            &sessions,
+            &[],
+            &transcripts,
+            &drafts,
+            &findings,
+            &events,
+        );
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
-        assert!(text.contains("lanes (1)"));
+        assert!(text.contains("sessions (1)"));
         assert!(text.contains("(finished)"), "{text}");
-        assert!(text.contains("lane-a       did not finish m"), "{text}");
+        assert!(
+            text.contains("lane-a       lane      did not finish m"),
+            "{text}"
+        );
         assert!(text.contains("rate limited"));
         assert!(text.contains("src/x.rs:12 comment c1"));
         assert!(text.contains("timeline (1)"));
@@ -790,6 +804,7 @@ mod tests {
             .unwrap();
         let spec = SessionSpec {
             name: "lane-a".into(),
+            role: henk_domain::role::Role::Reviewer,
             model: Arc::new(ScriptedClient::new("m", (0..5).map(|_| same()))),
             system: "s".into(),
             opening: vec![ChatMessage::user("go")],
@@ -802,7 +817,7 @@ mod tests {
 
         let text = render(
             &store.run(&id).await.unwrap().unwrap(),
-            &store.lanes(&id).await.unwrap(),
+            &store.sessions(&id).await.unwrap(),
             &ToolUsage::from_calls(&store.tool_calls(&id).await.unwrap()),
             &store.transcripts(&id).await.unwrap(),
             &store.drafts(&id).await.unwrap(),

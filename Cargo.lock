@@ -1410,6 +1410,7 @@ dependencies = [
  "async-trait",
  "deadpool-postgres",
  "henk-domain",
+ "henk-store",
  "rusqlite",
  "rusqlite_migration",
  "rustls",

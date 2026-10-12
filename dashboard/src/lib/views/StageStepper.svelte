@@ -14,7 +14,7 @@
 
 <ol class="stepper" aria-label="Stages">
   {#each stages as stage (stage.name)}
-    {#if stage.name === 'lanes' && reviewLanes.length > 0}
+    {#if (stage.name === 'rounds' || stage.name === 'lanes') && reviewLanes.length > 0}
       <li class="group">
         <ol class="lanes" aria-label="Lanes">
           {#each reviewLanes as lane (lane.name)}

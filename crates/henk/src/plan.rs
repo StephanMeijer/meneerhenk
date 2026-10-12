@@ -656,7 +656,7 @@ async fn plan_session(
         context: Arc::clone(&context),
         handoff: Arc::clone(&handoff),
         planner: ResumableSession::new(
-            "planner",
+            Role::Planner,
             model,
             system,
             set,
@@ -664,7 +664,7 @@ async fn plan_session(
         )
         .with_continuation(planner_continuation(Arc::clone(&handoff))),
         reviewer: ResumableSession::new(
-            "reviewer",
+            Role::Reviewer,
             reviewer_model,
             reviewer_system,
             reviewer_set,
@@ -1647,7 +1647,7 @@ model = "r"
         let store = &f.app.store;
         crate::runs::render(
             &store.run(run).await.unwrap().unwrap(),
-            &store.lanes(run).await.unwrap(),
+            &store.sessions(run).await.unwrap(),
             &henk_store::ToolUsage::from_calls(&store.tool_calls(run).await.unwrap()),
             &store.transcripts(run).await.unwrap(),
             &store.drafts(run).await.unwrap(),

@@ -258,7 +258,7 @@ async fn close_queued_check(
         error!(error = %format!("{error:#}"), "a queued review could not start");
         ReviewOutcome {
             commit: commit.clone(),
-            lanes: Vec::new(),
+            sessions: Vec::new(),
             open_findings: 0,
             nothing_to_review: false,
             stopped: None,
@@ -634,7 +634,7 @@ async fn report_failure(
     error!(error = %message, "review failed");
     let failed = ReviewOutcome {
         commit: commit.clone(),
-        lanes: Vec::new(),
+        sessions: Vec::new(),
         open_findings: 0,
         nothing_to_review: false,
         stopped: None,
@@ -697,7 +697,7 @@ async fn loop_body(
     let diff = fetch_diff(review, base_ref).await?;
     let nothing_to_review = diff.is_empty();
     let (results, open_findings, report, findings_left, review_only) = if nothing_to_review {
-        for stage in [Stage::Checkout, Stage::Lanes] {
+        for stage in [Stage::Checkout, Stage::Rounds] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
         (Vec::new(), 0, None, false, false)
@@ -729,7 +729,7 @@ async fn loop_body(
     stop_if_ended(review, &cancel)?;
     let outcome = ReviewOutcome {
         commit: commit.clone(),
-        lanes: results,
+        sessions: results,
         open_findings,
         nothing_to_review,
         stopped: None,
@@ -900,7 +900,7 @@ mod lifecycle_tests {
     use henk_llm::{Completion, ModelClient, StopReason, Usage};
     use henk_mcp::McpSession;
     use henk_mcp::testing::{FakeServer, echo_behaviour};
-    use henk_store::LaneStatus;
+    use henk_store::SessionStatus;
 
     use super::*;
     use crate::config::Config;
@@ -1136,7 +1136,7 @@ requester_id = 3
                 (Stage::Started, StageState::Done),
                 (Stage::Diff, StageState::Done),
                 (Stage::Checkout, StageState::Done),
-                (Stage::Lanes, StageState::Done),
+                (Stage::Rounds, StageState::Done),
                 (Stage::Publish, StageState::Skipped),
                 (Stage::Done, StageState::Done),
             ],
@@ -1160,9 +1160,9 @@ requester_id = 3
             format!("ready at {}", f.head.short())
         );
         assert!(
-            detail(Stage::Lanes).starts_with("The review loop ran 1 round"),
+            detail(Stage::Rounds).starts_with("The review loop ran 1 round"),
             "{}",
-            detail(Stage::Lanes)
+            detail(Stage::Rounds)
         );
         assert_eq!(
             detail(Stage::Publish),
@@ -1200,11 +1200,11 @@ requester_id = 3
         }
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished);
-        let lanes = f.app.store.lanes(&run).await.unwrap();
-        let sessions: Vec<_> = lanes.iter().map(|l| (l.name.as_str(), l.status)).collect();
+        let stored = f.app.store.sessions(&run).await.unwrap();
+        let sessions: Vec<_> = stored.iter().map(|s| (s.name.as_str(), s.status)).collect();
         assert_eq!(
             sessions,
-            [("reviewer", LaneStatus::Finished)],
+            [("reviewer", SessionStatus::Finished)],
             "no executor: nothing to fix"
         );
     }
@@ -1224,7 +1224,7 @@ requester_id = 3
         {
             let finished = f.writer.finished.lock().unwrap();
             assert_eq!(finished.len(), 1);
-            assert!(finished[0].lanes.is_empty());
+            assert!(finished[0].sessions.is_empty());
             assert_eq!(finished[0].check_conclusion(), CheckConclusion::Failure);
         }
         let record = f.app.store.run(&run).await.unwrap().unwrap();
@@ -1268,7 +1268,7 @@ requester_id = 3
     }
 
     /// The contract #7's fix relies on: a cancelled review closes its check
-    /// and leaves no run or lane `running`.
+    /// and leaves no run or session `running`.
     #[tokio::test]
     async fn a_cancelled_review_closes_its_check_and_leaves_nothing_running() {
         let run = RunId::parse("r-cancel").unwrap();
@@ -1281,8 +1281,8 @@ requester_id = 3
         );
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_ne!(record.status, RunStatus::Running);
-        for lane in f.app.store.lanes(&run).await.unwrap() {
-            assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
+        for session in f.app.store.sessions(&run).await.unwrap() {
+            assert_ne!(session.status, SessionStatus::Running, "{}", session.name);
         }
         assert_no_stage_running(&f.app, &run).await;
     }
@@ -1307,8 +1307,8 @@ requester_id = 3
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Failed);
         assert_eq!(record.error.as_deref(), Some("interrupted"));
-        for lane in f.app.store.lanes(&run).await.unwrap() {
-            assert_ne!(lane.status, LaneStatus::Running, "{}", lane.name);
+        for session in f.app.store.sessions(&run).await.unwrap() {
+            assert_ne!(session.status, SessionStatus::Running, "{}", session.name);
         }
     }
 
@@ -1342,12 +1342,20 @@ requester_id = 3
         );
         f.app.store.create_run(&new_run(&dead)).await.unwrap();
         f.app.store.set_check(&dead, "4242").await.unwrap();
-        f.app.store.start_lane(&dead, "lane-a", "m").await.unwrap();
+        f.app
+            .store
+            .start_session(&dead, "reviewer", henk_store::SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let cutoff = time::OffsetDateTime::now_utc();
         std::thread::sleep(std::time::Duration::from_millis(5));
         f.app.store.create_run(&new_run(&live)).await.unwrap();
-        f.app.store.start_lane(&live, "lane-a", "m").await.unwrap();
+        f.app
+            .store
+            .start_session(&live, "reviewer", henk_store::SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
 
         assert_eq!(crate::liveness::reap_silent_since(&f.app, cutoff).await, 1);
 
@@ -1358,8 +1366,8 @@ requester_id = 3
             Some("interrupted: the process ended")
         );
         assert_eq!(
-            f.app.store.lanes(&dead).await.unwrap()[0].status,
-            LaneStatus::DidNotFinish
+            f.app.store.sessions(&dead).await.unwrap()[0].status,
+            SessionStatus::DidNotFinish
         );
         assert_eq!(
             *f.writer.finished_checks.lock().unwrap(),
@@ -1373,8 +1381,8 @@ requester_id = 3
         let untouched = f.app.store.run(&live).await.unwrap().unwrap();
         assert_eq!(untouched.status, RunStatus::Running);
         assert_eq!(
-            f.app.store.lanes(&live).await.unwrap()[0].status,
-            LaneStatus::Running
+            f.app.store.sessions(&live).await.unwrap()[0].status,
+            SessionStatus::Running
         );
     }
 
@@ -1394,7 +1402,7 @@ requester_id = 3
         f.app.store.set_check(&crashed, "4242").await.unwrap();
         f.app
             .store
-            .start_lane(&crashed, "lane-a", "m")
+            .start_session(&crashed, "reviewer", henk_store::SessionRole::Reviewer, "m")
             .await
             .unwrap();
 
@@ -1432,8 +1440,8 @@ requester_id = 3
             Some("interrupted: the process ended")
         );
         assert_eq!(
-            app.store.lanes(&crashed).await.unwrap()[0].status,
-            LaneStatus::DidNotFinish
+            app.store.sessions(&crashed).await.unwrap()[0].status,
+            SessionStatus::DidNotFinish
         );
         assert_eq!(
             *writer.finished_checks.lock().unwrap(),
@@ -3244,8 +3252,8 @@ requester_id = 3
             "{summary}"
         );
         assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 0);
-        let lanes = f.app.store.lanes(&run).await.unwrap();
-        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        let sessions = f.app.store.sessions(&run).await.unwrap();
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["executor", "reviewer"]);
         for session in ["reviewer", "executor"] {
             assert!(
@@ -3773,16 +3781,16 @@ requester_id = 3
                 assert!(*read > 0, "{who}: turn {turn} read nothing: {usage:?}");
             }
         }
-        let lanes = f.app.store.lanes(&run).await.unwrap();
-        for lane in &lanes {
+        let sessions = f.app.store.sessions(&run).await.unwrap();
+        for session in &sessions {
             assert!(
-                lane.cache_read_tokens > 0 && lane.cache_read_tokens < lane.input_tokens,
-                "{lane:?}"
+                session.cache_read_tokens > 0 && session.cache_read_tokens < session.input_tokens,
+                "{session:?}"
             );
             assert_eq!(
-                lane.input_tokens,
-                lane.cache_read_tokens + lane.cache_write_tokens,
-                "tokens in stay the whole prompt: {lane:?}"
+                session.input_tokens,
+                session.cache_read_tokens + session.cache_write_tokens,
+                "tokens in stay the whole prompt: {session:?}"
             );
         }
     }
@@ -3860,13 +3868,13 @@ requester_id = 3
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
-        // A cancel is a skip, never a failed Lanes stage.
+        // A cancel is a skip, never a failed Rounds stage.
         let stages = stage_list(&f.app, &run).await;
-        let lanes = stages
+        let rounds = stages
             .iter()
-            .find(|(stage, _, _)| *stage == henk_store::Stage::Lanes)
+            .find(|(stage, _, _)| *stage == henk_store::Stage::Rounds)
             .unwrap();
-        assert_eq!(lanes.1, StageState::Skipped, "{stages:?}");
+        assert_eq!(rounds.1, StageState::Skipped, "{stages:?}");
         assert!(
             stages
                 .iter()
@@ -3950,9 +3958,9 @@ requester_id = 3
 
         assert!(!reviewer.requests().is_empty(), "the reviewer reviewed");
         assert!(executor.requests().is_empty(), "no executor");
-        assert!(f.model.requests().is_empty(), "no lane");
-        let lanes = f.app.store.lanes(&run).await.unwrap();
-        let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert!(f.model.requests().is_empty(), "no session");
+        let sessions = f.app.store.sessions(&run).await.unwrap();
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["reviewer"]);
         let findings = loop_findings(&f.app, &run).await;
         assert_eq!(findings.len(), 1, "{findings:?}");
@@ -4431,7 +4439,7 @@ requester_id = 3
         );
         let started = seen
             .iter()
-            .position(|c| matches!(&c.kind, crate::live::ChangeKind::Lanes(l) if l.iter().any(|l| l.name == "reviewer")))
+            .position(|c| matches!(&c.kind, crate::live::ChangeKind::Sessions(l) if l.iter().any(|l| l.name == "reviewer")))
             .unwrap();
         let reported = seen
             .iter()

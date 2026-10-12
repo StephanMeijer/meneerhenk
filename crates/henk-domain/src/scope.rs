@@ -1,5 +1,5 @@
-//! Scope guards (§8.5): a lane may read only its own repository, and a
-//! review lane only its own pull request. In review scope, file and tree
+//! Scope guards (§8.5): a session may read only its own repository, and a
+//! review session only its own pull request. In review scope, file and tree
 //! reads are pinned to the reviewed commit on both platforms; commit
 //! history (`get_commit`, `list_commits`) is not.
 //!
@@ -16,7 +16,7 @@ use crate::review::CommitSha;
 /// What a task may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// One review lane: this pull/merge request at this commit.
+    /// One review session: this pull/merge request at this commit.
     Review {
         /// The repository.
         repo: RepoRef,
@@ -535,7 +535,7 @@ mod tests {
                 json!({"owner": "docspec", "repo": "app", "path": "src/main.rs", "sha": SHA})
             )
         );
-        // A ref is dropped: the lane reads the commit under review, not a
+        // A ref is dropped: the session reads the commit under review, not a
         // branch that may have moved on.
         let with_ref = guard(
             Platform::GitHub,
@@ -834,7 +834,7 @@ mod tests {
         assert!(!is_exposed(Platform::GitHub, "issue_write"));
         assert!(
             !is_exposed(Platform::GitLab, "search_repositories"),
-            "a lane does not list other projects"
+            "a session does not list other projects"
         );
     }
 }
