@@ -803,7 +803,10 @@ workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), and on a backend apart from Henk run a command of their own
 (`bash`, #85): one test, a build or a grep, as the workspace's user, with the repository's toolchain
-and the profile's time and output limits. Each command is on the run's
+and the profile's time and output limits. `bash` tells the model the
+workspace can reach the network and starts with nothing downloaded, so it
+does not pass `--offline` (#349); until the profile has a network setting
+(#86), keep the sandbox's network open. Each command is on the run's
 timeline, so `henk runs show <id>` lists what a review ran. A review whose
 workspace cannot be opened or set up fails before any session starts.
 
