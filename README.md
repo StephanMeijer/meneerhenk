@@ -188,7 +188,8 @@ reported as nothing to review.
 
 Models are declared in two layers (#368). An `[endpoints.<id>]` says where
 and how they are reached: `provider` (`openai` or `anthropic`), `base_url`,
-`api_key_env`, and optionally `headers` sent with every request. Declare
+`api_key_env`, and optionally `headers` sent with every request and, on an
+`openai` endpoint, `api` (see "OpenAI's Responses API" below). Declare
 one per server or account, as many of one provider as there are. A
 `[models.<id>]` says which model on which endpoint and how to call it:
 `endpoint`, `model` (the provider's name for it), `max_tokens`,
@@ -452,6 +453,34 @@ effort = "high"
 Roles keep naming models by id. `henk llm models` lists what an endpoint
 serves and takes `--endpoint <id>` instead of `--model`. `henk doctor`
 checks each endpoint once and then each model on it.
+
+### OpenAI's Responses API
+
+An `openai` endpoint is called through Chat Completions
+(`/chat/completions`) unless it says otherwise. Every OpenAI-compatible
+server speaks that: gateways, local models, other vendors. OpenAI's own
+API also has the Responses API (`/responses`, #365), where a reasoning
+model's reasoning is carried from turn to turn. A review lane then keeps
+its chain of thought across its tool calls instead of starting over at
+each one. Choose it per endpoint:
+
+```toml
+[endpoints.openai]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+api = "responses"            # default: "chat_completions"
+```
+
+Henk keeps nothing at OpenAI. Every request sends `store: false` and the
+whole conversation, and asks for the reasoning back encrypted; Henk passes
+it back unchanged on the next turn. The output cap is always sent as
+`max_output_tokens`, so `max_tokens_param` is refused on a model of a
+Responses endpoint. Sessions record the tokens spent reasoning beside the
+rest (`henk runs show`, the run page). `henk config check` names each
+OpenAI endpoint's API. `henk doctor --probe` lets a model on the Responses
+API answer within its configured cap, so a reasoning model is not cut off
+while it thinks.
 
 ## Check a deployment
 
