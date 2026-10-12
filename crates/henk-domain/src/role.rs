@@ -1,7 +1,7 @@
 //! Roles (#171, #321): the agents Henk runs, and the tools each may ever
 //! have. A role's ceiling is a pure rule (§8.4): only the executor edits,
-//! the handoff tools belong to the pair that uses them, and the tracker and
-//! platform tools are the planner's. Configuration may narrow a role's
+//! the handoff tools belong to the pair that uses them, and the tracker,
+//! platform and web tools are the planner's. Configuration may narrow a role's
 //! tools, never widen them.
 
 use std::fmt;
@@ -90,24 +90,26 @@ impl Role {
         self == Self::Planner
     }
 
-    /// The built-in tools the role may ever have, in a fixed order.
+    /// The built-in tools the role may ever have, in a fixed order. Only
+    /// the planner's session is built with `web_fetch`, so only the
+    /// planner may have it: a grant can leave a tool out, never add one.
     #[must_use]
     pub fn ceiling(self) -> Vec<&'static str> {
         let mut tools = CODE.to_vec();
-        tools.extend([BASH, WEB_FETCH, LOAD_SKILL]);
+        tools.push(BASH);
+        if self == Self::Planner {
+            tools.push(WEB_FETCH);
+        }
+        tools.push(LOAD_SKILL);
         tools.extend(self.own());
         tools
     }
 
     /// The built-in tools the role gets when its configuration names none:
-    /// its ceiling, without `web_fetch` for all but the planner.
+    /// its ceiling.
     #[must_use]
     pub fn default_tools(self) -> Vec<String> {
-        self.ceiling()
-            .into_iter()
-            .filter(|tool| *tool != WEB_FETCH || self == Self::Planner)
-            .map(str::to_owned)
-            .collect()
+        self.ceiling().into_iter().map(str::to_owned).collect()
     }
 
     /// Whether the role may have the tool `name`: one of its ceiling, or
@@ -165,6 +167,14 @@ impl Role {
     #[must_use]
     pub fn reaches_web(granted: &[String]) -> bool {
         granted.iter().any(|tool| tool == WEB_FETCH)
+    }
+
+    /// Whether these granted tools can load a skill. A role that lists
+    /// skills needs `load_skill`, or its prompt would name skills it
+    /// cannot load.
+    #[must_use]
+    pub fn loads_skills(granted: &[String]) -> bool {
+        granted.iter().any(|tool| tool == LOAD_SKILL)
     }
 }
 
@@ -274,7 +284,25 @@ mod tests {
             );
             assert!(defaults.iter().all(|tool| role.allows(tool)), "{role}");
         }
-        assert!(Role::Reviewer.allows("web_fetch"), "it may be given");
+        assert!(Role::Planner.allows("web_fetch"));
+        assert!(!Role::Reviewer.allows("web_fetch"), "its session has none");
+        assert!(!Role::Executor.allows("web_fetch"), "its session has none");
+        assert_eq!(
+            Role::Reviewer
+                .narrow(Some(&tools(&["read_file", "web_fetch"])))
+                .unwrap_err()
+                .to_string(),
+            "[roles.reviewer] tools: the reviewer may not have web_fetch"
+        );
+    }
+
+    #[test]
+    fn skills_are_loaded_with_load_skill() {
+        for role in Role::ALL {
+            assert!(Role::loads_skills(&role.default_tools()), "{role}");
+        }
+        assert!(!Role::loads_skills(&tools(&["read_file"])));
+        assert!(Role::loads_skills(&tools(&["read_file", "load_skill"])));
     }
 
     #[test]

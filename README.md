@@ -168,10 +168,11 @@ run; 40 turns and 600s by default, 80 and 1200s for the planner), its own
 `skills`, and optionally `tools`: a list that narrows the role's tools
 within what the role may ever have. Only the executor edits, the reviewer
 and the executor each have their side of the handoff, and only the
-planner has the tracker and MCP tools; left out, a role gets its defaults,
-and only the planner reaches the web. `henk config check` lists each
-role, refuses a tool the role may not have, and says which roles reach the
-web.
+planner has the tracker and MCP tools and `web_fetch`; left out, a role
+gets its defaults. A role that lists `skills` keeps `load_skill` in its
+`tools`.
+`henk config check` lists each role, refuses a tool the role may not have,
+and says which roles reach the web.
 
 A review needs `[review.loop]` with `[roles.reviewer]` and
 `[roles.executor]`; without either role the configuration is refused.

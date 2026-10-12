@@ -1632,8 +1632,8 @@ fn moved(old: &str, new: &str) -> ConfigError {
 }
 
 /// Each configured role: its model exists, its tools are within its
-/// ceiling (#171) and its limits are above zero; the executor's push
-/// settings hold.
+/// ceiling (#171) and include `load_skill` when it lists skills, and its
+/// limits are above zero; the executor's push settings hold.
 fn validate_roles(
     roles: &RolesConfig,
     models: &BTreeMap<String, ModelFileConfig>,
@@ -1646,6 +1646,7 @@ fn validate_roles(
                 Role::Planner,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns(Role::Planner),
                 r.timeout_secs(Role::Planner),
             )
@@ -1655,6 +1656,7 @@ fn validate_roles(
                 Role::Reviewer,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns(Role::Reviewer),
                 r.timeout_secs(Role::Reviewer),
             )
@@ -1664,20 +1666,27 @@ fn validate_roles(
                 Role::Executor,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns,
                 r.timeout_secs,
             )
         }),
     ];
-    for (role, model, tools, max_turns, timeout_secs) in agents.into_iter().flatten() {
+    for (role, model, tools, skills, max_turns, timeout_secs) in agents.into_iter().flatten() {
         if !models.contains_key(model) {
             return Err(ConfigError::UnknownModel {
                 what: format!("roles.{role}"),
                 model: model.clone(),
             });
         }
-        role.narrow(tools)
+        let granted = role
+            .narrow(tools)
             .map_err(|e| ConfigError::Role(e.to_string()))?;
+        if !skills.is_empty() && !Role::loads_skills(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] lists skills, but its tools leave out load_skill: add load_skill to tools or remove the skills"
+            )));
+        }
         if max_turns == 0 || timeout_secs == 0 {
             return Err(ConfigError::Role(format!(
                 "roles.{role}: max_turns and timeout_secs must be above zero"
@@ -2888,10 +2897,38 @@ github_owners = ["docspec"]
             unknown,
             "[roles.reviewer] tools: teleport is not a tool Henk has"
         );
-        let web = reviewer(r#"["read_file", "web_fetch"]"#).unwrap();
-        assert!(web.describe().contains("reaches the web"));
+        // Only the planner's session is built with web_fetch (#334).
+        let web = reviewer(r#"["read_file", "web_fetch"]"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            web,
+            "[roles.reviewer] tools: the reviewer may not have web_fetch"
+        );
         let role = address("", "[roles.auditor]\nmodel = \"m\"\n").unwrap_err();
         assert!(matches!(role, ConfigError::Syntax(_)), "{role}");
+    }
+
+    /// A role told of skills must be able to load them (#334).
+    #[test]
+    fn a_role_with_skills_keeps_load_skill() {
+        let reviewer = |tools: &str| {
+            address(
+                "",
+                &format!(
+                    "[skills]\ndir = \"skills\"\n[roles.reviewer]\nmodel = \"m\"\nskills = [\"rust-errors\"]\n{tools}"
+                ),
+            )
+        };
+        let without = reviewer("tools = [\"read_file\", \"report_finding\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            without,
+            "[roles.reviewer] lists skills, but its tools leave out load_skill: add load_skill to tools or remove the skills"
+        );
+        assert!(reviewer("tools = [\"read_file\", \"load_skill\"]\n").is_ok());
+        assert!(reviewer("").is_ok(), "the defaults have load_skill");
     }
 
     /// The keys that moved to the roles (#322): a file that still has one
