@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.27](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.26...v0.1.27) - 2026-10-10
+
+### Added
+
+- *(review)* resume reviews a restart interrupted
+
+### Fixed
+
+- *(review)* give back a resume claim when the pull request cannot be read
+- *(dashboard)* announce a claimed resume as the store holds it
+- *(review)* claim a resume in the store so one process resumes a review
+- *(review)* resume nothing once Henk is told to stop
+- *(review)* do not resume a resumed review the reaper closed
+- *(runs)* a cancel over MCP is recorded as over MCP
+- *(urls)* take the web host and scheme Henk's own links use
+- *(store)* compare review start times as instants when resuming
+
+### Other
+
+- Merge pull request #297 from StephanMeijer/fix/cancel-source
+- Merge pull request #302 from StephanMeijer/fix/plan-previous-as-material
+- Merge pull request #300 from StephanMeijer/fix/coordinator-key-case
+- Merge pull request #299 from StephanMeijer/fix/url-hosts
+- Merge pull request #295 from StephanMeijer/docs/llms-txt
+- *(review)* a review cancelled over MCP or the dashboard is not resumed
+
 ## [0.1.26](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.25...v0.1.26) - 2026-10-09
 
 ### Added
