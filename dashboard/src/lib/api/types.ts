@@ -281,7 +281,7 @@ status: string, };
 
 export type StageDot = { 
 /**
- * `diff`, `lanes`, `fact_check`, and so on.
+ * `diff`, `rounds`, `publish`, and so on.
  */
 name: string, 
 /**

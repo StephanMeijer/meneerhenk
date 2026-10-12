@@ -223,7 +223,7 @@ impl Tool for RaisePoint {
         let record = DraftRecord {
             at: String::new(),
             draft: id.to_string(),
-            lane: "reviewer".to_owned(),
+            session: "reviewer".to_owned(),
             model: handoff.reviewer_model.clone(),
             kind: PLAN_POINT_KIND.to_owned(),
             path: raised.about,

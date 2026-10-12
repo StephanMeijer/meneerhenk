@@ -15,7 +15,7 @@ use std::sync::Arc;
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::push::push_refusal;
-use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult, ReviewOutcome};
+use henk_domain::review::{CommitSha, ReviewOutcome, SessionName, SessionOutcome, SessionResult};
 use henk_domain::run::RunId;
 use henk_mcp::testing::FakeServer;
 use henk_platform::gitlab::{GitLabRest, GitLabWriter};
@@ -160,9 +160,9 @@ async fn review_lifecycle_on_gitlab() {
 
     let outcome = ReviewOutcome {
         commit: commit.clone(),
-        lanes: vec![LaneResult {
-            lane: LaneName::new("a"),
-            outcome: LaneOutcome::Dropped,
+        sessions: vec![SessionResult {
+            session: SessionName::new("a"),
+            outcome: SessionOutcome::Dropped,
         }],
         open_findings: 2,
         nothing_to_review: false,

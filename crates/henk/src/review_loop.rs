@@ -26,7 +26,7 @@ use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::commit::FIX_SUBJECT;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::push::push_refusal;
-use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
+use henk_domain::review::{CommitSha, SessionName, SessionOutcome, SessionResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::role::Role;
 use henk_domain::run::RunId;
@@ -75,8 +75,8 @@ pub(crate) struct LoopTarget<'a> {
 /// How a loop ended, for the review's summary.
 #[derive(Debug)]
 pub(crate) struct LoopReport {
-    /// The reviewer and the executor, as the summary counts lanes.
-    pub(crate) results: Vec<LaneResult>,
+    /// The reviewer and the executor, as the summary counts sessions.
+    pub(crate) results: Vec<SessionResult>,
     /// For the check: rounds, commits pushed and why it stopped, then the
     /// findings that still stand.
     pub(crate) report: String,
@@ -306,7 +306,7 @@ impl<'a> Rounds<'a> {
             config,
             workspace: Arc::clone(workspace),
             reviewer: ResumableSession::new(
-                "reviewer",
+                Role::Reviewer,
                 reviewer_model,
                 reviewer_system,
                 reviewer_tools,
@@ -315,7 +315,7 @@ impl<'a> Rounds<'a> {
             .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
             executor: Some(
                 ResumableSession::new(
-                    "executor",
+                    Role::Executor,
                     app.model(&address.model)?,
                     executor_system,
                     executor_tools,
@@ -391,11 +391,11 @@ impl<'a> Rounds<'a> {
         } else {
             StageState::Done
         };
-        stages::mark(store, run, Stage::Lanes, state, &line).await;
+        stages::mark(store, run, Stage::Rounds, state, &line).await;
         let outcome = if failed {
-            LaneOutcome::Dropped
+            SessionOutcome::Dropped
         } else {
-            LaneOutcome::Finished
+            SessionOutcome::Finished
         };
         let sessions: &[&str] = if self.executor.is_some() {
             &["executor", "reviewer"]
@@ -404,8 +404,8 @@ impl<'a> Rounds<'a> {
         };
         let results = sessions
             .iter()
-            .map(|name| LaneResult {
-                lane: LaneName::new(*name),
+            .map(|name| SessionResult {
+                session: SessionName::new(*name),
                 outcome,
             })
             .collect();
@@ -440,7 +440,7 @@ impl<'a> Rounds<'a> {
                 self.compact(&first, round).await;
             }
             let doing = format!("round {round}: reviewer");
-            stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
+            stages::mark(store, run, Stage::Rounds, StageState::Running, doing).await;
             let review = self
                 .reviewer
                 .resume(store, run, ChatMessage::user(message), cancel.clone())
@@ -497,7 +497,7 @@ impl<'a> Rounds<'a> {
             return Ok(Err(stop));
         }
         let doing = format!("round {round}: executor");
-        stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
+        stages::mark(store, run, Stage::Rounds, StageState::Running, doing).await;
         let handed = format!(
             "Round {round}. The reviewer's findings, as data:\n\n{}\n\nCheck each against the code, fix the ones that hold, and give every one its verdict with give_verdict.",
             findings.join("\n\n")

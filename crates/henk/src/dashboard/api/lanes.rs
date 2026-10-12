@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use henk_store::{LaneEnding, LaneStatus, MOST_LANE_REVIEWS, session_kind};
+use henk_store::{MOST_SESSION_REVIEWS, SessionEnding, SessionStatus};
 use serde::Deserialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -29,7 +29,7 @@ const MOST_LAST: u32 = 200;
 const RATE_LIMITED: &str = "rate limited by the model endpoint";
 
 /// The query of `GET /stats/lanes`: the newest `last` reviews, or every
-/// review since `since` (the newest [`MOST_LANE_REVIEWS`] of them).
+/// review since `since` (the newest [`MOST_SESSION_REVIEWS`] of them).
 #[derive(Debug, Deserialize)]
 pub struct LanesQuery {
     last: Option<u32>,
@@ -46,7 +46,7 @@ pub async fn lanes(
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request("Ask for last or since, not both."));
         }
-        (None, Some(since)) => (Some(read_since(since)?), MOST_LANE_REVIEWS),
+        (None, Some(since)) => (Some(read_since(since)?), MOST_SESSION_REVIEWS),
         (last, None) => {
             let last = last.unwrap_or(DEFAULT_LAST);
             if last == 0 || last > MOST_LAST {
@@ -55,7 +55,7 @@ pub async fn lanes(
             (None, last)
         }
     };
-    let endings = dashboard.app.store.lane_endings(since, reviews).await?;
+    let endings = dashboard.app.store.session_endings(since, reviews).await?;
     Ok(Json(lane_stats(&endings)))
 }
 
@@ -67,7 +67,7 @@ fn read_since(value: &str) -> Result<OffsetDateTime, ApiError> {
 
 /// The grid: the reviews oldest first, and per lane its outcome in each,
 /// `None` where it did not run. `endings` come newest review first.
-pub(super) fn lane_stats(endings: &[LaneEnding]) -> LaneStats {
+pub(super) fn lane_stats(endings: &[SessionEnding]) -> LaneStats {
     let mut reviews: Vec<ReviewMark> = Vec::new();
     for ending in endings {
         if reviews
@@ -92,7 +92,7 @@ pub(super) fn lane_stats(endings: &[LaneEnding]) -> LaneStats {
         let name = row_name(&ending.name);
         let row = rows.entry(name).or_insert_with(|| LaneRow {
             name: name.to_owned(),
-            kind: session_kind(&ending.name).to_owned(),
+            kind: ending.role.as_str().to_owned(),
             models: Vec::new(),
             outcomes: vec![None; reviews.len()],
             ran: 0,
@@ -120,16 +120,16 @@ pub(super) fn lane_stats(endings: &[LaneEnding]) -> LaneStats {
 }
 
 /// Counts one ending into its lane's row; `models` stays newest first.
-fn tally(row: &mut LaneRow, ending: &LaneEnding) {
+fn tally(row: &mut LaneRow, ending: &SessionEnding) {
     if !row.models.contains(&ending.model) {
         row.models.push(ending.model.clone());
     }
     row.ran += 1;
     match ending.status {
-        LaneStatus::Finished => row.finished += 1,
-        LaneStatus::TimedOut => row.timed_out += 1,
-        LaneStatus::DidNotFinish => row.did_not_finish += 1,
-        LaneStatus::Running => {}
+        SessionStatus::Finished => row.finished += 1,
+        SessionStatus::TimedOut => row.timed_out += 1,
+        SessionStatus::DidNotFinish => row.did_not_finish += 1,
+        SessionStatus::Running => {}
     }
     let reasons = &mut row.reasons;
     match reason_of(ending.status, ending.error.as_deref()) {
@@ -168,11 +168,11 @@ fn order(name: &str) -> (u8, u32, String) {
 /// `cancelled`, `rate_limit`, `declined`, `stuck` or `provider_error`.
 /// `None` for a lane that finished or still runs. The texts are the ones
 /// henk-session stores for each way a session stops.
-pub(super) fn reason_of(status: LaneStatus, error: Option<&str>) -> Option<&'static str> {
+pub(super) fn reason_of(status: SessionStatus, error: Option<&str>) -> Option<&'static str> {
     match status {
-        LaneStatus::Finished | LaneStatus::Running => None,
-        LaneStatus::TimedOut => Some("time_limit"),
-        LaneStatus::DidNotFinish => Some(match error.unwrap_or_default() {
+        SessionStatus::Finished | SessionStatus::Running => None,
+        SessionStatus::TimedOut => Some("time_limit"),
+        SessionStatus::DidNotFinish => Some(match error.unwrap_or_default() {
             "cancelled" => "cancelled",
             text if text.contains(RATE_LIMITED) => "rate_limit",
             text if text.starts_with("the model declined") => "declined",
@@ -188,6 +188,7 @@ mod tests {
 
     use henk_domain::run::RunId;
     use henk_llm::LlmError;
+    use henk_store::SessionRole;
 
     use super::*;
 
@@ -195,13 +196,21 @@ mod tests {
         run: &str,
         name: &str,
         model: &str,
-        status: LaneStatus,
+        status: SessionStatus,
         error: Option<&str>,
-    ) -> LaneEnding {
-        LaneEnding {
+    ) -> SessionEnding {
+        // The roles the migration gave sessions of older reviews (#324).
+        let role = match name {
+            "reviewer" => SessionRole::Reviewer,
+            "executor" | "fixer" => SessionRole::Executor,
+            _ if name.starts_with("check-") => SessionRole::Check,
+            _ => SessionRole::Lane,
+        };
+        SessionEnding {
             run_id: RunId::parse(run).unwrap(),
             started_at: format!("2026-10-0{}T12:00:00Z", &run[2..]),
             name: name.into(),
+            role,
             model: model.into(),
             status,
             error: error.map(str::to_owned),
@@ -220,45 +229,45 @@ mod tests {
             body: "bad gateway".into(),
         };
         let cases = [
-            (LaneStatus::Finished, None, None),
-            (LaneStatus::Running, None, None),
-            (LaneStatus::TimedOut, None, Some("time_limit")),
+            (SessionStatus::Finished, None, None),
+            (SessionStatus::Running, None, None),
+            (SessionStatus::TimedOut, None, Some("time_limit")),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some("cancelled".to_owned()),
                 Some("cancelled"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(rate.to_string()),
                 Some("rate_limit"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(gave_up.to_string()),
                 Some("rate_limit"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(LlmError::Overloaded.to_string()),
                 Some("provider_error"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(server.to_string()),
                 Some("provider_error"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(format!("the model declined ({})", "policy")),
                 Some("declined"),
             ),
             (
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some(format!("stuck repeating {}", "read_file")),
                 Some("stuck"),
             ),
-            (LaneStatus::DidNotFinish, None, Some("provider_error")),
+            (SessionStatus::DidNotFinish, None, Some("provider_error")),
         ];
         for (status, error, reason) in cases {
             assert_eq!(
@@ -275,25 +284,25 @@ mod tests {
         // in r-2; lane-a moved from m-old to m-new; check-10 sorts after
         // check-2.
         let endings = [
-            ending("r-3", "check-10", "c", LaneStatus::Finished, None),
-            ending("r-3", "check-2", "c", LaneStatus::TimedOut, None),
+            ending("r-3", "check-10", "c", SessionStatus::Finished, None),
+            ending("r-3", "check-2", "c", SessionStatus::TimedOut, None),
             ending(
                 "r-3",
                 "lane-a",
                 "m-new",
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some("cancelled"),
             ),
-            ending("r-3", "lane-b", "m-b", LaneStatus::Finished, None),
-            ending("r-2", "lane-a", "m-new", LaneStatus::Finished, None),
+            ending("r-3", "lane-b", "m-b", SessionStatus::Finished, None),
+            ending("r-2", "lane-a", "m-new", SessionStatus::Finished, None),
             ending(
                 "r-2",
                 "lane-b",
                 "m-b",
-                LaneStatus::DidNotFinish,
+                SessionStatus::DidNotFinish,
                 Some("stuck repeating x"),
             ),
-            ending("r-1", "lane-a", "m-old", LaneStatus::Finished, None),
+            ending("r-1", "lane-a", "m-old", SessionStatus::Finished, None),
         ];
         let stats = lane_stats(&endings);
         let reviews: Vec<_> = stats.reviews.iter().map(|r| r.run_id.as_str()).collect();
@@ -334,12 +343,12 @@ mod tests {
         // r-3 ran the loop; r-2 too, before #323 named its executor fixer;
         // r-1 ran lanes before the loop (#310).
         let endings = [
-            ending("r-3", "executor", "m-e", LaneStatus::TimedOut, None),
-            ending("r-3", "reviewer", "m-r", LaneStatus::Finished, None),
-            ending("r-2", "fixer", "m-f", LaneStatus::Finished, None),
-            ending("r-2", "reviewer", "m-r", LaneStatus::Finished, None),
-            ending("r-1", "check-1", "c", LaneStatus::Finished, None),
-            ending("r-1", "lane-a", "m-a", LaneStatus::Finished, None),
+            ending("r-3", "executor", "m-e", SessionStatus::TimedOut, None),
+            ending("r-3", "reviewer", "m-r", SessionStatus::Finished, None),
+            ending("r-2", "fixer", "m-f", SessionStatus::Finished, None),
+            ending("r-2", "reviewer", "m-r", SessionStatus::Finished, None),
+            ending("r-1", "check-1", "c", SessionStatus::Finished, None),
+            ending("r-1", "lane-a", "m-a", SessionStatus::Finished, None),
         ];
         let stats = lane_stats(&endings);
         let rows: Vec<_> = stats

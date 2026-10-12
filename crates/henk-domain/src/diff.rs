@@ -1,6 +1,6 @@
 //! The diff of a review, per file, with line numbers (§3.2).
 //!
-//! Henk fetches the diff once and hands it to lanes file by file, numbered,
+//! Henk fetches the diff once and hands it to sessions file by file, numbered,
 //! so a model never counts lines in a unified diff and a finding can be
 //! checked against the diff before anything is posted.
 

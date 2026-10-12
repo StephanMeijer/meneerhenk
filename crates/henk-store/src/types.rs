@@ -1,8 +1,10 @@
 //! The records and statuses every backend stores and returns.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use henk_domain::allowlist::Platform;
+use henk_domain::role::Role;
 use henk_domain::run::{EventId, RunId, RunKind};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -107,9 +109,9 @@ impl RunStatus {
     }
 }
 
-/// Where a lane stands.
+/// Where a session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LaneStatus {
+pub enum SessionStatus {
     /// Still going.
     Running,
     /// Ran to its end: the model was done, or used its turns.
@@ -117,11 +119,11 @@ pub enum LaneStatus {
     /// Stopped at its time limit (#231). What it drafted until then counts.
     TimedOut,
     /// Did not finish: a model error, a refusal, a stuck loop or a cancel;
-    /// the lane's error says which.
+    /// the session's error says which.
     DidNotFinish,
 }
 
-impl LaneStatus {
+impl SessionStatus {
     /// The stored text: `running`, `finished`, `timed_out` or
     /// `did_not_finish`.
     #[must_use]
@@ -134,8 +136,8 @@ impl LaneStatus {
         }
     }
 
-    /// Reads the stored text; `dropped`, what lanes that did not finish
-    /// were stored as before #231, still reads.
+    /// Reads the stored text; `dropped`, what review lanes that did not
+    /// finish were stored as before #231, still reads.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "running" => Self::Running,
@@ -154,7 +156,7 @@ pub enum FindingAction {
     Posted,
     /// An existing comment was improved.
     Improved,
-    /// The lane wanted to post but the line was taken or the text refused.
+    /// The session wanted to post but the line was taken or the text refused.
     Refused,
     /// The fact-check found the finding wrong; nothing was posted or changed.
     Rejected,
@@ -183,17 +185,17 @@ impl FindingAction {
     }
 }
 
-/// A review lane's draft as it was queued (#189), with its decision once
-/// the fact-check has settled it.
+/// A reviewer's draft as it was queued (#189), with its decision once it
+/// was settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftRecord {
     /// RFC 3339; empty when recording means now.
     pub at: String,
     /// Its number in the review: `d3`.
     pub draft: String,
-    /// The lane that wrote it.
-    pub lane: String,
-    /// The lane's model.
+    /// The session that wrote it.
+    pub session: String,
+    /// The session's model.
     pub model: String,
     /// `finding`, `rewrite` or `withdrawal`.
     pub kind: String,
@@ -238,7 +240,7 @@ pub enum DraftVerdict {
     SameAs,
     /// No model could check it; written unchecked.
     Unchecked,
-    /// No fact-check is configured; written as the lane wrote it.
+    /// No fact-check is configured; written as the session wrote it.
     NotChecked,
     /// The review ended before it was settled; nothing written.
     Cancelled,
@@ -316,7 +318,7 @@ impl DraftVerdict {
 pub struct TranscriptRecord {
     /// RFC 3339; empty when recording means now.
     pub at: String,
-    /// The session: the lane row's name.
+    /// The session: the session row's name.
     pub session: String,
     /// The session's model.
     pub model: String,
@@ -353,7 +355,7 @@ pub struct TranscriptSummary {
 pub struct ToolCallRecord {
     /// RFC 3339; empty when recording means now.
     pub at: String,
-    /// The session: the lane row's name (`lane-a`, `check-2`,
+    /// The session: the session row's name (`lane-a`, `check-2`,
     /// `planner`, `address`).
     pub session: String,
     /// The session's model.
@@ -377,18 +379,71 @@ pub struct ToolCallRecord {
     pub elapsed_ms: u64,
 }
 
-/// What kind of session a session name is: a review loop's `reviewer`
-/// and `executor` (named `fixer` in runs before #323), `planner`, `address`, and, in reviews from before the
-/// loop, `check` for a fact-check and `lane` for a review lane.
-#[must_use]
-pub fn session_kind(session: &str) -> &'static str {
-    match session {
-        "reviewer" => "reviewer",
-        "executor" | "fixer" => "executor",
-        "planner" => "planner",
-        "address" => "address",
-        _ if session.starts_with("check-") => "check",
-        _ => "lane",
+/// The role a session ran in. New runs know only `planner`, `reviewer`
+/// and `executor` ([`Role`]); `lane`, `check` and `address` are history
+/// roles that sessions of older runs keep: a review lane, a fact-check, and
+/// an address run (#324).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SessionRole {
+    /// Drafts a plan.
+    Planner,
+    /// Reviews a pull request or a plan.
+    Reviewer,
+    /// Changes the code: fixes what the reviewer finds, or takes an issue
+    /// to a pull request. Named `fixer` before #323.
+    Executor,
+    /// A review lane, before the review loop (#283).
+    Lane,
+    /// A fact-check of the lanes' drafts, before #309.
+    Check,
+    /// An address run's session, before #327.
+    Address,
+}
+
+impl SessionRole {
+    /// Every role, new and history.
+    pub const ALL: [Self; 6] = [
+        Self::Planner,
+        Self::Reviewer,
+        Self::Executor,
+        Self::Lane,
+        Self::Check,
+        Self::Address,
+    ];
+
+    /// The stored text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Reviewer => "reviewer",
+            Self::Executor => "executor",
+            Self::Lane => "lane",
+            Self::Check => "check",
+            Self::Address => "address",
+        }
+    }
+
+    /// Reads the stored text.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|role| role.as_str() == value)
+    }
+}
+
+impl From<Role> for SessionRole {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Planner => Self::Planner,
+            Role::Reviewer => Self::Reviewer,
+            Role::Executor => Self::Executor,
+        }
+    }
+}
+
+impl fmt::Display for SessionRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
     }
 }
 
@@ -426,10 +481,9 @@ impl ToolTally {
 /// of one kind of session on one model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolUsage {
-    /// A session name for one run; a session kind ([`session_kind`]) across
-    /// runs.
+    /// A session name for one run; a role ([`SessionRole`]) across runs.
     pub session: String,
-    /// The model; empty for one run, where the lane says it.
+    /// The model; empty for one run, where the session says it.
     pub model: String,
     /// The tool.
     pub tool: String,
@@ -460,20 +514,20 @@ impl ToolUsage {
             .collect()
     }
 
-    /// Rows grouped by (model, session, tool, outcome) with a count and a
-    /// sum of milliseconds, folded per model, kind of session and tool.
+    /// Rows grouped by (model, role, tool, outcome) with a count and a
+    /// sum of milliseconds, folded per model, role and tool.
     pub(crate) fn across_runs(rows: Vec<(String, String, String, String, u64, u64)>) -> Vec<Self> {
-        let mut usage: BTreeMap<(String, &'static str, String), ToolTally> = BTreeMap::new();
-        for (model, session, tool, outcome, n, ms) in rows {
+        let mut usage: BTreeMap<(String, String, String), ToolTally> = BTreeMap::new();
+        for (model, role, tool, outcome, n, ms) in rows {
             usage
-                .entry((model, session_kind(&session), tool))
+                .entry((model, role, tool))
                 .or_default()
                 .add(&outcome, n, ms);
         }
         usage
             .into_iter()
-            .map(|((model, kind, tool), tally)| Self {
-                session: kind.to_owned(),
+            .map(|((model, role, tool), tally)| Self {
+                session: role,
                 model,
                 tool,
                 tally,
@@ -575,15 +629,18 @@ impl TokenUsage {
     }
 }
 
-/// A stored lane.
+/// A stored session: one conversation of one role in a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneRecord {
-    /// Lane name.
+pub struct SessionRecord {
+    /// Its name, unique in the run: `reviewer`, `executor`, `planner`, or
+    /// in older runs a lane's.
     pub name: String,
+    /// The role it ran in.
+    pub role: SessionRole,
     /// Model name.
     pub model: String,
     /// Where it stands.
-    pub status: LaneStatus,
+    pub status: SessionStatus,
     /// Model calls made.
     pub turns: u64,
     /// Tokens in: the whole prompt of every model call, cache reads and
@@ -620,11 +677,14 @@ pub enum Stage {
     /// The planner's workspace was set up (and an address run's, before
     /// #327).
     Workspace,
-    /// The review lanes ran.
+    /// The review lanes ran; runs before the review loop (#283) only.
     Lanes,
+    /// The reviewer and the executor took their rounds (#324); written as
+    /// `lanes` before.
+    Rounds,
     /// The planner's session ran (and an address run's, before #327).
     Session,
-    /// The drafts were checked.
+    /// The drafts were checked; runs before #309 only.
     FactCheck,
     /// An address run's commit was made; runs before #327 only.
     Commit,
@@ -650,6 +710,7 @@ impl Stage {
             Self::Checkout => "checkout",
             Self::Workspace => "workspace",
             Self::Lanes => "lanes",
+            Self::Rounds => "rounds",
             Self::Session => "session",
             Self::FactCheck => "fact_check",
             Self::Commit => "commit",
@@ -669,6 +730,7 @@ impl Stage {
             "checkout" => Self::Checkout,
             "workspace" => Self::Workspace,
             "lanes" => Self::Lanes,
+            "rounds" => Self::Rounds,
             "session" => Self::Session,
             "fact_check" => Self::FactCheck,
             "commit" => Self::Commit,
@@ -784,7 +846,7 @@ pub struct DayCounts {
     pub failed: u64,
     /// Findings posted that day: `posted` and `unverified` comments.
     pub findings_posted: u64,
-    /// Drafts the lanes wrote that day.
+    /// Drafts written that day.
     pub drafts: u64,
 }
 
@@ -818,45 +880,58 @@ pub(crate) fn merge_days(
     days.into_values().collect()
 }
 
-/// How one lane or fact-check session of a review ended (#229).
+/// How one session of a review ended (#229).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaneEnding {
+pub struct SessionEnding {
     /// The review.
     pub run_id: RunId,
     /// When the review started, RFC 3339.
     pub started_at: String,
-    /// The lane's name: `lane-a`, `check-1`.
+    /// The session's name: `reviewer`, or in older reviews `lane-a`,
+    /// `check-1`.
     pub name: String,
+    /// The role it ran in.
+    pub role: SessionRole,
     /// The model it ran.
     pub model: String,
     /// How it ended.
-    pub status: LaneStatus,
+    pub status: SessionStatus,
     /// Why it did not finish, when it did not.
     pub error: Option<String>,
 }
 
-/// The most reviews [`crate::RunStore::lane_endings`] reads at once.
-pub const MOST_LANE_REVIEWS: u32 = 1000;
+/// The most reviews [`crate::RunStore::session_endings`] reads at once.
+pub const MOST_SESSION_REVIEWS: u32 = 1000;
 
-/// A stored lane ending: (run, started at, name, model, status, error).
-pub(crate) type LaneEndingRow = (String, String, String, String, String, Option<String>);
+/// A stored session ending: (run, started at, name, role, model, status,
+/// error).
+pub(crate) type SessionEndingRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+);
 
-/// Stored lane endings, checked.
-pub(crate) fn lane_endings(rows: Vec<LaneEndingRow>) -> Result<Vec<LaneEnding>, StoreError> {
+/// Stored session endings, checked.
+pub(crate) fn session_endings(
+    rows: Vec<SessionEndingRow>,
+) -> Result<Vec<SessionEnding>, StoreError> {
     rows.into_iter()
-        .map(|(run, started_at, name, model, status, error)| {
+        .map(|(run, started_at, name, role, model, status, error)| {
             let run_id = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
-                column: "lanes.run_id",
+                column: "sessions.run_id",
                 value: run,
             })?;
-            let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
-                column: "lanes.status",
-                value: status,
-            })?;
-            Ok(LaneEnding {
+            let role = session_role(role)?;
+            let status = session_status(status)?;
+            Ok(SessionEnding {
                 run_id,
                 started_at,
                 name,
+                role,
                 model,
                 status,
                 error,
@@ -865,23 +940,35 @@ pub(crate) fn lane_endings(rows: Vec<LaneEndingRow>) -> Result<Vec<LaneEnding>, 
         .collect()
 }
 
-/// Stored (run, lane, status) rows, checked.
-pub(crate) fn lane_dots(
+/// Stored (run, session, status) rows, checked.
+pub(crate) fn session_dots(
     rows: Vec<(String, String, String)>,
-) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
     rows.into_iter()
         .map(|(run, name, status)| {
             let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
-                column: "lanes.run_id",
+                column: "sessions.run_id",
                 value: run,
             })?;
-            let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
-                column: "lanes.status",
-                value: status,
-            })?;
-            Ok((run, name, status))
+            Ok((run, name, session_status(status)?))
         })
         .collect()
+}
+
+/// A stored session role, checked.
+pub(crate) fn session_role(role: String) -> Result<SessionRole, StoreError> {
+    SessionRole::parse(&role).ok_or(StoreError::Corrupt {
+        column: "sessions.role",
+        value: role,
+    })
+}
+
+/// A stored session status, checked.
+pub(crate) fn session_status(status: String) -> Result<SessionStatus, StoreError> {
+    SessionStatus::parse(&status).ok_or(StoreError::Corrupt {
+        column: "sessions.status",
+        value: status,
+    })
 }
 
 /// Stored (run, stage, state) rows, checked, each run's in stage order.
@@ -941,8 +1028,8 @@ pub(crate) fn stage_records(
 pub struct FindingRecord {
     /// RFC 3339.
     pub at: String,
-    /// The lane.
-    pub lane: String,
+    /// The session.
+    pub session: String,
     /// File path.
     pub path: String,
     /// Line number.
@@ -1086,9 +1173,8 @@ pub struct ToolCallFilter {
     pub tool: Option<String>,
     /// The session's model.
     pub model: Option<String>,
-    /// The kind of session ([`session_kind`]): `reviewer`, `executor`,
-    /// `planner`, `address`, `lane` or `check`.
-    pub session_kind: Option<String>,
+    /// The role of the session that made them.
+    pub role: Option<SessionRole>,
     /// Made at or after this RFC 3339 time.
     pub since: Option<String>,
     /// Made before this RFC 3339 time.
@@ -1438,14 +1524,15 @@ mod tests {
     }
 
     #[test]
-    fn a_session_name_says_its_kind() {
-        assert_eq!(session_kind("check-lane-b-3"), "check");
-        assert_eq!(session_kind("planner"), "planner");
-        assert_eq!(session_kind("address"), "address");
-        assert_eq!(session_kind("reviewer"), "reviewer");
-        assert_eq!(session_kind("executor"), "executor");
-        assert_eq!(session_kind("fixer"), "executor", "before #323");
-        assert_eq!(session_kind("lane-a"), "lane");
-        assert_eq!(session_kind("security"), "lane");
+    fn a_session_role_reads_back_as_stored() {
+        for role in SessionRole::ALL {
+            assert_eq!(SessionRole::parse(role.as_str()), Some(role));
+        }
+        assert_eq!(SessionRole::parse("fixer"), None, "the migration maps it");
+        assert_eq!(
+            SessionRole::from(Role::Executor),
+            SessionRole::Executor,
+            "a new run writes only the three roles"
+        );
     }
 }

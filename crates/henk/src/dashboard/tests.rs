@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
-use henk_store::{FindingAction, InboundEvent, LaneStatus, NewRun, OutcomeRecord, RunStatus};
+use henk_store::{FindingAction, InboundEvent, NewRun, OutcomeRecord, RunStatus, SessionStatus};
 use http_body_util::BodyExt as _;
 use serde_json::json;
 use tower::ServiceExt as _;
@@ -222,14 +222,14 @@ pub(super) async fn seed(f: &Fixture) {
         .unwrap();
     let review = RunId::parse("r-review").unwrap();
     store
-        .start_lane(&review, "lane-a", "model-x")
+        .start_session(&review, "lane-a", henk_store::SessionRole::Lane, "model-x")
         .await
         .unwrap();
     store
-        .finish_lane(
+        .finish_session(
             &review,
             "lane-a",
-            LaneStatus::Finished,
+            SessionStatus::Finished,
             3,
             henk_store::TokenUsage::new(100, 20),
             None,

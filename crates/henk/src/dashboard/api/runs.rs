@@ -134,7 +134,7 @@ pub(super) async fn summaries(
 ) -> Result<Vec<RunSummary>, StoreError> {
     let ids: Vec<RunId> = runs.iter().map(|r| r.id.clone()).collect();
     let store = &app.store;
-    let lanes = store.lanes_of(&ids).await?;
+    let lanes = store.sessions_of(&ids).await?;
     let stages = store.stages_of(&ids).await?;
     let settings = &app.settings;
     Ok(runs
@@ -200,7 +200,7 @@ pub(crate) async fn run_detail(app: &App, run: &RunRecord) -> Result<RunDetail, 
     let store = &app.store;
     let calls = store.tool_calls(&run.id).await?;
     let lanes = store
-        .lanes(&run.id)
+        .sessions(&run.id)
         .await?
         .iter()
         .map(|lane| {

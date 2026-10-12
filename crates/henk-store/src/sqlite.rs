@@ -14,12 +14,13 @@ use time::format_description::well_known::Rfc3339;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
-    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
-    kind_parse, kind_str, lane_dots, lane_endings, merge_days, now, platform_parse, platform_str,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
+    MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
+    RawRun, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
+    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days, now,
+    platform_parse, platform_str, session_dots, session_endings, session_role, session_status,
     stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
@@ -63,6 +64,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/013_run_instant.sql")),
         M::up(include_str!("../migrations/sqlite/014_loop.sql")),
         M::up(include_str!("../migrations/sqlite/015_lane_cache.sql")),
+        M::up(include_str!("../migrations/sqlite/016_sessions.sql")),
     ])
 }
 
@@ -85,10 +87,31 @@ impl SqliteStore {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn from_connection(mut connection: Connection) -> Result<Self, StoreError> {
+    /// Opens or creates the database at `path` and migrates it only up to
+    /// schema `version`: for tests that seed rows the way an older Henk
+    /// wrote them, then open the database again to migrate the rest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the file cannot be opened or migrated.
+    #[cfg(feature = "testing")]
+    pub fn open_at(path: &Path, version: usize) -> Result<Self, StoreError> {
+        Self::migrated(Connection::open(path)?, Some(version))
+    }
+
+    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+        Self::migrated(connection, None)
+    }
+
+    /// The store over `connection`, migrated up to `version`, or to the
+    /// latest schema when `None`.
+    fn migrated(mut connection: Connection, version: Option<usize>) -> Result<Self, StoreError> {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        migrations().to_latest(&mut connection)?;
+        match version {
+            Some(version) => migrations().to_version(&mut connection, version)?,
+            None => migrations().to_latest(&mut connection)?,
+        }
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -325,38 +348,51 @@ impl RunStore for SqliteStore {
         })
     }
 
-    async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+    async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
-                "UPDATE lanes SET status = ?2, finished_at = ?3, error = ?4
+                "UPDATE sessions SET status = ?2, finished_at = ?3, error = ?4
                  WHERE run_id = ?1 AND status = ?5",
                 params![
                     run.as_str(),
-                    LaneStatus::DidNotFinish.as_str(),
+                    SessionStatus::DidNotFinish.as_str(),
                     now(),
                     reason,
-                    LaneStatus::Running.as_str()
+                    SessionStatus::Running.as_str()
                 ],
             )?;
             Ok(())
         })
     }
 
-    async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
+    async fn start_session(
+        &self,
+        run: &RunId,
+        name: &str,
+        role: SessionRole,
+        model: &str,
+    ) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO lanes (run_id, name, model, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![run.as_str(), name, model, LaneStatus::Running.as_str(), now()],
+                "INSERT INTO sessions (run_id, name, role, model, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run.as_str(),
+                    name,
+                    role.as_str(),
+                    model,
+                    SessionStatus::Running.as_str(),
+                    now()
+                ],
             )?;
             Ok(())
         })
     }
 
-    async fn finish_lane(
+    async fn finish_session(
         &self,
         run: &RunId,
         name: &str,
-        status: LaneStatus,
+        status: SessionStatus,
         turns: u64,
         tokens: TokenUsage,
         error: Option<&str>,
@@ -364,7 +400,7 @@ impl RunStore for SqliteStore {
         let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         self.with(|c| {
             c.execute(
-                "UPDATE lanes SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8,
+                "UPDATE sessions SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8,
                  cache_read_tokens = ?9, cache_write_tokens = ?10
                  WHERE run_id = ?1 AND name = ?2",
                 params![
@@ -384,10 +420,10 @@ impl RunStore for SqliteStore {
         })
     }
 
-    async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
+    async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens FROM lanes WHERE run_id = ?1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role FROM sessions WHERE run_id = ?1 ORDER BY name",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok((
@@ -402,9 +438,10 @@ impl RunStore for SqliteStore {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
+                    row.get::<_, String>(11)?,
                 ))
             })?;
-            let mut lanes = Vec::new();
+            let mut sessions = Vec::new();
             for row in rows {
                 let (
                     name,
@@ -418,31 +455,31 @@ impl RunStore for SqliteStore {
                     finished_at,
                     cache_read,
                     cache_write,
+                    role,
                 ) = row?;
-                let status = LaneStatus::parse(&status)
-                    .ok_or(StoreError::Corrupt { column: "lanes.status", value: status })?;
-                lanes.push(LaneRecord {
+                sessions.push(SessionRecord {
                     name,
+                    role: session_role(role)?,
                     model,
-                    status,
-                    turns: to_u64("lanes.turns", turns)?,
-                    input_tokens: to_u64("lanes.input_tokens", input_tokens)?,
-                    output_tokens: to_u64("lanes.output_tokens", output_tokens)?,
-                    cache_read_tokens: to_u64("lanes.cache_read_tokens", cache_read)?,
-                    cache_write_tokens: to_u64("lanes.cache_write_tokens", cache_write)?,
+                    status: session_status(status)?,
+                    turns: to_u64("sessions.turns", turns)?,
+                    input_tokens: to_u64("sessions.input_tokens", input_tokens)?,
+                    output_tokens: to_u64("sessions.output_tokens", output_tokens)?,
+                    cache_read_tokens: to_u64("sessions.cache_read_tokens", cache_read)?,
+                    cache_write_tokens: to_u64("sessions.cache_write_tokens", cache_write)?,
                     error,
                     started_at,
                     finished_at,
                 });
             }
-            Ok(lanes)
+            Ok(sessions)
         })
     }
 
     async fn record_finding(
         &self,
         run: &RunId,
-        lane: &str,
+        session: &str,
         path: &str,
         line_number: u32,
         comment_id: &str,
@@ -450,8 +487,8 @@ impl RunStore for SqliteStore {
     ) -> Result<(), StoreError> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO findings (run_id, lane, path, line, comment_id, action, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![run.as_str(), lane, path, line_number, comment_id, action.as_str(), now()],
+                "INSERT INTO findings (run_id, session, path, line, comment_id, action, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![run.as_str(), session, path, line_number, comment_id, action.as_str(), now()],
             )?;
             Ok(())
         })
@@ -465,11 +502,11 @@ impl RunStore for SqliteStore {
         };
         self.with(|c| {
             c.execute(
-                "INSERT INTO drafts (run_id, draft, lane, model, kind, path, line, target, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
+                "INSERT INTO drafts (run_id, draft, session, model, kind, path, line, target, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
                 params![
                     run.as_str(),
                     draft.draft,
-                    draft.lane,
+                    draft.session,
                     draft.model,
                     draft.kind,
                     draft.path,
@@ -524,14 +561,14 @@ impl RunStore for SqliteStore {
         );
         let rows: Vec<Row> = self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT created_at, draft, lane, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = ?1 ORDER BY id",
+                "SELECT created_at, draft, session, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = ?1 ORDER BY id",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok((
                     DraftRecord {
                         at: row.get(0)?,
                         draft: row.get(1)?,
-                        lane: row.get(2)?,
+                        session: row.get(2)?,
                         model: row.get(3)?,
                         kind: row.get(4)?,
                         path: row.get(5)?,
@@ -698,13 +735,13 @@ impl RunStore for SqliteStore {
         let (since, until) = window(filter.since.as_deref(), filter.until.as_deref())?;
         let rows = self.with(|c| {
             let mut statement = c.prepare(&format!(
-                "SELECT c.model, c.session, c.tool, c.outcome, COUNT(*), COALESCE(SUM(c.elapsed_ms), 0)
-                 FROM tool_calls c WHERE {CALL_FILTER}
-                 GROUP BY c.model, c.session, c.tool, c.outcome"
+                "SELECT c.model, {CALL_ROLE}, c.tool, c.outcome, COUNT(*), COALESCE(SUM(c.elapsed_ms), 0)
+                 FROM tool_calls c {CALL_SESSION} WHERE {CALL_FILTER}
+                 GROUP BY c.model, 2, c.tool, c.outcome"
             ))?;
             let number = |n: i64| u64::try_from(n).unwrap_or_default();
             let rows = statement.query_map(
-                params![filter.tool, filter.model, filter.session_kind, since, until],
+                params![filter.tool, filter.model, filter.role.map(SessionRole::as_str), since, until],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -741,7 +778,7 @@ impl RunStore for SqliteStore {
                         EXISTS (SELECT 1 FROM transcripts t
                                 WHERE t.run_id = c.run_id AND t.session = c.session),
                         r.kind
-                 FROM tool_calls c JOIN runs r ON r.id = c.run_id
+                 FROM tool_calls c JOIN runs r ON r.id = c.run_id {CALL_SESSION}
                  WHERE {CALL_FILTER}
                    AND (?6 IS NULL OR (?6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = ?6)
                    AND (?7 IS NULL OR c.at < ?7 OR (c.at = ?7 AND c.id < ?8))
@@ -751,7 +788,7 @@ impl RunStore for SqliteStore {
                 params![
                     filter.tool,
                     filter.model,
-                    filter.session_kind,
+                    filter.role.map(SessionRole::as_str),
                     since,
                     until,
                     outcome,
@@ -771,12 +808,12 @@ impl RunStore for SqliteStore {
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT created_at, lane, path, line, comment_id, action FROM findings WHERE run_id = ?1 ORDER BY id",
+                "SELECT created_at, session, path, line, comment_id, action FROM findings WHERE run_id = ?1 ORDER BY id",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok(FindingRecord {
                     at: row.get(0)?,
-                    lane: row.get(1)?,
+                    session: row.get(1)?,
                     path: row.get(2)?,
                     line: row.get(3)?,
                     comment_id: row.get(4)?,
@@ -1027,10 +1064,10 @@ impl RunStore for SqliteStore {
         })
     }
 
-    async fn lanes_of(
+    async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1038,29 +1075,29 @@ impl RunStore for SqliteStore {
         self.with(|c| {
             let rows = c
                 .prepare(&format!(
-                    "SELECT run_id, name, status FROM lanes WHERE run_id IN ({marks}) ORDER BY run_id, name"
+                    "SELECT run_id, name, status FROM sessions WHERE run_id IN ({marks}) ORDER BY run_id, name"
                 ))?
                 .query_map(
                     rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
-            lane_dots(rows)
+            session_dots(rows)
         })
     }
 
-    async fn lane_endings(
+    async fn session_endings(
         &self,
         since: Option<OffsetDateTime>,
         reviews: u32,
-    ) -> Result<Vec<LaneEnding>, StoreError> {
+    ) -> Result<Vec<SessionEnding>, StoreError> {
         let since = since
             .map(|at| instant("since", &at.format(&Rfc3339).unwrap_or_default()))
             .transpose()?;
-        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+        let reviews = i64::from(reviews.min(MOST_SESSION_REVIEWS));
         self.with(|c| {
             let rows = c
-                .prepare(LANE_ENDINGS)?
+                .prepare(SESSION_ENDINGS)?
                 .query_map(params![since, reviews], |row| {
                     Ok((
                         row.get(0)?,
@@ -1069,10 +1106,11 @@ impl RunStore for SqliteStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            lane_endings(rows)
+            session_endings(rows)
         })
     }
 
@@ -1276,12 +1314,12 @@ fn window(
     Ok((since, until))
 }
 
-/// The lanes of the newest reviews that ended (#229), over parameters 1
+/// The sessions of the newest reviews that ended (#229), over parameters 1
 /// (since, an [`instant`], or null) and 2 (how many reviews). Ordered as
 /// instants, not as text, so runs started in the same second keep their
 /// order (#216).
-const LANE_ENDINGS: &str = concat!(
-    "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+const SESSION_ENDINGS: &str = concat!(
+    "SELECT r.id, r.started_at, s.name, s.role, s.model, s.status, s.error
      FROM (SELECT id, started_at, ",
     instant_of!("started_at"),
     " AS at FROM runs
@@ -1290,8 +1328,8 @@ const LANE_ENDINGS: &str = concat!(
     instant_of!("started_at"),
     " >= ?1)
            ORDER BY at DESC, id DESC LIMIT ?2) r
-     JOIN lanes l ON l.run_id = r.id
-     ORDER BY r.at DESC, r.id DESC, l.name"
+     JOIN sessions s ON s.run_id = r.id
+     ORDER BY r.at DESC, r.id DESC, s.name"
 );
 
 /// The newest review of each pull request that started at or after ?2 (an
@@ -1348,17 +1386,19 @@ const DAY_DRAFTS: &str = concat!(
     " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point') GROUP BY 1"
 );
 
-/// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
-/// parameters 1 to 5: tool, model, kind of session, since and until, the
-/// last two as [`instant`]s. The kind is the session name's, as
-/// [`crate::session_kind`] reads it.
+/// The session row of a tool call `c`, as `s`, for its role.
+const CALL_SESSION: &str = "LEFT JOIN sessions s ON s.run_id = c.run_id AND s.name = c.session";
+
+/// The role of the session that made a tool call `c`, over
+/// [`CALL_SESSION`]. A call whose session has no row counts as a lane's.
+const CALL_ROLE: &str = "COALESCE(s.role, 'lane')";
+
+/// The `WHERE` of a tool call tally or listing over `tool_calls c` and
+/// [`CALL_SESSION`], over parameters 1 to 5: tool, model, session role,
+/// since and until, the last two as [`instant`]s.
 const CALL_FILTER: &str = concat!(
     "(?1 IS NULL OR c.tool = ?1) AND (?2 IS NULL OR c.model = ?2)",
-    " AND (?3 IS NULL OR (?3 = 'check' AND c.session LIKE 'check-%')",
-    " OR (?3 = c.session AND c.session IN ('planner', 'address', 'reviewer'))",
-    " OR (?3 = 'executor' AND c.session IN ('executor', 'fixer'))",
-    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%'",
-    " AND c.session NOT IN ('planner', 'address', 'reviewer', 'executor', 'fixer')))",
+    " AND (?3 IS NULL OR COALESCE(s.role, 'lane') = ?3)",
     " AND (?4 IS NULL OR ",
     instant_of!("c.at"),
     " >= ?4) AND (?5 IS NULL OR ",
@@ -1582,23 +1622,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lane_stored_as_dropped_before_231_reads_as_did_not_finish() {
+    async fn a_session_stored_as_dropped_before_231_reads_as_did_not_finish() {
         let store = SqliteStore::in_memory().unwrap();
         store.create_run(&new_run("r-old")).await.unwrap();
         let run = RunId::parse("r-old").unwrap();
-        store.start_lane(&run, "a", "m").await.unwrap();
+        store
+            .start_session(&run, "a", SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
         store
             .with(|c| {
                 c.execute(
-                    "UPDATE lanes SET status = 'dropped', error = 'gave up' WHERE run_id = 'r-old'",
+                    "UPDATE sessions SET status = 'dropped', error = 'gave up' WHERE run_id = 'r-old'",
                     [],
                 )?;
                 Ok(())
             })
             .unwrap();
-        let lanes = store.lanes(&run).await.unwrap();
-        assert_eq!(lanes.first().unwrap().status, LaneStatus::DidNotFinish);
-        assert_eq!(lanes.first().unwrap().error.as_deref(), Some("gave up"));
+        let sessions = store.sessions(&run).await.unwrap();
+        assert_eq!(
+            sessions.first().unwrap().status,
+            SessionStatus::DidNotFinish
+        );
+        assert_eq!(sessions.first().unwrap().error.as_deref(), Some("gave up"));
     }
 
     #[tokio::test]

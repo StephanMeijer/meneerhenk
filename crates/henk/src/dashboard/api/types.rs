@@ -9,8 +9,8 @@
 use henk_domain::allowlist::Platform;
 use henk_domain::run::RunKind;
 use henk_store::{
-    DraftRecord, EventRecord, EventWithOutcomes, FindingRecord, InboundEvent, LaneRecord,
-    OutcomeRecord, RunRecord, StageRecord, ToolCallRecord, ToolUsage, TranscriptSummary,
+    DraftRecord, EventRecord, EventWithOutcomes, FindingRecord, InboundEvent, OutcomeRecord,
+    RunRecord, SessionRecord, StageRecord, ToolCallRecord, ToolUsage, TranscriptSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -98,7 +98,7 @@ pub struct LaneDot {
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct StageDot {
-    /// `diff`, `lanes`, `fact_check`, and so on.
+    /// `diff`, `rounds`, `publish`, and so on.
     pub name: String,
     /// `running`, `done`, `failed` or `skipped`.
     pub state: String,
@@ -343,9 +343,10 @@ pub struct RunDetail {
 }
 
 /// One stage of a run: a review goes `requested`, `queued`, `started`,
-/// `diff`, `checkout`, `lanes`, `push`, `publish`, `done`; a plan goes
-/// through `workspace` and `session` instead. Runs before #309 have
-/// `fact_check`, and address runs before #327 `commit` and `replies`.
+/// `diff`, `checkout`, `rounds`, `push`, `publish`, `done`; a plan goes
+/// through `workspace` and `session` instead. Reviews before #324 have
+/// `lanes` for `rounds`, runs before #309 `fact_check`, and address runs
+/// before #327 `commit` and `replies`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Stage {
@@ -965,8 +966,8 @@ impl RunSummary {
     }
 }
 
-impl From<&LaneRecord> for Lane {
-    fn from(lane: &LaneRecord) -> Self {
+impl From<&SessionRecord> for Lane {
+    fn from(lane: &SessionRecord) -> Self {
         Self {
             name: lane.name.clone(),
             model: lane.model.clone(),
@@ -988,7 +989,7 @@ impl From<&FindingRecord> for Finding {
     fn from(finding: &FindingRecord) -> Self {
         Self {
             at: finding.at.clone(),
-            lane: finding.lane.clone(),
+            lane: finding.session.clone(),
             path: finding.path.clone(),
             line: finding.line,
             comment_id: finding.comment_id.clone(),
@@ -1002,7 +1003,7 @@ impl From<&DraftRecord> for Draft {
         Self {
             at: draft.at.clone(),
             id: draft.draft.clone(),
-            lane: draft.lane.clone(),
+            lane: draft.session.clone(),
             model: draft.model.clone(),
             kind: draft.kind.clone(),
             path: draft.path.clone(),

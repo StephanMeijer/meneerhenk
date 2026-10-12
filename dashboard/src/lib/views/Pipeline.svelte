@@ -25,6 +25,7 @@
     checkout: 'Checkout',
     workspace: 'Workspace',
     lanes: 'Lanes',
+    rounds: 'Rounds',
     session: 'Session',
     fact_check: 'Fact-check',
     commit: 'Commit',
@@ -71,7 +72,7 @@
         <Status word={stage.state === 'done' ? 'done' : stage.state} kind="stage-state" />
         {#if stage.detail}<span class="detail">{stage.detail}</span>{/if}
       </button>
-      {#if stage.name === 'lanes' && lanes.length > 0}
+      {#if (stage.name === 'rounds' || stage.name === 'lanes') && lanes.length > 0}
         <ul class="lanes">
           {#each lanes.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}
             <li>

@@ -3,7 +3,7 @@
 //! A marker is an HTML comment at the end of a comment body. It is invisible
 //! on GitHub and GitLab, and it records the run, the model and, when someone
 //! asked for the write, for whom. Reading a marker back is how Henk
-//! recognises his own words (§8.1) and how lanes see what is already there
+//! recognises his own words (§8.1) and how sessions see what is already there
 //! (§3.2).
 
 use std::fmt::{self, Write as _};

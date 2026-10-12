@@ -121,7 +121,7 @@ fn event<T: serde::Serialize>(message: &T, id: Option<String>) -> Option<Event> 
 fn message(dashboard: &Dashboard, change: &Change) -> RunMessage {
     match &change.kind {
         ChangeKind::Run(run) => RunMessage::Run(update(dashboard, run)),
-        ChangeKind::Lanes(lanes) => RunMessage::Lanes(lanes.iter().map(Lane::from).collect()),
+        ChangeKind::Sessions(lanes) => RunMessage::Lanes(lanes.iter().map(Lane::from).collect()),
         ChangeKind::ToolCall(call) => RunMessage::ToolCall(ToolCall::from(call)),
         ChangeKind::Draft(draft) => RunMessage::Draft(Draft::from(draft)),
         ChangeKind::Finding(finding) => RunMessage::Finding(Finding::from(finding)),
@@ -349,7 +349,7 @@ fn slots(dashboard: &Dashboard) -> Slots {
 fn progress(change: &Change) -> Option<Progress> {
     let run_id = change.run.as_str().to_owned();
     match &change.kind {
-        ChangeKind::Lanes(lanes) => Some(Progress {
+        ChangeKind::Sessions(lanes) => Some(Progress {
             run_id,
             lanes: Some(
                 lanes

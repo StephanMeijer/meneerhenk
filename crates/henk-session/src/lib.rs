@@ -2,9 +2,9 @@
 //!
 //! A [`SessionSpec`] says what varies: the model, the system prompt, the
 //! opening messages, the tools and the limits. [`run_session`] does what every
-//! session shares: a lane row in the run store, the loop, the mapping of how
-//! it stopped to a lane status, and a line on the run's timeline. Review lanes
-//! and the planner are both sessions.
+//! session shares: a session row in the run store with the role that runs
+//! it, the loop, the mapping of how it stopped to a session status, and a
+//! line on the run's timeline.
 //!
 //! [`platform_tools`] is the one place where a platform's MCP read tools are
 //! filtered and guarded by scope (spec §8.5) before a model may call them.
@@ -24,18 +24,22 @@ use henk_agent::{
 };
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
+use henk_domain::role::Role;
 use henk_domain::run::RunId;
 use henk_domain::scope::{self, Scope};
 use henk_llm::{CacheTtl, ChatMessage, ModelClient, Usage};
 use henk_mcp::{McpError, McpSession, NameMap};
-use henk_store::{LaneStatus, RunStore, TokenUsage, ToolCallRecord, ToolUsage};
+use henk_store::{RunStore, SessionStatus, TokenUsage, ToolCallRecord, ToolUsage};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 /// What varies between sessions.
 pub struct SessionSpec {
-    /// Lane name for the run page: a configured lane name, or `planner`.
+    /// Session name for the run page, unique in the run: `planner`,
+    /// `reviewer`, `executor`.
     pub name: String,
+    /// The role that runs it, recorded with the session (#324).
+    pub role: Role,
     /// The model.
     pub model: Arc<dyn ModelClient>,
     /// The system prompt, persona included.
@@ -57,6 +61,7 @@ impl std::fmt::Debug for SessionSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionSpec")
             .field("name", &self.name)
+            .field("role", &self.role)
             .field("model", &self.model.model())
             .field("tools", &self.tools)
             .field("limits", &self.limits)
@@ -75,8 +80,8 @@ pub struct SessionOutcome {
     pub usage: Usage,
     /// The last assistant text.
     pub final_text: String,
-    /// The lane status recorded in the store.
-    pub status: LaneStatus,
+    /// The session status recorded in the store.
+    pub status: SessionStatus,
     /// The error recorded, when it did not finish.
     pub error: Option<String>,
 }
@@ -87,7 +92,10 @@ impl SessionOutcome {
     /// What it drafted stands either way.
     #[must_use]
     pub fn finished(&self) -> bool {
-        matches!(self.status, LaneStatus::Finished | LaneStatus::TimedOut)
+        matches!(
+            self.status,
+            SessionStatus::Finished | SessionStatus::TimedOut
+        )
     }
 }
 
@@ -104,7 +112,7 @@ fn stored_usage(usage: &Usage) -> TokenUsage {
     }
 }
 
-/// Runs one session and records it as a lane of `run`.
+/// Runs one session and records it as a session of `run`.
 #[instrument(skip_all, fields(run = %run, session = %spec.name, model = %spec.model.model()))]
 pub async fn run_session(
     store: &dyn RunStore,
@@ -113,8 +121,11 @@ pub async fn run_session(
     cancel: CancellationToken,
 ) -> SessionOutcome {
     let model_name = spec.model.model().to_owned();
-    if let Err(error) = store.start_lane(run, &spec.name, &model_name).await {
-        tracing::warn!(%error, "could not record the lane start");
+    if let Err(error) = store
+        .start_session(run, &spec.name, spec.role.into(), &model_name)
+        .await
+    {
+        tracing::warn!(%error, "could not record the session start");
     }
     let system = spec.system;
     let mut agent = Agent::new(
@@ -142,12 +153,12 @@ pub async fn run_session(
     )
     .await;
     if !calls.is_empty() {
-        info!(lane = %spec.name, usage = %usage_line(&ToolUsage::from_calls(&calls)), "tool usage");
+        info!(session = %spec.name, usage = %usage_line(&ToolUsage::from_calls(&calls)), "tool usage");
     }
     keep_transcript(store, run, &spec.name, &model_name, &system, &outcome).await;
-    let (status, error) = lane_status(&outcome.stop);
+    let (status, error) = session_status(&outcome.stop);
     if let Err(store_error) = store
-        .finish_lane(
+        .finish_session(
             run,
             &spec.name,
             status,
@@ -157,7 +168,7 @@ pub async fn run_session(
         )
         .await
     {
-        tracing::warn!(error = %store_error, "could not record the lane end");
+        tracing::warn!(error = %store_error, "could not record the session end");
     }
     // Each time the repeat guard fired goes on the run (§8.6), so
     // `henk runs show` says which tool, how often and whether it ended
@@ -215,24 +226,24 @@ async fn keep_transcript(
     }
 }
 
-/// How a session ended, as its lane row records it (#231): it ran to an
+/// How a session ended, as its session row records it (#231): it ran to an
 /// end (finished), reached its time limit (timed out: what it drafted until
 /// then stands, it drafts nothing more), or broke off (did not finish, with
 /// why). How a caller presents a time limit is the caller's business: the
-/// review reports such a lane as stopped at the time limit in its summary,
+/// review reports such a session as stopped at the time limit in its summary,
 /// the planner treats it as a failed plan.
-fn lane_status(stop: &StopCause) -> (LaneStatus, Option<String>) {
+fn session_status(stop: &StopCause) -> (SessionStatus, Option<String>) {
     match stop {
-        StopCause::EndTurn | StopCause::MaxTurns => (LaneStatus::Finished, None),
-        StopCause::Timeout => (LaneStatus::TimedOut, None),
-        StopCause::Cancelled => (LaneStatus::DidNotFinish, Some("cancelled".to_owned())),
-        StopCause::ModelError(e) => (LaneStatus::DidNotFinish, Some(e.to_string())),
+        StopCause::EndTurn | StopCause::MaxTurns => (SessionStatus::Finished, None),
+        StopCause::Timeout => (SessionStatus::TimedOut, None),
+        StopCause::Cancelled => (SessionStatus::DidNotFinish, Some("cancelled".to_owned())),
+        StopCause::ModelError(e) => (SessionStatus::DidNotFinish, Some(e.to_string())),
         StopCause::Refused(why) => (
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             Some(format!("the model declined ({why})")),
         ),
         StopCause::Stuck { tool, .. } => (
-            LaneStatus::DidNotFinish,
+            SessionStatus::DidNotFinish,
             Some(format!("stuck repeating {tool}")),
         ),
     }
@@ -240,11 +251,12 @@ fn lane_status(stop: &StopCause) -> (LaneStatus, Option<String>) {
 
 /// A session kept across the rounds of a review loop (#284). Each round
 /// resumes the same conversation with one new message, so the model sees
-/// everything it said and read before. The run keeps one lane row for it,
+/// everything it said and read before. The run keeps one session row for it,
 /// ended by [`ResumableSession::finish`] with the turns and tokens of every
 /// round, and its newest transcript holds the whole conversation.
 pub struct ResumableSession {
     name: String,
+    role: Role,
     model: Arc<dyn ModelClient>,
     model_name: String,
     system: String,
@@ -261,7 +273,7 @@ pub struct ResumableSession {
     rounds_dropped: usize,
     turns: u32,
     usage: Usage,
-    status: Option<(LaneStatus, Option<String>)>,
+    status: Option<(SessionStatus, Option<String>)>,
 }
 
 /// The prompt cache's lifetime for a role in a pairing whose partner's
@@ -318,6 +330,7 @@ impl std::fmt::Debug for ResumableSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResumableSession")
             .field("name", &self.name)
+            .field("role", &self.role)
             .field("model", &self.model_name)
             .field("messages", &self.messages.len())
             .field("turns", &self.turns)
@@ -337,11 +350,12 @@ pub struct RoundOutcome {
 }
 
 impl ResumableSession {
-    /// A session that has not run yet. `limits` hold per round: every round
-    /// gets the whole turn limit and time limit again.
+    /// A session of `role` that has not run yet, named for its role in the
+    /// run record. `limits` hold per round: every round gets the whole turn
+    /// limit and time limit again.
     #[must_use]
     pub fn new(
-        name: impl Into<String>,
+        role: Role,
         model: Arc<dyn ModelClient>,
         system: impl Into<String>,
         tools: ToolSet,
@@ -349,7 +363,8 @@ impl ResumableSession {
     ) -> Self {
         let model_name = model.model().to_owned();
         Self {
-            name: name.into(),
+            name: role.name().to_owned(),
+            role,
             model,
             model_name,
             system: system.into(),
@@ -430,7 +445,7 @@ impl ResumableSession {
                 )),
             );
         }
-        info!(lane = %self.name, dropped = cut, "compacted the earlier rounds");
+        info!(session = %self.name, dropped = cut, "compacted the earlier rounds");
         let dropped = RoundsDropped {
             session: self.name.clone(),
             first: self.rounds_dropped + 1,
@@ -459,9 +474,11 @@ impl ResumableSession {
         cancel: CancellationToken,
     ) -> RoundOutcome {
         if self.status.is_none()
-            && let Err(error) = store.start_lane(run, &self.name, &self.model_name).await
+            && let Err(error) = store
+                .start_session(run, &self.name, self.role.into(), &self.model_name)
+                .await
         {
-            tracing::warn!(%error, "could not record the lane start");
+            tracing::warn!(%error, "could not record the session start");
         }
         // The earlier messages are already in the live view.
         let seen = self.messages.len();
@@ -489,7 +506,7 @@ impl ResumableSession {
             seen,
         )
         .await;
-        let status = lane_status(&outcome.stop);
+        let status = session_status(&outcome.stop);
         for firing in &outcome.repeats {
             let _ = store
                 .event(run, "warn", &repeat_event(&self.name, firing))
@@ -513,7 +530,7 @@ impl ResumableSession {
             &outcome,
         )
         .await;
-        info!(lane = %self.name, turns = round_turns, status = ?status.0, "round ended");
+        info!(session = %self.name, turns = round_turns, status = ?status.0, "round ended");
         self.status = Some(status);
         let first_kept = outcome.messages.len().saturating_sub(kept);
         self.messages = outcome.messages.split_off(first_kept);
@@ -524,14 +541,14 @@ impl ResumableSession {
         }
     }
 
-    /// Ends the session's lane row with the turns and tokens of every
+    /// Ends the session's row with the turns and tokens of every
     /// round, as its last round ended. A session that never ran has none.
     pub async fn finish(&self, store: &dyn RunStore, run: &RunId) {
         let Some((status, error)) = &self.status else {
             return;
         };
         if let Err(store_error) = store
-            .finish_lane(
+            .finish_session(
                 run,
                 &self.name,
                 *status,
@@ -541,7 +558,7 @@ impl ResumableSession {
             )
             .await
         {
-            tracing::warn!(error = %store_error, "could not record the lane end");
+            tracing::warn!(error = %store_error, "could not record the session end");
         }
     }
 }
@@ -727,14 +744,14 @@ fn usage_line(usage: &[ToolUsage]) -> String {
 }
 
 /// The timeline line for one firing of the repeat guard.
-fn repeat_event(lane: &str, firing: &RepeatFiring) -> String {
+fn repeat_event(session: &str, firing: &RepeatFiring) -> String {
     let what = if firing.ended {
         "the session was ended as stuck"
     } else {
         "the call was refused"
     };
     format!(
-        "{lane}: the model called {} with the same arguments {} times in a row; {what}",
+        "{session}: the model called {} with the same arguments {} times in a row; {what}",
         firing.tool, firing.repeats
     )
 }
@@ -792,8 +809,9 @@ mod tests {
     use henk_domain::allowlist::RepoRef;
     use henk_domain::review::CommitSha;
     use henk_llm::testing::ScriptedClient;
-    use henk_llm::{Completion, LlmError, Role, StopReason};
+    use henk_llm::{Completion, LlmError, StopReason};
     use henk_mcp::testing::{FakeServer, echo_behaviour};
+    use henk_store::SessionRole;
     use serde_json::json;
 
     use super::*;
@@ -836,6 +854,7 @@ mod tests {
     fn spec(model: Arc<dyn ModelClient>) -> SessionSpec {
         SessionSpec {
             name: "planner".into(),
+            role: Role::Planner,
             model,
             system: "s".into(),
             opening: vec![ChatMessage::user("go")],
@@ -1031,18 +1050,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_finished_session_records_a_lane_row() {
+    async fn a_finished_session_records_a_session_row_with_its_role() {
         let store = store_with_run().await;
         let model: Arc<dyn ModelClient> = Arc::new(ScriptedClient::new("m", [text("done")]));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
         assert!(outcome.finished());
         assert_eq!(outcome.final_text, "done");
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].name, "planner");
-        assert_eq!(lanes[0].model, "m");
-        assert_eq!(lanes[0].status, LaneStatus::Finished);
-        assert_eq!(lanes[0].input_tokens, 12);
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "planner");
+        assert_eq!(sessions[0].role, SessionRole::Planner);
+        assert_eq!(sessions[0].model, "m");
+        assert_eq!(sessions[0].status, SessionStatus::Finished);
+        assert_eq!(sessions[0].input_tokens, 12);
         assert_eq!(store.events(&run_id()).await.unwrap().len(), 1);
 
         let listed = store.transcripts(&run_id()).await.unwrap();
@@ -1074,12 +1094,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_resumed_session_sees_its_earlier_rounds_and_keeps_one_lane() {
+    async fn a_resumed_session_sees_its_earlier_rounds_and_keeps_one_row() {
         let store = store_with_run().await;
         let scripted = Arc::new(ScriptedClient::new("m", [text("first"), text("second")]));
         let model: Arc<dyn ModelClient> = scripted.clone();
         let mut session = ResumableSession::new(
-            "reviewer",
+            Role::Reviewer,
             model,
             "s",
             ToolSet::new(),
@@ -1118,11 +1138,15 @@ mod tests {
         assert_eq!(session.messages().len(), 4);
 
         session.finish(&store, &run_id()).await;
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes.len(), 1, "one lane row for every round");
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions.len(), 1, "one session row for every round");
         assert_eq!(
-            (lanes[0].status, lanes[0].turns, lanes[0].input_tokens),
-            (LaneStatus::Finished, 2, 24)
+            (
+                sessions[0].status,
+                sessions[0].turns,
+                sessions[0].input_tokens
+            ),
+            (SessionStatus::Finished, 2, 24)
         );
         let stored = store
             .transcript(&run_id(), "reviewer")
@@ -1152,7 +1176,7 @@ mod tests {
                 fails: false,
             });
         let mut session =
-            ResumableSession::new("reviewer", model, "s", tools, AgentConfig::default());
+            ResumableSession::new(Role::Reviewer, model, "s", tools, AgentConfig::default());
         for opening in ["go", "again"] {
             session
                 .resume(
@@ -1194,7 +1218,7 @@ mod tests {
             max_conversation_chars: 10,
             ..AgentConfig::default()
         };
-        let mut session = ResumableSession::new("executor", model, "s", ToolSet::new(), limits);
+        let mut session = ResumableSession::new(Role::Executor, model, "s", ToolSet::new(), limits);
         for round in ["round 1", "round 2", "round 3"] {
             session
                 .resume(
@@ -1234,13 +1258,20 @@ mod tests {
             .await;
         let last = scripted.requests().pop().unwrap();
         let roles: Vec<_> = last.messages.iter().map(|m| m.role).collect();
-        assert_eq!(roles, [Role::User, Role::Assistant, Role::User]);
+        assert_eq!(
+            roles,
+            [
+                henk_llm::Role::User,
+                henk_llm::Role::Assistant,
+                henk_llm::Role::User
+            ]
+        );
         assert!(last.messages[0].text().contains("f1 fixed in abc."));
 
         let roomy = AgentConfig::default();
         let model: Arc<dyn ModelClient> =
             Arc::new(ScriptedClient::new("m", [text("a"), text("b")]));
-        let mut small = ResumableSession::new("reviewer", model, "s", ToolSet::new(), roomy);
+        let mut small = ResumableSession::new(Role::Reviewer, model, "s", ToolSet::new(), roomy);
         for round in ["1", "2"] {
             small
                 .resume(
@@ -1278,7 +1309,7 @@ mod tests {
             max_conversation_chars: 10,
             ..AgentConfig::default()
         };
-        let mut session = ResumableSession::new("executor", model, "s", ToolSet::new(), limits);
+        let mut session = ResumableSession::new(Role::Executor, model, "s", ToolSet::new(), limits);
         let round = async |session: &mut ResumableSession, text: &str| {
             session
                 .resume(
@@ -1339,9 +1370,9 @@ mod tests {
         assert!(matches!(outcome.stop, StopCause::Timeout));
         assert!(outcome.finished());
         assert_eq!(outcome.error, None);
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::TimedOut);
-        assert_eq!(lanes[0].error, None);
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions[0].status, SessionStatus::TimedOut);
+        assert_eq!(sessions[0].error, None);
         let events = store.events(&run_id()).await.unwrap();
         assert_eq!(events[0].level, "warn");
         assert!(
@@ -1363,10 +1394,10 @@ mod tests {
         ));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
         assert!(!outcome.finished());
-        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
+        assert_eq!(outcome.status, SessionStatus::DidNotFinish);
         assert!(outcome.error.as_deref().unwrap_or("").contains("401"));
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::DidNotFinish);
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions[0].status, SessionStatus::DidNotFinish);
     }
 
     #[tokio::test]
@@ -1381,16 +1412,16 @@ mod tests {
             })],
         ));
         let outcome = run_session(&store, &run_id(), spec(model), CancellationToken::new()).await;
-        assert!(!outcome.finished(), "a refusal is not a finished lane");
-        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
+        assert!(!outcome.finished(), "a refusal is not a finished session");
+        assert_eq!(outcome.status, SessionStatus::DidNotFinish);
         assert_eq!(
             outcome.error.as_deref(),
             Some("the model declined (refusal)")
         );
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].status, LaneStatus::DidNotFinish);
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions[0].status, SessionStatus::DidNotFinish);
         assert_eq!(
-            lanes[0].error.as_deref(),
+            sessions[0].error.as_deref(),
             Some("the model declined (refusal)")
         );
     }
@@ -1423,10 +1454,10 @@ mod tests {
         spec.limits.max_repeated_calls = 1;
         let outcome = run_session(&store, &run_id(), spec, CancellationToken::new()).await;
         assert!(matches!(&outcome.stop, StopCause::Stuck { tool, repeats: 3 } if tool == "read"));
-        assert_eq!(outcome.status, LaneStatus::DidNotFinish);
+        assert_eq!(outcome.status, SessionStatus::DidNotFinish);
         assert_eq!(outcome.error.as_deref(), Some("stuck repeating read"));
-        let lanes = store.lanes(&run_id()).await.unwrap();
-        assert_eq!(lanes[0].error.as_deref(), Some("stuck repeating read"));
+        let sessions = store.sessions(&run_id()).await.unwrap();
+        assert_eq!(sessions[0].error.as_deref(), Some("stuck repeating read"));
         let events = store.events(&run_id()).await.unwrap();
         let timeline: Vec<(&str, &str)> = events
             .iter()

@@ -2,7 +2,7 @@
 //! wraps the store Henk writes to and, after each write the dashboard
 //! shows, announces a [`Change`] on a [`Feed`]; the dashboard's streams
 //! follow the feed. Nothing that writes needs to know: the store is the
-//! one place every lane, tool call, draft and verdict passes through.
+//! one place every session, tool call, draft and verdict passes through.
 //!
 //! A write holds the feed's gate shared from the store write to its
 //! announcement, and a snapshot holds it alone ([`Feed::settled`]), so a
@@ -22,10 +22,11 @@ use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
 use henk_store::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
-    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus,
-    RunStore, Stage, StageRecord, StageState, StageWrite, StoreError, ToolCallFilter,
-    ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
+    PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, broadcast};
@@ -57,11 +58,11 @@ pub struct Change {
 pub enum ChangeKind {
     /// The run started, ended or got its check.
     Run(RunRecord),
-    /// A lane started or ended: every lane of the run.
-    Lanes(Vec<LaneRecord>),
+    /// A session started or ended: every session of the run.
+    Sessions(Vec<SessionRecord>),
     /// A session called a tool.
     ToolCall(ToolCallRecord),
-    /// A lane queued a draft, or the check decided one.
+    /// A session queued a draft, or a verdict decided one.
     Draft(DraftRecord),
     /// A finding was posted, improved, refused, and so on.
     Finding(FindingRecord),
@@ -240,7 +241,7 @@ pub struct Announcing {
     inner: Arc<dyn RunStore>,
     feed: Feed,
     /// Held from a read-back to its announcement, so read-backs are
-    /// announced in the order they were read: two lanes ending at once
+    /// announced in the order they were read: two sessions ending at once
     /// cannot announce an older read last.
     read_back: tokio::sync::Mutex<()>,
 }
@@ -272,11 +273,11 @@ impl Announcing {
         }
     }
 
-    async fn announce_lanes(&self, id: &RunId) {
+    async fn announce_sessions(&self, id: &RunId) {
         let _order = self.read_back.lock().await;
-        match self.inner.lanes(id).await {
-            Ok(lanes) => self.feed.announce(id, ChangeKind::Lanes(lanes)),
-            Err(error) => warn!(%error, run = %id, "could not read lanes back to announce them"),
+        match self.inner.sessions(id).await {
+            Ok(sessions) => self.feed.announce(id, ChangeKind::Sessions(sessions)),
+            Err(error) => warn!(%error, run = %id, "could not read sessions back to announce them"),
         }
     }
 }
@@ -351,19 +352,19 @@ impl RunStore for Announcing {
         self.inner.daily_stats(since).await
     }
 
-    async fn lanes_of(
+    async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
-        self.inner.lanes_of(runs).await
+    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+        self.inner.sessions_of(runs).await
     }
 
-    async fn lane_endings(
+    async fn session_endings(
         &self,
         since: Option<OffsetDateTime>,
         reviews: u32,
-    ) -> Result<Vec<LaneEnding>, StoreError> {
-        self.inner.lane_endings(since, reviews).await
+    ) -> Result<Vec<SessionEnding>, StoreError> {
+        self.inner.session_endings(since, reviews).await
     }
 
     async fn stages_of(
@@ -412,11 +413,11 @@ impl RunStore for Announcing {
         Ok(claimed)
     }
 
-    async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+    async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
-        self.inner.drop_running_lanes(run, reason).await?;
+        self.inner.drop_running_sessions(run, reason).await?;
         self.feed.sessions().run_ended(run);
-        self.announce_lanes(run).await;
+        self.announce_sessions(run).await;
         Ok(())
     }
 
@@ -426,39 +427,45 @@ impl RunStore for Announcing {
             .said(run, session, turn, message, now());
     }
 
-    async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
-        let _writing = self.feed.writing().await;
-        self.inner.start_lane(run, name, model).await?;
-        self.announce_lanes(run).await;
-        Ok(())
-    }
-
-    async fn finish_lane(
+    async fn start_session(
         &self,
         run: &RunId,
         name: &str,
-        status: LaneStatus,
+        role: SessionRole,
+        model: &str,
+    ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.start_session(run, name, role, model).await?;
+        self.announce_sessions(run).await;
+        Ok(())
+    }
+
+    async fn finish_session(
+        &self,
+        run: &RunId,
+        name: &str,
+        status: SessionStatus,
         turns: u64,
         tokens: henk_store::TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner
-            .finish_lane(run, name, status, turns, tokens, error)
+            .finish_session(run, name, status, turns, tokens, error)
             .await?;
         self.feed.sessions().ended(run, name);
-        self.announce_lanes(run).await;
+        self.announce_sessions(run).await;
         Ok(())
     }
 
-    async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
-        self.inner.lanes(run).await
+    async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
+        self.inner.sessions(run).await
     }
 
     async fn record_finding(
         &self,
         run: &RunId,
-        lane: &str,
+        session: &str,
         path: &str,
         line_number: u32,
         comment_id: &str,
@@ -466,13 +473,13 @@ impl RunStore for Announcing {
     ) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner
-            .record_finding(run, lane, path, line_number, comment_id, action)
+            .record_finding(run, session, path, line_number, comment_id, action)
             .await?;
         self.feed.announce(
             run,
             ChangeKind::Finding(FindingRecord {
                 at: now(),
-                lane: lane.to_owned(),
+                session: session.to_owned(),
                 path: path.to_owned(),
                 line: line_number,
                 comment_id: comment_id.to_owned(),
@@ -778,18 +785,18 @@ mod tests {
         async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
             self.inner.daily_stats(since).await
         }
-        async fn lanes_of(
+        async fn sessions_of(
             &self,
             runs: &[RunId],
-        ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
-            self.inner.lanes_of(runs).await
+        ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+            self.inner.sessions_of(runs).await
         }
-        async fn lane_endings(
+        async fn session_endings(
             &self,
             since: Option<OffsetDateTime>,
             reviews: u32,
-        ) -> Result<Vec<LaneEnding>, StoreError> {
-            self.inner.lane_endings(since, reviews).await
+        ) -> Result<Vec<SessionEnding>, StoreError> {
+            self.inner.session_endings(since, reviews).await
         }
         async fn stages_of(
             &self,
@@ -823,46 +830,52 @@ mod tests {
         ) -> Result<bool, StoreError> {
             self.inner.claim_resume(run, interrupted, resumed).await
         }
-        async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
-            self.inner.drop_running_lanes(run, reason).await
+        async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+            self.inner.drop_running_sessions(run, reason).await
         }
         async fn session_message(&self, run: &RunId, session: &str, turn: u32, message: &str) {
             self.inner
                 .session_message(run, session, turn, message)
                 .await;
         }
-        async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
-            self.inner.start_lane(run, name, model).await
-        }
-        async fn finish_lane(
+        async fn start_session(
             &self,
             run: &RunId,
             name: &str,
-            status: LaneStatus,
+            role: SessionRole,
+            model: &str,
+        ) -> Result<(), StoreError> {
+            self.inner.start_session(run, name, role, model).await
+        }
+        async fn finish_session(
+            &self,
+            run: &RunId,
+            name: &str,
+            status: SessionStatus,
             turns: u64,
             tokens: henk_store::TokenUsage,
             error: Option<&str>,
         ) -> Result<(), StoreError> {
             self.inner
-                .finish_lane(run, name, status, turns, tokens, error)
+                .finish_session(run, name, status, turns, tokens, error)
                 .await
         }
-        async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
-            let lanes = self.inner.lanes(run).await;
-            self.hold("lanes").await;
-            lanes
+        async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
+            let sessions = self.inner.sessions(run).await;
+            self.hold("sessions").await;
+            sessions
         }
         async fn record_finding(
             &self,
             run: &RunId,
-            lane: &str,
+            session: &str,
             path: &str,
             line_number: u32,
             comment_id: &str,
             action: FindingAction,
         ) -> Result<(), StoreError> {
             self.inner
-                .record_finding(run, lane, path, line_number, comment_id, action)
+                .record_finding(run, session, path, line_number, comment_id, action)
                 .await
         }
         async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
@@ -991,23 +1004,29 @@ mod tests {
     const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
     #[tokio::test]
-    async fn two_lanes_ending_at_once_announce_their_lanes_in_the_order_read() {
-        let (store, feed, paused) = paused("lanes");
+    async fn two_sessions_ending_at_once_announce_their_sessions_in_the_order_read() {
+        let (store, feed, paused) = paused("sessions");
         let run = id("r-1");
         store.create_run(&new_run("r-1")).await.unwrap();
-        store.start_lane(&run, "lane-a", "m").await.unwrap();
-        store.start_lane(&run, "lane-b", "m").await.unwrap();
+        store
+            .start_session(&run, "reviewer", SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
+        store
+            .start_session(&run, "executor", SessionRole::Executor, "m")
+            .await
+            .unwrap();
         let pause = paused.arm();
-        // The pause is taken by the next read-back: lane-a's, which reads
-        // lane-a finished and lane-b running, and stops before announcing.
+        // The pause is taken by the next read-back: the reviewer's, which reads
+        // the reviewer finished and the executor running, and stops before announcing.
         let a = tokio::spawn({
             let (store, run) = (Arc::clone(&store), run.clone());
             async move {
                 store
-                    .finish_lane(
+                    .finish_session(
                         &run,
-                        "lane-a",
-                        LaneStatus::Finished,
+                        "reviewer",
+                        SessionStatus::Finished,
                         1,
                         henk_store::TokenUsage::new(1, 1),
                         None,
@@ -1020,10 +1039,10 @@ mod tests {
             let (store, run) = (Arc::clone(&store), run.clone());
             async move {
                 store
-                    .finish_lane(
+                    .finish_session(
                         &run,
-                        "lane-b",
-                        LaneStatus::Finished,
+                        "executor",
+                        SessionStatus::Finished,
                         2,
                         henk_store::TokenUsage::new(2, 2),
                         None,
@@ -1033,18 +1052,19 @@ mod tests {
         });
         assert!(
             tokio::time::timeout(SETTLE, &mut b).await.is_err(),
-            "lane-b's read-back waits for lane-a's announcement"
+            "the executor's read-back waits for the reviewer's announcement"
         );
         pause.go.send(()).unwrap();
         a.await.unwrap().unwrap();
         b.await.unwrap().unwrap();
 
         let all = feed.since(feed.epoch(), 0, &run).unwrap();
-        let Some(ChangeKind::Lanes(last)) = all.last().map(|c| &c.kind) else {
+        let Some(ChangeKind::Sessions(last)) = all.last().map(|c| &c.kind) else {
             panic!("{:?}", kinds(&all))
         };
         assert!(
-            last.iter().all(|lane| lane.status == LaneStatus::Finished),
+            last.iter()
+                .all(|session| session.status == SessionStatus::Finished),
             "the last announcement is the latest read: {last:?}"
         );
     }
@@ -1127,7 +1147,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .event(&id("r-1"), "info", "lane-a: EndTurn")
+            .event(&id("r-1"), "info", "reviewer: EndTurn")
             .await
             .unwrap();
         store
@@ -1182,7 +1202,8 @@ mod tests {
             ));
         let mut news = feed.sessions().subscribe();
         let spec = henk_session::SessionSpec {
-            name: "lane-a".into(),
+            name: "reviewer".into(),
+            role: henk_domain::role::Role::Reviewer,
             model,
             system: "s".into(),
             opening: vec![henk_llm::ChatMessage::user("Review this.")],
@@ -1218,7 +1239,7 @@ mod tests {
         }
         assert_eq!(heard, ["1 turn 0", "2 turn 1", "ended"]);
         assert!(
-            !feed.sessions().is_live(&run, "lane-a"),
+            !feed.sessions().is_live(&run, "reviewer"),
             "the transcript is the record now"
         );
         assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
@@ -1235,7 +1256,7 @@ mod tests {
             .iter()
             .map(|c| match c.kind {
                 ChangeKind::Run(_) => "run",
-                ChangeKind::Lanes(_) => "lanes",
+                ChangeKind::Sessions(_) => "sessions",
                 ChangeKind::ToolCall(_) => "tool_call",
                 ChangeKind::Draft(_) => "draft",
                 ChangeKind::Finding(_) => "finding",
@@ -1288,13 +1309,16 @@ mod tests {
         let (store, feed) = announcing();
         let run = id("r-1");
         store.create_run(&new_run("r-1")).await.unwrap();
-        store.start_lane(&run, "lane-a", "m").await.unwrap();
+        store
+            .start_session(&run, "reviewer", SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
         store
             .record_tool_call(
                 &run,
                 &ToolCallRecord {
                     at: String::new(),
-                    session: "lane-a".into(),
+                    session: "reviewer".into(),
                     model: "m".into(),
                     turn: 2,
                     tool: "read_file".into(),
@@ -1311,7 +1335,7 @@ mod tests {
         let draft = DraftRecord {
             at: String::new(),
             draft: "d1".into(),
-            lane: "lane-a".into(),
+            session: "reviewer".into(),
             model: "m".into(),
             kind: "finding".into(),
             path: "a.rs".into(),
@@ -1337,7 +1361,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .record_finding(&run, "lane-a", "a.rs", 4, "c-1", FindingAction::Posted)
+            .record_finding(&run, "reviewer", "a.rs", 4, "c-1", FindingAction::Posted)
             .await
             .unwrap();
         store.event(&run, "info", "a line").await.unwrap();
@@ -1345,7 +1369,7 @@ mod tests {
             .stage(
                 &run,
                 &StageWrite::now(
-                    henk_store::Stage::Lanes,
+                    henk_store::Stage::Rounds,
                     henk_store::StageState::Done,
                     "1 of 1 finished",
                 ),
@@ -1353,10 +1377,10 @@ mod tests {
             .await
             .unwrap();
         store
-            .finish_lane(
+            .finish_session(
                 &run,
-                "lane-a",
-                LaneStatus::Finished,
+                "reviewer",
+                SessionStatus::Finished,
                 3,
                 henk_store::TokenUsage::new(10, 2),
                 None,
@@ -1374,14 +1398,14 @@ mod tests {
             kinds(&all),
             [
                 "run",
-                "lanes",
+                "sessions",
                 "tool_call",
                 "draft",
                 "draft",
                 "finding",
                 "event",
                 "stages",
-                "lanes",
+                "sessions",
                 "run",
                 "heartbeat"
             ],
@@ -1404,10 +1428,10 @@ mod tests {
             stages[0].detail, "1 of 1 finished",
             "read back as the store holds it"
         );
-        let ChangeKind::Lanes(lanes) = &all[8].kind else {
+        let ChangeKind::Sessions(sessions) = &all[8].kind else {
             panic!()
         };
-        assert_eq!(lanes[0].turns, 3, "read back as the store holds it");
+        assert_eq!(sessions[0].turns, 3, "read back as the store holds it");
         let ChangeKind::ToolCall(call) = &all[2].kind else {
             panic!()
         };
@@ -1436,7 +1460,7 @@ mod tests {
         let (a, b) = (id("r-a"), id("r-b"));
         for n in 0..6 {
             let run = if n % 2 == 0 { &a } else { &b };
-            feed.announce(run, ChangeKind::Lanes(Vec::new()));
+            feed.announce(run, ChangeKind::Sessions(Vec::new()));
         }
         let seqs = |changes: Vec<Arc<Change>>| changes.iter().map(|c| c.seq).collect::<Vec<_>>();
         assert_eq!(seqs(feed.since(feed.epoch(), 2, &a).unwrap()), [3, 5]);
@@ -1459,7 +1483,7 @@ mod tests {
         let feed = Feed::default();
         let run = id("r-a");
         for _ in 0..REPLAY + 10 {
-            feed.announce(&run, ChangeKind::Lanes(Vec::new()));
+            feed.announce(&run, ChangeKind::Sessions(Vec::new()));
         }
         assert_eq!(feed.0.recent.lock().unwrap().changes.len(), REPLAY);
         assert!(
@@ -1475,7 +1499,7 @@ mod tests {
         let mut slow = feed.subscribe();
         let run = id("r-a");
         for _ in 0..CHANNEL + 5 {
-            feed.announce(&run, ChangeKind::Lanes(Vec::new()));
+            feed.announce(&run, ChangeKind::Sessions(Vec::new()));
         }
         assert!(matches!(
             slow.recv().await,

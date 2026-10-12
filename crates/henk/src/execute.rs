@@ -476,6 +476,7 @@ impl Work<'_> {
         let settings = &self.app.settings;
         SessionSpec {
             name: "executor".to_owned(),
+            role: Role::Executor,
             model: Arc::clone(&self.model),
             system,
             opening: vec![ChatMessage::user(opening)],

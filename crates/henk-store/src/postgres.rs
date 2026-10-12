@@ -17,12 +17,13 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
-    LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
-    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
-    kind_parse, kind_str, lane_dots, lane_endings, merge_days, platform_parse, platform_str,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
+    MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
+    RawRun, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
+    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days,
+    platform_parse, platform_str, session_dots, session_endings, session_role, session_status,
     stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
@@ -39,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/009_stats.sql"),
     include_str!("../migrations/postgres/010_loop.sql"),
     include_str!("../migrations/postgres/011_lane_cache.sql"),
+    include_str!("../migrations/postgres/012_sessions.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -65,6 +67,22 @@ impl PgStore {
     /// Returns [`StoreError`] when the URL does not parse, the server cannot
     /// be reached, or migrating fails. The URL itself is never in the error.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        Self::connect_up_to(url, MIGRATIONS.len()).await
+    }
+
+    /// Connects like [`Self::connect`], but migrates only up to schema
+    /// `version`: for tests that seed rows the way an older Henk wrote
+    /// them, then connect again to migrate the rest.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::connect`].
+    #[cfg(feature = "testing")]
+    pub async fn connect_at(url: &str, version: usize) -> Result<Self, StoreError> {
+        Self::connect_up_to(url, version.min(MIGRATIONS.len())).await
+    }
+
+    async fn connect_up_to(url: &str, version: usize) -> Result<Self, StoreError> {
         let mut config = parse_url(url)?;
         if config.get_connect_timeout().is_none() {
             config.connect_timeout(CONNECT_TIMEOUT);
@@ -81,11 +99,12 @@ impl PgStore {
             .build()
             .map_err(|error| StoreError::Connect(error.to_string()))?;
         let store = Self { pool };
-        store.migrate().await?;
+        store.migrate(version).await?;
         Ok(store)
     }
 
-    async fn migrate(&self) -> Result<(), StoreError> {
+    /// Applies the migrations up to `upto` the database lacks.
+    async fn migrate(&self, upto: usize) -> Result<(), StoreError> {
         let mut client = self.pool.get().await?;
         let transaction = client.transaction().await?;
         transaction
@@ -112,7 +131,7 @@ impl PgStore {
                 "the database is at schema version {applied}, newer than the {known} this Henk knows"
             )));
         }
-        for (version, sql) in (1..).zip(MIGRATIONS) {
+        for (version, sql) in (1..).zip(MIGRATIONS.iter().take(upto)) {
             if version <= applied {
                 continue;
             }
@@ -218,15 +237,18 @@ fn window(
     Ok((time("since", since)?, time("until", until)?))
 }
 
-/// The `WHERE` of a tool call tally or listing over `tool_calls c`, over
-/// parameters 1 to 5: tool, model, kind of session, since and until. The
-/// kind is the session name's, as [`crate::session_kind`] reads it.
+/// The session row of a tool call `c`, as `s`, for its role.
+const CALL_SESSION: &str = "LEFT JOIN sessions s ON s.run_id = c.run_id AND s.name = c.session";
+
+/// The role of the session that made a tool call `c`, over
+/// [`CALL_SESSION`]. A call whose session has no row counts as a lane's.
+const CALL_ROLE: &str = "COALESCE(s.role, 'lane')";
+
+/// The `WHERE` of a tool call tally or listing over `tool_calls c` and
+/// [`CALL_SESSION`], over parameters 1 to 5: tool, model, session role,
+/// since and until.
 const CALL_FILTER: &str = "($1::text IS NULL OR c.tool = $1) AND ($2::text IS NULL OR c.model = $2)
-     AND ($3::text IS NULL OR ($3 = 'check' AND c.session LIKE 'check-%')
-          OR ($3 = c.session AND c.session IN ('planner', 'address', 'reviewer'))
-          OR ($3 = 'executor' AND c.session IN ('executor', 'fixer'))
-          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%'
-              AND c.session NOT IN ('planner', 'address', 'reviewer', 'executor', 'fixer')))
+     AND ($3::text IS NULL OR COALESCE(s.role, 'lane') = $3)
      AND ($4::timestamptz IS NULL OR c.at >= $4)
      AND ($5::timestamptz IS NULL OR c.at < $5)";
 
@@ -490,18 +512,18 @@ impl RunStore for PgStore {
         Ok(changed == 1)
     }
 
-    async fn drop_running_lanes(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
+    async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
         self.client()
             .await?
             .execute(
-                "UPDATE lanes SET status = $2, finished_at = $3, error = $4
+                "UPDATE sessions SET status = $2, finished_at = $3, error = $4
                  WHERE run_id = $1 AND status = $5",
                 &[
                     &run.as_str(),
-                    &LaneStatus::DidNotFinish.as_str(),
+                    &SessionStatus::DidNotFinish.as_str(),
                     &now(),
                     &reason,
-                    &LaneStatus::Running.as_str(),
+                    &SessionStatus::Running.as_str(),
                 ],
             )
             .await?;
@@ -561,10 +583,10 @@ impl RunStore for PgStore {
         Ok(merge_days(runs, findings, drafts))
     }
 
-    async fn lanes_of(
+    async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, LaneStatus)>, StoreError> {
+    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
@@ -573,33 +595,33 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT run_id, name, status FROM lanes WHERE run_id = ANY($1) ORDER BY run_id, name",
+                "SELECT run_id, name, status FROM sessions WHERE run_id = ANY($1) ORDER BY run_id, name",
                 &[&ids],
             )
             .await?
             .iter()
             .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
             .collect::<Result<Vec<_>, StoreError>>()?;
-        lane_dots(rows)
+        session_dots(rows)
     }
 
-    async fn lane_endings(
+    async fn session_endings(
         &self,
         since: Option<OffsetDateTime>,
         reviews: u32,
-    ) -> Result<Vec<LaneEnding>, StoreError> {
-        let reviews = i64::from(reviews.min(MOST_LANE_REVIEWS));
+    ) -> Result<Vec<SessionEnding>, StoreError> {
+        let reviews = i64::from(reviews.min(MOST_SESSION_REVIEWS));
         let rows = self
             .client()
             .await?
             .query(
-                "SELECT r.id, r.started_at, l.name, l.model, l.status, l.error
+                "SELECT r.id, r.started_at, s.name, s.role, s.model, s.status, s.error
                  FROM (SELECT id, started_at FROM runs
                        WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
                          AND ($1::timestamptz IS NULL OR started_at >= $1)
                        ORDER BY started_at DESC, id DESC LIMIT $2) r
-                 JOIN lanes l ON l.run_id = r.id
-                 ORDER BY r.started_at DESC, r.id DESC, l.name",
+                 JOIN sessions s ON s.run_id = r.id
+                 ORDER BY r.started_at DESC, r.id DESC, s.name",
                 &[&since, &reviews],
             )
             .await?
@@ -612,10 +634,11 @@ impl RunStore for PgStore {
                     row.try_get(3)?,
                     row.try_get(4)?,
                     row.try_get(5)?,
+                    row.try_get(6)?,
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
-        lane_endings(rows)
+        session_endings(rows)
     }
 
     async fn stages_of(
@@ -708,16 +731,23 @@ impl RunStore for PgStore {
         stage_records(rows)
     }
 
-    async fn start_lane(&self, run: &RunId, name: &str, model: &str) -> Result<(), StoreError> {
+    async fn start_session(
+        &self,
+        run: &RunId,
+        name: &str,
+        role: SessionRole,
+        model: &str,
+    ) -> Result<(), StoreError> {
         self.client()
             .await?
             .execute(
-                "INSERT INTO lanes (run_id, name, model, status, started_at) VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO sessions (run_id, name, role, model, status, started_at) VALUES ($1, $2, $3, $4, $5, $6)",
                 &[
                     &run.as_str(),
                     &name,
+                    &role.as_str(),
                     &model,
-                    &LaneStatus::Running.as_str(),
+                    &SessionStatus::Running.as_str(),
                     &now(),
                 ],
             )
@@ -725,11 +755,11 @@ impl RunStore for PgStore {
         Ok(())
     }
 
-    async fn finish_lane(
+    async fn finish_session(
         &self,
         run: &RunId,
         name: &str,
-        status: LaneStatus,
+        status: SessionStatus,
         turns: u64,
         tokens: TokenUsage,
         error: Option<&str>,
@@ -739,7 +769,7 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .execute(
-                "UPDATE lanes SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8,
+                "UPDATE sessions SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8,
                  cache_read_tokens = $9, cache_write_tokens = $10
                  WHERE run_id = $1 AND name = $2",
                 &[
@@ -759,31 +789,27 @@ impl RunStore for PgStore {
         Ok(())
     }
 
-    async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
+    async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
         let rows = self
             .client()
             .await?
             .query(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens FROM lanes WHERE run_id = $1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role FROM sessions WHERE run_id = $1 ORDER BY name",
                 &[&run.as_str()],
             )
             .await?;
         rows.iter()
             .map(|row| {
-                let status: String = row.try_get(2)?;
-                let status = LaneStatus::parse(&status).ok_or(StoreError::Corrupt {
-                    column: "lanes.status",
-                    value: status,
-                })?;
-                Ok(LaneRecord {
+                Ok(SessionRecord {
                     name: row.try_get(0)?,
+                    role: session_role(row.try_get(11)?)?,
                     model: row.try_get(1)?,
-                    status,
-                    turns: to_u64("lanes.turns", row.try_get(3)?)?,
-                    input_tokens: to_u64("lanes.input_tokens", row.try_get(4)?)?,
-                    output_tokens: to_u64("lanes.output_tokens", row.try_get(5)?)?,
-                    cache_read_tokens: to_u64("lanes.cache_read_tokens", row.try_get(9)?)?,
-                    cache_write_tokens: to_u64("lanes.cache_write_tokens", row.try_get(10)?)?,
+                    status: session_status(row.try_get(2)?)?,
+                    turns: to_u64("sessions.turns", row.try_get(3)?)?,
+                    input_tokens: to_u64("sessions.input_tokens", row.try_get(4)?)?,
+                    output_tokens: to_u64("sessions.output_tokens", row.try_get(5)?)?,
+                    cache_read_tokens: to_u64("sessions.cache_read_tokens", row.try_get(9)?)?,
+                    cache_write_tokens: to_u64("sessions.cache_write_tokens", row.try_get(10)?)?,
                     error: row.try_get(6)?,
                     started_at: text(row.try_get(7)?),
                     finished_at: row.try_get::<_, Option<OffsetDateTime>>(8)?.map(text),
@@ -795,7 +821,7 @@ impl RunStore for PgStore {
     async fn record_finding(
         &self,
         run: &RunId,
-        lane: &str,
+        session: &str,
         path: &str,
         line_number: u32,
         comment_id: &str,
@@ -804,10 +830,10 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .execute(
-                "INSERT INTO findings (run_id, lane, path, line, comment_id, action, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO findings (run_id, session, path, line, comment_id, action, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 &[
                     &run.as_str(),
-                    &lane,
+                    &session,
                     &path,
                     &i64::from(line_number),
                     &comment_id,
@@ -824,11 +850,11 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .execute(
-                "INSERT INTO drafts (run_id, draft, lane, model, kind, path, line, target, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
+                "INSERT INTO drafts (run_id, draft, session, model, kind, path, line, target, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
                 &[
                     &run.as_str(),
                     &draft.draft,
-                    &draft.lane,
+                    &draft.session,
                     &draft.model,
                     &draft.kind,
                     &draft.path,
@@ -873,7 +899,7 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT created_at, draft, lane, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = $1 ORDER BY id",
+                "SELECT created_at, draft, session, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = $1 ORDER BY id",
                 &[&run.as_str()],
             )
             .await?;
@@ -898,7 +924,7 @@ impl RunStore for PgStore {
                 Ok(DraftRecord {
                     at: text(row.try_get(0)?),
                     draft: row.try_get(1)?,
-                    lane: row.try_get(2)?,
+                    session: row.try_get(2)?,
                     model: row.try_get(3)?,
                     kind: row.try_get(4)?,
                     path: row.try_get(5)?,
@@ -1059,23 +1085,18 @@ impl RunStore for PgStore {
 
     async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError> {
         let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let role = filter.role.map(SessionRole::as_str);
         let rows = self
             .client()
             .await?
             .query(
                 &format!(
-                    "SELECT c.model, c.session, c.tool, c.outcome, COUNT(*),
+                    "SELECT c.model, {CALL_ROLE}, c.tool, c.outcome, COUNT(*),
                             COALESCE(SUM(c.elapsed_ms), 0)::BIGINT
-                     FROM tool_calls c WHERE {CALL_FILTER}
-                     GROUP BY c.model, c.session, c.tool, c.outcome"
+                     FROM tool_calls c {CALL_SESSION} WHERE {CALL_FILTER}
+                     GROUP BY c.model, 2, c.tool, c.outcome"
                 ),
-                &[
-                    &filter.tool,
-                    &filter.model,
-                    &filter.session_kind,
-                    &since,
-                    &until,
-                ],
+                &[&filter.tool, &filter.model, &role, &since, &until],
             )
             .await?;
         let number = |n: i64| u64::try_from(n).unwrap_or_default();
@@ -1101,6 +1122,7 @@ impl RunStore for PgStore {
         page: Page,
     ) -> Result<Vec<ToolCallListing>, StoreError> {
         let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
+        let role = filter.role.map(SessionRole::as_str);
         let outcome = OutcomeFilter::param(filter.outcome.as_ref());
         let before_at = filter
             .before
@@ -1119,7 +1141,7 @@ impl RunStore for PgStore {
                             EXISTS (SELECT 1 FROM transcripts t
                                     WHERE t.run_id = c.run_id AND t.session = c.session),
                             r.kind
-                     FROM tool_calls c JOIN runs r ON r.id = c.run_id
+                     FROM tool_calls c JOIN runs r ON r.id = c.run_id {CALL_SESSION}
                      WHERE {CALL_FILTER}
                        AND ($6::text IS NULL OR ($6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = $6)
                        AND ($7::timestamptz IS NULL OR c.at < $7 OR (c.at = $7 AND c.id < $8::bigint))
@@ -1128,7 +1150,7 @@ impl RunStore for PgStore {
                 &[
                     &filter.tool,
                     &filter.model,
-                    &filter.session_kind,
+                    &role,
                     &since,
                     &until,
                     &outcome,
@@ -1186,7 +1208,7 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT created_at, lane, path, line, comment_id, action FROM findings WHERE run_id = $1 ORDER BY id",
+                "SELECT created_at, session, path, line, comment_id, action FROM findings WHERE run_id = $1 ORDER BY id",
                 &[&run.as_str()],
             )
             .await?;
@@ -1195,7 +1217,7 @@ impl RunStore for PgStore {
                 let line: i64 = row.try_get(3)?;
                 Ok(FindingRecord {
                     at: text(row.try_get(0)?),
-                    lane: row.try_get(1)?,
+                    session: row.try_get(1)?,
                     path: row.try_get(2)?,
                     line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
                         column: "findings.line",

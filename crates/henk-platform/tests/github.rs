@@ -15,7 +15,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
-use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult, ReviewOutcome};
+use henk_domain::review::{CommitSha, ReviewOutcome, SessionName, SessionOutcome, SessionResult};
 use henk_domain::run::RunId;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::{PlatformWriter as _, ReviewTarget};
@@ -154,9 +154,9 @@ async fn review_lifecycle_opens_the_check_posts_a_comment_and_closes_it() {
         .await;
     let outcome = ReviewOutcome {
         commit: commit.clone(),
-        lanes: vec![LaneResult {
-            lane: LaneName::new("a"),
-            outcome: LaneOutcome::Finished,
+        sessions: vec![SessionResult {
+            session: SessionName::new("a"),
+            outcome: SessionOutcome::Finished,
         }],
         open_findings: 1,
         nothing_to_review: false,
