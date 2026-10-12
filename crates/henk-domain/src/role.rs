@@ -163,6 +163,28 @@ impl Role {
         Ok(configured.to_vec())
     }
 
+    /// The handoff tools the role needs in the review loop: without them
+    /// the reviewer cannot hand over a finding or end its round, and the
+    /// executor cannot read the findings or give a verdict. The planner
+    /// has none.
+    #[must_use]
+    pub fn handoff(self) -> &'static [&'static str] {
+        match self {
+            Self::Planner => &[],
+            Self::Reviewer => &["report_finding", "finish_round"],
+            Self::Executor => &["list_findings", "give_verdict"],
+        }
+    }
+
+    /// The first handoff tool of the role's that `granted` leaves out.
+    #[must_use]
+    pub fn missing_handoff(self, granted: &[String]) -> Option<&'static str> {
+        self.handoff()
+            .iter()
+            .copied()
+            .find(|tool| !granted.iter().any(|g| g == tool))
+    }
+
     /// Whether these granted tools reach the web.
     #[must_use]
     pub fn reaches_web(granted: &[String]) -> bool {
@@ -294,6 +316,26 @@ mod tests {
                 .to_string(),
             "[roles.reviewer] tools: the reviewer may not have web_fetch"
         );
+    }
+
+    #[test]
+    fn the_loop_roles_keep_their_side_of_the_handoff() {
+        for role in Role::ALL {
+            assert_eq!(role.missing_handoff(&role.default_tools()), None, "{role}");
+            assert!(
+                role.handoff().iter().all(|tool| role.allows(tool)),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            Role::Reviewer.missing_handoff(&tools(&["read_file", "report_finding"])),
+            Some("finish_round")
+        );
+        assert_eq!(
+            Role::Executor.missing_handoff(&tools(&["edit_file", "give_verdict"])),
+            Some("list_findings")
+        );
+        assert_eq!(Role::Planner.missing_handoff(&[]), None);
     }
 
     #[test]
