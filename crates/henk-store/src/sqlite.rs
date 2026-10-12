@@ -66,6 +66,9 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/015_lane_cache.sql")),
         M::up(include_str!("../migrations/sqlite/016_sessions.sql")),
         M::up(include_str!("../migrations/sqlite/017_rounds.sql")),
+        M::up(include_str!(
+            "../migrations/sqlite/018_reasoning_tokens.sql"
+        )),
     ])
 }
 
@@ -402,7 +405,7 @@ impl RunStore for SqliteStore {
         self.with(|c| {
             c.execute(
                 "UPDATE sessions SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8,
-                 cache_read_tokens = ?9, cache_write_tokens = ?10
+                 cache_read_tokens = ?9, cache_write_tokens = ?10, reasoning_tokens = ?11
                  WHERE run_id = ?1 AND name = ?2",
                 params![
                     run.as_str(),
@@ -415,6 +418,7 @@ impl RunStore for SqliteStore {
                     error,
                     count(tokens.cache_read),
                     count(tokens.cache_write),
+                    count(tokens.reasoning),
                 ],
             )?;
             Ok(())
@@ -424,7 +428,7 @@ impl RunStore for SqliteStore {
     async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role FROM sessions WHERE run_id = ?1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role, reasoning_tokens FROM sessions WHERE run_id = ?1 ORDER BY name",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok((
@@ -440,6 +444,7 @@ impl RunStore for SqliteStore {
                     row.get::<_, i64>(9)?,
                     row.get::<_, i64>(10)?,
                     row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             })?;
             let mut sessions = Vec::new();
@@ -457,6 +462,7 @@ impl RunStore for SqliteStore {
                     cache_read,
                     cache_write,
                     role,
+                    reasoning,
                 ) = row?;
                 sessions.push(SessionRecord {
                     name,
@@ -468,6 +474,7 @@ impl RunStore for SqliteStore {
                     output_tokens: to_u64("sessions.output_tokens", output_tokens)?,
                     cache_read_tokens: to_u64("sessions.cache_read_tokens", cache_read)?,
                     cache_write_tokens: to_u64("sessions.cache_write_tokens", cache_write)?,
+                    reasoning_tokens: to_u64("sessions.reasoning_tokens", reasoning)?,
                     error,
                     started_at,
                     finished_at,

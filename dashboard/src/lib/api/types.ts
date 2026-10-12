@@ -631,6 +631,10 @@ cache_read_tokens: number,
  */
 cache_write_tokens: number, 
 /**
+ * Of `output_tokens`, spent reasoning before answering (#365).
+ */
+reasoning_tokens: number, 
+/**
  * Why it did not finish.
  */
 error: string | null, 

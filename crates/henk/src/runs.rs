@@ -261,6 +261,16 @@ pub fn cache_text(session: &SessionRecord) -> String {
     )
 }
 
+/// What of a session's output went to reasoning (#365): empty when the
+/// provider reported none.
+#[must_use]
+pub fn reasoning_text(session: &SessionRecord) -> String {
+    if session.reasoning_tokens == 0 {
+        return String::new();
+    }
+    format!("  of which reasoning {}", session.reasoning_tokens)
+}
+
 /// `read` of `prompt` as a whole percentage, rounded down.
 fn hit_percent(read: u64, prompt: u64) -> u64 {
     read.saturating_mul(100).checked_div(prompt).unwrap_or(0)
@@ -417,7 +427,7 @@ pub fn render(
             session.input_tokens,
             session.output_tokens
         );
-        let _ = write!(out, "{}", cache_text(session));
+        let _ = write!(out, "{}{}", cache_text(session), reasoning_text(session));
         match &session.error {
             Some(error) => {
                 let _ = writeln!(out, "  {error}");
@@ -520,6 +530,7 @@ mod tests {
             output_tokens: 300,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            reasoning_tokens: 0,
             error: None,
             started_at: "t0".into(),
             finished_at: Some("t1".into()),
@@ -531,6 +542,28 @@ mod tests {
             cache_text(&session),
             "  cache read 8150 written 1200 (81% hit)"
         );
+    }
+
+    #[test]
+    fn a_session_line_says_what_went_to_reasoning() {
+        let mut session = SessionRecord {
+            name: "reviewer".into(),
+            role: SessionRole::Reviewer,
+            model: "m".into(),
+            status: SessionStatus::Finished,
+            turns: 4,
+            input_tokens: 10_000,
+            output_tokens: 300,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            error: None,
+            started_at: "t0".into(),
+            finished_at: Some("t1".into()),
+        };
+        assert_eq!(reasoning_text(&session), "", "none reported, nothing said");
+        session.reasoning_tokens = 240;
+        assert_eq!(reasoning_text(&session), "  of which reasoning 240");
     }
 
     #[test]
@@ -577,6 +610,7 @@ mod tests {
             output_tokens: 20,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            reasoning_tokens: 0,
             error: Some("rate limited".into()),
             started_at: "t0".into(),
             finished_at: Some("t1".into()),
