@@ -49,6 +49,7 @@
     'snapshot',
     'run',
     'sessions',
+    'rounds',
     'tool_call',
     'draft',
     'finding',
@@ -376,6 +377,38 @@
     </section>
   {/if}
 
+  {#if d.rounds.length > 0}
+    <section class="panel" aria-labelledby="turns-title">
+      <div class="panel-head">
+        <h2 id="turns-title">Turns</h2>
+        <span class="note">Who was resumed in which round, in order, and with what (#374).</span>
+      </div>
+      <ol class="turns">
+        {#each d.rounds as turn (`${turn.session}/${turn.round}`)}
+          <li class="turn" class:running={turn.ended_at === null}>
+            <div class="turn-head">
+              <span class="round">Round {turn.round}</span>
+              <Role role={turn.role} />
+              <span class="mono">{turn.session}</span>
+              <span class="muted"><Time iso={turn.started_at} /></span>
+              <span class="muted">
+                {#if turn.ended_at === null}<Elapsed since={turn.started_at} />{:else}{turn.turns} {turn.turns === 1 ? 'turn' : 'turns'}{/if}
+              </span>
+              {#if d.transcripts.some((t) => t.session === turn.session)}
+                <a href={href(transcriptPath(d.run.id, turn.session, turn.first_turn))} use:link title="This round in the conversation">turn {turn.first_turn}</a>
+              {/if}
+            </div>
+            <details class="handover">
+              <summary>Handed over</summary>
+              <pre>{turn.handover}</pre>
+              {#if turn.handover_cut}<p class="muted cut">Cut here; the conversation holds all of it.</p>{/if}
+            </details>
+          </li>
+        {/each}
+      </ol>
+    </section>
+  {/if}
+
   {#if selectedSession !== null && selectedSession.status === 'running'}
     {#key selectedSession.name}
       <LiveSession runId={d.run.id} session={selectedSession.name} streamed={streamedCalls} {connect} {loadCalls} />
@@ -607,4 +640,10 @@
   .filter-note { margin: 0; padding: 0 var(--space-4) var(--space-2); color: var(--muted); font-size: 13px; }
   .link { border: 0; background: none; color: var(--accent); padding: 0; min-height: 0; font-size: inherit; }
   .list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .turns { list-style: none; margin: 0; padding: 0; }
+  .turn { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line-soft); }
+  .turn-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-2); }
+  .round { font-weight: 600; min-width: 5.5rem; }
+  .handover summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .handover pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; margin: 4px 0; }
 </style>

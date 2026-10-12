@@ -14,8 +14,8 @@ use axum::http::{Method, Request, StatusCode, header};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, NewRun, RunStatus, SessionRole,
-    SessionStatus, ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, InboundEvent, NewRun, RoundRecord, RunStatus,
+    SessionRole, SessionStatus, ToolCallRecord, TranscriptRecord,
 };
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
@@ -656,6 +656,7 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
         "by name, each with its history role"
     );
     assert!(detail.get("lanes").is_none(), "no lane field is left");
+    assert_eq!(detail["rounds"], json!([]), "rounds came with #374");
     assert_eq!(detail["drafts"][0]["session"], "lane-a");
     assert_eq!(detail["findings"][0]["session"], "lane-a");
     let decided: Vec<(&str, &str)> = detail["drafts"]
@@ -698,6 +699,7 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
         &store.sessions(&run).await.unwrap(),
+        &store.rounds(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
@@ -718,6 +720,116 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     ] {
         assert!(shown.contains(line), "{line}:\n{shown}");
     }
+}
+
+/// A pairing's rounds read in the order they started, each with its role
+/// and what it was handed, cut when long (#374); the run stream announces
+/// a round as it starts.
+#[tokio::test]
+async fn a_pairing_s_rounds_read_in_order_with_what_was_handed_over() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-loop").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "new commits".into(),
+            link: format!("{ORIGIN}/runs/r-loop"),
+        })
+        .await
+        .unwrap();
+    let round =
+        |session: &str, role, round, at: &str, first_turn, handover: &str, len| RoundRecord {
+            session: session.into(),
+            role,
+            round,
+            started_at: at.into(),
+            ended_at: None,
+            first_turn,
+            turns: 0,
+            handover: handover.into(),
+            handover_len: len,
+        };
+    for record in [
+        round(
+            "reviewer",
+            SessionRole::Reviewer,
+            1,
+            "2026-10-07T10:00:00Z",
+            1,
+            "Review this.",
+            12,
+        ),
+        round(
+            "executor",
+            SessionRole::Executor,
+            1,
+            "2026-10-07T10:01:00Z",
+            1,
+            "Round 1. The findings",
+            9000,
+        ),
+    ] {
+        store.start_round(&run, &record).await.unwrap();
+    }
+    store.end_round(&run, "reviewer", 1, 5).await.unwrap();
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-loop", &cookie)
+        .await
+        .json();
+    let rounds: Vec<(&str, &str, u64, u64, bool, bool)> = detail["rounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["session"].as_str().unwrap(),
+                r["role"].as_str().unwrap(),
+                r["round"].as_u64().unwrap(),
+                r["turns"].as_u64().unwrap(),
+                r["handover_cut"].as_bool().unwrap(),
+                r["ended_at"].is_null(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rounds,
+        [
+            ("reviewer", "reviewer", 1, 5, false, false),
+            ("executor", "executor", 1, 0, true, true),
+        ]
+    );
+    assert_eq!(detail["rounds"][1]["handover"], "Round 1. The findings");
+
+    let (live, _alive) = live_run(&f, "r-live").await;
+    let mut events = stream(&f, "/dashboard/api/v1/runs/r-live/stream", &cookie, None).await;
+    assert_eq!(events.next().await.unwrap().event, "snapshot");
+    store
+        .start_round(
+            &live,
+            &round(
+                "reviewer",
+                SessionRole::Reviewer,
+                1,
+                "",
+                1,
+                "Review this.",
+                12,
+            ),
+        )
+        .await
+        .unwrap();
+    let next = events.next().await.unwrap();
+    assert_eq!(next.event, "rounds");
+    assert_eq!(next.data[0]["role"], "reviewer");
+    assert_eq!(next.data[0]["ended_at"], Value::Null);
 }
 
 /// A review loop run from before #323 named its executor `fixer`: its
@@ -845,6 +957,7 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
         &store.sessions(&run).await.unwrap(),
+        &store.rounds(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
@@ -951,6 +1064,7 @@ async fn an_address_run_from_before_its_removal_still_reads_in_full() {
     let shown = crate::runs::render(
         &store.run(&run).await.unwrap().unwrap(),
         &store.sessions(&run).await.unwrap(),
+        &store.rounds(&run).await.unwrap(),
         &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
         &store.transcripts(&run).await.unwrap(),
         &store.drafts(&run).await.unwrap(),
@@ -1802,6 +1916,7 @@ fn api_types_are_current() {
         types::Stage::decl(&cfg),
         types::Heartbeat::decl(&cfg),
         types::Session::decl(&cfg),
+        types::Round::decl(&cfg),
         types::Finding::decl(&cfg),
         types::Draft::decl(&cfg),
         types::DraftDecision::decl(&cfg),

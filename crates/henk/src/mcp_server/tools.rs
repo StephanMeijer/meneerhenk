@@ -317,7 +317,7 @@ impl HenkMcp {
     }
 
     #[tool(
-        description = "One run in full: status, sessions with their roles, stages, findings, drafts and their verdicts, tool usage, timeline, the requests that started it, and its link."
+        description = "One run in full: status, sessions with their roles, the rounds of a pairing in order with what each role was handed, stages, findings, drafts and their verdicts, tool usage, timeline, the requests that started it, and its link."
     )]
     async fn get_run(
         &self,

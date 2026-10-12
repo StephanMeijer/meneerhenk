@@ -212,7 +212,7 @@ count: number,
  */
 slots: Slots, };
 
-export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "sessions", "data": Array<Session> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
+export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "sessions", "data": Array<Session> } | { "kind": "rounds", "data": Array<Round> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
 export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots };
 
@@ -242,6 +242,12 @@ heartbeat_at: string | null,
  * have review lanes, checks and an address run's session.
  */
 sessions: Array<Session>, 
+/**
+ * A pairing's rounds in the order they started (#374): which role
+ * was resumed in which round, and with what. Empty for runs without
+ * a pairing and for runs from before #374.
+ */
+rounds: Array<Round>, 
 /**
  * What happened to findings on the platform.
  */
@@ -641,6 +647,46 @@ started_at: string,
  * RFC 3339: when it ended, once it has.
  */
 finished_at: string | null, };
+
+export type Round = { 
+/**
+ * The session: `reviewer`, `executor`, `planner`.
+ */
+session: string, 
+/**
+ * Its role: `planner`, `reviewer` or `executor`.
+ */
+role: string, 
+/**
+ * This session's round, from 1.
+ */
+round: number, 
+/**
+ * RFC 3339: when the role was resumed.
+ */
+started_at: string, 
+/**
+ * RFC 3339: when its round ended; `null` while it runs.
+ */
+ended_at: string | null, 
+/**
+ * Its first model turn in the session's transcript: the
+ * `#turn-<n>` a link to it lands on.
+ */
+first_turn: number, 
+/**
+ * Model turns it took; 0 while it runs.
+ */
+turns: number, 
+/**
+ * The message it was handed, perhaps cut; the transcript holds all of
+ * it.
+ */
+handover: string, 
+/**
+ * Whether `handover` was cut.
+ */
+handover_cut: boolean, };
 
 export type Finding = { 
 /**

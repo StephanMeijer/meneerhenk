@@ -29,7 +29,7 @@ use henk_domain::run::RunId;
 use henk_domain::scope::{self, Scope};
 use henk_llm::{CacheTtl, ChatMessage, ModelClient, Usage};
 use henk_mcp::{McpError, McpSession, NameMap};
-use henk_store::{RunStore, SessionStatus, TokenUsage, ToolCallRecord, ToolUsage};
+use henk_store::{RoundRecord, RunStore, SessionStatus, TokenUsage, ToolCallRecord, ToolUsage};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -271,6 +271,9 @@ pub struct ResumableSession {
     dropped: Vec<ChatMessage>,
     /// How many rounds [`ResumableSession::compact_rounds`] dropped so far.
     rounds_dropped: usize,
+    /// How many rounds it was resumed for, each recorded with the run
+    /// (#374).
+    rounds_run: u32,
     turns: u32,
     usage: Usage,
     status: Option<(SessionStatus, Option<String>)>,
@@ -375,6 +378,7 @@ impl ResumableSession {
             round_starts: Vec::new(),
             dropped: Vec::new(),
             rounds_dropped: 0,
+            rounds_run: 0,
             turns: 0,
             usage: Usage::default(),
             status: None,
@@ -480,6 +484,23 @@ impl ResumableSession {
         {
             tracing::warn!(%error, "could not record the session start");
         }
+        self.rounds_run += 1;
+        let round = self.rounds_run;
+        let handover = message_text(&message);
+        let record = RoundRecord {
+            session: self.name.clone(),
+            role: self.role.into(),
+            round,
+            started_at: String::new(),
+            ended_at: None,
+            first_turn: self.turns.saturating_add(1),
+            turns: 0,
+            handover: cut_at(&handover, MOST_HANDOVER_BYTES).to_owned(),
+            handover_len: u64::try_from(handover.len()).unwrap_or(u64::MAX),
+        };
+        if let Err(error) = store.start_round(run, &record).await {
+            tracing::warn!(%error, "could not record the round start");
+        }
         // The earlier messages are already in the live view.
         let seen = self.messages.len();
         self.round_starts.push(seen);
@@ -514,6 +535,9 @@ impl ResumableSession {
         }
         end_events(store, run, &self.name, &outcome, status.1.is_some()).await;
         let round_turns = outcome.turns;
+        if let Err(error) = store.end_round(run, &self.name, round, round_turns).await {
+            tracing::warn!(%error, "could not record the round end");
+        }
         self.turns = self.turns.saturating_add(round_turns);
         self.usage.add(&outcome.usage);
         outcome.turns = self.turns;
@@ -697,10 +721,7 @@ fn call_record(
     else {
         return None;
     };
-    let mut end = arguments.len().min(cap);
-    while !arguments.is_char_boundary(end) {
-        end -= 1;
-    }
+    let kept = cut_at(&arguments, cap).len();
     Some(ToolCallRecord {
         at: String::new(),
         session: session.to_owned(),
@@ -709,7 +730,7 @@ fn call_record(
         tool: name,
         origin,
         outcome: outcome.as_str().to_owned(),
-        arguments: arguments.get(..end).unwrap_or_default().to_owned(),
+        arguments: arguments.get(..kept).unwrap_or_default().to_owned(),
         arguments_len: u64::try_from(arguments.len()).unwrap_or(u64::MAX),
         result_chars: u64::try_from(result_chars).unwrap_or(u64::MAX),
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
@@ -741,6 +762,32 @@ fn usage_line(usage: &[ToolUsage]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The most of a round's handover the run record keeps (#374); the
+/// transcript holds all of it.
+const MOST_HANDOVER_BYTES: usize = 8 * 1024;
+
+/// `text` cut to at most `cap` bytes, at a character boundary.
+fn cut_at(text: &str, cap: usize) -> &str {
+    let mut end = text.len().min(cap);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or_default()
+}
+
+/// The text of a message, its text blocks one after another.
+fn message_text(message: &ChatMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            henk_llm::Block::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The timeline line for one firing of the repeat guard.
@@ -1093,6 +1140,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_long_handover_is_cut_at_a_character_boundary() {
+        let long = "é".repeat(MOST_HANDOVER_BYTES);
+        let kept = cut_at(&long, MOST_HANDOVER_BYTES);
+        assert_eq!(kept.len(), MOST_HANDOVER_BYTES);
+        assert_eq!(cut_at("aé", 2), "a", "not in the middle of é");
+        let message = ChatMessage {
+            role: henk_llm::Role::User,
+            blocks: vec![
+                henk_llm::Block::Text("Round 2.".into()),
+                henk_llm::Block::Text("The diff.".into()),
+            ],
+        };
+        assert_eq!(message_text(&message), "Round 2.\n\nThe diff.");
+    }
+
     #[tokio::test]
     async fn a_resumed_session_sees_its_earlier_rounds_and_keeps_one_row() {
         let store = store_with_run().await;
@@ -1136,6 +1199,20 @@ mod tests {
             "the second round goes on from the first"
         );
         assert_eq!(session.messages().len(), 4);
+
+        let rounds = store.rounds(&run_id()).await.unwrap();
+        assert_eq!(
+            rounds
+                .iter()
+                .map(|r| (r.round, r.role, r.first_turn, r.turns, r.handover.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (1, SessionRole::Reviewer, 1, 1, "go"),
+                (2, SessionRole::Reviewer, 2, 1, "again"),
+            ],
+            "each round is on the run record with what it was handed (#374)"
+        );
+        assert!(rounds.iter().all(|r| r.ended_at.is_some()));
 
         session.finish(&store, &run_id()).await;
         let sessions = store.sessions(&run_id()).await.unwrap();

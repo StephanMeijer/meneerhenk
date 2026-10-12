@@ -1648,6 +1648,7 @@ model = "r"
         crate::runs::render(
             &store.run(run).await.unwrap().unwrap(),
             &store.sessions(run).await.unwrap(),
+            &store.rounds(run).await.unwrap(),
             &henk_store::ToolUsage::from_calls(&store.tool_calls(run).await.unwrap()),
             &store.transcripts(run).await.unwrap(),
             &store.drafts(run).await.unwrap(),

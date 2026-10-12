@@ -17,9 +17,9 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use super::types::{
-    Cancelled, Draft, EventSummary, Finding, Page, RunCount, RunDetail, RunEvent, RunSummary,
-    Session, SessionDot, Stage, StageDot, StartRequest, Started, ToolCall, ToolUsageRow,
-    Transcript, TranscriptRef,
+    Cancelled, Draft, EventSummary, Finding, Page, Round, RunCount, RunDetail, RunEvent,
+    RunSummary, Session, SessionDot, Stage, StageDot, StartRequest, Started, ToolCall,
+    ToolUsageRow, Transcript, TranscriptRef,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::app::App;
@@ -220,6 +220,12 @@ pub(crate) async fn run_detail(app: &App, run: &RunRecord) -> Result<RunDetail, 
         check_id: run.check_id.clone(),
         heartbeat_at: run.heartbeat_at.clone(),
         sessions,
+        rounds: store
+            .rounds(&run.id)
+            .await?
+            .iter()
+            .map(Round::from)
+            .collect(),
         findings: store
             .findings(&run.id)
             .await?

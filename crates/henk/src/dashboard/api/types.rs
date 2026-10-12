@@ -10,7 +10,8 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::RunKind;
 use henk_store::{
     DraftRecord, EventRecord, EventWithOutcomes, FindingRecord, InboundEvent, OutcomeRecord,
-    RunRecord, SessionRecord, StageRecord, ToolCallRecord, ToolUsage, TranscriptSummary,
+    RoundRecord, RunRecord, SessionRecord, StageRecord, ToolCallRecord, ToolUsage,
+    TranscriptSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -332,6 +333,10 @@ pub struct RunDetail {
     /// Its sessions: the reviewer, the executor, the planner; older runs
     /// have review lanes, checks and an address run's session.
     pub sessions: Vec<Session>,
+    /// A pairing's rounds in the order they started (#374): which role
+    /// was resumed in which round, and with what. Empty for runs without
+    /// a pairing and for runs from before #374.
+    pub rounds: Vec<Round>,
     /// What happened to findings on the platform.
     pub findings: Vec<Finding>,
     /// A review's drafts and what became of each (#189).
@@ -427,6 +432,8 @@ pub enum RunMessage {
     Run(RunUpdate),
     /// A session started or ended: every session of the run.
     Sessions(Vec<Session>),
+    /// A round of a pairing started or ended: every round of the run.
+    Rounds(Vec<Round>),
     /// A session called a tool.
     ToolCall(ToolCall),
     /// A session queued a draft, or a verdict decided one.
@@ -973,6 +980,53 @@ impl RunSummary {
             loop_rounds: run.loop_rounds,
             sessions: Vec::new(),
             stages: Vec::new(),
+        }
+    }
+}
+
+/// One round of a session in a pairing (#374).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`round` is the round's number, as the API names it"
+)]
+pub struct Round {
+    /// The session: `reviewer`, `executor`, `planner`.
+    pub session: String,
+    /// Its role: `planner`, `reviewer` or `executor`.
+    pub role: String,
+    /// This session's round, from 1.
+    pub round: u32,
+    /// RFC 3339: when the role was resumed.
+    pub started_at: String,
+    /// RFC 3339: when its round ended; `null` while it runs.
+    pub ended_at: Option<String>,
+    /// Its first model turn in the session's transcript: the
+    /// `#turn-<n>` a link to it lands on.
+    pub first_turn: u32,
+    /// Model turns it took; 0 while it runs.
+    pub turns: u32,
+    /// The message it was handed, perhaps cut; the transcript holds all of
+    /// it.
+    pub handover: String,
+    /// Whether `handover` was cut.
+    pub handover_cut: bool,
+}
+
+impl From<&RoundRecord> for Round {
+    fn from(round: &RoundRecord) -> Self {
+        Self {
+            session: round.session.clone(),
+            role: round.role.as_str().to_owned(),
+            round: round.round,
+            started_at: round.started_at.clone(),
+            ended_at: round.ended_at.clone(),
+            first_turn: round.first_turn,
+            turns: round.turns,
+            handover: round.handover.clone(),
+            handover_cut: u64::try_from(round.handover.len()).unwrap_or(u64::MAX)
+                < round.handover_len,
         }
     }
 }

@@ -61,6 +61,8 @@ export function applyRun(detail: RunDetail, message: RunMessage): RunDetail {
             null,
         })),
       };
+    case 'rounds':
+      return { ...detail, rounds: message.data };
     case 'tool_call':
       return addCall(detail, message.data);
     case 'draft': {

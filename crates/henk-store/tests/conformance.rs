@@ -18,9 +18,9 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction,
     InboundEvent, LOOP_FINDING_KIND, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
-    PLAN_POINT_KIND, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord, RunStatus, RunStore,
-    SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite, TokenUsage,
-    ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
+    PLAN_POINT_KIND, Page, PgStore, PruneCounts, RoundRecord, RunFilter, RunKey, RunRecord,
+    RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite,
+    TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -108,6 +108,7 @@ macro_rules! for_each_scenario {
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
             a_session_s_calls_count_under_its_stored_role,
             a_session_keeps_what_the_cache_served,
+            a_pairing_s_rounds_come_back_in_the_order_they_started,
         );
     };
 }
@@ -1120,6 +1121,81 @@ async fn a_superseded_run_names_the_run_that_replaced_it(store: &dyn RunStore) {
         ["r-old"]
     );
     assert_eq!(listed[0].superseded_by, Some(id("r-new")));
+}
+
+/// #374: each round of a pairing is kept with its role, its handover and
+/// its turns, in the order the rounds started.
+async fn a_pairing_s_rounds_come_back_in_the_order_they_started(store: &dyn RunStore) {
+    store.create_run(&new_run("r-rounds")).await.unwrap();
+    store.create_run(&new_run("r-none")).await.unwrap();
+    let run = id("r-rounds");
+    let round = |session: &str, role, round, at: &str, first_turn, handover: &str| RoundRecord {
+        session: session.into(),
+        role,
+        round,
+        started_at: at.into(),
+        ended_at: None,
+        first_turn,
+        turns: 0,
+        handover: handover.into(),
+        handover_len: 9000,
+    };
+    // Recorded out of order: they come back in the order they started.
+    for record in [
+        round(
+            "reviewer",
+            SessionRole::Reviewer,
+            2,
+            "2026-10-07T10:02:00.5Z",
+            6,
+            "Round 2.",
+        ),
+        round(
+            "reviewer",
+            SessionRole::Reviewer,
+            1,
+            "2026-10-07T10:00:00Z",
+            1,
+            "Review this.",
+        ),
+        round(
+            "executor",
+            SessionRole::Executor,
+            1,
+            "2026-10-07T10:01:00Z",
+            1,
+            "Round 1. The findings.",
+        ),
+    ] {
+        store.start_round(&run, &record).await.unwrap();
+    }
+    store.end_round(&run, "reviewer", 1, 5).await.unwrap();
+    store.end_round(&run, "executor", 1, 3).await.unwrap();
+
+    let rounds = store.rounds(&run).await.unwrap();
+    assert_eq!(
+        rounds
+            .iter()
+            .map(|r| (r.session.as_str(), r.role, r.round, r.first_turn, r.turns))
+            .collect::<Vec<_>>(),
+        [
+            ("reviewer", SessionRole::Reviewer, 1, 1, 5),
+            ("executor", SessionRole::Executor, 1, 1, 3),
+            ("reviewer", SessionRole::Reviewer, 2, 6, 0),
+        ]
+    );
+    assert!(rounds[0].ended_at.is_some() && rounds[1].ended_at.is_some());
+    assert_eq!(rounds[2].ended_at, None, "still going");
+    assert_eq!(
+        (rounds[1].handover.as_str(), rounds[1].handover_len),
+        ("Round 1. The findings.", 9000)
+    );
+    assert!(
+        OffsetDateTime::parse(&rounds[0].started_at, &Rfc3339).is_ok(),
+        "{}",
+        rounds[0].started_at
+    );
+    assert!(store.rounds(&id("r-none")).await.unwrap().is_empty());
 }
 
 /// #330: a session keeps its cache reads and writes beside its tokens in,

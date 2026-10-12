@@ -12,7 +12,7 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
 use henk_mcp::{McpServerConfig, McpSession as _, RmcpSession};
-use henk_store::{DraftRecord, FindingAction, NewRun, SessionRole, TranscriptRecord};
+use henk_store::{DraftRecord, FindingAction, NewRun, RoundRecord, SessionRole, TranscriptRecord};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 
@@ -166,6 +166,24 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
         .event(&run, "info", "diff: 3 files")
         .await
         .unwrap();
+    henk.app
+        .store
+        .start_round(
+            &run,
+            &RoundRecord {
+                session: "reviewer".into(),
+                role: SessionRole::Reviewer,
+                round: 1,
+                started_at: String::new(),
+                ended_at: None,
+                first_turn: 1,
+                turns: 0,
+                handover: "Review this.".into(),
+                handover_len: 12,
+            },
+        )
+        .await
+        .unwrap();
     let session = client(&henk, READ).await;
 
     let mut names: Vec<String> = session
@@ -203,6 +221,11 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
     let (error, detail, _) = call(&session, "get_run", json!({ "run_id": "r-1" })).await;
     assert!(!error);
     assert_eq!(detail["run"]["repo"], "docspec/app");
+    assert_eq!(
+        detail["rounds"][0]["role"], "reviewer",
+        "a pairing's rounds (#374)"
+    );
+    assert_eq!(detail["rounds"][0]["handover"], "Review this.");
     let (error, _, text) = call(&session, "get_run", json!({ "run_id": "r-404" })).await;
     assert!(error);
     assert_eq!(text, "No such run.");
@@ -270,6 +293,7 @@ async fn get_run_gives_a_lane_era_run_s_sessions_with_their_roles() {
         .collect();
     assert_eq!(sessions, [("check-1", "check"), ("lane-a", "lane")]);
     assert!(detail.get("lanes").is_none(), "{detail}");
+    assert_eq!(detail["rounds"], json!([]), "a lane-era run has no rounds");
     assert_eq!(detail["drafts"][0]["session"], "lane-a");
     assert_eq!(detail["findings"][0]["session"], "lane-a");
 }

@@ -698,6 +698,7 @@ comment for a failure or a cancel, nothing for a shutdown.
 ```mermaid
 erDiagram
     runs ||--o{ sessions : has
+    runs ||--o{ session_rounds : paces
     runs ||--o{ drafts : holds
     runs ||--o{ stages : moves_through
     runs ||--o{ findings : records
@@ -736,6 +737,17 @@ erDiagram
         int cache_read_tokens "of input, from the prompt cache"
         int cache_write_tokens "of input, into it"
         text error
+    }
+    session_rounds {
+        text run_id FK
+        text session
+        text role
+        int round "per session, from 1"
+        text started_at
+        text ended_at
+        int first_turn "in the session's transcript"
+        int turns
+        text handover "what it was resumed with, cut at 8 KiB"
     }
     drafts {
         int id PK
@@ -814,6 +826,11 @@ with the kind `loop_finding`, and the verdict it ended with: `fixed` with the
 commit in `comment_id`, `rejected` or `wont_fix` by the executor, or
 `unsettled` when the loop gave it one. Its `findings` stay empty, since
 nothing is posted. An execution records one `sessions` row for the executor.
+
+Each round of a pairing (a review loop's reviewer and executor, a plan's
+planner and reviewer) is a `session_rounds` row (#374), written when the
+role is resumed and ended when its round ends: the run page lists them in
+order with what each role was handed. One-shot sessions have none.
 
 Each session row says the role that ran it, written when the session starts
 (#324); filters on tool calls and session statistics read that column, not

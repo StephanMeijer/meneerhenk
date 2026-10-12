@@ -155,6 +155,13 @@ One run with everything the run record holds about it:
   `running`, `finished`, `timed_out` (stopped at its time limit) or
   `did_not_finish` (`error` says why), `started_at`, `finished_at`, and
   `last_call_turn`: the turn of its latest tool call;
+- `rounds`: a pairing's rounds in the order they started (#374): each
+  `session` and its `role`, its `round` (from 1, per session),
+  `started_at`, `ended_at` (`null` while it runs), `first_turn` (its first
+  model turn in the session's transcript: the `#turn-<n>` a link lands
+  on), `turns`, and `handover`, the message the role was resumed with,
+  cut at 8 KiB (`handover_cut` says so; the transcript holds all of it).
+  Empty for a run without a pairing and for runs from before #374;
 - `findings`: what was done with a finding comment on the platform, with
   the `session` that wrote it. Only reviews made by lanes have any: a
   review loop posts nothing;
@@ -260,6 +267,7 @@ above; `RunMessage` in `types.ts` is the union.
 | `snapshot` | `RunDetail` | First, and whenever the stream cannot replay what was missed |
 | `run` | `RunUpdate`: the run, summary, error, check id | The run started, ended or got its check |
 | `sessions` | `Session[]`, every session | A session started or ended |
+| `rounds` | `Round[]`, every round | A round of a pairing started or ended |
 | `tool_call` | `ToolCall` | A session called a tool |
 | `draft` | `Draft` | The reviewer reported a finding or raised a point on a plan, or the executor or planner answered it |
 | `finding` | `Finding` | Something was done with a finding comment; only a review by lanes did that |

@@ -16,12 +16,12 @@ use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
     MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RawRun, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
-    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    RawRun, RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days, now,
-    platform_parse, platform_str, session_dots, session_endings, session_role, session_status,
-    stage_dots, stage_records, status_str, to_i64, to_u64,
+    platform_parse, platform_str, round_record, session_dots, session_endings, session_role,
+    session_status, stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -65,6 +65,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/014_loop.sql")),
         M::up(include_str!("../migrations/sqlite/015_lane_cache.sql")),
         M::up(include_str!("../migrations/sqlite/016_sessions.sql")),
+        M::up(include_str!("../migrations/sqlite/017_rounds.sql")),
     ])
 }
 
@@ -631,6 +632,71 @@ impl RunStore for SqliteStore {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
+        let at = if round.started_at.is_empty() {
+            now()
+        } else {
+            round.started_at.clone()
+        };
+        let handover_len = to_i64("session_rounds.handover_len", round.handover_len)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO session_rounds (run_id, session, role, round, started_at, first_turn, handover, handover_len)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    run.as_str(),
+                    round.session,
+                    round.role.as_str(),
+                    round.round,
+                    at,
+                    round.first_turn,
+                    round.handover,
+                    handover_len,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn end_round(
+        &self,
+        run: &RunId,
+        session: &str,
+        round: u32,
+        turns: u32,
+    ) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE session_rounds SET ended_at = ?4, turns = ?5
+                 WHERE run_id = ?1 AND session = ?2 AND round = ?3",
+                params![run.as_str(), session, round, now(), turns],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
+        self.with(|c| {
+            let rows = c
+                .prepare(ROUNDS)?
+                .query_map(params![run.as_str()], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                })?
+                .collect::<Result<Vec<RoundRow>, _>>()?;
+            rows.into_iter().map(round_record).collect()
         })
     }
 
@@ -1384,6 +1450,15 @@ const DAY_DRAFTS: &str = concat!(
     "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
     instant_of!("created_at"),
     " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point') GROUP BY 1"
+);
+
+/// The rounds of a run (#374), over parameter 1, in the order they
+/// started: as instants, not as text (#216).
+const ROUNDS: &str = concat!(
+    "SELECT session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len
+     FROM session_rounds WHERE run_id = ?1 ORDER BY ",
+    instant_of!("started_at"),
+    ", session, round"
 );
 
 /// The session row of a tool call `c`, as `s`, for its role.

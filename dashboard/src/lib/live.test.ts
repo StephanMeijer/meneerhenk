@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LiveMessage, ToolCall } from './api/types';
 import { NO_LOG, applyLive, applyRun, applyRunning, callsOf, connectionAfter } from './live';
-import { draft, reviewStages, runDetail, runSummary, waitingReview } from './testing/fixtures';
+import { draft, loopDetail, reviewStages, runDetail, runSummary, waitingReview } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
   at: '',
@@ -28,6 +28,12 @@ describe('applyRun', () => {
       { session: 'lane-a', tool: 'bash', calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 5 },
     ]);
     expect(d.sessions.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(6);
+  });
+
+  it('takes the rounds of a pairing as the stream sends them (#374)', () => {
+    const d = runDetail('running');
+    const rounds = loopDetail().rounds;
+    expect(applyRun(d, { kind: 'rounds', data: rounds }).rounds).toEqual(rounds);
   });
 
   it('keeps the live turn when the lanes come again without one', () => {

@@ -26,9 +26,9 @@ use tokio::sync::{broadcast, mpsc};
 use super::ApiError;
 use super::runs::{run_detail, run_of};
 use super::types::{
-    Draft, Finding, Heartbeat, Progress, RunDetail, RunEvent, RunMessage, RunSummary, RunUpdate,
-    RunningMessage, RunningSnapshot, Session, SessionDot, Slots, Stage, StageDot, ToolCall,
-    TranscriptRef, WaitingReview,
+    Draft, Finding, Heartbeat, Progress, Round, RunDetail, RunEvent, RunMessage, RunSummary,
+    RunUpdate, RunningMessage, RunningSnapshot, Session, SessionDot, Slots, Stage, StageDot,
+    ToolCall, TranscriptRef, WaitingReview,
 };
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -124,6 +124,7 @@ fn message(dashboard: &Dashboard, change: &Change) -> RunMessage {
         ChangeKind::Sessions(sessions) => {
             RunMessage::Sessions(sessions.iter().map(Session::from).collect())
         }
+        ChangeKind::Rounds(rounds) => RunMessage::Rounds(rounds.iter().map(Round::from).collect()),
         ChangeKind::ToolCall(call) => RunMessage::ToolCall(ToolCall::from(call)),
         ChangeKind::Draft(draft) => RunMessage::Draft(Draft::from(draft)),
         ChangeKind::Finding(finding) => RunMessage::Finding(Finding::from(finding)),

@@ -23,9 +23,9 @@ use henk_domain::run::{EventId, RunId};
 use henk_store::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
-    PruneCounts, RunFilter, RunRecord, RunStatus, RunStore, SessionEnding, SessionRecord,
-    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    PruneCounts, RoundRecord, RunFilter, RunRecord, RunStatus, RunStore, SessionEnding,
+    SessionRecord, SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite,
+    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary,
 };
 use time::OffsetDateTime;
@@ -60,6 +60,9 @@ pub enum ChangeKind {
     Run(RunRecord),
     /// A session started or ended: every session of the run.
     Sessions(Vec<SessionRecord>),
+    /// A round of a pairing started or ended: every round of the run
+    /// (#374).
+    Rounds(Vec<RoundRecord>),
     /// A session called a tool.
     ToolCall(ToolCallRecord),
     /// A session queued a draft, or a verdict decided one.
@@ -278,6 +281,14 @@ impl Announcing {
         match self.inner.sessions(id).await {
             Ok(sessions) => self.feed.announce(id, ChangeKind::Sessions(sessions)),
             Err(error) => warn!(%error, run = %id, "could not read sessions back to announce them"),
+        }
+    }
+
+    async fn announce_rounds(&self, id: &RunId) {
+        let _order = self.read_back.lock().await;
+        match self.inner.rounds(id).await {
+            Ok(rounds) => self.feed.announce(id, ChangeKind::Rounds(rounds)),
+            Err(error) => warn!(%error, run = %id, "could not read rounds back to announce them"),
         }
     }
 }
@@ -559,6 +570,30 @@ impl RunStore for Announcing {
         page: Page,
     ) -> Result<Vec<ToolCallListing>, StoreError> {
         self.inner.list_tool_calls(filter, page).await
+    }
+
+    async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.start_round(run, round).await?;
+        self.announce_rounds(run).await;
+        Ok(())
+    }
+
+    async fn end_round(
+        &self,
+        run: &RunId,
+        session: &str,
+        round: u32,
+        turns: u32,
+    ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.end_round(run, session, round, turns).await?;
+        self.announce_rounds(run).await;
+        Ok(())
+    }
+
+    async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
+        self.inner.rounds(run).await
     }
 
     async fn record_transcript(
@@ -915,6 +950,21 @@ mod tests {
         ) -> Result<Vec<ToolCallListing>, StoreError> {
             self.inner.list_tool_calls(filter, page).await
         }
+        async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
+            self.inner.start_round(run, round).await
+        }
+        async fn end_round(
+            &self,
+            run: &RunId,
+            session: &str,
+            round: u32,
+            turns: u32,
+        ) -> Result<(), StoreError> {
+            self.inner.end_round(run, session, round, turns).await
+        }
+        async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
+            self.inner.rounds(run).await
+        }
         async fn record_transcript(
             &self,
             run: &RunId,
@@ -1257,6 +1307,7 @@ mod tests {
             .map(|c| match c.kind {
                 ChangeKind::Run(_) => "run",
                 ChangeKind::Sessions(_) => "sessions",
+                ChangeKind::Rounds(_) => "rounds",
                 ChangeKind::ToolCall(_) => "tool_call",
                 ChangeKind::Draft(_) => "draft",
                 ChangeKind::Finding(_) => "finding",
