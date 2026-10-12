@@ -8,7 +8,8 @@ pub const PERSONA: &str = include_str!("../prompts/persona.md");
 pub const EXECUTOR_BASH: &str = include_str!("../prompts/executor_bash.md");
 
 /// Appended to the planner's instructions when it has a workspace at the
-/// default branch (#172). `{{branch}}` and `{{commit}}` say which.
+/// default branch (#172). `{{branch}}` and `{{commit}}` say which;
+/// `{{tools}}` is a sentence on the code tools the planner was granted.
 pub const PLAN_WORKSPACE: &str = include_str!("../prompts/plan_workspace.md");
 
 /// Instructions for the planner (§4), who drafts and revises after the
@@ -107,9 +108,8 @@ mod tests {
             assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
         assert!(EXECUTOR_BASH.contains("`bash`") && EXECUTOR_BASH.contains("`mktemp`"));
-        for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {
-            assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
-        }
+        assert!(PLAN_WORKSPACE.contains("{{tools}}"));
+        assert!(PLAN_WORKSPACE.contains("`list_commits`"));
         // The planner's copy is one commit without history (#183).
         assert!(PLAN_WORKSPACE.contains("without history"));
         assert!(!PLAN_WORKSPACE.contains("`git log` on a file"));

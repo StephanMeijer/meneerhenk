@@ -140,6 +140,35 @@ jobs:
       - run: npm run build
       - run: npm audit --audit-level=high
 
+  # The image's build stage, which compiles henk inside the Docker build
+  # context. A file the code embeds but .dockerignore keeps out (llms.txt,
+  # #313) builds everywhere else and fails only here. Without this job that
+  # shows up in release.yml after the tag is out, and a tag does not move.
+  # No `paths:` filter: the break came from a change to server.rs, not to the
+  # Dockerfile. amd64 only and native, so no QEMU; release.yml builds both
+  # platforms. Its own cache scope keeps it from evicting the release build's.
+  docker:
+    runs-on: ubuntu-latest
+    # A backstop against a runaway build, as in release.yml.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: build
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=ci-docker
+          cache-to: type=gha,mode=max,scope=ci-docker
+
   # The whole of deny.toml: advisories, licences, sources and the bans that
   # keep TLS on rustls with ring. Runs on pull requests and on pushes to
   # `main`; the `main` run is what tells an author that a red advisory check
@@ -198,7 +227,8 @@ jobs:
   # Releases, see RELEASING.md. Nothing is published to a registry: release-plz
   # runs git-only (release-plz.toml), reads the version from the last vX.Y.Z
   # tag, and on a push to main whose version is ahead of it, tags, creates the
-  # GitHub Release with the changelog and hands over to release.yml.
+  # GitHub Release with the changelog and hands over to release.yml. Both jobs
+  # need `docker`, so an image that cannot build gets no tag (#313).
   #
   # Two constraints on how the two jobs are wired:
   #
@@ -218,7 +248,7 @@ jobs:
   #      PR update is safe, the newest run writes a correct PR.
   release-plz-release:
     name: Tag and create the GitHub Release
-    needs: [fmt, clippy, test, deny, machete, dashboard]
+    needs: [fmt, clippy, test, deny, machete, dashboard, docker]
     if: >-
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'
@@ -266,7 +296,7 @@ jobs:
 
   release-plz-pr:
     name: Open / update release PR
-    needs: [fmt, clippy, test, deny, machete, release-plz-release]
+    needs: [fmt, clippy, test, deny, machete, docker, release-plz-release]
     # `!cancelled()` lets this run after a failed release; the result check
     # keeps the gate, since release-plz-release is `skipped` whenever one of
     # the checks failed.

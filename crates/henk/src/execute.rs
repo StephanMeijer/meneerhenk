@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
-use henk_domain::execute::{branch_name, commit_subject, pull_body};
+use henk_domain::execute::{branch_candidate, branch_name, commit_subject, pull_body};
 use henk_domain::review::CommitSha;
 use henk_domain::role::Role;
 use henk_domain::run::{RunId, RunKind};
@@ -112,6 +112,10 @@ impl std::error::Error for NoPullRequest {}
 fn no_pull(why: impl Into<String>) -> anyhow::Error {
     NoPullRequest(why.into()).into()
 }
+
+/// The most names an execute run tries for its branch: the issue's own,
+/// then with `-2` up to this.
+const BRANCH_TRIES: u32 = 10;
 
 /// Takes one issue to a pull request, end to end. Every execute run ends
 /// (§4a): either the pull request is open, or a comment on the issue says
@@ -252,26 +256,35 @@ impl Work<'_> {
             opened = self.open(&*writer) => opened,
             () = cancel.cancelled() => return Err(Cancelled.into()),
         };
-        let (base, workspace) = match opened {
+        let (base, workspace, branch) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 let why = format!("{error:#}");
                 stages::mark(store, run, Stage::Checkout, StageState::Failed, &why).await;
+                if error.downcast_ref::<NoPullRequest>().is_some() {
+                    return Err(error);
+                }
                 return Err(error.context("the executor needs a workspace"));
             }
         };
-        let ready = format!("ready at {} on {}", base.head.short(), base.default_branch);
+        let ready = format!(
+            "ready at {} on {}, for {branch}",
+            base.head.short(),
+            base.default_branch
+        );
         stages::mark(store, run, Stage::Checkout, StageState::Done, ready).await;
-        let result = self.work(&writer, &base, &workspace, cancel).await;
+        let result = self.work(&writer, &base, &workspace, &branch, cancel).await;
         workspace.close().await;
         result
     }
 
-    /// The default branch's head, and a workspace on it, set up.
+    /// The default branch's head, a workspace on it, set up, and the
+    /// branch the work will go to, chosen before the session so a run
+    /// never works for a branch it cannot push.
     async fn open(
         &self,
         writer: &dyn PushWriter,
-    ) -> anyhow::Result<(RepoHead, Arc<dyn Workspace>)> {
+    ) -> anyhow::Result<(RepoHead, Arc<dyn Workspace>, String)> {
         let repo = &self.request.target.repo;
         let base = writer
             .repo_head(repo)
@@ -292,9 +305,37 @@ impl Work<'_> {
         )
         .await
         .context("checking out the default branch")?;
+        let branch = self.free_branch(&checkout).await?;
         let profile = self.app.settings.workspace.profile_for(&repo.path());
         let workspace = open_prepared(self.app, self.run, &checkout, profile).await?;
-        Ok((base, workspace))
+        Ok((base, workspace, branch))
+    }
+
+    /// The first of the issue's branch names that `origin` does not have:
+    /// its own, then with `-2`, `-3` and on, so a run after an earlier
+    /// one (a failed push, a pull request that did not open, one that was
+    /// closed) takes a new branch and never pushes over one (§3.5). The
+    /// push checks again.
+    async fn free_branch(&self, checkout: &Checkout) -> anyhow::Result<String> {
+        let first = branch_name(
+            &self.execution.branch_prefix,
+            self.request.target.number,
+            &self.issue.title,
+        );
+        for n in 1..=BRANCH_TRIES {
+            let branch = branch_candidate(&first, n);
+            if !checkout
+                .remote_has_branch(&branch)
+                .await
+                .context("looking for the branch")?
+            {
+                return Ok(branch);
+            }
+        }
+        Err(no_pull(format!(
+            "the branches {first} to {} already exist",
+            branch_candidate(&first, BRANCH_TRIES)
+        )))
     }
 
     /// The executor's session, then the checks, the push and the pull
@@ -304,29 +345,28 @@ impl Work<'_> {
         writer: &Arc<dyn PushWriter>,
         base: &RepoHead,
         workspace: &Arc<dyn Workspace>,
+        branch: &str,
         cancel: &CancellationToken,
     ) -> anyhow::Result<OpenedPullRequest> {
         let (store, run, target) = (&*self.app.store, self.run, &self.request.target);
         let repo = &target.repo;
         let reference = format!("#{}", target.number);
-        let branch = branch_name(
-            &self.execution.branch_prefix,
-            target.number,
-            &self.issue.title,
-        );
         let profile = self.app.settings.workspace.profile_for(&repo.path());
         let editing = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
             check_commands: self.executor.check_commands.clone(),
             check_timeout: Duration::from_secs(profile.limits.command_secs),
             max_changed_files: self.executor.max_changed_files,
-            bash: profile.backend.runs_model_commands(),
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
+            bash: profile.backend.runs_model_commands()
+                && Role::Executor.grants(&self.executor.tools(), "bash"),
             state: Mutex::new(EditState::default()),
         });
         let proposed: Proposed = Arc::default();
         let session = format!("executor, {}", self.model.model());
         stages::mark(store, run, Stage::Session, StageState::Running, session).await;
-        let spec = self.session(&editing, &proposed, &reference, &branch);
+        let spec = self.session(&editing, &proposed, &reference, branch);
         let outcome = run_session(store, run, spec, cancel.clone()).await;
         self.session_result(outcome.stop)?;
         stages::mark(store, run, Stage::Session, StageState::Done, "proposed").await;
@@ -346,7 +386,7 @@ impl Work<'_> {
         stages::mark(store, run, Stage::Commit, StageState::Done, checked).await;
         stop_if_cancelled(cancel)?;
 
-        self.publish(writer, base, &branch, &proposal, &changes, cancel)
+        self.publish(writer, base, branch, &proposal, &changes, cancel)
             .await
     }
 
@@ -661,6 +701,7 @@ check_commands = [["make", "check"]]
         tracker: Arc<FakeIssueWriter>,
         hub: Arc<IssueHub>,
         provider: FakeProvider,
+        model: Arc<ScriptedClient>,
         _remote: ScratchDir,
     }
 
@@ -687,7 +728,7 @@ check_commands = [["make", "check"]]
         );
         let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
-        models.insert("m".to_owned(), model as Arc<dyn ModelClient>);
+        models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         let tracker = Arc::new(FakeIssueWriter::new(
             Platform::GitHub,
             None,
@@ -719,6 +760,7 @@ check_commands = [["make", "check"]]
             tracker,
             hub,
             provider,
+            model,
             _remote: remote,
         }
     }
@@ -931,14 +973,13 @@ check_commands = [["make", "check"]]
         assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
     }
 
-    #[tokio::test]
-    async fn a_branch_that_exists_is_never_pushed_over() {
-        let f = fixture("henk-exec-taken", vec![write_csv(), propose(), done()], 0).await;
-        // Someone's branch, or an earlier run's, by the same name.
+    /// Pushes the default branch's head to each of `branches`: somebody's
+    /// branches, or an earlier run's, by the names a run would take.
+    async fn taken(f: &Fixture, name: &str, branches: &[String]) -> String {
         let (head, _) = remote_feature(&f.hub.remote).await;
         let url = f.hub.remote.to_string_lossy().into_owned();
         let other = Checkout::clone_at(
-            ScratchDir::new("henk-exec-taken-other").unwrap(),
+            ScratchDir::new(name).unwrap(),
             &url,
             "feature",
             &CommitSha::parse(&head).unwrap(),
@@ -946,24 +987,102 @@ check_commands = [["make", "check"]]
         )
         .await
         .unwrap();
-        other.push("henk/9-export-runs").await.unwrap();
+        for branch in branches {
+            other.push(branch).await.unwrap();
+        }
+        head
+    }
 
-        run_execute(&f.app, request("r-exec-5"), CancellationToken::new())
+    /// A run for an issue that has a branch already (an earlier run's after
+    /// a failed push or a closed pull request, or somebody's) takes the
+    /// next free name and never pushes over the branch that is there.
+    #[tokio::test]
+    async fn a_branch_that_exists_is_never_pushed_over_and_a_rerun_takes_the_next_name() {
+        let f = fixture("henk-exec-taken", vec![write_csv(), propose(), done()], 0).await;
+        let first = "henk/9-export-runs".to_owned();
+        let head = taken(&f, "henk-exec-taken-other", std::slice::from_ref(&first)).await;
+
+        let report = run_execute(&f.app, request("r-exec-5"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.pull.target.number, 12);
+        let opened = f.hub.opened.lock().unwrap().clone();
+        assert_eq!(opened[0].head, "henk/9-export-runs-2");
+        assert_eq!(
+            remote_branch_file(&f.hub.remote, "henk/9-export-runs-2", "src/csv.rs").await,
+            "pub fn export() {}\n"
+        );
+        assert_eq!(
+            remote_branch_log(&f.hub.remote, &first, "%H").await.trim(),
+            head,
+            "untouched"
+        );
+    }
+
+    /// With every name it would try taken, a run says so on the issue
+    /// before the executor starts, and pushes nothing.
+    #[tokio::test]
+    async fn a_run_with_no_free_branch_name_stops_before_the_session() {
+        let f = fixture("henk-exec-all-taken", vec![], 0).await;
+        let names: Vec<String> = (1..=BRANCH_TRIES)
+            .map(|n| branch_candidate("henk/9-export-runs", n))
+            .collect();
+        taken(&f, "henk-exec-all-taken-other", &names).await;
+
+        run_execute(&f.app, request("r-exec-6"), CancellationToken::new())
             .await
             .unwrap_err();
         let comments = f.tracker.comments.lock().unwrap().clone();
         assert!(
-            comments[0].contains("the branch henk/9-export-runs already exists"),
+            comments[0].contains(
+                "I opened no pull request for this issue: the branches henk/9-export-runs to henk/9-export-runs-10 already exist"
+            ),
             "{comments:?}"
         );
-        assert_eq!(
-            remote_branch_log(&f.hub.remote, "henk/9-export-runs", "%H")
-                .await
-                .trim(),
-            head,
-            "untouched"
-        );
         assert!(f.hub.opened.lock().unwrap().is_empty());
+        let run = record(&f, "r-exec-6").await;
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        assert!(
+            !stages.iter().any(|s| s.stage.as_str() == "session"),
+            "no session: {stages:?}"
+        );
+    }
+
+    /// The executor is told of `bash` only when it has it: on a backend
+    /// that runs model commands, and with `bash` in `[roles.executor]`
+    /// tools.
+    #[tokio::test]
+    async fn the_executor_hears_of_bash_only_when_its_tools_grant_it() {
+        let without: Vec<String> = Role::Executor
+            .default_tools()
+            .into_iter()
+            .filter(|tool| tool != "bash")
+            .collect();
+        for (name, tools, granted) in [
+            ("henk-exec-bash", None, true),
+            ("henk-exec-nobash", Some(without), false),
+        ] {
+            let mut f = fixture(name, vec![done()], 0).await;
+            f.app.settings.workspace.default.backend = henk_domain::workspace::BackendKind::Ssh;
+            f.app.settings.roles.executor.as_mut().unwrap().tools = tools;
+            run_execute(
+                &f.app,
+                request(&format!("r-{name}")),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            let requests = f.model.requests();
+            let first = requests.first().unwrap();
+            let names: Vec<String> = first.tools.iter().map(|t| t.name.to_string()).collect();
+            let system = first.system.clone().unwrap_or_default();
+            assert_eq!(names.iter().any(|n| n == "bash"), granted, "{names:?}");
+            assert_eq!(
+                system.contains("commands of your own in the checkout with `bash`"),
+                granted,
+                "{system}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -258,6 +258,7 @@ impl Tool for FinishReview {
         };
         let round = state.ledger.round();
         let new = state.ledger.raised_in(round).count();
+        state.ledger.finish_round();
         state.finished = true;
         ToolOutput::ok(format!(
             "Round {round} finished with {new} new point(s). End your turn now."

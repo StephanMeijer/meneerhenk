@@ -806,6 +806,9 @@ async fn make(ctx: &PlanContext, change: &Change) -> anyhow::Result<Option<u64>>
             .await?;
         }
         Change::Fields(fields) => {
+            // A person may have filled a field since the draft; theirs stays.
+            let current = ctx.writer.issue(&ctx.target).await?.fields;
+            fields.may_fill(&current)?;
             update(IssueUpdate {
                 fields: Some(*fields),
                 ..Default::default()
@@ -1118,6 +1121,31 @@ pub(crate) mod tests {
         assert_eq!(cost(&ctx), 0, "a refusal costs nothing");
         assert!(untouched(&writer));
         assert_eq!(writer.issue.lock().unwrap().fields.weight, Some(8));
+    }
+
+    #[tokio::test]
+    async fn set_fields_leaves_a_value_a_person_filled_after_the_draft_alone() {
+        let (writer, ctx) = gitlab("Issue");
+        let out = SetFields(Arc::clone(&ctx))
+            .call(json!({"weight": 3, "health": "on_track", "reason": "small change"}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        writer.issue.lock().unwrap().fields.weight = Some(8);
+        plan_and_publish(&ctx, "").await;
+        let fields = writer.issue.lock().unwrap().fields;
+        assert_eq!(fields.weight, Some(8), "the person's weight stays");
+        assert_eq!(
+            fields.health, None,
+            "the change is made whole or not at all"
+        );
+        assert!(
+            changes(&ctx)
+                .iter()
+                .any(|c| c.starts_with("could not make set weight 3")
+                    && c.contains("already set, left alone: weight")),
+            "{:?}",
+            changes(&ctx)
+        );
     }
 
     #[tokio::test]

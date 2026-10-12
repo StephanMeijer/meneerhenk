@@ -39,6 +39,41 @@ pub fn branch_name(prefix: &str, number: u64, title: &str) -> String {
     }
 }
 
+/// Whether `prefix` can start every branch name: one or more path
+/// components ending in `/`, each of ASCII letters, digits, `-`, `_` and
+/// `.`, and none that git refuses in a ref (`git check-ref-format`): empty,
+/// `..`, starting with `.` or ending in `.lock`. The whole may not start
+/// with `-`.
+#[must_use]
+pub fn is_branch_prefix(prefix: &str) -> bool {
+    let Some(components) = prefix.strip_suffix('/') else {
+        return false;
+    };
+    !components.starts_with('-')
+        && components.split('/').all(|component| {
+            !component.is_empty()
+                && !component.starts_with('.')
+                && component.strip_suffix(".lock").is_none()
+                && !component.contains("..")
+                && component
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+}
+
+/// The `n`th branch name to try for an issue whose first choice is `name`
+/// (from 1): `name` itself, then `name-2`, `name-3` and on, so a run for an
+/// issue that already has a branch (an earlier run's, or somebody's) takes
+/// a new one instead of pushing over it.
+#[must_use]
+pub fn branch_candidate(name: &str, n: u32) -> String {
+    if n <= 1 {
+        name.to_owned()
+    } else {
+        format!("{name}-{n}")
+    }
+}
+
 /// The subject of the executor's commit: `Resolve #9: Export runs`, on one
 /// line, cut to 72 characters.
 #[must_use]
@@ -89,6 +124,43 @@ mod tests {
         assert_eq!(branch_name("bot/", 4, "🚀"), "bot/4");
         let long = branch_name("henk/", 1, &"x".repeat(60));
         assert_eq!(long, format!("henk/1-{}", "x".repeat(40)));
+    }
+
+    #[test]
+    fn a_branch_prefix_is_one_git_takes() {
+        for good in ["henk/", "bots/henk/", "a.b/", "h_1-x/", "x.lockx/"] {
+            assert!(is_branch_prefix(good), "{good}");
+        }
+        for bad in [
+            "henk",
+            "/henk/",
+            "-x/",
+            "a//b/",
+            "a..b/",
+            "h nk/",
+            "/",
+            "",
+            "./",
+            ".h/",
+            "a/.h/",
+            "a.lock/",
+            "b/a.lock/",
+        ] {
+            assert!(!is_branch_prefix(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_taken_branch_name_gets_a_number() {
+        assert_eq!(
+            branch_candidate("henk/9-export-runs", 1),
+            "henk/9-export-runs"
+        );
+        assert_eq!(
+            branch_candidate("henk/9-export-runs", 2),
+            "henk/9-export-runs-2"
+        );
+        assert_eq!(branch_candidate("henk/9", 0), "henk/9");
     }
 
     #[test]
