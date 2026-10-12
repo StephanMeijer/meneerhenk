@@ -181,9 +181,9 @@ requester_id = 523456789012345678
 # round of the review loop or of the plan review. The reviewer reviews both
 # pull requests and plans. `tools` narrows a
 # role's tools within what the role may ever have; left out, the role gets
-# its defaults, and only the planner reaches the web. `henk config check`
-# lists each role's tools when they differ, and refuses a tool the role may
-# not have. Moving from [address] and the old [review.loop] and [planning]
+# its defaults. Only the planner may have web_fetch, and a role that lists
+# skills keeps load_skill. `henk config check` lists each role's tools when
+# they differ, and refuses a tool the role may not have. Moving from [address] and the old [review.loop] and [planning]
 # keys: README, "Migrating to roles".
 [roles.reviewer]
 model = "opus"
