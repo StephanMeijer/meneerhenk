@@ -6,24 +6,20 @@ use std::sync::Arc;
 
 use henk_domain::allowlist::Platform;
 use henk_domain::diff::FileStatus;
-use henk_domain::marker::{Marker, MarkerKind};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_mcp::McpSession;
 use serde_json::{Value, json};
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, warn};
 
 use crate::error::PlatformError;
 use crate::gitlab::rest::GitLabRest;
 use crate::writer::{
-    DiffSide, ExistingFinding, ExistingSummary, FilePatch, PlatformWriter, PostedComment,
-    PullRequestInfo, PullRequestState, ReviewHandle, ReviewTarget,
+    FilePatch, PlatformWriter, PostedComment, PullRequestInfo, PullRequestState, ReviewHandle,
+    ReviewTarget,
 };
 
 /// Name of the commit status (§3.3).
 pub const STATUS_NAME: &str = "Meneer Henk";
-
-/// Prefix of a folded summary note.
-pub const OUTDATED_PREFIX: &str = "*Outdated.*";
 
 /// The account the token belongs to (§2: by id).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,14 +44,6 @@ impl std::fmt::Debug for GitLabWriter {
             .field("rest", &self.rest)
             .finish_non_exhaustive()
     }
-}
-
-/// The diff refs a positioned note needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiffRefs {
-    base: String,
-    start: String,
-    head: String,
 }
 
 impl GitLabWriter {
@@ -149,23 +137,6 @@ impl GitLabWriter {
             .await
     }
 
-    fn diff_refs(merge_request: &Value) -> Result<DiffRefs, PlatformError> {
-        let refs = merge_request
-            .get("diff_refs")
-            .ok_or_else(|| PlatformError::Decode("merge request without diff_refs".to_owned()))?;
-        let get = |key: &str| {
-            refs.get(key)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| PlatformError::Decode(format!("diff_refs without {key}")))
-        };
-        Ok(DiffRefs {
-            base: get("base_sha")?,
-            start: get("start_sha")?,
-            head: get("head_sha")?,
-        })
-    }
-
     /// Every item of a paged list tool, to its end: `per_page` 100, until a
     /// page has fewer than 100 items. A page is an array or an object
     /// holding the array under one of `keys`. A list that goes on past 100
@@ -223,14 +194,6 @@ impl GitLabWriter {
             &["items", "discussions"],
         )
         .await
-    }
-
-    /// Whether Henk's own account wrote `note`. The marker in a body is
-    /// traceability, not authorship: anyone can paste one (§8).
-    fn is_henk_note(&self, note: &Value) -> bool {
-        note.pointer("/author/username")
-            .and_then(Value::as_str)
-            .is_some_and(|name| !name.is_empty() && name.eq_ignore_ascii_case(&self.username))
     }
 }
 
@@ -378,191 +341,6 @@ impl PlatformWriter for GitLabWriter {
         Ok(())
     }
 
-    async fn existing_findings(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingFinding>, PlatformError> {
-        let mut findings = Vec::new();
-        for discussion in self.discussions(target).await? {
-            let notes = discussion
-                .get("notes")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let Some(first) = notes.first() else { continue };
-            if is_system(first)
-                || first.get("position").is_none_or(Value::is_null)
-                || !self.is_henk_note(first)
-            {
-                continue;
-            }
-            let Some(marker) = Marker::parse(note_body(first)) else {
-                continue;
-            };
-            if marker.kind.is_some_and(|k| k != MarkerKind::Finding) {
-                continue;
-            }
-            let Some(id) = note_id(first) else { continue };
-            let position = first.get("position").cloned().unwrap_or(Value::Null);
-            let line = position
-                .get("new_line")
-                .and_then(Value::as_u64)
-                .or_else(|| position.get("old_line").and_then(Value::as_u64))
-                .and_then(|l| u32::try_from(l).ok());
-            let answered_by_person = notes
-                .iter()
-                .skip(1)
-                .any(|n| !is_system(n) && !self.is_henk_note(n));
-            findings.push(ExistingFinding {
-                comment_id: id,
-                node_id: discussion
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                path: position
-                    .get("new_path")
-                    .or_else(|| position.get("old_path"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                line,
-                body: note_body(first).to_owned(),
-                marker,
-                resolved: first
-                    .get("resolved")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                answered_by_person,
-            });
-        }
-        debug!(count = findings.len(), "existing findings");
-        Ok(findings)
-    }
-
-    async fn existing_summaries(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingSummary>, PlatformError> {
-        let mut summaries = Vec::new();
-        for discussion in self.discussions(target).await? {
-            let notes = discussion
-                .get("notes")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let Some(first) = notes.first() else { continue };
-            if is_system(first)
-                || !first.get("position").is_none_or(Value::is_null)
-                || !self.is_henk_note(first)
-            {
-                continue;
-            }
-            let Some(marker) = Marker::parse(note_body(first)) else {
-                continue;
-            };
-            if !matches!(marker.kind, Some(MarkerKind::Summary | MarkerKind::Failure)) {
-                continue;
-            }
-            let Some(id) = note_id(first) else { continue };
-            summaries.push(ExistingSummary {
-                comment_id: id,
-                node_id: discussion
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                marker,
-                folded: note_body(first).trim_start().starts_with(OUTDATED_PREFIX),
-            });
-        }
-        Ok(summaries)
-    }
-
-    async fn post_finding(
-        &self,
-        target: &ReviewTarget,
-        commit: &CommitSha,
-        path: &str,
-        line: u32,
-        side: DiffSide,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        let mr = self.merge_request(target).await?;
-        let refs = Self::diff_refs(&mr)?;
-        if refs.head != commit.as_str() {
-            warn!(head = %refs.head, reviewed = %commit, "merge request moved on; positioning on its current head");
-        }
-        let mut position = serde_json::Map::new();
-        position.insert("base_sha".into(), json!(refs.base));
-        position.insert("start_sha".into(), json!(refs.start));
-        position.insert("head_sha".into(), json!(refs.head));
-        position.insert("position_type".into(), json!("text"));
-        position.insert("new_path".into(), json!(path));
-        position.insert("old_path".into(), json!(path));
-        let line_key = match side {
-            DiffSide::Right => "new_line",
-            DiffSide::Left => "old_line",
-        };
-        position.insert(line_key.into(), json!(line));
-        let position = Value::Object(position);
-        let mut args = Self::base_args(target);
-        args.insert("body".into(), json!(body));
-        args.insert("position".into(), position);
-        let created = self
-            .call_tool("create_merge_request_thread", Value::Object(args))
-            .await?;
-        let first = created.pointer("/notes/0").cloned().unwrap_or(Value::Null);
-        let id = note_id(&first)
-            .or_else(|| note_id(&created))
-            .ok_or_else(|| PlatformError::Decode("thread without a note id".to_owned()))?;
-        Ok(PostedComment {
-            id,
-            node_id: created.get("id").and_then(Value::as_str).map(str::to_owned),
-            url: String::new(),
-        })
-    }
-
-    async fn update_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-        body: &str,
-    ) -> Result<(), PlatformError> {
-        let mut args = Self::base_args(target);
-        args.insert("note_id".into(), json!(comment_id));
-        args.insert("body".into(), json!(body));
-        self.call_tool("update_merge_request_note", Value::Object(args))
-            .await?;
-        Ok(())
-    }
-
-    async fn resolve_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-    ) -> Result<(), PlatformError> {
-        let discussion_id = self
-            .discussions(target)
-            .await?
-            .iter()
-            .find(|d| {
-                d.get("notes")
-                    .and_then(Value::as_array)
-                    .and_then(|notes| notes.first())
-                    .and_then(note_id)
-                    .is_some_and(|id| id == comment_id)
-            })
-            .and_then(|d| d.get("id").and_then(Value::as_str).map(str::to_owned))
-            .ok_or_else(|| {
-                PlatformError::Decode(format!("no discussion starts with note {comment_id}"))
-            })?;
-        let mut args = Self::base_args(target);
-        args.insert("discussion_id".into(), json!(discussion_id));
-        args.insert("resolved".into(), json!(true));
-        self.call_tool("resolve_merge_request_thread", Value::Object(args))
-            .await?;
-        Ok(())
-    }
-
     async fn post_comment(
         &self,
         target: &ReviewTarget,
@@ -608,28 +386,6 @@ impl PlatformWriter for GitLabWriter {
         self.post_comment(target, body).await
     }
 
-    async fn fold_summary(
-        &self,
-        target: &ReviewTarget,
-        summary: &ExistingSummary,
-    ) -> Result<(), PlatformError> {
-        if summary.folded {
-            return Ok(());
-        }
-        let body = format!("{OUTDATED_PREFIX}\n\n{}", summary.marker.render());
-        self.update_finding(target, &summary.comment_id, &body)
-            .await
-    }
-
-    async fn fold_finding(
-        &self,
-        _target: &ReviewTarget,
-        _finding: &ExistingFinding,
-    ) -> Result<(), PlatformError> {
-        // GitLab collapses resolved threads itself; there is nothing to fold.
-        Ok(())
-    }
-
     async fn finish_review(
         &self,
         target: &ReviewTarget,
@@ -649,5 +405,98 @@ impl PlatformWriter for GitLabWriter {
         });
         self.call_tool("create_commit_status", args).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::needless_pass_by_value
+    )]
+
+    use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_mcp::testing::FakeServer;
+    use rmcp::model::{CallToolResult, ContentBlock};
+
+    use super::*;
+
+    fn target() -> ReviewTarget {
+        ReviewTarget {
+            repo: RepoRef::parse(Platform::GitLab, "9xxlab/tools/cli").unwrap(),
+            number: 5,
+        }
+    }
+
+    fn text(value: Value) -> CallToolResult {
+        CallToolResult::success(vec![ContentBlock::text(value.to_string())])
+    }
+
+    /// One discussion by a person, numbered by its page and place.
+    fn discussion(page: u64, i: u64) -> Value {
+        json!({"id": format!("d-{page}-{i}"), "notes": [
+            {"id": page * 1000 + i, "body": "looks fine", "author": {"username": "alice"}}
+        ]})
+    }
+
+    /// `mr_discussions` with 100 discussions on every page before `last`,
+    /// one on page `last`, and nothing past it.
+    fn paged_discussions(last: u64) -> FakeServer {
+        let tools = vec![FakeServer::tool("mr_discussions", "", &[])];
+        FakeServer::new(tools, move |_, args| {
+            let page = args["page"].as_u64().unwrap_or(0);
+            let count = match page.cmp(&last) {
+                std::cmp::Ordering::Less => 100,
+                std::cmp::Ordering::Equal => 1,
+                std::cmp::Ordering::Greater => 0,
+            };
+            text(Value::Array(
+                (0..count).map(|i| discussion(page, i)).collect(),
+            ))
+        })
+    }
+
+    async fn writer(fake: &FakeServer) -> GitLabWriter {
+        GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk")
+    }
+
+    #[tokio::test]
+    async fn discussions_on_the_eleventh_page_are_read() {
+        let fake = paged_discussions(11);
+        let discussions = writer(&fake).await.discussions(&target()).await.unwrap();
+        assert_eq!(discussions.len(), 1001);
+        assert_eq!(discussions[1000]["id"], "d-11-0");
+        assert_eq!(fake.calls().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn a_discussion_list_of_exactly_the_cap_is_read_whole() {
+        let tools = vec![FakeServer::tool("mr_discussions", "", &[])];
+        let fake = FakeServer::new(tools, |_, args| {
+            let page = args["page"].as_u64().unwrap_or(0);
+            let count = if page > 100 { 0 } else { 100 };
+            text(Value::Array(
+                (0..count).map(|i| discussion(page, i)).collect(),
+            ))
+        });
+        let discussions = writer(&fake).await.discussions(&target()).await.unwrap();
+        assert_eq!(
+            discussions.len(),
+            10_000,
+            "10,000 discussions is the cap, not past it: the list is whole"
+        );
+        assert_eq!(fake.calls().len(), 101, "one empty page shows the end");
+    }
+
+    #[tokio::test]
+    async fn a_discussion_list_past_the_cap_is_an_error() {
+        let fake = paged_discussions(u64::MAX);
+        let result = writer(&fake).await.discussions(&target()).await;
+        assert!(
+            matches!(result, Err(PlatformError::TooMany { limit: 10_000, .. })),
+            "{result:?}"
+        );
+        assert_eq!(fake.calls().len(), 101, "stops one page past the cap");
     }
 }

@@ -1,5 +1,5 @@
-//! The reviewer↔fixer loop (#284): instead of the lanes, a reviewer reviews
-//! the pull request, a fixer fixes what holds and Henk pushes it to the
+//! The reviewer↔fixer loop (#284), which is the review (#309): a reviewer
+//! reviews the pull request, a fixer fixes what holds and Henk pushes it to the
 //! pull request's branch, and each resumes its own conversation the next
 //! round, until the reviewer finds nothing more or the rounds run out.
 //!
@@ -42,13 +42,13 @@ use crate::app::App;
 use crate::cancel::is_cancelled;
 use crate::checks::{describe, run_checks};
 use crate::config::LoopConfig;
+use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::git::{Checkout, ScratchDir, git_command};
 use crate::loop_tools::{
     FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding, finding_text,
     fixer_continuation, reviewer_continuation, verdict_text,
 };
 use crate::push::{Pusher, stop_if_cancelled};
-use crate::review_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::stages;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
@@ -155,14 +155,6 @@ pub(crate) async fn run_loop(
     };
     let ready = format!("ready at {}", commit.short());
     stages::mark(store, run, Stage::Checkout, StageState::Done, ready).await;
-    stages::mark(
-        store,
-        run,
-        Stage::FactCheck,
-        StageState::Skipped,
-        "the fixer checks each finding",
-    )
-    .await;
     if let Some(why) = &alone {
         let skipped = format!("nothing is pushed: {why}");
         stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;

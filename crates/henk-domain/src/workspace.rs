@@ -137,10 +137,9 @@ pub struct Profile {
     pub setup: Vec<Vec<String>>,
     /// The tool manager that provides the repository's toolchain, if any.
     pub toolchain: Option<Toolchain>,
-    /// Whether reviews of the repository get workspaces too (#170): one
-    /// per lane and one for the fact-checker, at the reviewed commit. Off
-    /// by default, so a review reads through its MCP session only. Never on
-    /// the host backend: see [`Profile::serves`].
+    /// Whether reviews of the repository get workspaces too (#170). Off by
+    /// default, and never on the host backend: see [`Profile::serves`]. The
+    /// review loop opens its workspace whether or not this is set (#284).
     pub review: bool,
     /// Whether the planner gets a workspace too (#172): one copy of the
     /// repository at its default branch, set up as for any run, never

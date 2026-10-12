@@ -58,22 +58,9 @@ pub fn attach(settings: &mut Settings, config_dir: &Path) -> Result<(), ConfigEr
     let dir = config_dir.join(dir);
     let catalog = load(&dir)?;
     let listed = settings
-        .lanes
+        .planning
         .iter()
-        .map(|lane| (format!("lane {}", lane.name), &lane.skills))
-        .chain(
-            settings
-                .review
-                .fact_check
-                .iter()
-                .map(|f| ("review.fact_check".to_owned(), &f.skills)),
-        )
-        .chain(
-            settings
-                .planning
-                .iter()
-                .map(|p| ("planning".to_owned(), &p.skills)),
-        );
+        .map(|p| ("planning".to_owned(), &p.skills));
     for (what, names) in listed {
         if let Some(missing) = names.iter().find(|n| !catalog.skills.contains_key(*n)) {
             return Err(ConfigError::Skill(format!(
