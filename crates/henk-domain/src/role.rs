@@ -139,6 +139,27 @@ impl Role {
         granted.iter().any(|tool| tool == name)
     }
 
+    /// The handoff tools the role needs to plan (#328): without them the
+    /// reviewer cannot raise a point or end its round, and the planner
+    /// cannot write the plan or answer a point. The executor has none.
+    #[must_use]
+    pub fn plan_handoff(self) -> &'static [&'static str] {
+        match self {
+            Self::Planner => &["write_plan", "answer_point"],
+            Self::Reviewer => &["raise_point", "finish_round"],
+            Self::Executor => &[],
+        }
+    }
+
+    /// The first plan handoff tool of the role's that `granted` leaves out.
+    #[must_use]
+    pub fn missing_plan_handoff(self, granted: &[String]) -> Option<&'static str> {
+        self.plan_handoff()
+            .iter()
+            .copied()
+            .find(|tool| !granted.iter().any(|g| g == tool))
+    }
+
     /// The tools the role gets from its configured list: the defaults
     /// when there is none.
     ///
@@ -239,6 +260,34 @@ mod tests {
 
     fn tools(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_planning_roles_keep_their_side_of_the_plan_handoff() {
+        for role in Role::ALL {
+            assert_eq!(
+                role.missing_plan_handoff(&role.default_tools()),
+                None,
+                "{role}"
+            );
+            assert!(
+                role.plan_handoff().iter().all(|tool| role.allows(tool)),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            Role::Reviewer.missing_plan_handoff(&tools(&[
+                "read_file",
+                "report_finding",
+                "finish_round"
+            ])),
+            Some("raise_point")
+        );
+        assert_eq!(
+            Role::Planner.missing_plan_handoff(&tools(&["read_file", "write_plan"])),
+            Some("answer_point")
+        );
+        assert_eq!(Role::Executor.missing_plan_handoff(&[]), None);
     }
 
     #[test]

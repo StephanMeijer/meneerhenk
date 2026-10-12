@@ -182,14 +182,15 @@ requester_id = 523456789012345678
 # pull requests and plans. `tools` narrows a
 # role's tools within what the role may ever have; left out, the role gets
 # its defaults. Only the planner may have web_fetch, and a role that lists
-# skills keeps load_skill. `henk config check` lists each role's tools when
+# skills keeps load_skill. With [planning], the reviewer keeps raise_point
+# and finish_round and the planner write_plan and answer_point. `henk config check` lists each role's tools when
 # they differ, and refuses a tool the role may not have. Moving from [address] and the old [review.loop] and [planning]
 # keys: README, "Migrating to roles".
 [roles.reviewer]
 model = "opus"
 max_turns = 40
 timeout_secs = 600
-# tools = ["list_changed_files", "get_file_diff", "list_files", "read_file", "search", "report_finding", "finish_round"]
+# tools = ["list_changed_files", "get_file_diff", "list_files", "read_file", "search", "report_finding", "raise_point", "finish_round"]
 
 [roles.planner]
 model = "claude"

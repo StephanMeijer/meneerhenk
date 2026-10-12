@@ -1842,6 +1842,27 @@ fn validate_planning(
             return Err(ConfigError::Role(format!("[planning] needs {role}")));
         }
     }
+    // The planner and the reviewer hand points and answers to each other:
+    // a reviewer without raise_point would let a plan through unreviewed,
+    // and a planner without write_plan or answer_point never publishes or
+    // answers.
+    let sides = [
+        roles
+            .planner
+            .as_ref()
+            .map(|r| (Role::Planner, r.tools(Role::Planner))),
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| (Role::Reviewer, r.tools(Role::Reviewer))),
+    ];
+    for (role, granted) in sides.into_iter().flatten() {
+        if let Some(tool) = role.missing_plan_handoff(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] tools leave out {tool}, which [planning] needs: add {tool} to tools"
+            )));
+        }
+    }
     if planning.max_rounds == 0 {
         return Err(ConfigError::Role(
             "planning.max_rounds must be at least 1".to_owned(),
@@ -3035,6 +3056,41 @@ github_owners = ["docspec"]
         assert_eq!(error.to_string(), "[planning] needs [roles.planner]");
         let error = planning(planner).unwrap_err();
         assert_eq!(error.to_string(), "[planning] needs [roles.reviewer]");
+        for (extra, (role, tool)) in [
+            (
+                format!(
+                    "{planner}{reviewer}tools = [\"read_file\", \"report_finding\", \"finish_round\"]\n"
+                ),
+                ("reviewer", "raise_point"),
+            ),
+            (
+                format!("{planner}{reviewer}tools = [\"read_file\", \"raise_point\"]\n"),
+                ("reviewer", "finish_round"),
+            ),
+            (
+                format!("{reviewer}{planner}tools = [\"read_file\", \"answer_point\"]\n"),
+                ("planner", "write_plan"),
+            ),
+            (
+                format!("{reviewer}{planner}tools = [\"read_file\", \"write_plan\"]\n"),
+                ("planner", "answer_point"),
+            ),
+        ] {
+            let message = planning(&extra).unwrap_err().to_string();
+            assert_eq!(
+                message,
+                format!(
+                    "[roles.{role}] tools leave out {tool}, which [planning] needs: add {tool} to tools"
+                )
+            );
+            assert!(henk_domain::text::is_in_style(&message), "{message}");
+        }
+        assert!(
+            planning(&format!(
+                "{planner}tools = [\"read_file\", \"write_plan\", \"answer_point\"]\n{reviewer}tools = [\"read_file\", \"raise_point\", \"finish_round\"]\n"
+            ))
+            .is_ok()
+        );
         let error = planning(&format!("max_rounds = 0\n{planner}{reviewer}")).unwrap_err();
         assert_eq!(error.to_string(), "planning.max_rounds must be at least 1");
         let settings = planning(&format!("{planner}{reviewer}")).unwrap();
