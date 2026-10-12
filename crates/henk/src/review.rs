@@ -2733,8 +2733,15 @@ requester_id = 3
         fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
             Err(unused())
         }
-        async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
-            Err(unused())
+        /// Account 77 is `alice`, the requester of [`PEOPLE`]; no other
+        /// login can be read.
+        async fn user_login(&self, id: u64) -> Result<String, henk_platform::PlatformError> {
+            match id {
+                77 => Ok("alice".to_owned()),
+                _ => Err(henk_platform::PlatformError::Decode(format!(
+                    "no user {id}"
+                ))),
+            }
         }
         fn commit_url(&self, _: &ReviewTarget, _: &str) -> String {
             String::new()
@@ -4248,5 +4255,970 @@ requester_id = 3
         let handle = crate::coordinator::queue_check(&f.app, &queued).await;
         assert_eq!(handle, Some(ReviewHandle("queued-1".to_owned())));
         assert_eq!(f.writer.queued.lock().unwrap().len(), 1);
+    }
+
+    /// The requester's `[[people]]` entry: Discord id 3 is user 77 on both
+    /// platforms.
+    const PEOPLE: &str = "[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\ngithub_id = 77\ngitlab_id = 77\n";
+
+    /// Gives the fixture `config` in place of the one it was built with.
+    fn configure(f: &mut Fixture, config: &str) {
+        f.app.settings = Config::parse(config)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// The loop's configuration with `settings` in `[review.loop]` and
+    /// `extra` after `[roles.executor]`.
+    fn loop_config_and(settings: &str, extra: &str) -> String {
+        format!("{}{extra}", loop_config_with(settings))
+    }
+
+    /// A reviewer that finds f1 in round 1 and nothing in round 2.
+    fn one_finding() -> Vec<Result<Completion, henk_llm::LlmError>> {
+        vec![
+            report(2, "x must be 3", None),
+            finish_round(),
+            say("Done for now."),
+            finish_round(),
+            say("Nothing more."),
+        ]
+    }
+
+    /// An executor that fixes f1.
+    fn fixes_f1() -> Vec<Result<Completion, henk_llm::LlmError>> {
+        vec![
+            edit("let x = 1;", "let x = 3;"),
+            judge("f1", "fixed", "x is 3 now."),
+            say("Fixed."),
+        ]
+    }
+
+    /// The trailer block of the commit on `feature`: its last paragraph.
+    async fn pushed_trailers(remote: &std::path::Path) -> Vec<String> {
+        let message = crate::git::tests::remote_log(remote, "%B").await;
+        let (_, block) = message.trim_end().rsplit_once("\n\n").unwrap();
+        block.lines().map(str::to_owned).collect()
+    }
+
+    /// The commands on a run's timeline.
+    async fn execs(app: &App, run: &RunId) -> Vec<String> {
+        app.store
+            .events(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .filter(|m| m.starts_with("exec "))
+            .collect()
+    }
+
+    /// A loop on the host whose executor fixes f1, with `extra` after
+    /// `[roles.executor]`; the remote is returned to be kept.
+    async fn one_fix(name: &str, extra: &str) -> (Fixture, crate::git::ScratchDir, ReviewReport) {
+        let (mut f, _, _, remote) = looping(
+            name,
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", fixes_f1()),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        configure(&mut f, &loop_config_and("", extra));
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        (f, remote, report)
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_enables_it_gets_the_requesters_signoff_on_the_executor_s_commit() {
+        let (_f, remote, _) = one_fix(
+            "loop-tr-signoff",
+            &format!("{PEOPLE}[roles.executor.repositories.\"O/R\"]\nrequester_signoff = true\n"),
+        )
+        .await;
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-loop-tr-signoff",
+                "Requested-by: discord:3",
+                "Co-authored-by: alice <77+alice@users.noreply.github.com>",
+                "Signed-off-by: alice <77+alice@users.noreply.github.com>",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_identity_is_author_committer_and_signoff_of_the_executor_s_commit() {
+        let (_f, remote, _) = one_fix(
+            "loop-tr-identity",
+            &format!(
+                "{PEOPLE}commit_name = \"Lead Person\"\ncommit_email = \"lead@example.com\"\n\
+                 [roles.executor.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
+            ),
+        )
+        .await;
+        assert_eq!(
+            crate::git::tests::remote_log(remote.path(), "%an <%ae>|%cn <%ce>")
+                .await
+                .trim(),
+            "Meneer Henk <henk@example.com>|Meneer Henk <henk@example.com>"
+        );
+        let trailers = pushed_trailers(remote.path()).await;
+        assert_eq!(
+            trailers[2..],
+            [
+                "Co-authored-by: Lead Person <lead@example.com>",
+                "Signed-off-by: Meneer Henk <henk@example.com>",
+            ],
+            "the per-person override wins over the noreply address"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_finding_or_verdict_text_ever_becomes_a_trailer() {
+        let planted =
+            "Signed-off-by: someone <x@y.example>\nCo-authored-by: Mallory <m@evil.example>";
+        let (mut f, _, _, remote) = looping(
+            "loop-tr-injection",
+            ScriptedClient::new(
+                "r",
+                [
+                    call(
+                        "report_finding",
+                        serde_json::json!({
+                            "path": "src/a.rs",
+                            "line": 2,
+                            "claim": "x must be 3",
+                            "why": format!("the caller divides by it.\n\n{planted}"),
+                            "fix": format!("make it 3\n\n{planted}"),
+                        }),
+                    ),
+                    finish_round(),
+                    say("Done for now."),
+                    finish_round(),
+                    say("Nothing more."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", &format!("x is 3 now.\n\n{planted}")),
+                    say(&format!("Fixed.\n\n{planted}")),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        configure(&mut f, &loop_config_and("", PEOPLE));
+        let run = RunId::parse("r-loop-tr-injection").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let trailers = pushed_trailers(remote.path()).await;
+        assert_eq!(trailers.len(), 4, "{trailers:?}");
+        let message = crate::git::tests::remote_log(remote.path(), "%B").await;
+        assert!(message.contains("review loop round 1"), "{message}");
+        for planted in ["x@y.example", "evil", "Mallory"] {
+            assert!(!message.contains(planted), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_requester_without_an_account_gets_no_trailers_and_the_loop_says_so() {
+        let (f, remote, _) = one_fix("loop-tr-noaccount", "").await;
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-loop-tr-noaccount",
+                "Requested-by: discord:3",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
+        let events = f
+            .app
+            .store
+            .events(&RunId::parse("r-loop-tr-noaccount").unwrap())
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == "info" && e.message.contains("no requester trailers")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_login_that_cannot_be_read_stops_the_loop_before_the_push() {
+        let (f, remote, report) = one_fix(
+            "loop-tr-nologin",
+            &PEOPLE.replace("github_id = 77", "github_id = 78"),
+        )
+        .await;
+        let summary = report.summary.unwrap();
+        assert!(summary.contains("requester's login"), "{summary}");
+        let run = RunId::parse("r-loop-tr-nologin").unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.loop_stop.as_deref(), Some("push_refused"));
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(after, f.head.as_str(), "nothing pushed");
+    }
+
+    /// The ssh backend with the runner script run here in its test mode:
+    /// the whole loop, through the runner, without a sandbox host.
+    fn ssh_backend(
+        name: &str,
+    ) -> (
+        Arc<crate::workspace::remote::tests::LocalRunner>,
+        Arc<dyn crate::workspace::WorkspaceProvider>,
+    ) {
+        use crate::workspace::remote::tests::LocalRunner;
+        let runner = LocalRunner::new(name);
+        let provider = crate::workspace::ssh::SshProvider::with_runner(
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
+        );
+        (runner, Arc::new(provider))
+    }
+
+    /// A loop on `provider` whose reviewer finds two things and then
+    /// nothing. With `fixes`, the executor fixes the first and rejects the
+    /// second, and that one commit is pushed, as Henk, with the default
+    /// trailers, after the checks pass; without, it rejects both, and
+    /// nothing is checked or pushed.
+    async fn executor_on(
+        name: &str,
+        provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+        fixes: bool,
+    ) {
+        let reviewer = ScriptedClient::new(
+            "r",
+            [
+                report(2, "x must be 3", None),
+                report(1, "main must return a value", None),
+                finish_round(),
+                say("Done for now."),
+                finish_round(),
+                say("Nothing more."),
+            ],
+        );
+        let first = if fixes {
+            vec![
+                edit("let x = 1;", "let x = 3;"),
+                judge("f1", "fixed", "x is 3 now."),
+            ]
+        } else {
+            vec![judge("f1", "rejected", "the caller never divides by x.")]
+        };
+        let executor = first
+            .into_iter()
+            .chain([judge("f2", "rejected", "main returns ()."), say("Settled.")]);
+        let settings = ssh_loop_settings("true");
+        let (mut f, _, _, remote) = looping_with(
+            name,
+            &settings,
+            reviewer,
+            ScriptedClient::new("f", executor),
+            provider,
+        )
+        .await;
+        configure(
+            &mut f,
+            &loop_config_and(
+                &settings,
+                &format!("check_commands = [[\"true\"]]\n{PEOPLE}"),
+            ),
+        );
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished, "{:?}", record.error);
+        assert_eq!(record.loop_stop.as_deref(), Some("converged"));
+        let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
+        let checks = execs(&f.app, &run)
+            .await
+            .into_iter()
+            .filter(|e| e.starts_with("exec true exit 0 in "))
+            .count();
+        let summary = report.summary.unwrap();
+        if !fixes {
+            assert_eq!(head, f.head.as_str(), "nothing pushed");
+            assert_eq!(checks, 1, "the setup step only: no change, no checks");
+            assert!(summary.contains("pushed 0 commits"), "{summary}");
+            return;
+        }
+        assert_ne!(head, f.head.as_str(), "pushed");
+        assert!(summary.contains("pushed 1 commit "), "{summary}");
+        assert_eq!(
+            f.app.own_pushes.pushed_for(&head),
+            Some(crate::push::PushedFor::ReviewedByRun)
+        );
+        assert!(
+            log.starts_with("meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"),
+            "{log}"
+        );
+        assert!(log.contains("review loop round 1"), "{log}");
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                format!("Henk-Run: r-{name}"),
+                "Requested-by: discord:3".to_owned(),
+                "Co-authored-by: alice <77+alice@users.noreply.github.com>".to_owned(),
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"
+                    .to_owned(),
+            ],
+            "the default trailers, last and in order"
+        );
+        let (changed, content) =
+            crate::git::tests::remote_change(remote.path(), f.head.as_str(), "src/a.rs").await;
+        assert_eq!(changed, ["src/a.rs"]);
+        assert_eq!(content, "fn main() {\n    let x = 3;\n}\n");
+        assert_eq!(checks, 2, "the setup step and the check");
+    }
+
+    #[tokio::test]
+    async fn the_executor_s_fix_is_pushed_as_one_commit_on_the_ssh_backend() {
+        let (runner, provider) = ssh_backend("henk-loop-ssh-fix");
+        executor_on("loop-ssh-fix", provider, true).await;
+        assert_eq!(
+            std::fs::read_dir(runner.base()).unwrap().count(),
+            0,
+            "the workspace is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_change_the_executor_pushes_nothing_on_the_ssh_backend() {
+        let (runner, provider) = ssh_backend("henk-loop-ssh-nochange");
+        executor_on("loop-ssh-nochange", provider, false).await;
+        assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
+    async fn live_the_executor_s_fix_is_pushed_from_a_real_sandbox_host() {
+        let provider =
+            crate::workspace::ssh::SshProvider::new(crate::workspace::ssh::tests::live_target());
+        executor_on("loop-ssh-live-fix", Arc::new(provider.clone()), true).await;
+        executor_on("loop-ssh-live-nochange", Arc::new(provider), false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
+    async fn live_kube_the_executor_s_fix_is_pushed_from_its_pod() {
+        use crate::workspace::kubernetes::tests::{LIVE, live_provider, pods_left};
+        let _one = LIVE.lock().await;
+        let provider = live_provider().await;
+        executor_on("loop-kube-live-fix", Arc::new(provider.clone()), true).await;
+        executor_on("loop-kube-live-nochange", Arc::new(provider.clone()), false).await;
+        assert_eq!(pods_left(&provider).await, Vec::<String>::new());
+    }
+
+    /// An executor that, when first asked, has someone push to the branch
+    /// before it answers, as a person pushing while Henk works would.
+    struct PushedUnderneath {
+        script: ScriptedClient,
+        remote: std::path::PathBuf,
+        name: String,
+        moved: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for PushedUnderneath {
+        fn model(&self) -> &'static str {
+            "f"
+        }
+        async fn complete(
+            &self,
+            request: &henk_llm::CompletionRequest,
+        ) -> Result<Completion, henk_llm::LlmError> {
+            if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                move_branch(&self.remote, &self.name).await;
+            }
+            self.script.complete(request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_moved_while_the_executor_worked_gets_nothing_pushed() {
+        let (runner, ssh) = ssh_backend("henk-loop-moved-ssh");
+        let host: Arc<dyn crate::workspace::WorkspaceProvider> =
+            Arc::new(crate::workspace::host::HostProvider);
+        for (backend, provider, settings) in [
+            ("host", host, String::new()),
+            ("ssh", ssh, ssh_loop_settings("true")),
+        ] {
+            let name = format!("loop-moved-{backend}");
+            let (mut f, _, _, remote) = looping_with(
+                &name,
+                &settings,
+                ScriptedClient::new("r", one_finding()),
+                ScriptedClient::new("f", []),
+                provider,
+            )
+            .await;
+            f.app.models.insert(
+                "f".to_owned(),
+                Arc::new(PushedUnderneath {
+                    script: ScriptedClient::new("f", fixes_f1()),
+                    remote: remote.path().to_path_buf(),
+                    name: name.clone(),
+                    moved: std::sync::atomic::AtomicBool::new(false),
+                }),
+            );
+            let run = RunId::parse(format!("r-{name}")).unwrap();
+            let error = run_review(&f.app, request(&run), CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("the branch moved"),
+                "{backend}: {error:#}"
+            );
+            let record = f.app.store.run(&run).await.unwrap().unwrap();
+            assert_eq!(record.status, RunStatus::Failed, "{backend}");
+            let (_, log) = crate::git::tests::remote_feature(remote.path()).await;
+            assert!(
+                log.starts_with("Later <later@example.com>"),
+                "{backend}: only the other push is on the branch: {log}"
+            );
+            let findings = loop_findings(&f.app, &run).await;
+            assert_ne!(findings[0].1, "fixed", "{backend}: {findings:?}");
+            assert_no_stage_running(&f.app, &run).await;
+        }
+        assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn on_a_sandbox_the_executor_runs_its_own_commands_and_their_change_is_pushed() {
+        let command = "sed -i 's/x = 1/x = 3/' src/a.rs";
+        let mut provider = crate::workspace::fake::FakeProvider::default();
+        provider.script.insert(
+            "true".to_owned(),
+            crate::workspace::fake::Scripted::default(),
+        );
+        provider.script.insert(
+            format!("bash -c {command}"),
+            crate::workspace::fake::Scripted {
+                writes: vec![(
+                    "src/a.rs".to_owned(),
+                    b"fn main() {\n    let x = 3;\n}\n".to_vec(),
+                )],
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let (f, _, executor, remote) = looping_with(
+            "loop-executor-bash",
+            &ssh_loop_settings("true"),
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new(
+                "f",
+                [
+                    call("bash", serde_json::json!({"command": command})),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+            Arc::new(provider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-executor-bash").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (changed, content) =
+            crate::git::tests::remote_change(remote.path(), f.head.as_str(), "src/a.rs").await;
+        assert_eq!(
+            changed,
+            ["src/a.rs"],
+            "a change made through bash is pushed"
+        );
+        assert_eq!(content, "fn main() {\n    let x = 3;\n}\n");
+        let (names, _, system) = seen(&executor);
+        assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(
+            system.contains("commands of your own in the checkout with `bash`"),
+            "{system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_the_host_the_executor_gets_no_shell() {
+        let (f, _, executor, _remote) = looping(
+            "loop-executor-no-bash",
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new(
+                "f",
+                [
+                    judge("f1", "rejected", "the caller never divides by x."),
+                    say("Settled."),
+                ],
+            ),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse("r-loop-executor-no-bash").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (names, _, system) = seen(&executor);
+        assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!system.contains("`bash`"), "{system}");
+    }
+
+    /// mise and one setup step, every command on the fake backend passing.
+    /// The step leaves a lockfile and a changed tracked file in the tree, as
+    /// a dependency fetch can.
+    fn set_up_backend() -> crate::workspace::fake::FakeProvider {
+        use crate::workspace::fake::Scripted;
+        let mut provider = crate::workspace::fake::FakeProvider::default();
+        provider.script.insert(
+            "env MISE_SAFE=1 mise settings get safe".to_owned(),
+            Scripted {
+                output: "true\n".to_owned(),
+                ..Scripted::default()
+            },
+        );
+        provider.script.insert(
+            "env MISE_SAFE=1 mise exec -- make deps".to_owned(),
+            Scripted {
+                writes: vec![
+                    ("deps.lock".to_owned(), b"locked\n".to_vec()),
+                    (
+                        "src/a.rs".to_owned(),
+                        b"fn main() {\n    let x = 1;\n}\n// deps\n".to_vec(),
+                    ),
+                ],
+                ..Scripted::default()
+            },
+        );
+        for command in [
+            "env MISE_SAFE=1 mise install",
+            "env MISE_SAFE=1 mise exec -- true",
+        ] {
+            provider
+                .script
+                .insert(command.to_owned(), Scripted::default());
+        }
+        provider
+    }
+
+    const SET_UP: &str = "[workspace]\ntoolchain = \"mise\"\nsetup = [[\"make\", \"deps\"]]\n";
+
+    /// A loop on `provider` with `settings`, a check, and an executor that
+    /// answers `executor`.
+    async fn set_up_loop(
+        name: &str,
+        settings: &str,
+        executor: Vec<Result<Completion, henk_llm::LlmError>>,
+        provider: &crate::workspace::fake::FakeProvider,
+    ) -> Looping {
+        let mut looping = looping_with(
+            name,
+            settings,
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", executor),
+            Arc::new(provider.clone()),
+        )
+        .await;
+        configure(
+            &mut looping.0,
+            &loop_config_and(settings, "check_commands = [[\"true\"]]\n"),
+        );
+        looping
+    }
+
+    #[tokio::test]
+    async fn the_setup_stage_installs_the_toolchain_and_runs_its_steps_before_the_reviewer() {
+        let provider = set_up_backend();
+        let (f, _, _, remote) = set_up_loop("loop-setup", SET_UP, fixes_f1(), &provider).await;
+        let run = RunId::parse("r-loop-setup").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let ran = provider.ran.lock().unwrap().clone();
+        assert_eq!(
+            ran.get(..3).unwrap(),
+            [
+                "env MISE_SAFE=1 mise settings get safe",
+                "env MISE_SAFE=1 mise install",
+                "env MISE_SAFE=1 mise exec -- make deps"
+            ],
+            "mise first, in safe mode, then the operator's steps, before anything else"
+        );
+        assert!(ran.len() > 3, "the check ran: {ran:?}");
+        assert!(
+            ran.iter()
+                .skip(3)
+                .all(|c| c == "env MISE_SAFE=1 mise exec -- true"),
+            "the checks run through mise: {ran:?}"
+        );
+        assert!(!ran.iter().any(|c| c.contains("trust")), "{ran:?}");
+        let (files, content) =
+            crate::git::tests::remote_change(remote.path(), f.head.as_str(), "src/a.rs").await;
+        assert_eq!(files, ["src/a.rs"], "nothing setup left is pushed");
+        assert_eq!(
+            content, "fn main() {\n    let x = 3;\n}\n// deps\n",
+            "the fix on top of the tree setup left"
+        );
+        assert!(
+            execs(&f.app, &run)
+                .await
+                .iter()
+                .any(|e| e.starts_with("exec env MISE_SAFE=1 mise install exit 0")),
+            "every setup step is on the run's timeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_setup_leaves_in_the_tree_is_never_pushed_by_the_loop() {
+        let provider = set_up_backend();
+        let (f, _, _, remote) = set_up_loop(
+            "loop-setup-leftovers",
+            SET_UP,
+            vec![
+                judge("f1", "rejected", "the caller never divides by x."),
+                say("Settled."),
+            ],
+            &provider,
+        )
+        .await;
+        let run = RunId::parse("r-loop-setup-leftovers").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let summary = report.summary.unwrap();
+        assert!(summary.contains("pushed 0 commits"), "{summary}");
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(after, f.head.as_str(), "nothing pushed");
+    }
+
+    /// The run a loop that never got its workspace ended with, after the
+    /// models were never asked and nothing was pushed.
+    async fn never_set_up(
+        f: &Fixture,
+        reviewer: &ScriptedClient,
+        executor: &ScriptedClient,
+        remote: &crate::git::ScratchDir,
+        run: &RunId,
+    ) -> String {
+        let _ = run_review(&f.app, request(run), CancellationToken::new()).await;
+        assert!(reviewer.requests().is_empty() && executor.requests().is_empty());
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(after, f.head.as_str(), "nothing pushed");
+        assert_no_stage_running(&f.app, run).await;
+        let record = f.app.store.run(run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        record.error.unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_mise_without_safe_mode_is_refused_before_the_loop_reads_the_repository() {
+        let mut provider = set_up_backend();
+        // An older mise fails on the setting it does not know.
+        provider.script.insert(
+            "env MISE_SAFE=1 mise settings get safe".to_owned(),
+            crate::workspace::fake::Scripted {
+                code: 1,
+                output: "mise ERROR Unknown setting: safe".to_owned(),
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let (f, reviewer, executor, remote) =
+            set_up_loop("loop-setup-unsafe", SET_UP, fixes_f1(), &provider).await;
+        let run = RunId::parse("r-loop-setup-unsafe").unwrap();
+        let error = never_set_up(&f, &reviewer, &executor, &remote, &run).await;
+        assert!(error.contains("no safe mode"), "{error}");
+        assert_eq!(
+            *provider.ran.lock().unwrap(),
+            ["env MISE_SAFE=1 mise settings get safe"],
+            "mise never installed and the models never ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_setup_step_stops_the_loop_before_the_reviewer() {
+        let mut provider = crate::workspace::fake::FakeProvider::default();
+        provider.script.insert(
+            "make deps".to_owned(),
+            crate::workspace::fake::Scripted {
+                code: 2,
+                output: "no rule to make target 'deps'".to_owned(),
+                ..crate::workspace::fake::Scripted::default()
+            },
+        );
+        let (f, reviewer, executor, remote) = set_up_loop(
+            "loop-setup-fails",
+            "[workspace]\nsetup = [[\"make\", \"deps\"]]\n",
+            fixes_f1(),
+            &provider,
+        )
+        .await;
+        let run = RunId::parse("r-loop-setup-fails").unwrap();
+        let error = never_set_up(&f, &reviewer, &executor, &remote, &run).await;
+        assert!(
+            error.contains("setup step `make deps` exited with 2"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("no rule to make target"),
+            "the error names the step, not its output: {error}"
+        );
+        assert_eq!(*provider.ran.lock().unwrap(), ["make deps"]);
+        assert!(provider.closed(), "the workspace is destroyed");
+        for reply in f.writer.replies.lock().unwrap().iter() {
+            assert!(
+                !reply.body.contains("no rule to make target"),
+                "{}",
+                reply.body
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_changeset_against_the_rules_stops_the_loop_before_the_push() {
+        use crate::workspace::Exported;
+        use henk_domain::workspace::{FileMode, RawChange};
+        let raw = |path: &str, mode: FileMode| Exported {
+            raw: RawChange {
+                path: path.to_owned(),
+                mode,
+                deleted: false,
+            },
+            content: b"x\n".to_vec(),
+        };
+        let too_many: Vec<Exported> = (0..20)
+            .map(|i| raw(&format!("gen/{i}.txt"), FileMode::Regular))
+            .collect();
+        for (case, inject, why) in [
+            (
+                "link",
+                vec![raw("docs", FileMode::Symlink)],
+                "symbolic link",
+            ),
+            (
+                "module",
+                vec![raw("vendor/lib", FileMode::Gitlink)],
+                "submodule",
+            ),
+            (
+                "git",
+                vec![raw(".git/hooks/pre-push", FileMode::Regular)],
+                ".git",
+            ),
+            (
+                "escape",
+                vec![raw("../outside", FileMode::Regular)],
+                "leaves the repository",
+            ),
+            (
+                "many",
+                too_many,
+                "21 files changed; a run may change at most 20",
+            ),
+        ] {
+            let provider = crate::workspace::fake::FakeProvider {
+                inject,
+                ..crate::workspace::fake::FakeProvider::default()
+            };
+            let name = format!("loop-refused-{case}");
+            let (f, _, _, remote) = looping(
+                &name,
+                ScriptedClient::new("r", one_finding()),
+                ScriptedClient::new("f", fixes_f1()),
+                Arc::new(provider.clone()),
+            )
+            .await;
+            let run = RunId::parse(format!("r-{name}")).unwrap();
+            let report = run_review(&f.app, request(&run), CancellationToken::new())
+                .await
+                .unwrap();
+            let summary = report.summary.unwrap();
+            assert!(summary.contains("cannot be pushed"), "{case}: {summary}");
+            assert!(summary.contains(why), "{case}: {summary}");
+            let record = f.app.store.run(&run).await.unwrap().unwrap();
+            assert_eq!(record.loop_stop.as_deref(), Some("push_refused"), "{case}");
+            let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+            assert_eq!(after, f.head.as_str(), "{case}: nothing pushed");
+            assert!(provider.closed(), "{case}: the workspace is destroyed");
+            assert_no_stage_running(&f.app, &run).await;
+        }
+    }
+
+    /// `text` as a TOML basic string.
+    fn toml_string(text: &str) -> String {
+        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    #[tokio::test]
+    async fn the_loop_pushes_from_a_clean_checkout_with_only_the_changeset() {
+        let check = r#"echo stray > stray.txt; mkdir -p "$HOME/.cache" && echo c > "$HOME/.cache/x"; mkdir -p .git/hooks && echo evil > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit; echo checked"#;
+        let (mut f, _, _, remote) = looping(
+            "loop-clean",
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", fixes_f1()),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let checks = format!(
+            "check_commands = [[\"sh\", \"-c\", {}]]\n",
+            toml_string(check)
+        );
+        configure(&mut f, &loop_config_and("", &checks));
+        let run = RunId::parse("r-loop-clean").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_ne!(head, f.head.as_str(), "pushed");
+        // What the check left in the tree is part of the changeset and its
+        // limits; its HOME and a .git it made are not, and no hook it
+        // planted ran when Henk committed.
+        let (changed, stray) =
+            crate::git::tests::remote_change(remote.path(), f.head.as_str(), "stray.txt").await;
+        assert_eq!(changed, ["src/a.rs", "stray.txt"]);
+        assert_eq!(stray, "stray\n");
+        let execs = execs(&f.app, &run).await;
+        assert_eq!(execs.len(), 1, "{execs:?}");
+        assert!(execs[0].contains("exit 0"), "{execs:?}");
+        assert!(execs[0].ends_with("\nchecked"), "{execs:?}");
+        let push = crate::git::scratch_prefix("henk-loop-r-loop-clean-push-1");
+        let left: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.starts_with(&push))
+            .collect();
+        assert!(left.is_empty(), "the push checkout is gone: {left:?}");
+    }
+
+    const GITLAB_TOKEN: &str = "glpat-never-shown";
+
+    /// GitLab's REST API for merge request g/p!7, project 11, whose branch
+    /// `feature` lives at `remote`. Only a request with the token in its
+    /// header gets an answer.
+    async fn gitlab_rest(remote: &std::path::Path, head: &CommitSha) -> wiremock::MockServer {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (at, body) in [
+            (
+                "/api/v4/projects/g%2Fp/merge_requests/7",
+                serde_json::json!({"iid": 7, "state": "opened", "sha": head.as_str(), "source_branch": "feature",
+                       "target_branch": "main", "source_project_id": 11, "target_project_id": 11}),
+            ),
+            (
+                "/api/v4/projects/g%2Fp",
+                serde_json::json!({"id": 11, "path_with_namespace": "g/p", "default_branch": "main",
+                       "http_url_to_repo": remote.to_string_lossy()}),
+            ),
+            (
+                "/api/v4/projects/11/repository/branches/feature",
+                serde_json::json!({"name": "feature", "protected": false, "default": false}),
+            ),
+            (
+                "/api/v4/user",
+                serde_json::json!({"id": 42, "username": "meneerhenk"}),
+            ),
+            (
+                "/api/v4/users/77",
+                serde_json::json!({"id": 77, "username": "alice", "name": "Alice Display"}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(at))
+                .and(header("PRIVATE-TOKEN", GITLAB_TOKEN))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn a_whole_loop_works_on_gitlab_through_the_gitlab_writer() {
+        use henk_platform::gitlab::{GitLabRest, GitLabWriter};
+
+        let (mut f, reviewer, executor, remote) = looping(
+            "loop-gitlab",
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", fixes_f1()),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let config = loop_config_and("", PEOPLE).replace(
+            "github_owners = [\"o\"]\n",
+            "github_owners = [\"o\"]\ngitlab_projects = [\"g/p\"]\n",
+        );
+        configure(&mut f, &config);
+        let rest = gitlab_rest(remote.path(), &f.head).await;
+        let mcp = FakeServer::new(Vec::new(), echo_behaviour());
+        f.app.test_push_writer = None;
+        f.app.gitlab = Some(Arc::new(GitLabWriter::new(
+            Arc::new(mcp.connect("gitlab-write").await),
+            "meneerhenk",
+        )));
+        let refused = f.app.push_writer(Platform::GitLab).err().unwrap();
+        assert!(
+            refused.to_string().contains("needs the token in $"),
+            "{refused}"
+        );
+        f.app.gitlab = Some(Arc::new(
+            GitLabWriter::new(Arc::new(mcp.connect("gitlab-write").await), "meneerhenk").with_rest(
+                GitLabRest::new(
+                    &format!("{}/api/v4", rest.uri()),
+                    secrecy::SecretString::from(GITLAB_TOKEN.to_owned()),
+                )
+                .unwrap(),
+            ),
+        ));
+        assert!(f.app.push_writer(Platform::GitLab).is_ok());
+
+        let run = RunId::parse("r-loop-gitlab").unwrap();
+        let mut on_gitlab = request(&run);
+        on_gitlab.target.repo = RepoRef::parse(Platform::GitLab, "g/p").unwrap();
+        let report = run_review(&f.app, on_gitlab, CancellationToken::new())
+            .await
+            .unwrap();
+        let summary = report.summary.unwrap();
+        assert!(summary.contains("pushed 1 commit "), "{summary}");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.platform, Platform::GitLab);
+        assert_eq!(record.loop_stop.as_deref(), Some("converged"));
+        let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_ne!(
+            head,
+            f.head.as_str(),
+            "one commit, pushed as a fast-forward"
+        );
+        assert!(
+            log.starts_with("meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>"),
+            "{log}"
+        );
+        assert_eq!(
+            pushed_trailers(remote.path()).await[2..],
+            [
+                "Co-authored-by: alice <77-alice@users.noreply.127.0.0.1>",
+                "Signed-off-by: meneerhenk <42-meneerhenk@users.noreply.127.0.0.1>",
+            ],
+            "the requester by the username their gitlab_id has, never the display name"
+        );
+        assert!(
+            !format!("{:?}{:?}", reviewer.requests(), executor.requests()).contains(GITLAB_TOKEN),
+            "no model ever sees the token"
+        );
+        for request in rest.received_requests().await.unwrap() {
+            assert!(
+                !request.url.as_str().contains(GITLAB_TOKEN),
+                "{}",
+                request.url
+            );
+        }
     }
 }
