@@ -15,6 +15,7 @@ use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::address::ThreadOutcome;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::push::push_refusal;
+use henk_domain::role::Role;
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
@@ -29,11 +30,12 @@ use crate::address_tools::{AddressContext, Settled, address_tools};
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::checks::{describe, run_checks};
-use crate::edit_tools::{EditContext, EditState};
+use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
 use crate::push::{Pusher, stop_if_cancelled};
+use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::setup;
 use crate::workspace::traced::Traced;
@@ -554,6 +556,15 @@ impl Session<'_> {
         if context.edit.bash {
             system = format!("{system}\n\n{}", prompts::EXECUTOR_BASH);
         }
+        // The executor's tools and skills from [roles.executor] (#334); the
+        // thread tools come on top, outside the role's grant.
+        let edit = equip_and_grant(
+            Role::Executor,
+            &mut system,
+            edit_tools(&context.edit),
+            self.app.settings.skills.select(&config.skills),
+            &config.tools(),
+        );
         let opening = ChatMessage::user(format!(
             "The open review threads on {reference}, as data:\n\n{}",
             context.threads_text()
@@ -563,7 +574,7 @@ impl Session<'_> {
             model: Arc::clone(&self.model),
             system,
             opening: vec![opening],
-            tools: address_tools(context),
+            tools: address_tools(context, edit),
             limits: AgentConfig {
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_secs),
@@ -1496,6 +1507,52 @@ check_commands = [["true"]]
         assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
         assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
         assert!(!system.contains("`bash`"), "{system}");
+    }
+
+    /// `[roles.executor]` tools and skills hold for an address run too
+    /// (#334): a tool left out is not offered, the skills are, and the
+    /// thread tools stay.
+    #[tokio::test]
+    async fn an_address_run_gets_the_executors_tools_and_skills() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-role").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(fix_x()).into_iter().map(Ok),
+        ));
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        let config = format!(
+            "{CONFIG}tools = [\"list_files\", \"read_file\", \"edit_file\", \"load_skill\"]\nskills = [\"rust-errors\"]\n[skills]\ndir = \"skills\"\n{PEOPLE}"
+        );
+        let mut app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(HostProvider),
+            &config,
+        );
+        crate::skills::attach(&mut app.settings, std::path::Path::new(fixtures)).unwrap();
+        run_address(
+            &app,
+            request(platform, "r-addr-role"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (names, system) = offered(&model);
+        assert_eq!(
+            names,
+            [
+                "edit_file",
+                "list_files",
+                "list_threads",
+                "load_skill",
+                "read_file",
+                "settle_thread"
+            ],
+            "{names:?}"
+        );
+        assert!(system.contains("rust-errors"), "{system}");
     }
 
     #[tokio::test]

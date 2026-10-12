@@ -13,7 +13,7 @@ use henk_llm::ToolDef;
 use henk_platform::push::OpenThread;
 use serde_json::{Value, json};
 
-use crate::edit_tools::{EditContext, arg_str, edit_tools, name, schema};
+use crate::edit_tools::{EditContext, arg_str, name, schema};
 
 /// What all address tools share: the edit tools' context and the threads.
 pub struct AddressContext {
@@ -147,13 +147,14 @@ impl Tool for SettleThread {
     }
 }
 
-/// Every address tool over one context.
+/// Every address tool over one context: `edit`, the executor's tools as
+/// its role grants them, and the review threads, which an address run
+/// always has.
 #[must_use]
-pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
-    let mut set = edit_tools(&ctx.edit);
-    set.add(ListThreads(Arc::clone(ctx)))
+pub fn address_tools(ctx: &Arc<AddressContext>, mut edit: ToolSet) -> ToolSet {
+    edit.add(ListThreads(Arc::clone(ctx)))
         .add(SettleThread(Arc::clone(ctx)));
-    set
+    edit
 }
 
 #[cfg(test)]
