@@ -24,7 +24,7 @@ use tracing::{info, warn};
 
 use crate::app::App;
 use crate::cancel::Cancelled;
-use crate::config::AddressConfig;
+use crate::config::ExecutorConfig;
 use crate::git::{Checkout, ScratchDir};
 
 /// Stops the run when its token fired. Checked where the run would
@@ -86,8 +86,8 @@ impl Pusher<'_> {
         changes: &[Change],
         cancel: &CancellationToken,
     ) -> anyhow::Result<String> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         let henk = self.henk_identity(config).await?;
         let policy = config.trailer_policy(&self.target.repo);
@@ -158,8 +158,8 @@ impl Pusher<'_> {
 
     /// Who Henk commits and signs off as: `[address.identity]`, or the
     /// App's own account.
-    async fn henk_identity(&self, config: &AddressConfig) -> anyhow::Result<CommitPerson> {
-        if let Some(person) = config.henk_identity().context("address.identity")? {
+    async fn henk_identity(&self, config: &ExecutorConfig) -> anyhow::Result<CommitPerson> {
+        if let Some(person) = config.henk_identity().context("roles.executor.identity")? {
             return Ok(person);
         }
         let identity = self
@@ -178,7 +178,7 @@ impl Pusher<'_> {
     /// is no account to credit.
     async fn requester_identity(
         &self,
-        config: &AddressConfig,
+        config: &ExecutorConfig,
     ) -> anyhow::Result<Option<CommitPerson>> {
         let committer = self.app.settings.committers.get(&config.requester_id);
         if let Some(person) = committer.and_then(|c| c.commit_as.clone()) {

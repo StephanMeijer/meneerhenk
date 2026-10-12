@@ -6,6 +6,8 @@
 use henk_agent::ToolSet;
 use henk_domain::role::Role;
 
+use crate::skill_tools::{AgentSkills, equip};
+
 /// `set`, keeping only the tools `role` grants in `granted`. A tool above
 /// the role's ceiling is a bug in the code that built the set: tests and
 /// debug builds stop on it, release builds leave it out.
@@ -18,6 +20,24 @@ pub fn grant(role: Role, mut set: ToolSet, granted: &[String]) -> ToolSet {
     }
     set.retain(|name| role.allows(name) && role.grants(granted, name));
     set
+}
+
+/// `set` with the role's `skills` added (their catalogue goes in `system`),
+/// then cut to what `role` grants in `granted`. Without `load_skill` in
+/// `granted` the skills are left out, catalogue and all, so the prompt
+/// never names a skill the role cannot load; the configuration load
+/// refuses that combination first.
+pub fn equip_and_grant(
+    role: Role,
+    system: &mut String,
+    mut set: ToolSet,
+    skills: AgentSkills,
+    granted: &[String],
+) -> ToolSet {
+    if Role::loads_skills(granted) {
+        equip(system, &mut set, skills);
+    }
+    grant(role, set, granted)
 }
 
 #[cfg(test)]
@@ -83,6 +103,48 @@ mod tests {
             &Role::Planner.default_tools(),
         );
         assert_eq!(tools.len(), 2);
+    }
+
+    fn skills() -> AgentSkills {
+        let skill = henk_domain::skill::Skill::parse(
+            "rust-errors",
+            "---\nname: rust-errors\ndescription: Use for errors.\n---\nReturn typed errors.",
+        )
+        .unwrap();
+        [(skill.name().clone(), Arc::new(skill))]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn a_role_with_load_skill_gets_its_skills() {
+        let mut system = String::new();
+        let tools = equip_and_grant(
+            Role::Reviewer,
+            &mut system,
+            set(&["read_file"]),
+            skills(),
+            &Role::Reviewer.default_tools(),
+        );
+        assert!(system.contains("rust-errors"), "{system}");
+        assert_eq!(
+            tools.names().collect::<Vec<_>>(),
+            ["load_skill", "read_file"]
+        );
+    }
+
+    #[test]
+    fn a_role_without_load_skill_hears_of_no_skills() {
+        let mut system = String::new();
+        let tools = equip_and_grant(
+            Role::Reviewer,
+            &mut system,
+            set(&["read_file"]),
+            skills(),
+            &["read_file".to_owned()],
+        );
+        assert!(system.is_empty(), "{system}");
+        assert_eq!(tools.names().collect::<Vec<_>>(), ["read_file"]);
     }
 
     #[test]

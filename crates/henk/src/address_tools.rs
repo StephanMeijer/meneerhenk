@@ -33,7 +33,7 @@ pub struct AddressContext {
     /// Files one run may change.
     pub max_changed_files: usize,
     /// Whether the model may run commands of its own (`bash`, #172): only
-    /// on a backend apart from Henk.
+    /// on a backend apart from Henk, and when its role's tools grant it.
     pub bash: bool,
     /// What the model decided so far.
     pub state: Mutex<AddressState>,
@@ -330,13 +330,14 @@ impl Tool for SettleThread {
     }
 }
 
-/// Every address tool over one context.
+/// Every address tool over one context: `edit`, the executor's tools as
+/// its role grants them, and the review threads, which an address run
+/// always has.
 #[must_use]
-pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
-    let mut set = edit_tools(ctx);
-    set.add(ListThreads(Arc::clone(ctx)))
+pub fn address_tools(ctx: &Arc<AddressContext>, mut edit: ToolSet) -> ToolSet {
+    edit.add(ListThreads(Arc::clone(ctx)))
         .add(SettleThread(Arc::clone(ctx)));
-    set
+    edit
 }
 
 /// The tools to read, change and check the code, without the review

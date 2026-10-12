@@ -1540,7 +1540,7 @@ async fn an_address_run_is_startable_only_where_address_runs_are_configured() {
         "https://127.0.0.1:9",
         crate::dashboard::app::Assets(&[]),
         |s| {
-            s.address = Some(toml::from_str("model = \"m\"\nrequester_id = 3").unwrap());
+            s.roles.executor = Some(toml::from_str("model = \"m\"\nrequester_id = 3").unwrap());
         },
     );
     let (cookie, _) = viewer(&f);

@@ -14,6 +14,7 @@ use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::address::{ThreadOutcome, push_refusal};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
+use henk_domain::role::Role;
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
@@ -24,7 +25,7 @@ use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
-use crate::address_tools::{AddressContext, AddressState, Settled, address_tools};
+use crate::address_tools::{AddressContext, AddressState, Settled, address_tools, edit_tools};
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::checks::{describe, run_checks};
@@ -32,6 +33,7 @@ use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
 use crate::push::{Pusher, stop_if_cancelled};
+use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::setup;
 use crate::workspace::traced::Traced;
@@ -85,9 +87,10 @@ pub async fn run_address(
 ) -> anyhow::Result<AddressReport> {
     let config = app
         .settings
-        .address
+        .roles
+        .executor
         .as_ref()
-        .ok_or_else(|| anyhow!("address runs are not configured"))?;
+        .ok_or_else(|| anyhow!("address runs need [roles.executor]"))?;
     if !app.settings.allowlist.allows(&request.target.repo) {
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
@@ -436,8 +439,8 @@ impl Session<'_> {
         Vec<Change>,
         String,
     )> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         let workspace = &self.set_up(workspace).await?;
         let context = Arc::new(AddressContext {
@@ -446,13 +449,16 @@ impl Session<'_> {
             check_commands: config.check_commands.clone(),
             check_timeout: self.command_limit(),
             max_changed_files: config.max_changed_files,
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
             bash: self
                 .app
                 .settings
                 .workspace
                 .profile_for(&self.request.target.repo.path())
                 .backend
-                .runs_model_commands(),
+                .runs_model_commands()
+                && Role::Executor.grants(&config.tools(), "bash"),
             state: Mutex::new(AddressState::default()),
         });
         self.session(&context, cancel).await?;
@@ -479,8 +485,8 @@ impl Session<'_> {
     /// in the workspace first, so what they leave behind is part of the
     /// changeset and its limits.
     async fn changeset(&self, workspace: &dyn Workspace) -> anyhow::Result<(Vec<Change>, String)> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         if workspace
             .export()
@@ -521,8 +527,8 @@ impl Session<'_> {
         context: &Arc<AddressContext>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         let target = &self.request.target;
         let note = self
@@ -547,6 +553,15 @@ impl Session<'_> {
         if context.bash {
             system = format!("{system}\n\n{}", prompts::ADDRESS_BASH);
         }
+        // The executor's tools and skills from [roles.executor] (#334); the
+        // thread tools come on top, outside the role's grant.
+        let edit = equip_and_grant(
+            Role::Executor,
+            &mut system,
+            edit_tools(context),
+            self.app.settings.skills.select(&config.skills),
+            &config.tools(),
+        );
         let opening = ChatMessage::user(format!(
             "The open review threads on {reference}, as data:\n\n{}",
             context.threads_text()
@@ -556,7 +571,7 @@ impl Session<'_> {
             model: Arc::clone(&self.model),
             system,
             opening: vec![opening],
-            tools: address_tools(context),
+            tools: address_tools(context, edit),
             limits: AgentConfig {
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_secs),
@@ -730,7 +745,7 @@ provider = "open_ai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"
-[address]
+[roles.executor]
 model = "m"
 requester_id = 3
 check_commands = [["true"]]
@@ -917,7 +932,7 @@ check_commands = [["true"]]
     }
 
     /// An app on the host backend whose configuration has `extra` after
-    /// `[address]`.
+    /// `[roles.executor]`.
     fn app_with(hub: Arc<FakeHub>, script: Vec<Completion>, extra: &str) -> App {
         app_on(
             hub,
@@ -1179,7 +1194,7 @@ check_commands = [["true"]]
         let app = app_with(
             Arc::clone(&hub),
             fix("Set x to 2."),
-            &format!("{PEOPLE}[address.repositories.\"O/R\"]\nrequester_signoff = true\n"),
+            &format!("{PEOPLE}[roles.executor.repositories.\"O/R\"]\nrequester_signoff = true\n"),
         );
         run_address(
             &app,
@@ -1209,7 +1224,7 @@ check_commands = [["true"]]
             fix("Set x to 2."),
             &format!(
                 "{PEOPLE}commit_name = \"Lead Person\"\ncommit_email = \"lead@example.com\"\n\
-                 [address.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
+                 [roles.executor.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
             ),
         );
         run_address(
@@ -1463,6 +1478,43 @@ check_commands = [["true"]]
         );
     }
 
+    /// On a sandbox, an executor whose tools leave out bash gets neither
+    /// the tool nor the prompt that tells it to use one (#334).
+    #[tokio::test]
+    async fn on_a_sandbox_an_executor_without_bash_is_not_told_of_it() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-nobash-granted").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let config = format!(
+            "{CONFIG}tools = [\"list_files\", \"read_file\", \"search\", \"edit_file\", \"write_file\", \"run_checks\"]\n{PEOPLE}[workspace]\nbackend = \"ssh\"\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            key.public_key().to_openssh().unwrap()
+        );
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(fix_x()).into_iter().map(Ok),
+        ));
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(fake()),
+            &config,
+        );
+        run_address(
+            &app,
+            request(platform, "r-addr-nobash-granted"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (names, system) = offered(&model);
+        assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!system.contains("`bash`"), "{system}");
+    }
+
     #[tokio::test]
     async fn on_the_host_the_address_model_gets_no_shell() {
         let platform = Platform::GitHub;
@@ -1489,6 +1541,52 @@ check_commands = [["true"]]
         assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
         assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
         assert!(!system.contains("`bash`"), "{system}");
+    }
+
+    /// `[roles.executor]` tools and skills hold for an address run too
+    /// (#334): a tool left out is not offered, the skills are, and the
+    /// thread tools stay.
+    #[tokio::test]
+    async fn an_address_run_gets_the_executors_tools_and_skills() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-role").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(fix_x()).into_iter().map(Ok),
+        ));
+        let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        let config = format!(
+            "{CONFIG}tools = [\"list_files\", \"read_file\", \"edit_file\", \"load_skill\"]\nskills = [\"rust-errors\"]\n[skills]\ndir = \"skills\"\n{PEOPLE}"
+        );
+        let mut app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(HostProvider),
+            &config,
+        );
+        crate::skills::attach(&mut app.settings, std::path::Path::new(fixtures)).unwrap();
+        run_address(
+            &app,
+            request(platform, "r-addr-role"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (names, system) = offered(&model);
+        assert_eq!(
+            names,
+            [
+                "edit_file",
+                "list_files",
+                "list_threads",
+                "load_skill",
+                "read_file",
+                "settle_thread"
+            ],
+            "{names:?}"
+        );
+        assert!(system.contains("rust-errors"), "{system}");
     }
 
     #[tokio::test]

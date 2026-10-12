@@ -849,7 +849,7 @@ github_owners = ["docspec"]
             .find(|o| o.listener == "address")
             .unwrap();
         assert_eq!(outcome.outcome, "ignored");
-        assert_eq!(outcome.detail, "address runs are not configured");
+        assert_eq!(outcome.detail, "address runs need [roles.executor]");
 
         // No [gitlab] here: a merge request URL is refused before any
         // event, naming its host (#58).

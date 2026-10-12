@@ -371,7 +371,10 @@ pub(crate) fn check_secrets(settings: &Settings) -> Vec<Check> {
     })
     .collect();
     if let Some(gitlab) = &settings.gitlab {
-        checks.push(gitlab_token(&gitlab.token_env, settings.address.is_some()));
+        checks.push(gitlab_token(
+            &gitlab.token_env,
+            settings.roles.executor.is_some(),
+        ));
     }
     if let Some(dashboard) = &settings.dashboard {
         let variable = &dashboard.client_id_env;
@@ -407,9 +410,12 @@ fn gitlab_token(variable: &str, address: bool) -> Check {
     let name = format!("secret ${variable}");
     match (env_var(variable).is_some(), address) {
         (true, true) => Check::ok(name, "set; GitLab address runs can push"),
-        (true, false) => Check::ok(name, "set; address runs are not configured"),
+        (true, false) => Check::ok(name, "set; there is no [roles.executor], so nothing pushes"),
         (false, true) => Check::warn(name, "not set; GitLab address runs are refused"),
-        (false, false) => Check::ok(name, "not set; address runs are not configured anyway"),
+        (false, false) => Check::ok(
+            name,
+            "not set; there is no [roles.executor], so nothing pushes",
+        ),
     }
 }
 
@@ -473,23 +479,17 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         .models
         .keys()
         .filter(|id| {
-            settings.planning.as_ref().is_none_or(|p| &p.model != *id)
-                && settings
-                    .review
-                    .r#loop
-                    .as_ref()
-                    .is_none_or(|l| &l.reviewer != *id && &l.fixer != *id)
-                && settings.address.as_ref().is_none_or(|a| &a.model != *id)
+            let roles = &settings.roles;
+            roles.planner.as_ref().is_none_or(|r| &r.model != *id)
+                && roles.reviewer.as_ref().is_none_or(|r| &r.model != *id)
+                && roles.executor.as_ref().is_none_or(|r| &r.model != *id)
         })
         .map(String::as_str)
         .collect();
     if !unused.is_empty() {
         checks.push(Check::warn(
             "models",
-            format!(
-                "configured but used by no review loop, address run or planner: {}",
-                unused.join(", ")
-            ),
+            format!("configured but used by no role: {}", unused.join(", ")),
         ));
     }
     if settings.review.r#loop.is_none() {
@@ -741,7 +741,7 @@ mod tests {
             .unwrap()
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     #[tokio::test]
     async fn a_model_only_address_runs_use_is_not_unused() {
@@ -754,9 +754,7 @@ mod tests {
         let unused = checks.iter().find(|c| c.name == "models").unwrap();
         assert_eq!(
             unused.verdict,
-            Verdict::Warn(
-                "configured but used by no review loop, address run or planner: spare".to_owned()
-            )
+            Verdict::Warn("configured but used by no role: spare".to_owned())
         );
     }
 

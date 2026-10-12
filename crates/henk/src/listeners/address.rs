@@ -37,8 +37,8 @@ impl Listener for AddressListener {
             return Handled::Ignored("not an address request".to_owned());
         };
         let app = self.coordinator.app();
-        if app.settings.address.is_none() {
-            return Handled::Ignored("address runs are not configured".to_owned());
+        if app.settings.roles.executor.is_none() {
+            return Handled::Ignored("address runs need [roles.executor]".to_owned());
         }
         if !app.settings.allowlist.allows(&target.repo) {
             return Handled::Ignored(format!("{} is not on the allowlist", target.repo));

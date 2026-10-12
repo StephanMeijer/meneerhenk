@@ -254,8 +254,8 @@ The loop stops (`henk_domain::review_loop::LoopStop`) when a round has no new
 findings (converged), at `max_rounds`, when a finding repeats one that was
 fixed, when the reviewer alone has had its round, when the checks fail after
 the fixer's changes, when a push is refused, when the reviewer changed its
-workspace, when a session fails or runs out of time (per round
-`round_timeout_secs`, for the whole loop `run_timeout_secs`, #286), or on a
+workspace, when a session fails or runs out of time (per round its role's
+`timeout_secs`, for the whole loop `run_timeout_secs`, #286), or on a
 cancel. Every finding then gets one final verdict; one left without is
 `unsettled`. The first four stops end well and the review completes. A
 cancel ends it the way its token says: cancelled, superseded or interrupted
@@ -777,8 +777,10 @@ too; without a dashboard they are not served.
 
 ## 11. Configuration and secrets
 
-`henk.toml` holds ids, the allowlist, models, the review loop (`[review.loop]`,
-which needs `[address]`) and the MCP server commands.
+`henk.toml` holds ids, the allowlist, models, the roles (`[roles.planner]`,
+`[roles.reviewer]`, `[roles.executor]`, #322), the review loop
+(`[review.loop]`, which needs the reviewer and the executor) and the MCP
+server commands.
 It never holds a secret; every secret is named by the environment variable that
 carries it, and the deployment fills those variables from OpenBao.
 

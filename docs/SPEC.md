@@ -89,8 +89,9 @@ change against the target branch.
 
 A review is one **review loop** (`[review.loop]`, #283): two model
 sessions, a **reviewer** and a **fixer**, working on one pull request in a
-checkout of it. Reviews need `[review.loop]` and `[address]`; without them
-Henk does not review (#309). A review that cannot get its checkout does not
+checkout of it. Reviews need `[review.loop]` with `[roles.reviewer]` and
+`[roles.executor]` (#322); without `[review.loop]` Henk does not review
+(#309). A review that cannot get its checkout does not
 complete.
 
 - **The reviewer reviews** the commit. It reads the change and as much of
@@ -658,6 +659,10 @@ surprising reading of the earlier wording; veto any that is wrong.
   quality figures are removed with the fact-check (#310).
 - §8 invariant 4: each role has a fixed tool ceiling that configuration can
   only narrow (#171, #321).
+- §3: each agent is configured once, as a role: `[roles.planner]`,
+  `[roles.reviewer]` and `[roles.executor]` (#322). `[address]` and the
+  model and limit keys of `[review.loop]` and `[planning]` moved there; a
+  stage whose role is missing is refused.
 
 ## Revision notes (2026-10-07)
 
