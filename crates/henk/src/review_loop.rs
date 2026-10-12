@@ -131,15 +131,20 @@ pub(crate) async fn run_loop(
         .context("getting a credential for git")?;
     let profile = app.settings.workspace.profile_for(&target.repo.path());
     stages::mark(store, run, Stage::Checkout, StageState::Running, "").await;
-    let opened = open_workspace(
+    let opening = open_workspace(
         app,
         run,
         &facts,
         alone.is_some().then_some(commit),
         credential.clone(),
         profile,
-    )
-    .await;
+    );
+    // A setup can take minutes; a cancel does not wait for it. The
+    // workspace dropped mid-setup destroys itself.
+    let opened = tokio::select! {
+        opened = opening => opened,
+        () = cancel.cancelled() => return Err(crate::cancel::Cancelled.into()),
+    };
     let workspace = match opened {
         Ok(workspace) => workspace,
         Err(error) => {

@@ -921,7 +921,15 @@ async fn loop_body(
             run,
             pushed_head: review.pushed_head,
         };
-        let report = crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await?;
+        let report = match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await {
+            Ok(report) => report,
+            // Stopped for its token, it ends the way the token says:
+            // cancelled, superseded or interrupted, not failed.
+            Err(error) => {
+                stop_if_ended(review, &cancel)?;
+                return Err(error);
+            }
+        };
         (
             report.results,
             report.open,
