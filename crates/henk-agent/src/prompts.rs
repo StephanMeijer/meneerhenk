@@ -3,16 +3,6 @@
 /// Henk's persona (spec §7). Prepended to every system prompt.
 pub const PERSONA: &str = include_str!("../prompts/persona.md");
 
-/// Instructions for one review lane (§3.2).
-pub const REVIEW_LANE: &str = include_str!("../prompts/review_lane.md");
-
-/// Instructions for a fact-check of one finding (§3.2).
-pub const FACT_CHECK: &str = include_str!("../prompts/fact_check.md");
-
-/// Appended to a review lane's and the fact-checker's instructions when
-/// they have a workspace at the reviewed commit (#90).
-pub const REVIEW_WORKSPACE: &str = include_str!("../prompts/review_workspace.md");
-
 /// Appended to an address run's instructions when its workspace lets the
 /// model run commands of its own (#172).
 pub const ADDRESS_BASH: &str = include_str!("../prompts/address_bash.md");
@@ -78,12 +68,9 @@ mod tests {
     #[test]
     fn persona_is_in_style() {
         assert!(henk_domain::text::is_in_style(PERSONA));
-        assert!(henk_domain::text::is_in_style(REVIEW_LANE));
-        assert!(henk_domain::text::is_in_style(FACT_CHECK));
         assert!(henk_domain::text::is_in_style(PLANNER));
         assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
-        assert!(henk_domain::text::is_in_style(REVIEW_WORKSPACE));
         assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
@@ -101,9 +88,6 @@ mod tests {
         // The planner's copy is one commit without history (#183).
         assert!(PLAN_WORKSPACE.contains("without history"));
         assert!(!PLAN_WORKSPACE.contains("`git log` on a file"));
-        for tool in ["list_files", "search", "read_file", "bash"] {
-            assert!(REVIEW_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
-        }
         assert!(henk_domain::text::is_in_style(GREETINGS));
         assert!(greeting(7).contains("review"));
         assert_eq!(greeting(1), greeting(1 + 4));
@@ -111,36 +95,8 @@ mod tests {
     }
 
     #[test]
-    fn review_lane_names_every_lane_tool() {
-        for tool in [
-            "list_changed_files",
-            "get_file_diff",
-            "read_file",
-            "list_existing_findings",
-            "post_finding",
-            "improve_finding",
-            "withdraw_finding",
-        ] {
-            assert!(REVIEW_LANE.contains(&format!("`{tool}`")), "{tool}");
-        }
-    }
-
-    #[test]
     fn skills_block_names_its_tool_and_placeholder() {
         assert!(SKILLS.contains("`load_skill`"));
         assert!(SKILLS.contains("{{catalogue}}"));
-    }
-
-    #[test]
-    fn fact_check_names_every_checker_tool() {
-        for tool in [
-            "list_changed_files",
-            "get_file_diff",
-            "read_file",
-            "give_verdict",
-            "same_as",
-        ] {
-            assert!(FACT_CHECK.contains(&format!("`{tool}`")), "{tool}");
-        }
     }
 }

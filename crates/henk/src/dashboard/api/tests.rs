@@ -515,6 +515,178 @@ async fn runs_list_and_one_run_in_full_with_text_as_stored() {
     assert_eq!(bad.code(), "bad_request");
 }
 
+/// A review from before the loop (#309): lanes, a fact-checker, drafts
+/// with the fact-check's verdicts and the findings it wrote, and the
+/// `lanes` and `fact_check` stages. Nothing writes these any more, but
+/// old runs keep them, and the run page and `henk runs show` still read
+/// them all.
+#[tokio::test]
+async fn a_review_from_before_the_loop_still_reads_in_full() {
+    use henk_store::{FindingAction, Stage, StageState, StageWrite};
+
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-lanes").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "new commits".into(),
+            link: format!("{ORIGIN}/runs/r-lanes"),
+        })
+        .await
+        .unwrap();
+    for (lane, model) in [("lane-a", "model-x"), ("check-1", "model-y")] {
+        store.start_lane(&run, lane, model).await.unwrap();
+        store
+            .finish_lane(&run, lane, LaneStatus::Finished, 4, 100, 10, None)
+            .await
+            .unwrap();
+    }
+    let verdicts = [
+        ("d1", DraftVerdict::Confirmed, "", "c-1"),
+        ("d2", DraftVerdict::Rejected, "", ""),
+        ("d3", DraftVerdict::SameAs, "d1", "c-1"),
+        ("d4", DraftVerdict::Unchecked, "", "c-2"),
+        ("d5", DraftVerdict::NotChecked, "", "c-3"),
+    ];
+    for (line, (draft, verdict, same_as, comment_id)) in (1..).zip(verdicts) {
+        store
+            .record_draft(
+                &run,
+                &DraftRecord {
+                    at: String::new(),
+                    draft: draft.into(),
+                    lane: "lane-a".into(),
+                    model: "model-x".into(),
+                    kind: "finding".into(),
+                    path: "src/a.rs".into(),
+                    line,
+                    target: String::new(),
+                    body: format!("Finding {draft}."),
+                    decision: None,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .decide_draft(
+                &run,
+                draft,
+                &DraftDecision {
+                    at: String::new(),
+                    verdict,
+                    checker: "model-y".into(),
+                    reason: format!("Why {draft}."),
+                    same_as: same_as.into(),
+                    comment_id: comment_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for (line, comment_id, action) in [
+        (1, "c-1", FindingAction::Posted),
+        (2, "", FindingAction::Rejected),
+        (3, "c-1", FindingAction::Merged),
+        (4, "c-2", FindingAction::Unverified),
+    ] {
+        store
+            .record_finding(&run, "lane-a", "src/a.rs", line, comment_id, action)
+            .await
+            .unwrap();
+    }
+    for (stage, detail) in [
+        (Stage::Lanes, "1 of 1 lanes finished"),
+        (
+            Stage::FactCheck,
+            "5 drafts: 1 confirmed, 1 rejected, 1 repeat",
+        ),
+    ] {
+        store
+            .stage(&run, &StageWrite::now(stage, StageState::Done, detail))
+            .await
+            .unwrap();
+    }
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-lanes", &cookie).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail = detail.json();
+    let names: Vec<&str> = detail["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| lane["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["check-1", "lane-a"], "by name");
+    let decided: Vec<(&str, &str)> = detail["drafts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|draft| {
+            (
+                draft["id"].as_str().unwrap(),
+                draft["decision"]["verdict"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        decided,
+        [
+            ("d1", "confirmed"),
+            ("d2", "rejected"),
+            ("d3", "same_as"),
+            ("d4", "unchecked"),
+            ("d5", "not_checked"),
+        ]
+    );
+    assert_eq!(detail["drafts"][2]["decision"]["same_as"], "d1");
+    let actions: Vec<&str> = detail["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| finding["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(actions, ["posted", "rejected", "merged", "unverified"]);
+    let stages: Vec<&str> = detail["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| stage["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(stages, ["lanes", "fact_check"]);
+
+    let shown = crate::runs::render(
+        &store.run(&run).await.unwrap().unwrap(),
+        &store.lanes(&run).await.unwrap(),
+        &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
+        &store.transcripts(&run).await.unwrap(),
+        &store.drafts(&run).await.unwrap(),
+        &store.findings(&run).await.unwrap(),
+        &store.events(&run).await.unwrap(),
+    );
+    for line in [
+        "lanes (2)",
+        "check-1",
+        "drafts (5)",
+        "confirmed by model-y, comment c-1: Why d1.",
+        "rejected by model-y: Why d2.",
+        "same as d1 by model-y",
+        "not checked by model-y",
+        "findings (4)",
+        "merged",
+        "unverified",
+    ] {
+        assert!(shown.contains(line), "{line}:\n{shown}");
+    }
+}
+
 #[tokio::test]
 async fn a_query_that_does_not_parse_is_a_json_bad_request() {
     let f = fixture("https://127.0.0.1:9");

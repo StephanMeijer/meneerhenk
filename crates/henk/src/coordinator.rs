@@ -156,7 +156,7 @@ pub(crate) async fn queue_check(app: &App, request: &ReviewRequest) -> Option<Re
     let (Some(run), Some(commit)) = (&request.run, &request.commit) else {
         return None;
     };
-    let reviews = !app.settings.lanes.is_empty() || app.settings.review.r#loop.is_some();
+    let reviews = app.settings.review.r#loop.is_some();
     if !app.settings.allowlist.allows(&request.target.repo) || !reviews {
         return None;
     }

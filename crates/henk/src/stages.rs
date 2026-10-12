@@ -3,9 +3,6 @@
 //! again when it ends. Recording one never fails a run: a store error is a
 //! warning, and the timeline keeps its lines as before.
 
-use std::collections::BTreeMap;
-
-use henk_domain::draft::{DraftId, Verdict};
 use henk_domain::run::RunId;
 use henk_store::{RunStore, Stage, StageState, StageWrite};
 use time::OffsetDateTime;
@@ -143,78 +140,4 @@ pub async fn requested(
         None,
     )
     .await;
-}
-
-/// What the fact-check made of the drafts, in a line:
-/// `4 drafts: 2 confirmed, 1 rejected, 1 repeat`.
-#[must_use]
-pub fn fact_check_line(verdicts: &BTreeMap<DraftId, Verdict>) -> String {
-    let (mut confirmed, mut rejected, mut repeats, mut unchecked) = (0, 0, 0, 0);
-    for verdict in verdicts.values() {
-        match verdict {
-            Verdict::Confirmed { .. } => confirmed += 1,
-            Verdict::Rejected { .. } => rejected += 1,
-            Verdict::SameAs { .. } => repeats += 1,
-            Verdict::Unchecked { .. } | Verdict::NoCheck => unchecked += 1,
-        }
-    }
-    let mut parts = vec![
-        format!("{confirmed} confirmed"),
-        format!("{rejected} rejected"),
-    ];
-    if repeats > 0 {
-        parts.push(format!(
-            "{repeats} {}",
-            if repeats == 1 { "repeat" } else { "repeats" }
-        ));
-    }
-    if unchecked > 0 {
-        parts.push(format!("{unchecked} unchecked"));
-    }
-    let drafts = verdicts.len();
-    format!(
-        "{drafts} {}: {}",
-        if drafts == 1 { "draft" } else { "drafts" },
-        parts.join(", ")
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
-    use henk_domain::marker::ModelId;
-
-    use super::*;
-
-    #[test]
-    fn the_fact_check_line_counts_each_verdict_and_is_in_style() {
-        let by = ModelId::parse("opus").unwrap();
-        let mut verdicts = BTreeMap::new();
-        verdicts.insert(
-            DraftId::parse("d1").unwrap(),
-            Verdict::Confirmed {
-                by: by.clone(),
-                reason: String::new(),
-            },
-        );
-        verdicts.insert(
-            DraftId::parse("d2").unwrap(),
-            Verdict::Rejected {
-                by: by.clone(),
-                reason: String::new(),
-            },
-        );
-        verdicts.insert(
-            DraftId::parse("d3").unwrap(),
-            Verdict::Unchecked { why: String::new() },
-        );
-        let line = fact_check_line(&verdicts);
-        assert_eq!(line, "3 drafts: 1 confirmed, 1 rejected, 1 unchecked");
-        assert!(henk_domain::text::is_in_style(&line));
-        assert_eq!(
-            fact_check_line(&BTreeMap::new()),
-            "0 drafts: 0 confirmed, 0 rejected"
-        );
-    }
 }

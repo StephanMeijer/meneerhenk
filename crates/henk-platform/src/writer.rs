@@ -1,7 +1,6 @@
 //! What Henk writes to a platform, behind one trait per platform.
 
 use henk_domain::allowlist::Platform;
-use henk_domain::marker::Marker;
 use henk_domain::review::{CommitSha, ReviewOutcome};
 
 use crate::error::PlatformError;
@@ -32,7 +31,7 @@ pub struct PullRequestInfo {
     pub state: PullRequestState,
 }
 
-pub use henk_domain::diff::{DiffSide, FilePatch};
+pub use henk_domain::diff::FilePatch;
 
 /// A comment Henk posted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,40 +42,6 @@ pub struct PostedComment {
     pub node_id: Option<String>,
     /// Link to the comment.
     pub url: String,
-}
-
-/// One of Henk's findings already on the target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExistingFinding {
-    /// Comment id.
-    pub comment_id: String,
-    /// GraphQL node id, where the platform has one.
-    pub node_id: Option<String>,
-    /// File path.
-    pub path: String,
-    /// Current line, or `None` when the comment is outdated.
-    pub line: Option<u32>,
-    /// Visible text, marker included.
-    pub body: String,
-    /// The parsed marker.
-    pub marker: Marker,
-    /// Whether its thread is resolved.
-    pub resolved: bool,
-    /// Whether a person replied in its thread.
-    pub answered_by_person: bool,
-}
-
-/// One of Henk's earlier summaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExistingSummary {
-    /// Comment id.
-    pub comment_id: String,
-    /// GraphQL node id, where the platform has one.
-    pub node_id: Option<String>,
-    /// The parsed marker.
-    pub marker: Marker,
-    /// Whether it is already folded.
-    pub folded: bool,
 }
 
 /// What `start_review` hands back so `finish_review` can close it.
@@ -137,46 +102,6 @@ pub trait PlatformWriter: Send + Sync {
         is_review_comment: bool,
     ) -> Result<(), PlatformError>;
 
-    /// Henk's findings on the target, with thread state.
-    async fn existing_findings(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingFinding>, PlatformError>;
-
-    /// Henk's summaries and failure comments on the target: the comments
-    /// a newer summary folds as outdated (§3.3).
-    async fn existing_summaries(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<ExistingSummary>, PlatformError>;
-
-    /// Posts a line comment at `commit`.
-    async fn post_finding(
-        &self,
-        target: &ReviewTarget,
-        commit: &CommitSha,
-        path: &str,
-        line: u32,
-        side: DiffSide,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError>;
-
-    /// Rewrites a line comment.
-    async fn update_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-        body: &str,
-    ) -> Result<(), PlatformError>;
-
-    /// Resolves the thread a line comment opened. Used when a finding is
-    /// withdrawn as wrong; GitHub then shows the thread collapsed.
-    async fn resolve_finding(
-        &self,
-        target: &ReviewTarget,
-        comment_id: &str,
-    ) -> Result<(), PlatformError>;
-
     /// Posts a conversation comment (summary, greeting, failure).
     async fn post_comment(
         &self,
@@ -193,20 +118,6 @@ pub trait PlatformWriter: Send + Sync {
         is_review_comment: bool,
         body: &str,
     ) -> Result<PostedComment, PlatformError>;
-
-    /// Folds an earlier summary as outdated (§3.3).
-    async fn fold_summary(
-        &self,
-        target: &ReviewTarget,
-        summary: &ExistingSummary,
-    ) -> Result<(), PlatformError>;
-
-    /// Folds a finding whose thread is resolved (§3.3).
-    async fn fold_finding(
-        &self,
-        target: &ReviewTarget,
-        finding: &ExistingFinding,
-    ) -> Result<(), PlatformError>;
 
     /// Closes the review: check conclusion or commit status (§3.3).
     async fn finish_review(
