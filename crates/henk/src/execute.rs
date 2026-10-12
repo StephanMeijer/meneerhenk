@@ -631,7 +631,7 @@ bot_login = "h[bot]"
 [mcp.github]
 command = "unused"
 [models.m]
-provider = "open_ai"
+provider = "openai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"

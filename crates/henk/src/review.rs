@@ -936,7 +936,7 @@ bot_login = "h[bot]"
 [mcp.github]
 command = "unused"
 [models.m]
-provider = "open_ai"
+provider = "openai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"
@@ -2958,7 +2958,7 @@ requester_id = 3
     /// A review loop of reviewer `r` and executor `f` (#284), each its own
     /// scripted model, with `settings` in `[review.loop]`.
     fn loop_config_with(settings: &str) -> String {
-        let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
+        let models = "[models.r]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
         CONFIG
             .replace("[review]\n", &format!("{models}[review]\n"))
             .replace("[review.loop]\n", &format!("[review.loop]\n{settings}"))
