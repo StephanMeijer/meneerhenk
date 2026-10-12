@@ -865,7 +865,11 @@ service links, and the profile's `memory_mib`, `cpus` and `disk_mib` as its
 memory, cpu and scratch disk. The number of processes is the node's
 setting (`podPidsLimit`). A command that runs out of memory ends the whole
 Pod on Kubernetes 1.32 and later; the result says so, and the workspace is
-gone for the rest of that run. Pods live at most six hours whatever
+gone for the rest of that run. The scratch disk is a hard limit too: a
+Pod that writes more than `disk_mib` to `/sandbox` is evicted, and the
+run fails saying so. A Rust workspace's `target/` after clippy and the
+tests passes 8 GiB easily, so size `disk_mib` for the repository's own
+builds. Pods live at most six hours whatever
 happens to Henk, and `henk serve` removes those of a Henk that died when
 it starts: one Henk per sandbox namespace.
 
