@@ -3,7 +3,7 @@
 //! No credential lives here (§8.4). Every secret is named by the environment
 //! variable that holds it and read by the component that needs it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -160,8 +160,8 @@ fn validate_mcp_serve(config: &McpServeConfig) -> Result<(), ConfigError> {
     if config.enabled && config.tokens.is_empty() {
         return fail("mcp_server.enabled needs at least one [[mcp_server.tokens]]".to_owned());
     }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut envs = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut envs = BTreeSet::new();
     for token in &config.tokens {
         let fine = !token.name.is_empty()
             && token
@@ -388,8 +388,15 @@ pub struct AllowlistConfig {
 pub struct GitHubConfig {
     /// App id.
     pub app_id: u64,
-    /// Installation id.
-    pub installation_id: u64,
+    /// The one installation Henk may act for. Without it or
+    /// `installations`, Henk acts for every installation of the App the
+    /// allowlist lets it work in.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+    /// The installations Henk may act for, when it serves several accounts
+    /// but not every installation of the App.
+    #[serde(default)]
+    pub installations: Option<Vec<u64>>,
     /// Env var holding the path to the PEM private key.
     #[serde(default = "default_github_key_env")]
     pub private_key_path_env: String,
@@ -402,6 +409,54 @@ pub struct GitHubConfig {
     #[serde(default = "default_github_mcp")]
     pub mcp_server: String,
 }
+
+impl GitHubConfig {
+    /// The installations Henk may act for; `None` is every one.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<BTreeSet<u64>> {
+        match (self.installation_id, &self.installations) {
+            (Some(id), _) => Some(BTreeSet::from([id])),
+            (None, Some(ids)) => Some(ids.iter().copied().collect()),
+            (None, None) => None,
+        }
+    }
+
+    fn validate(&self, mcp: &BTreeMap<String, McpServerConfig>) -> Result<(), ConfigError> {
+        let bad = |message: String| Err(ConfigError::GitHub(message));
+        match (self.installation_id, &self.installations) {
+            (Some(_), Some(_)) => {
+                return bad("github: set installation_id or installations, not both".to_owned());
+            }
+            (_, Some(ids)) if ids.is_empty() => {
+                return bad(
+                    "github.installations is empty; leave it out to serve every installation"
+                        .to_owned(),
+                );
+            }
+            _ => {}
+        }
+        if self.installation_id == Some(0) || self.installations.iter().flatten().any(|&id| id == 0)
+        {
+            return bad("github: 0 is not an installation id".to_owned());
+        }
+        if let Some(server) = mcp.get(&self.mcp_server) {
+            for key in MCP_INSTALLATION_ENV {
+                if server.env.contains_key(key) {
+                    return bad(format!(
+                        "[mcp.{}] sets {key}; Henk sets it for each session, to the \
+                         installation of the repository the session reads, so remove it",
+                        self.mcp_server
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The environment the GitHub MCP server signs in as an App installation
+/// with. Henk sets both for each session it starts (#378).
+pub const MCP_INSTALLATION_ENV: [&str; 2] = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID"];
 
 fn default_github_key_env() -> String {
     "GITHUB_APP_PRIVATE_KEY_PATH".to_owned()
@@ -1520,6 +1575,9 @@ pub enum ConfigError {
     /// A skill or a reference to one is unusable.
     #[error("skills: {0}")]
     Skill(String),
+    /// The `[github]` section is unusable.
+    #[error("{0}")]
+    GitHub(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -1627,6 +1685,9 @@ impl Config {
             validate_execution(execution, &self.roles)?;
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
+        if let Some(github) = &self.github {
+            github.validate(&self.mcp)?;
+        }
         let skills_dir = self.skills.map(|s| s.dir);
         validate_skill_references(skills_dir.as_deref(), &self.roles)?;
         let committers = self
@@ -2769,10 +2830,21 @@ impl Settings {
             let _ = writeln!(out, "  {alias}: {how}");
         }
         if let Some(github) = &self.github {
+            let installations = github.ceiling().map_or_else(
+                || "every installation the allowlist reaches".to_owned(),
+                |ids| {
+                    let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+                    format!(
+                        "installation{} {}",
+                        if ids.len() == 1 { "" } else { "s" },
+                        ids.join(", ")
+                    )
+                },
+            );
             let _ = writeln!(
                 out,
-                "GitHub App:      id {} installation {} as {}",
-                github.app_id, github.installation_id, github.bot_login
+                "GitHub App:      id {} {installations} as {}",
+                github.app_id, github.bot_login
             );
         }
         if let Some(gitlab) = &self.gitlab {
@@ -4304,6 +4376,78 @@ github_owners = ["docspec"]
             Config::parse(&empty).and_then(Config::into_settings),
             Err(ConfigError::Review(_))
         ));
+    }
+
+    fn github(section: &str, mcp_env: &str) -> Result<Settings, ConfigError> {
+        let text = format!(
+            "{MINIMAL}\n[mcp.github]\ncommand = \"unused\"\nenv = {{ {mcp_env} }}\n[github]\napp_id = 1\nbot_login = \"h[bot]\"\n{section}"
+        );
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn henk_serves_every_installation_unless_told_which() {
+        let every = github("", "").unwrap();
+        assert_eq!(every.github.as_ref().unwrap().ceiling(), None);
+        assert!(
+            every.describe().contains(
+                "GitHub App:      id 1 every installation the allowlist reaches as h[bot]"
+            ),
+            "{}",
+            every.describe()
+        );
+        let one = github("installation_id = 2\n", "").unwrap();
+        assert_eq!(
+            one.github.as_ref().unwrap().ceiling(),
+            Some(BTreeSet::from([2])),
+            "installation_id is a list of one"
+        );
+        assert!(
+            one.describe()
+                .contains("GitHub App:      id 1 installation 2 as h[bot]"),
+            "{}",
+            one.describe()
+        );
+        let several = github("installations = [2, 3]\n", "").unwrap();
+        assert_eq!(
+            several.github.as_ref().unwrap().ceiling(),
+            Some(BTreeSet::from([2, 3]))
+        );
+        assert!(
+            several
+                .describe()
+                .contains("GitHub App:      id 1 installations 2, 3 as h[bot]")
+        );
+    }
+
+    #[test]
+    fn installations_must_be_one_way_and_real() {
+        for section in [
+            "installation_id = 2\ninstallations = [3]\n",
+            "installations = []\n",
+            "installation_id = 0\n",
+            "installations = [2, 0]\n",
+        ] {
+            assert!(
+                matches!(github(section, ""), Err(ConfigError::GitHub(_))),
+                "{section}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_github_mcp_server_is_not_told_its_installation_in_the_config() {
+        for env in [
+            "GITHUB_APP_INSTALLATION_ID = \"2\"",
+            "GITHUB_APP_ID = \"1\"",
+        ] {
+            let error = github("", env).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::GitHub(why) if why.contains("Henk sets it")),
+                "{env}: {error}"
+            );
+        }
+        assert!(github("", "GITHUB_READ_ONLY = \"1\"").is_ok());
     }
 
     #[test]

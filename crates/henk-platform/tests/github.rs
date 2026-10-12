@@ -17,7 +17,10 @@ use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, ReviewOutcome, SessionName, SessionOutcome, SessionResult};
 use henk_domain::run::RunId;
-use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter, Installations};
 use henk_platform::{PlatformWriter as _, ReviewTarget};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -47,7 +50,7 @@ fn marker(kind: MarkerKind) -> String {
 
 #[test]
 fn app_jwt_has_the_documented_shape() {
-    let credentials = AppCredentials::from_pem(12345, 678, KEY).unwrap();
+    let credentials = AppCredentials::from_pem(12345, KEY).unwrap();
     let jwt = credentials
         .jwt(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
         .unwrap();
@@ -68,45 +71,187 @@ fn app_jwt_has_the_documented_shape() {
 
 #[test]
 fn garbage_pem_is_rejected() {
-    assert!(AppCredentials::from_pem(1, 2, "not a key").is_err());
+    assert!(AppCredentials::from_pem(1, "not a key").is_err());
     assert!(
-        AppCredentials::from_pem(1, 2, "-----BEGIN THING-----\nYWJj\n-----END THING-----").is_err()
+        AppCredentials::from_pem(1, "-----BEGIN THING-----\nYWJj\n-----END THING-----").is_err()
+    );
+}
+
+fn app_auth(allowed: Option<BTreeSet<u64>>) -> GitHubAuth {
+    GitHubAuth::app(Arc::new(Installations::new(
+        AppCredentials::from_pem(1, KEY).unwrap(),
+        allowed,
+    )))
+}
+
+fn repo(path: &str) -> RepoRef {
+    RepoRef::parse(Platform::GitHub, path).unwrap()
+}
+
+/// A fake GitHub with the App installed on two accounts: `alice` (111,
+/// token `ghs_alice`) and `docspec` (222, token `ghs_docspec`).
+async fn two_installations() -> MockServer {
+    let server = MockServer::start().await;
+    for (owner, id) in [("alice", 111), ("docspec", 222)] {
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{id}/access_tokens")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(
+                json!({"token": format!("ghs_{owner}"), "expires_at": "2999-01-01T00:00:00Z"}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(format!(
+                "^/repos/{owner}/[^/]+/installation$"
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id": id, "account": {"login": owner}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(format!(
+                "^/repos/{owner}/[^/]+/pulls/7$"
+            )))
+            .and(header("authorization", format!("Bearer ghs_{owner}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "Fix", "state": "open", "draft": false,
+                "head": {"sha": SHA}, "base": {"ref": "main"}
+            })))
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+fn target_in(path: &str) -> ReviewTarget {
+    ReviewTarget {
+        repo: repo(path),
+        number: 7,
+    }
+}
+
+#[tokio::test]
+async fn each_repository_is_served_with_its_own_installations_token() {
+    let server = two_installations().await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    for path in [
+        "alice/x",
+        "docspec/docspec",
+        "docspec/pdf-fixer-cli",
+        "alice/x",
+    ] {
+        let writer = GitHubWriter::new(api.for_repository(&repo(path)), "meneer-henk[bot]");
+        let info = writer.pull_request(&target_in(path)).await.unwrap();
+        assert_eq!(info.head.as_str(), SHA);
+        let owner = path.split('/').next().unwrap();
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&writer.api().git_token().await.unwrap()),
+            format!("ghs_{owner}"),
+            "git uses the same installation's token"
+        );
+    }
+    let requests = server.received_requests().await.unwrap();
+    let lookups = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/installation"))
+        .count();
+    assert_eq!(lookups, 2, "an owner's installation is looked up once");
+    let mints: Vec<&str> = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/access_tokens"))
+        .map(|r| r.url.path())
+        .collect();
+    assert_eq!(
+        mints,
+        [
+            "/app/installations/111/access_tokens",
+            "/app/installations/222/access_tokens"
+        ],
+        "each installation's token is minted once"
     );
 }
 
 #[tokio::test]
-async fn installation_token_is_minted_once_and_reused() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/app/installations/678/access_tokens"))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_json(json!({"token": "ghs_abc", "expires_at": "x"})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/repos/docspec/app/pulls/7"))
-        .and(header("authorization", "Bearer ghs_abc"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "title": "Fix", "state": "open", "draft": false,
-            "head": {"sha": SHA}, "base": {"ref": "main"}
-        })))
-        .expect(2)
-        .mount(&server)
-        .await;
+async fn a_remembered_installation_needs_no_lookup() {
+    let server = two_installations().await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    api.installations().unwrap().remember("DocSpec", 222);
+    let scoped = api.for_repository(&repo("docspec/docspec"));
+    assert_eq!(scoped.installation().await.unwrap(), 222);
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.url.path().ends_with("/installation")),
+        "the webhook's installation id was used"
+    );
+}
 
-    let api = GitHubApi::new(
-        &server.uri(),
-        GitHubAuth::app(AppCredentials::from_pem(1, 678, KEY).unwrap()),
-    )
-    .unwrap();
-    let writer = GitHubWriter::new(api, "meneer-henk[bot]");
-    let info = writer.pull_request(&target()).await.unwrap();
-    assert_eq!(info.head.as_str(), SHA);
-    assert_eq!(info.base_ref, "main");
-    let _ = writer.pull_request(&target()).await.unwrap();
+#[tokio::test]
+async fn a_repository_without_the_app_is_not_installed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/stranger/x/installation"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    let error = api
+        .for_repository(&repo("stranger/x"))
+        .get("/repos/stranger/x")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, henk_platform::PlatformError::NotInstalled { .. }),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn an_installation_outside_the_ceiling_is_refused() {
+    let server = two_installations().await;
+    let api = GitHubApi::new(&server.uri(), app_auth(Some(BTreeSet::from([111])))).unwrap();
+    assert!(
+        api.for_repository(&repo("alice/x"))
+            .git_token()
+            .await
+            .is_ok()
+    );
+    let error = api
+        .for_repository(&repo("docspec/docspec"))
+        .git_token()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, henk_platform::PlatformError::NotInstalled { .. }),
+        "{error}"
+    );
+    let error = api.for_installation(222).git_token().await.unwrap_err();
+    assert!(
+        matches!(error, henk_platform::PlatformError::NotInstalled { .. }),
+        "{error}"
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.url.path() != "/app/installations/222/access_tokens"),
+        "no token is minted outside the ceiling"
+    );
+}
+
+#[tokio::test]
+async fn an_unscoped_app_client_makes_no_installation_calls() {
+    let server = MockServer::start().await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    let error = api.get("/repos/alice/x").await.unwrap_err();
+    assert!(
+        matches!(error, henk_platform::PlatformError::Auth(_)),
+        "{error}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -216,11 +361,7 @@ async fn get_as_app_uses_the_jwt_not_an_installation_token() {
         .expect(1)
         .mount(&server)
         .await;
-    let api = GitHubApi::new(
-        &server.uri(),
-        GitHubAuth::app(AppCredentials::from_pem(12345, 678, KEY).unwrap()),
-    )
-    .unwrap();
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
     let value = api.get_as_app("/app/installations").await.unwrap();
     assert_eq!(value[0]["id"], 678);
     let requests = server.received_requests().await.unwrap();

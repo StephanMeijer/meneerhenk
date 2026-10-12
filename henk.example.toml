@@ -49,7 +49,13 @@ gitlab_groups = ["9xxlab"]
 [github]
 # The GitHub App. Its private key path comes from the environment.
 app_id = 123456
-installation_id = 7654321
+# Henk acts for every installation of the App, on each account it is
+# installed on, and works only where [allowlist] lets it: install the App
+# on a user and an organisation, allowlist both, and Henk reviews in both.
+# Each repository's work goes out as the installation on its account.
+# To act for only some installations, name them (at most one of these):
+# installation_id = 7654321
+# installations = [7654321, 7654322]
 private_key_path_env = "GITHUB_APP_PRIVATE_KEY_PATH"
 bot_login = "meneer-henk[bot]"
 mcp_server = "github"
@@ -322,11 +328,14 @@ requester_id = 523456789012345678
 
 # External MCP servers. Henk is the client; nothing here is part of Henk.
 # The read session reviewers and the planner see: read-only toolsets, no
-# write tool at all.
+# write tool at all. It signs in as the App with the key below; Henk sets
+# GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID for each session, to the
+# installation on the account of the repository it reads, so do not set
+# them here.
 [mcp.github]
 command = "github-mcp-server"
 args = ["stdio"]
-env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels", GITHUB_APP_ID = "123456", GITHUB_APP_INSTALLATION_ID = "7654321" }
+env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels" }
 pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
 call_timeout_secs = 60
 

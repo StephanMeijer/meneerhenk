@@ -923,6 +923,16 @@ too; without a dashboard they are not served.
 | Loop push | git over HTTPS with the App installation token as `x-access-token` | git over HTTPS with the personal access token as `oauth2` |
 | Review ended | check `success`, `neutral` or `failure` | commit status always `success`, count in the description |
 | Mention reply | reply in the review thread, or a conversation comment | reply in the discussion, or a note |
+| Accounts | every installation of the App (#378): each repository's calls, git token and MCP session are its account's installation's, from the delivery's `installation.id` or `GET /repos/{owner}/{repo}/installation` | the one personal access token |
+
+`App.github` is a `GitHubWriters`: one unscoped `GitHubApi` over a shared
+`Installations` (the App key, the optional `installations` ceiling,
+owner → installation, installation → token). `App::writer`, `push_writer`
+and `issue_writer` take the repository and return a writer whose client is
+`GitHubApi::for_repository`. Its installation is fixed for the life of the
+writer, so a run cannot reach another account with its token. Tokens are
+minted once per installation, held until two minutes before their
+`expires_at`, and minted under a lock so concurrent calls share one.
 
 ## 11. Configuration and secrets
 
@@ -936,7 +946,7 @@ carries it, and the deployment fills those variables from OpenBao.
 | Variable | Read by | Reaches |
 |---|---|---|
 | `[endpoints.*].api_key_env` | `App::build` | the clients of the endpoint's models, as a bearer token or `x-api-key` |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting, as the installation Henk names in `GITHUB_APP_INSTALLATION_ID` for each session (#378) |
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for the review loop's push | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
 | `HENK_GITHUB_WEBHOOK_SECRET`, `HENK_GITLAB_WEBHOOK_TOKEN` | `server::router` | signature and token checks |
 | `HENK_API_TOKEN` | `server::router` | `POST /review` and `POST /plan` |

@@ -1,6 +1,7 @@
 //! GitHub App authentication without a JWT crate: RS256 on ring.
 
-use std::sync::Mutex;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -9,6 +10,8 @@ use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tracing::debug;
 
 use crate::error::PlatformError;
@@ -16,7 +19,6 @@ use crate::error::PlatformError;
 /// The App's identity and private key.
 pub struct AppCredentials {
     app_id: u64,
-    installation_id: u64,
     key: RsaKeyPair,
 }
 
@@ -24,7 +26,6 @@ impl std::fmt::Debug for AppCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppCredentials")
             .field("app_id", &self.app_id)
-            .field("installation_id", &self.installation_id)
             .finish_non_exhaustive()
     }
 }
@@ -37,7 +38,7 @@ impl AppCredentials {
     /// # Errors
     ///
     /// Returns [`PlatformError::Auth`] when the PEM cannot be read.
-    pub fn from_pem(app_id: u64, installation_id: u64, pem: &str) -> Result<Self, PlatformError> {
+    pub fn from_pem(app_id: u64, pem: &str) -> Result<Self, PlatformError> {
         let (label, der) = decode_pem(pem)?;
         let key = match label {
             "RSA PRIVATE KEY" => RsaKeyPair::from_der(&der),
@@ -49,17 +50,13 @@ impl AppCredentials {
             }
         }
         .map_err(|error| PlatformError::Auth(format!("unreadable App private key: {error}")))?;
-        Ok(Self {
-            app_id,
-            installation_id,
-            key,
-        })
+        Ok(Self { app_id, key })
     }
 
-    /// The installation this process acts for.
+    /// The App's id.
     #[must_use]
-    pub const fn installation_id(&self) -> u64 {
-        self.installation_id
+    pub const fn app_id(&self) -> u64 {
+        self.app_id
     }
 
     /// A signed App JWT valid for about nine minutes, backdated a minute
@@ -121,14 +118,190 @@ fn decode_pem(pem: &str) -> Result<(&str, Vec<u8>), PlatformError> {
     Ok((label, der))
 }
 
+/// The installations of one App that Henk may act for, and the tokens it
+/// holds for them. One per process, shared by every client: a repository's
+/// installation is looked up once per owner, and each installation's token
+/// is minted once and renewed before its hour runs out.
+pub struct Installations {
+    credentials: AppCredentials,
+    /// The ceiling from the configuration; `None` is every installation.
+    allowed: Option<BTreeSet<u64>>,
+    /// Owner, lowercased, to installation id.
+    owners: Mutex<HashMap<String, u64>>,
+    /// Held across a mint, so one installation's token is minted once even
+    /// when several calls want it at the same moment.
+    tokens: tokio::sync::Mutex<HashMap<u64, CachedToken>>,
+}
+
+impl std::fmt::Debug for Installations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Installations")
+            .field("credentials", &self.credentials)
+            .field("allowed", &self.allowed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Installations {
+    /// The installations of the App `credentials` names, limited to
+    /// `allowed` when that is `Some`.
+    #[must_use]
+    pub fn new(credentials: AppCredentials, allowed: Option<BTreeSet<u64>>) -> Self {
+        Self {
+            credentials,
+            allowed,
+            owners: Mutex::new(HashMap::new()),
+            tokens: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The App's id.
+    #[must_use]
+    pub const fn app_id(&self) -> u64 {
+        self.credentials.app_id
+    }
+
+    /// Whether the configuration lets Henk act for installation `id`.
+    #[must_use]
+    pub fn allows(&self, id: u64) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&id))
+    }
+
+    /// Records that `owner`'s repositories belong to installation `id`, as
+    /// a webhook delivery says, so work it starts needs no lookup.
+    pub fn remember(&self, owner: &str, id: u64) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.insert(owner.to_lowercase(), id);
+        }
+    }
+
+    fn known(&self, owner: &str) -> Option<u64> {
+        self.owners
+            .lock()
+            .ok()
+            .and_then(|owners| owners.get(&owner.to_lowercase()).copied())
+    }
+
+    /// The installation that reaches `owner/name`: remembered, or asked of
+    /// GitHub with the App JWT and then remembered for the owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::NotInstalled`] when the App is not installed
+    /// there or the installation is outside the configured ones, otherwise
+    /// as the request fails.
+    pub async fn installation_for(
+        &self,
+        http: &reqwest::Client,
+        api_base: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<u64, PlatformError> {
+        let id = if let Some(id) = self.known(owner) {
+            id
+        } else {
+            let jwt = self.credentials.jwt(SystemTime::now())?;
+            let response = http
+                .get(format!("{api_base}/repos/{owner}/{name}/installation"))
+                .bearer_auth(&jwt)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await?;
+            let status = response.status();
+            let body = response.text().await?;
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(PlatformError::NotInstalled {
+                    repo: format!("{owner}/{name}"),
+                    reason: "the App is not installed there".to_owned(),
+                });
+            }
+            if !status.is_success() {
+                return Err(PlatformError::Status {
+                    status: status.as_u16(),
+                    body: crate::error::truncate(&body),
+                });
+            }
+            let value: Value =
+                serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
+            let id = value.get("id").and_then(Value::as_u64).ok_or_else(|| {
+                PlatformError::Decode("installation response without id".to_owned())
+            })?;
+            debug!(owner, installation = id, "found installation");
+            self.remember(owner, id);
+            id
+        };
+        if !self.allows(id) {
+            return Err(PlatformError::NotInstalled {
+                repo: format!("{owner}/{name}"),
+                reason: format!("installation {id} is not one of [github] installations"),
+            });
+        }
+        Ok(id)
+    }
+
+    /// A token for installation `id`, minted when there is none or the one
+    /// held is within two minutes of expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError::NotInstalled`] for an installation outside
+    /// the configured ones, otherwise as the token request fails.
+    pub async fn token(
+        &self,
+        http: &reqwest::Client,
+        api_base: &str,
+        id: u64,
+    ) -> Result<SecretString, PlatformError> {
+        if !self.allows(id) {
+            return Err(PlatformError::NotInstalled {
+                repo: format!("installation {id}"),
+                reason: format!("installation {id} is not one of [github] installations"),
+            });
+        }
+        let mut tokens = self.tokens.lock().await;
+        let now = SystemTime::now();
+        if let Some(cached) = tokens.get(&id)
+            && cached.expires_at > now + Duration::from_mins(2)
+        {
+            return Ok(cached.token.clone());
+        }
+        let fresh = mint_installation_token(http, api_base, &self.credentials, id, now).await?;
+        tokens.insert(id, fresh.clone());
+        Ok(fresh.token)
+    }
+}
+
+/// Which installation a client's calls go out as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// None yet: only App (JWT) calls work. The client Henk builds once and
+    /// scopes per repository.
+    Unscoped,
+    /// The installation that reaches this repository.
+    Repository {
+        /// Its owner.
+        owner: String,
+        /// Its name.
+        name: String,
+    },
+    /// This installation.
+    Installation(u64),
+}
+
 /// How the client authenticates to GitHub.
 pub enum GitHubAuth {
-    /// A GitHub App: installation tokens minted from the App key and cached.
+    /// A GitHub App, acting for the installation its scope names.
     App {
-        /// The credentials.
-        credentials: Box<AppCredentials>,
-        /// The cached installation token.
-        cache: Mutex<Option<CachedToken>>,
+        /// The App's installations and their tokens, shared.
+        installations: Arc<Installations>,
+        /// Which installation this client acts for.
+        scope: Scope,
+        /// The scope's installation, once found; fixed for the client's
+        /// life.
+        resolved: tokio::sync::OnceCell<u64>,
     },
     /// A fixed token (a PAT, or a test value).
     Token(SecretString),
@@ -144,19 +317,28 @@ pub struct CachedToken {
 impl std::fmt::Debug for GitHubAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::App { credentials, .. } => f.debug_tuple("App").field(credentials).finish(),
+            Self::App {
+                installations,
+                scope,
+                ..
+            } => f
+                .debug_struct("App")
+                .field("installations", installations)
+                .field("scope", scope)
+                .finish_non_exhaustive(),
             Self::Token(_) => f.write_str("Token(..)"),
         }
     }
 }
 
 impl GitHubAuth {
-    /// App authentication.
+    /// App authentication, not yet scoped to an installation.
     #[must_use]
-    pub fn app(credentials: AppCredentials) -> Self {
+    pub fn app(installations: Arc<Installations>) -> Self {
         Self::App {
-            credentials: Box::new(credentials),
-            cache: Mutex::new(None),
+            installations,
+            scope: Scope::Unscoped,
+            resolved: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -164,6 +346,32 @@ impl GitHubAuth {
     #[must_use]
     pub fn token(token: SecretString) -> Self {
         Self::Token(token)
+    }
+
+    /// The same authentication acting for `scope`. A fixed token stays
+    /// itself.
+    #[must_use]
+    pub fn scoped(&self, scope: Scope) -> Self {
+        match self {
+            Self::Token(token) => Self::Token(token.clone()),
+            Self::App { installations, .. } => Self::App {
+                installations: Arc::clone(installations),
+                resolved: match scope {
+                    Scope::Installation(id) => tokio::sync::OnceCell::new_with(Some(id)),
+                    Scope::Unscoped | Scope::Repository { .. } => tokio::sync::OnceCell::new(),
+                },
+                scope,
+            },
+        }
+    }
+
+    /// The App's installations, for an App.
+    #[must_use]
+    pub fn installations(&self) -> Option<&Arc<Installations>> {
+        match self {
+            Self::App { installations, .. } => Some(installations),
+            Self::Token(_) => None,
+        }
     }
 
     /// A signed App JWT, for the few endpoints that authenticate as the App
@@ -176,18 +384,60 @@ impl GitHubAuth {
     pub fn app_jwt(&self) -> Option<Result<SecretString, PlatformError>> {
         match self {
             Self::Token(_) => None,
-            Self::App { credentials, .. } => {
-                Some(credentials.jwt(SystemTime::now()).map(SecretString::from))
-            }
+            Self::App { installations, .. } => Some(
+                installations
+                    .credentials
+                    .jwt(SystemTime::now())
+                    .map(SecretString::from),
+            ),
         }
     }
 
-    /// A bearer token for API calls, minting an installation token when the
-    /// cached one is missing or within two minutes of expiry.
+    /// The installation this client acts for, found on first use.
     ///
     /// # Errors
     ///
-    /// Returns [`PlatformError`] when the token request fails.
+    /// Returns [`PlatformError::Auth`] for an unscoped App client and a
+    /// fixed token, otherwise as [`Installations::installation_for`].
+    pub async fn installation(
+        &self,
+        http: &reqwest::Client,
+        api_base: &str,
+    ) -> Result<u64, PlatformError> {
+        match self {
+            Self::Token(_) => Err(PlatformError::Auth(
+                "a fixed token has no installation".to_owned(),
+            )),
+            Self::App {
+                installations,
+                scope,
+                resolved,
+            } => resolved
+                .get_or_try_init(|| async {
+                    match scope {
+                        Scope::Installation(id) => Ok(*id),
+                        Scope::Repository { owner, name } => {
+                            installations
+                                .installation_for(http, api_base, owner, name)
+                                .await
+                        }
+                        Scope::Unscoped => Err(PlatformError::Auth(
+                            "no repository or installation chosen for this GitHub call".to_owned(),
+                        )),
+                    }
+                })
+                .await
+                .copied(),
+        }
+    }
+
+    /// A bearer token for API calls: the scope's installation token, minted
+    /// when missing or within two minutes of expiry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when the installation cannot be found or
+    /// the token request fails.
     pub async fn bearer(
         &self,
         http: &reqwest::Client,
@@ -195,19 +445,9 @@ impl GitHubAuth {
     ) -> Result<SecretString, PlatformError> {
         match self {
             Self::Token(token) => Ok(token.clone()),
-            Self::App { credentials, cache } => {
-                let now = SystemTime::now();
-                if let Ok(cache) = cache.lock()
-                    && let Some(cached) = cache.as_ref()
-                    && cached.expires_at > now + Duration::from_mins(2)
-                {
-                    return Ok(cached.token.clone());
-                }
-                let fresh = mint_installation_token(http, api_base, credentials, now).await?;
-                if let Ok(mut cache) = cache.lock() {
-                    *cache = Some(fresh.clone());
-                }
-                Ok(fresh.token)
+            Self::App { installations, .. } => {
+                let id = self.installation(http, api_base).await?;
+                installations.token(http, api_base, id).await
             }
         }
     }
@@ -217,13 +457,11 @@ async fn mint_installation_token(
     http: &reqwest::Client,
     api_base: &str,
     credentials: &AppCredentials,
+    installation: u64,
     now: SystemTime,
 ) -> Result<CachedToken, PlatformError> {
     let jwt = credentials.jwt(now)?;
-    let url = format!(
-        "{api_base}/app/installations/{}/access_tokens",
-        credentials.installation_id
-    );
+    let url = format!("{api_base}/app/installations/{installation}/access_tokens");
     let response = http
         .post(&url)
         .bearer_auth(&jwt)
@@ -244,16 +482,21 @@ async fn mint_installation_token(
     let token = value.get("token").and_then(Value::as_str).ok_or_else(|| {
         PlatformError::Decode("installation token response without token".to_owned())
     })?;
-    // GitHub says tokens last an hour; a conservative fixed lifetime avoids
-    // parsing the timestamp in the body.
-    debug!(
-        installation = credentials.installation_id,
-        "minted installation token"
-    );
+    debug!(installation, "minted installation token");
     Ok(CachedToken {
         token: SecretString::from(token.to_owned()),
-        expires_at: now + Duration::from_mins(55),
+        expires_at: expiry(&value, now),
     })
+}
+
+/// When a token expires: the response's `expires_at`, or 55 minutes from
+/// now when it has none GitHub's way (tokens last an hour).
+fn expiry(response: &Value, now: SystemTime) -> SystemTime {
+    response
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok())
+        .map_or_else(|| now + Duration::from_mins(55), SystemTime::from)
 }
 
 impl CachedToken {
@@ -261,5 +504,26 @@ impl CachedToken {
     #[must_use]
     pub fn expose(&self) -> &str {
         self.token.expose_secret()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use serde_json::json;
+
+    use super::expiry;
+
+    #[test]
+    fn a_token_expires_when_github_says() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let at = expiry(&json!({"expires_at": "2023-11-14T22:23:20Z"}), now);
+        assert_eq!(at, UNIX_EPOCH + Duration::from_secs(1_700_000_600));
+        assert_eq!(
+            expiry(&json!({"expires_at": "soon"}), now),
+            now + Duration::from_mins(55),
+            "an unreadable expiry falls back to 55 minutes"
+        );
     }
 }

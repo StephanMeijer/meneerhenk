@@ -23,6 +23,14 @@ pub enum PlatformError {
     /// Credentials could not be produced.
     #[error("authentication: {0}")]
     Auth(String),
+    /// No installation of the App Henk may act for reaches the repository.
+    #[error("GitHub App cannot act on {repo}: {reason}")]
+    NotInstalled {
+        /// The repository, or the installation asked for.
+        repo: String,
+        /// Why not.
+        reason: String,
+    },
     /// An MCP-backed write failed.
     #[error(transparent)]
     Mcp(#[from] henk_mcp::McpError),
