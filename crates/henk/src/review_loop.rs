@@ -27,6 +27,7 @@ use henk_domain::address::push_refusal;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
+use henk_domain::role::Role;
 use henk_domain::run::RunId;
 use henk_domain::workspace::{EnvLane, Profile};
 use henk_llm::ChatMessage;
@@ -49,6 +50,7 @@ use crate::loop_tools::{
     fixer_continuation, reviewer_continuation, verdict_text,
 };
 use crate::push::{Pusher, stop_if_cancelled};
+use crate::roles::grant;
 use crate::stages;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
@@ -278,8 +280,11 @@ impl<'a> Rounds<'a> {
             reviewer_model: reviewer_model.model().to_owned(),
             state: Mutex::new(HandoffState::default()),
         });
-        let reviewer_tools =
-            reviewer_tools(workspace, diff, &handoff, bash.then_some(command_limit));
+        let reviewer_tools = grant(
+            Role::Reviewer,
+            reviewer_tools(workspace, diff, &handoff, bash.then_some(command_limit)),
+            &Role::Reviewer.default_tools(),
+        );
         let reviewer_system = format!(
             "{}\n\n{}",
             prompts::PERSONA,
@@ -318,6 +323,7 @@ impl<'a> Rounds<'a> {
         let mut fixer_tools = edit_tools(&fixing);
         fixer_tools.add(ListFindings(Arc::clone(&handoff)));
         fixer_tools.add(GiveVerdict(Arc::clone(&handoff)));
+        let fixer_tools = grant(Role::Executor, fixer_tools, &Role::Executor.default_tools());
 
         Ok(Self {
             on,

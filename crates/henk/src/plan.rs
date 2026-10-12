@@ -1,5 +1,6 @@
 //! The planning orchestrator (§4).
 
+use henk_domain::role::Role;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -590,6 +591,7 @@ async fn plan_session(
         &mut set,
         app.settings.skills.select(&planning.skills),
     );
+    let set = crate::roles::grant(Role::Planner, set, &Role::Planner.default_tools());
     let limits = AgentConfig {
         max_turns: planning.max_turns,
         timeout: Duration::from_secs(planning.timeout_secs),

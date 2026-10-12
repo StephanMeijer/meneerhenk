@@ -467,7 +467,11 @@ These hold everywhere:
    requester's permissions decide what he does.
 4. **The model never holds credentials.** Platform, mail, Discord and cluster
    tokens are held by the tools around the model. The model can only use
-   them through narrow, purpose-built tools.
+   them through narrow, purpose-built tools. Each role (planner, reviewer,
+   executor) has a fixed ceiling of tools it may ever get: only the
+   executor edits, the handoff tools belong to the pair that uses them, and
+   the tracker and platform tools are the planner's. Configuration can
+   narrow a role's tools, never widen them (#171).
 5. **Scope is fixed per task.**
    - A review loop works only on its own pull/merge request: the reviewer
      at its own commit and those the fixer added, the fixer pushing only to
@@ -645,6 +649,8 @@ surprising reading of the earlier wording; veto any that is wrong.
   promise. Comments posted by lanes stay, and their markers are still read.
 - §2: an MCP read token reads runs, events and health; the fact-check's
   quality figures are removed with the fact-check (#310).
+- §8 invariant 4: each role has a fixed tool ceiling that configuration can
+  only narrow (#171, #321).
 
 ## Revision notes (2026-10-07)
 

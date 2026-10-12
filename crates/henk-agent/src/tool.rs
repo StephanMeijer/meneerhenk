@@ -107,6 +107,12 @@ impl ToolSet {
         self
     }
 
+    /// Keeps only the tools whose names `keep` accepts.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) -> &mut Self {
+        self.tools.retain(|name, _| keep(name));
+        self
+    }
+
     /// The definitions, in name order.
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDef> {
@@ -190,5 +196,15 @@ mod tests {
         assert!(tools.keeps_in_context("get_file_diff"));
         assert!(!tools.keeps_in_context("read_file"));
         assert!(!tools.keeps_in_context("unknown"));
+    }
+
+    #[test]
+    fn retain_keeps_only_the_named_tools() {
+        let mut tools = ToolSet::new();
+        tools
+            .add(Named("bash", false))
+            .add(Named("read_file", false));
+        tools.retain(|name| name != "bash");
+        assert_eq!(tools.names().collect::<Vec<_>>(), ["read_file"]);
     }
 }
