@@ -233,6 +233,8 @@ impl fmt::Display for AnswerError {
 pub struct PointLedger {
     points: Vec<PlanPoint>,
     round: u32,
+    /// The last round the reviewer finished, 0 before any.
+    reviewed: u32,
 }
 
 impl PointLedger {
@@ -245,6 +247,12 @@ impl PointLedger {
     /// Starts round `round`: points and answers from now on belong to it.
     pub fn start_round(&mut self, round: u32) {
         self.round = round;
+    }
+
+    /// The reviewer finished the round under way: it read every answer
+    /// handed to it before this round.
+    pub fn finish_round(&mut self) {
+        self.reviewed = self.round;
     }
 
     /// The round under way.
@@ -361,11 +369,13 @@ impl PointLedger {
 
     /// The points still open when the pairing ends: every unsettled one,
     /// and the last round's rejections, which the reviewer never saw. Once
-    /// the reviewer read a rejection and raised nothing, it stands.
+    /// the reviewer read a rejection and finished a later round without
+    /// contesting it, it stands; a later round that was only started does
+    /// not count.
     #[must_use]
     pub fn still_open(&self) -> Vec<&PlanPoint> {
         let last = self.points.iter().map(|p| p.round).max().unwrap_or(0);
-        let reviewed_after = self.round > last;
+        let reviewed_after = self.reviewed > last;
         self.points
             .iter()
             .filter(|p| match &p.answer {
@@ -502,9 +512,29 @@ mod tests {
             "{note}"
         );
         ledger.start_round(3);
+        ledger.finish_round();
         let open: Vec<PointId> = ledger.still_open().iter().map(|p| p.id).collect();
         assert_eq!(open, vec![unanswered]);
         assert_eq!(ledger.open_note(&PlanStop::Converged), "");
+    }
+
+    #[test]
+    fn a_rejection_stays_open_when_the_next_round_never_finished() {
+        let mut ledger = PointLedger::new();
+        ledger.start_round(1);
+        let id = ledger.raise(raised("step 2"), None).unwrap();
+        ledger.answer(id, rejected()).unwrap();
+        ledger.finish_round();
+        ledger.start_round(2);
+        ledger.close_all("the planner gave no answer");
+        let open: Vec<PointId> = ledger.still_open().iter().map(|p| p.id).collect();
+        assert_eq!(open, vec![id], "the reviewer never read the rejection");
+        let note = ledger.open_note(&PlanStop::SessionFailed(
+            "the reviewer did not finish round 2".to_owned(),
+        ));
+        assert!(!note.contains("No point was left open"), "{note}");
+        ledger.finish_round();
+        assert!(ledger.still_open().is_empty());
     }
 
     #[test]
