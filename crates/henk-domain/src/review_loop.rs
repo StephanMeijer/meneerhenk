@@ -7,7 +7,7 @@
 //! becomes `unsettled`, as does every finding still open when the run ends.
 
 use std::collections::BTreeSet;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 /// A finding's number within one run: `f1`, `f2`, ...
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -137,6 +137,10 @@ const REPEAT_LINES: u32 = 3;
 /// it repeats.
 const REPEAT_OVERLAP_PERCENT: usize = 60;
 
+/// The most of a loop's report a check is given: GitHub takes 65,535
+/// characters of summary, and the headline and run link come with it.
+pub const MAX_REPORT_CHARS: usize = 60_000;
+
 /// A claim's words, lowercased, without the short ones.
 fn claim_words(claim: &str) -> BTreeSet<String> {
     claim
@@ -180,6 +184,11 @@ pub enum LoopStop {
     PushRefused(String),
     /// Someone or something cancelled the run.
     Cancelled,
+    /// The loop may not push to the pull request (a fork, the default or a
+    /// protected branch, or a branch that moved after the review was
+    /// queued), so the reviewer reviewed one round alone and nothing was
+    /// fixed (#307). Why, in Henk's own words.
+    ReviewOnly(String),
 }
 
 impl LoopStop {
@@ -196,6 +205,7 @@ impl LoopStop {
             Self::WorkspaceChanged => "workspace_changed",
             Self::PushRefused(_) => "push_refused",
             Self::Cancelled => "cancelled",
+            Self::ReviewOnly(_) => "review_only",
         }
     }
 
@@ -205,7 +215,10 @@ impl LoopStop {
     pub fn ended_well(&self) -> bool {
         matches!(
             self,
-            Self::Converged | Self::MaxRounds(_) | Self::RepeatingFinding { .. }
+            Self::Converged
+                | Self::MaxRounds(_)
+                | Self::RepeatingFinding { .. }
+                | Self::ReviewOnly(_)
         )
     }
 
@@ -235,6 +248,7 @@ impl fmt::Display for LoopStop {
                 f.write_str("the reviewer changed the workspace; nothing was pushed")
             }
             Self::Cancelled => f.write_str("cancelled"),
+            Self::ReviewOnly(why) => write!(f, "reviewed only, since {why}"),
         }
     }
 }
@@ -490,6 +504,50 @@ impl Ledger {
         }
     }
 
+    /// Whether the finding still stands at the end of a run: unsettled, or
+    /// one the fixer would not fix.
+    fn stands(finding: &LoopFinding) -> bool {
+        matches!(
+            finding.verdict,
+            Some(LoopVerdict::Unsettled { .. } | LoopVerdict::WontFix { .. })
+        )
+    }
+
+    /// How many findings still stand at the end of a run.
+    #[must_use]
+    pub fn standing(&self) -> usize {
+        self.findings.iter().filter(|f| Self::stands(f)).count()
+    }
+
+    /// The loop's report for the check (#307): `line`, then every finding
+    /// that still stands, one a line, cut to [`MAX_REPORT_CHARS`] with how
+    /// many more the run page has.
+    #[must_use]
+    pub fn check_report(&self, line: &str) -> String {
+        let open: Vec<String> = self
+            .findings
+            .iter()
+            .filter(|f| Self::stands(f))
+            .map(LoopFinding::verdict_line)
+            .collect();
+        let mut text = line.to_owned();
+        if open.is_empty() {
+            return text;
+        }
+        text.push_str("\n\nOpen findings:");
+        for (shown, finding) in open.iter().enumerate() {
+            // Room for the line of what was left out.
+            if text.chars().count() + finding.chars().count() + 3 > MAX_REPORT_CHARS - 80 {
+                let more = open.len() - shown;
+                let _ = write!(text, "\n\n... and {more} more, on the run page.");
+                return text;
+            }
+            text.push_str("\n- ");
+            text.push_str(finding);
+        }
+        text
+    }
+
     /// Every finding without a verdict becomes unsettled with `reason`;
     /// returns them. After [`Ledger::unpushed`] at the end of a run, every
     /// finding has its one final verdict.
@@ -615,6 +673,54 @@ mod tests {
             LoopStop::MaxRounds(50).to_string(),
             "it reached max_rounds (50)"
         );
+        let alone = LoopStop::ReviewOnly("its branch is the default branch (main)".into());
+        assert_eq!(alone.as_str(), "review_only");
+        assert!(alone.ended_well(), "a review of its own, not a failure");
+        assert!(!alone.left_findings_open(), "its findings count as open");
+        assert_eq!(
+            alone.to_string(),
+            "reviewed only, since its branch is the default branch (main)"
+        );
+    }
+
+    #[test]
+    fn the_report_lists_what_stands_and_fits_a_check() {
+        let mut ledger = Ledger::new();
+        ledger.start_round(1);
+        assert_eq!(ledger.check_report("Ran."), "Ran.");
+        let fixed = ledger.report(report(2), None).unwrap();
+        let what = LoopVerdict::Fixed {
+            what: "x is 3".into(),
+            commit: None,
+        };
+        ledger.give(fixed, what).unwrap();
+        ledger.report(report(9), None).unwrap();
+        ledger.close_all("not fixed: a fork");
+        assert_eq!(ledger.standing(), 1);
+        let text = ledger.check_report("Ran.");
+        assert!(
+            text.starts_with("Ran.\n\nOpen findings:\n- f2 at src/a.rs:9"),
+            "{text}"
+        );
+        assert!(text.ends_with("unsettled: not fixed: a fork"), "{text}");
+        assert!(
+            !text.contains("f1 "),
+            "a fixed finding does not stand: {text}"
+        );
+
+        let mut many = Ledger::new();
+        many.start_round(1);
+        for line in 1..=2_000 {
+            let long = Report {
+                claim: format!("claim {line} {}", "word ".repeat(20)),
+                ..report(line)
+            };
+            many.report(long, None).unwrap();
+        }
+        many.close_all("not fixed");
+        let text = many.check_report("Ran.");
+        assert!(text.chars().count() <= MAX_REPORT_CHARS, "{}", text.len());
+        assert!(text.ends_with("more, on the run page."), "{text}");
     }
 
     #[test]
