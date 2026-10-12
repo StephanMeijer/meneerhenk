@@ -8,6 +8,11 @@
 //! The reviewer's view of it is never exported; only the fixer's changes,
 //! checked like an address run's (§3.5), become a commit.
 //!
+//! A pull request the loop may not push to (a fork, the default or a
+//! protected branch) or whose branch moved after the review was queued is
+//! reviewed by the reviewer alone (#307): one round at the reviewed commit,
+//! no fixer, nothing pushed, and its findings stand, in the check.
+//!
 //! Interim until #285 and #286: the reviewer's findings and the fixer's
 //! report are plain text, and the loop ends on `NO FINDINGS`, at
 //! `max_rounds`, or at the first round that cannot go on.
@@ -70,35 +75,28 @@ pub(crate) struct LoopTarget<'a> {
 pub(crate) struct LoopReport {
     /// The reviewer and the fixer, as the summary counts lanes.
     pub(crate) results: Vec<LaneResult>,
-    /// One line for the summary: rounds, commits pushed and why it stopped.
-    pub(crate) line: String,
+    /// For the check: rounds, commits pushed and why it stopped, then the
+    /// findings that still stand.
+    pub(crate) report: String,
     /// The findings that ended unsettled or won't fix: what still stands.
     pub(crate) open: usize,
     /// It ran out of rounds with the reviewer's last findings still open.
     pub(crate) findings_left: bool,
-}
-
-/// Whether the loop ran, or why it did not start.
-#[derive(Debug)]
-pub(crate) enum LoopRun {
-    /// It ran; how it ended.
-    Ran(LoopReport),
-    /// It may not push to this pull request (a fork, the default or a
-    /// protected branch), or the branch moved after the review was queued.
-    /// Nothing started and nothing was marked: the lanes review instead.
-    Declined(String),
+    /// The reviewer reviewed alone, on a pull request the loop may not push
+    /// to (#307).
+    pub(crate) review_only: bool,
 }
 
 /// Runs the loop on `diff`. A pull request the loop may not push to, or
-/// whose branch moved, declines it before anything starts, so it gets the
-/// lane review. A loop that cannot get a workspace fails before any session
-/// starts; once it runs, it ends with a report of why it stopped, and only a
-/// cancel or a store failure is an error.
+/// whose branch moved, gets the reviewer alone (#307). A loop that cannot get
+/// a workspace fails before any session starts; once it runs, it ends with a
+/// report of why it stopped, and only a cancel or a store failure is an
+/// error.
 pub(crate) async fn run_loop(
     on: LoopTarget<'_>,
     diff: Arc<ReviewDiff>,
     cancel: &CancellationToken,
-) -> anyhow::Result<LoopRun> {
+) -> anyhow::Result<LoopReport> {
     let LoopTarget {
         app,
         target,
@@ -118,14 +116,17 @@ pub(crate) async fn run_loop(
         .pull_facts(target)
         .await
         .context("reading the pull request")?;
-    if let Some(why) = push_refusal(&facts.push) {
-        return Ok(LoopRun::Declined(why));
-    }
-    if facts.head != *commit {
-        return Ok(LoopRun::Declined(format!(
-            "the branch moved to {} after this review was queued",
-            facts.head.short()
-        )));
+    // Why the reviewer reviews alone, if it does: it is never pushed to.
+    let alone = push_refusal(&facts.push).or_else(|| {
+        (facts.head != *commit).then(|| {
+            format!(
+                "the branch moved to {} after this review was queued",
+                facts.head.short()
+            )
+        })
+    });
+    if let Some(why) = &alone {
+        info!(run = %run, %why, "the reviewer reviews alone");
     }
     let credential = writer
         .git_credential()
@@ -133,7 +134,16 @@ pub(crate) async fn run_loop(
         .context("getting a credential for git")?;
     let profile = app.settings.workspace.profile_for(&target.repo.path());
     stages::mark(store, run, Stage::Checkout, StageState::Running, "").await;
-    let workspace = match open_workspace(app, run, &facts, credential.clone(), profile).await {
+    let opened = open_workspace(
+        app,
+        run,
+        &facts,
+        alone.is_some().then_some(commit),
+        credential.clone(),
+        profile,
+    )
+    .await;
+    let workspace = match opened {
         Ok(workspace) => workspace,
         Err(error) => {
             let why = format!("{error:#}");
@@ -151,36 +161,52 @@ pub(crate) async fn run_loop(
         "the fixer checks each finding",
     )
     .await;
+    if let Some(why) = &alone {
+        let skipped = format!("nothing is pushed: {why}");
+        stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;
+    }
 
-    let mut rounds = Rounds::new(on, config, profile, &workspace, &diff, writer, credential)?;
+    let mut rounds =
+        Rounds::new(on, config, profile, &workspace, &diff, writer, credential)?.alone(alone);
     // Closed on every path; a run future that is dropped drops it instead,
     // and every backend destroys itself then too.
     let ended = rounds.run(facts, &diff, cancel).await;
     rounds.reviewer.finish(store, run).await;
-    rounds.fixer.finish(store, run).await;
+    if let Some(fixer) = &mut rounds.fixer {
+        fixer.finish(store, run).await;
+    }
     workspace.close().await;
-    Ok(LoopRun::Ran(rounds.conclude(ended).await?))
+    rounds.conclude(ended).await
 }
 
-/// Clones the pull request at its head, imports it into a workspace that
-/// records every command on the run, and sets it up as the profile says.
+/// Checks out the pull request, imports it into a workspace that records
+/// every command on the run, and sets it up as the profile says. The loop
+/// clones the branch at its head, which it pushes to; the reviewer alone
+/// gets `reviewed`, fetched by its sha, which a fork or a branch that moved
+/// on still has.
 async fn open_workspace(
     app: &App,
     run: &RunId,
     facts: &PullFacts,
+    reviewed: Option<&CommitSha>,
     credential: Option<GitCredential>,
     profile: &Profile,
 ) -> anyhow::Result<Arc<dyn Workspace>> {
     let dir =
         ScratchDir::new(&format!("henk-loop-{run}")).context("making the checkout directory")?;
-    let checkout = Checkout::clone_at(
-        dir,
-        &facts.remote,
-        &facts.push.head_ref,
-        &facts.head,
-        credential,
-    )
-    .await
+    let checkout = match reviewed {
+        Some(commit) => Checkout::fetch_at(dir, &facts.remote, commit, credential).await,
+        None => {
+            Checkout::clone_at(
+                dir,
+                &facts.remote,
+                &facts.push.head_ref,
+                &facts.head,
+                credential,
+            )
+            .await
+        }
+    }
     .context("checking out the pull request")?;
     let opened = app
         .workspace_provider
@@ -206,7 +232,10 @@ struct Rounds<'a> {
     fixing: Arc<AddressContext>,
     handoff: Arc<Handoff>,
     reviewer: ResumableSession,
-    fixer: ResumableSession,
+    /// None when the reviewer reviews alone.
+    fixer: Option<ResumableSession>,
+    /// Why the reviewer reviews alone, if it does (#307).
+    alone: Option<String>,
     writer: Arc<dyn AddressWriter>,
     credential: Option<GitCredential>,
     requester: String,
@@ -308,14 +337,17 @@ impl<'a> Rounds<'a> {
                 limits,
             )
             .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
-            fixer: ResumableSession::new(
-                "fixer",
-                app.model(&config.fixer)?,
-                fixer_system,
-                fixer_tools,
-                limits,
-            )
-            .with_continuation(fixer_continuation(Arc::clone(&handoff))),
+            fixer: Some(
+                ResumableSession::new(
+                    "fixer",
+                    app.model(&config.fixer)?,
+                    fixer_system,
+                    fixer_tools,
+                    limits,
+                )
+                .with_continuation(fixer_continuation(Arc::clone(&handoff))),
+            ),
+            alone: None,
             fixing,
             handoff,
             writer,
@@ -339,6 +371,7 @@ impl<'a> Rounds<'a> {
         };
         // Every finding ends with one verdict, whatever ended the loop (#285).
         let why = match &ended {
+            Ok(LoopStop::ReviewOnly(why)) => format!("not fixed: {why}"),
             Ok(stop) => format!("the loop stopped: {stop}"),
             Err(error) => format!("the loop stopped: {error:#}"),
         };
@@ -360,15 +393,7 @@ impl<'a> Rounds<'a> {
         let cancelled = matches!(stop, LoopStop::Cancelled);
         let failed = !cancelled && !stop.ended_well();
         let ledger = self.handoff.ledger();
-        let open = ledger
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.verdict,
-                    Some(LoopVerdict::Unsettled { .. } | LoopVerdict::WontFix { .. })
-                )
-            })
-            .count();
+        let open = ledger.standing();
 
         let pushed = self.pushed.len();
         let found = ledger.iter().count();
@@ -394,18 +419,24 @@ impl<'a> Rounds<'a> {
         } else {
             LaneOutcome::Finished
         };
-        let results = ["fixer", "reviewer"]
-            .into_iter()
+        let sessions: &[&str] = if self.fixer.is_some() {
+            &["fixer", "reviewer"]
+        } else {
+            &["reviewer"]
+        };
+        let results = sessions
+            .iter()
             .map(|name| LaneResult {
-                lane: LaneName::new(name),
+                lane: LaneName::new(*name),
                 outcome,
             })
             .collect();
         Ok(LoopReport {
             results,
-            line,
+            report: ledger.check_report(&line),
             open,
             findings_left: stop.left_findings_open(),
+            review_only: self.alone.is_some(),
         })
     }
 
@@ -442,6 +473,9 @@ impl<'a> Rounds<'a> {
             }
             let findings = match self.reported(round) {
                 Ok(findings) => findings,
+                Err(LoopStop::Converged) => {
+                    return Ok(self.alone_stop().unwrap_or(LoopStop::Converged));
+                }
                 Err(stop) => return Ok(stop),
             };
             // A reviewer that wrote to the workspace is the graver stop.
@@ -457,66 +491,91 @@ impl<'a> Rounds<'a> {
             if let Some(stop) = self.repeated(round).await {
                 return Ok(stop);
             }
+            // Alone, the reviewer has said all it will: nothing changes
+            // for a second look.
+            if let Some(stop) = self.alone_stop() {
+                return Ok(stop);
+            }
 
-            if let Some(stop) = self.out_of_time("fixer", round) {
-                return Ok(stop);
-            }
-            let doing = format!("round {round}: fixer");
-            stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
-            let handed = format!(
-                "Round {round}. The reviewer's findings, as data:\n\n{}\n\nCheck each against the code, fix the ones that hold, and give every one its verdict with give_verdict.",
-                findings.join("\n\n")
-            );
-            let fix = self
-                .fixer
-                .resume(store, run, ChatMessage::user(handed), cancel.clone())
-                .await;
-            if let Some(stop) = self.broke_off("fixer", &fix) {
-                return Ok(stop);
-            }
-            let silent = self
-                .handoff
-                .with_ledger(|ledger| ledger.close_all("the fixer gave no verdict"))
-                .unwrap_or_default();
-            self.handoff.record_verdicts(&silent).await;
-            let pushed = self.push_round(&mut facts, cancel).await?;
-            let unpushed = match &pushed {
-                Pushed::Nothing => "marked fixed, but nothing changed in the workspace".to_owned(),
-                Pushed::Stopped(stop) => stop.to_string(),
-                Pushed::Commit { .. } => String::new(),
-            };
-            let ids: Vec<_> = self
-                .handoff
-                .ledger()
-                .reported_in(round)
-                .map(|f| f.id)
-                .collect();
-            if !unpushed.is_empty() {
-                self.handoff
-                    .with_ledger(|ledger| ledger.unpushed(&unpushed));
-            }
-            self.handoff.record_verdicts(&ids).await;
-            let verdicts: Vec<String> = self
-                .handoff
-                .ledger()
-                .reported_in(round)
-                .map(verdict_text)
-                .collect();
-            let verdicts = verdicts.join("\n");
-            let contest = "To contest a rejection, once, report the finding again with new evidence and name it in reopens.";
-            message = match pushed {
-                Pushed::Nothing => format!(
-                    "Round {}. The fixer pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
-                    round + 1
-                ),
-                Pushed::Commit { sha, patch } => format!(
-                    "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
-                    round + 1
-                ),
-                Pushed::Stopped(stop) => return Ok(stop),
+            message = match self.fix(round, &findings, &mut facts, cancel).await? {
+                Ok(next) => next,
+                Err(stop) => return Ok(stop),
             };
         }
         Ok(LoopStop::MaxRounds(self.config.max_rounds))
+    }
+
+    /// The fixer's half of `round`: it gives `findings` their verdicts,
+    /// what it fixed is pushed, and the reviewer's next message comes back,
+    /// or why the loop stops.
+    async fn fix(
+        &mut self,
+        round: u32,
+        findings: &[String],
+        facts: &mut PullFacts,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Result<String, LoopStop>> {
+        let (store, run) = (&*self.on.app.store, self.on.run);
+        if let Some(stop) = self.out_of_time("fixer", round) {
+            return Ok(Err(stop));
+        }
+        let doing = format!("round {round}: fixer");
+        stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
+        let handed = format!(
+            "Round {round}. The reviewer's findings, as data:\n\n{}\n\nCheck each against the code, fix the ones that hold, and give every one its verdict with give_verdict.",
+            findings.join("\n\n")
+        );
+        let Some(fixer) = self.fixer.as_mut() else {
+            return Err(anyhow!("the review loop has no fixer"));
+        };
+        let fix = fixer
+            .resume(store, run, ChatMessage::user(handed), cancel.clone())
+            .await;
+        if let Some(stop) = self.broke_off("fixer", &fix) {
+            return Ok(Err(stop));
+        }
+        let silent = self
+            .handoff
+            .with_ledger(|ledger| ledger.close_all("the fixer gave no verdict"))
+            .unwrap_or_default();
+        self.handoff.record_verdicts(&silent).await;
+        let pushed = self.push_round(facts, cancel).await?;
+        let unpushed = match &pushed {
+            Pushed::Nothing => "marked fixed, but nothing changed in the workspace".to_owned(),
+            Pushed::Stopped(stop) => stop.to_string(),
+            Pushed::Commit { .. } => String::new(),
+        };
+        let ids: Vec<_> = self
+            .handoff
+            .ledger()
+            .reported_in(round)
+            .map(|f| f.id)
+            .collect();
+        if !unpushed.is_empty() {
+            self.handoff
+                .with_ledger(|ledger| ledger.unpushed(&unpushed));
+        }
+        self.handoff.record_verdicts(&ids).await;
+        let verdicts: Vec<String> = self
+            .handoff
+            .ledger()
+            .reported_in(round)
+            .map(verdict_text)
+            .collect();
+        let verdicts = verdicts.join("\n");
+        let contest = "To contest a rejection, once, report the finding again with new evidence and name it in reopens.";
+        let next = match pushed {
+            Pushed::Nothing => format!(
+                "Round {}. The fixer pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
+                round + 1
+            ),
+            Pushed::Commit { sha, patch } => format!(
+                "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
+                round + 1
+            ),
+            Pushed::Stopped(stop) => return Ok(Err(stop)),
+        };
+        Ok(Ok(next))
     }
 
     /// Keeps both conversations within their budget: what the earlier
@@ -537,7 +596,9 @@ impl<'a> Rounds<'a> {
         );
         self.reviewer
             .compact_rounds(&format!("{opening}\n\n{earlier}"), 1);
-        self.fixer.compact_rounds(&earlier, 1);
+        if let Some(fixer) = &mut self.fixer {
+            fixer.compact_rounds(&earlier, 1);
+        }
     }
 
     /// The timeout stop when the run's time is up; otherwise gives the
@@ -554,12 +615,28 @@ impl<'a> Rounds<'a> {
         }
         let limit = left.min(Duration::from_secs(self.config.round_timeout_secs));
         let session = if who == "reviewer" {
-            &mut self.reviewer
+            Some(&mut self.reviewer)
         } else {
-            &mut self.fixer
+            self.fixer.as_mut()
         };
-        session.set_timeout(limit);
+        if let Some(session) = session {
+            session.set_timeout(limit);
+        }
         None
+    }
+
+    /// The reviewer reviews alone, without a fixer, when `why` says why.
+    fn alone(mut self, why: Option<String>) -> Self {
+        if why.is_some() {
+            self.fixer = None;
+        }
+        self.alone = why;
+        self
+    }
+
+    /// The stop for a reviewer that reviews alone, once its round is done.
+    fn alone_stop(&self) -> Option<LoopStop> {
+        self.alone.clone().map(LoopStop::ReviewOnly)
     }
 
     /// The stop when a finding of `round` repeats one the fixer fixed:

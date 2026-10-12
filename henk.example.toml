@@ -145,8 +145,9 @@ max_turns = 12
 # pull request's branch, and each resumes its own conversation the next
 # round, until the reviewer finds nothing more or max_rounds is reached.
 # It pushes like an address run, so it needs [address] below. A pull request
-# it may not push to (a fork, the default or a protected branch) gets the
-# lane review instead.
+# it may not push to (a fork, the default or a protected branch, or a branch
+# that moved after the review was queued) is reviewed by the reviewer alone:
+# one round, nothing pushed, and its findings in the check.
 # [review.loop]
 # reviewer = "opus"
 # fixer = "claude"

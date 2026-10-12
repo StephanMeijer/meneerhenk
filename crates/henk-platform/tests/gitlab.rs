@@ -223,6 +223,7 @@ async fn review_lifecycle_on_gitlab() {
         stopped: None,
         not_reviewed: None,
         findings_left: false,
+        report: None,
     };
     writer
         .finish_review(&t, &commit, None, &outcome, "https://henk/runs/r-1")

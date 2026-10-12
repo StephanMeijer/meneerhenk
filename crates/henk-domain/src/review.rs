@@ -272,6 +272,10 @@ pub struct ReviewOutcome {
     /// findings still open. They are not on the pull request, so
     /// `open_findings` does not count them, and the review is no pass.
     pub findings_left: bool,
+    /// What a review loop did, and the findings it left open, for the end
+    /// of the summary: nothing of a loop is on the pull request, so the
+    /// check is where it is read (#307).
+    pub report: Option<String>,
 }
 
 /// Why a review stopped before it ended. They exclude each other.
@@ -302,6 +306,7 @@ impl ReviewOutcome {
             stopped: Some(why),
             not_reviewed,
             findings_left: false,
+            report: None,
         }
     }
 
@@ -446,6 +451,9 @@ impl ReviewOutcome {
                 );
             }
         }
+        if let Some(report) = &self.report {
+            let _ = write!(text, "\n\n{report}");
+        }
         text
     }
 }
@@ -501,6 +509,7 @@ mod tests {
             stopped: None,
             not_reviewed: None,
             findings_left: false,
+            report: None,
         }
     }
 
@@ -574,6 +583,11 @@ mod tests {
         left.open_findings = 2;
         assert_eq!(left.summary(), "2 issues found.");
         assert_eq!(left.check_conclusion(), CheckConclusion::Neutral);
+        left.report = Some("The review loop ran 1 round.".into());
+        assert_eq!(
+            left.summary(),
+            "2 issues found.\n\nThe review loop ran 1 round."
+        );
     }
 
     #[test]
