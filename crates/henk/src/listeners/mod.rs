@@ -94,12 +94,14 @@ pub(crate) mod testing {
         pub fail_pull_request: Option<String>,
         /// `start_review` fails instead, after recording what it was given.
         pub fail_start: bool,
+        /// The platform it says it is; GitHub when unset.
+        pub platform: Option<Platform>,
     }
 
     #[async_trait::async_trait]
     impl PlatformWriter for FakeWriter {
         fn platform(&self) -> Platform {
-            Platform::GitHub
+            self.platform.unwrap_or(Platform::GitHub)
         }
 
         async fn pull_request(&self, _: &ReviewTarget) -> Result<PullRequestInfo, PlatformError> {

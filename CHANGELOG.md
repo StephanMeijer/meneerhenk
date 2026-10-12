@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.29](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.28...v0.1.29) - 2026-10-12
+
+### Added
+
+- *(review)* a pull request the loop may not push to gets a reviewer-only review
+
+### Fixed
+
+- *(review)* a reviewer-only review on GitLab posts its summary note
+
+### Other
+
+- *(review)* ReviewRun::posts no longer describes the removed lane fallback
+
+## [0.1.28](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.27...v0.1.28) - 2026-10-12
+
+### Added
+
+- *(review)* the reviewer reports findings to the fixer, who gives each a verdict
+- *(review)* a reviewer↔fixer loop with sessions that resume each round
+- *(review)* the loop ends for a recorded reason and keeps its conversations in budget
+- *(review)* [review.loop] config and sessions that resume across rounds
+
+### Fixed
+
+- *(session)* a compaction keeps the transcript whole and drops replayed thinking
+- *(review)* a loop out of rounds with findings open is no pass
+- *(store)* the overview's drafts per day leave loop findings out
+
+### Other
+
+- Merge pull request #305 from StephanMeijer/fix/flaky-cancel-during-setup
+- Merge pull request #301 from StephanMeijer/fix/review-address-push
+- Merge pull request #291 from StephanMeijer/feat/loop-limits
+- Merge remote-tracking branch 'origin/main' into feat/review-loop
+- Merge remote-tracking branch 'origin/main' into feat/review-loop
+- Merge remote-tracking branch 'origin/feat/review-loop' into feat/loop-handoff
+
 ## [0.1.27](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.26...v0.1.27) - 2026-10-10
 
 ### Added

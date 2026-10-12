@@ -28,7 +28,7 @@ pub struct EditContext {
     /// Files one push may change.
     pub max_changed_files: usize,
     /// Whether the model may run commands of its own (`bash`, #172): only
-    /// on a backend apart from Henk.
+    /// on a backend apart from Henk, and when its role's tools grant it.
     pub bash: bool,
     /// What the tools changed so far.
     pub state: Mutex<EditState>,
