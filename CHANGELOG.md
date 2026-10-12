@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.29...v0.2.0) - 2026-10-12
+
+### Added
+
+- *(api)* [**breaking**] the API, streams and MCP speak of sessions and roles, not lanes
+- *(store)* [**breaking**] the store keeps sessions with a role, not lanes
+- *(session)* pairings keep their prompt cache warm, and every session records its cache
+- *(execute)* the executor takes an issue to a pull request
+- *(plan)* [**breaking**] the reviewer reviews the plan before it is published
+- [**breaking**] address runs are removed; the executor fixes what the reviewer finds
+- *(config)* [**breaking**] roles are configured in [roles.planner], [roles.reviewer] and [roles.executor]
+- *(domain)* roles and a tool ceiling per role
+- *(dashboard)* [**breaking**] the fact-check quality analytics are removed; sessions are reliability per role
+- *(review)* [**breaking**] the loop is the review; lanes and the fact-check are removed
+- *(config)* the example configurations review with the loop, and config check says so
+
+### Fixed
+
+- *(review)* a review loop cancelled during setup stops at once and ends cancelled
+- *(plan)* the planner's copy prompt names only the tools it was granted
+
+### Other
+
+- Merge remote-tracking branch 'origin/feat/warm-cache' into feat/sessions-role
+- *(review)* the loop's push carries the address run's coverage
+- shared push and edit code loses its address names
+- *(review)* [**breaking**] the review loop's fixer is the executor
+- *(review)* the lifecycle tests run on the review loop, the lane tests in their own module
+- Merge branch 'feat/execute' into feat/warm-cache
+- Merge branch 'feat/plan-review' into feat/execute
+- Merge branch 'feat/executor' into feat/plan-review
+- Merge branch 'feat/roles-config' into feat/executor
+- *(platform)* GitHubApi loses minimize_comment, which only folding summaries used
+
 ## [0.1.29](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.28...v0.1.29) - 2026-10-12
 
 ### Added
