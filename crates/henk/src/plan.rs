@@ -333,7 +333,7 @@ async fn end_cancelled(
         checked_by: None,
         withdrawn: None,
     }
-    .attach(&crate::cancel::cancelled_notice(by, link, false));
+    .attach(&crate::cancel::cancelled_notice(by, link));
     if let Err(post_error) = writer.comment(&request.target, &body).await {
         error!(%post_error, "could not post that planning was cancelled");
     }
@@ -811,12 +811,6 @@ model = "m"
         ) -> Result<henk_platform::push::RepoHead, henk_platform::PlatformError> {
             Ok(self.0.clone())
         }
-        async fn open_threads(
-            &self,
-            _: &henk_platform::ReviewTarget,
-        ) -> Result<Vec<henk_platform::push::OpenThread>, henk_platform::PlatformError> {
-            Err(unused())
-        }
         async fn git_credential(
             &self,
         ) -> Result<Option<henk_platform::push::GitCredential>, henk_platform::PlatformError>
@@ -832,31 +826,6 @@ model = "m"
             Err(unused())
         }
         async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
-            Err(unused())
-        }
-        fn commit_url(&self, _: &henk_platform::ReviewTarget, _: &str) -> String {
-            String::new()
-        }
-        async fn reply_in_thread(
-            &self,
-            _: &henk_platform::ReviewTarget,
-            _: &henk_platform::push::OpenThread,
-            _: &str,
-        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
-            Err(unused())
-        }
-        async fn resolve_thread(
-            &self,
-            _: &henk_platform::ReviewTarget,
-            _: &str,
-        ) -> Result<(), henk_platform::PlatformError> {
-            Err(unused())
-        }
-        async fn post_comment(
-            &self,
-            _: &henk_platform::ReviewTarget,
-            _: &str,
-        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
             Err(unused())
         }
     }

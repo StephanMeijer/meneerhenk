@@ -3,8 +3,7 @@
 The team's AI colleague: a strict, dry, senior software engineer and code
 reviewer who works on GitHub pull requests, GitLab merge requests and
 issues. He is advisory. He never approves, blocks or merges. He changes
-code only on a pull request's own branch: the fixes of his review loop and
-the commit of an address run.
+code only on a pull request's own branch: the fixes of his review loop.
 
 What Henk does and promises is in [docs/SPEC.md](docs/SPEC.md). This
 repository is how he is built. This version covers code review (§3) and
@@ -39,11 +38,11 @@ works from the diff Henk fetched once (`list_changed_files`,
 Henk). It hands each finding to the executor with `report_finding` and ends
 its round with `finish_round`; nothing is posted on the pull request. The
 executor reads them (`list_findings`), checks each against the code, fixes
-what holds with an address run's tools (`edit_file`, `write_file`,
-`run_checks`, and `bash` on a backend apart from Henk) and gives each its
-verdict with `give_verdict`: fixed, rejected (it does not hold) or won't
-fix. Henk runs `[roles.executor].check_commands`, checks the changeset as for an
-address run and pushes it as one commit to the pull request's branch. The
+what holds with its edit tools (`edit_file`, `write_file`, `run_checks`,
+and `bash` on a backend apart from Henk) and gives each its verdict with
+`give_verdict`: fixed, rejected (it does not hold) or won't fix. Henk runs
+`[roles.executor].check_commands`, checks the changeset (see "Pushing a
+review's fixes") and pushes it as one commit to the pull request's branch. The
 next round each resumes its own conversation: the reviewer sees the commit
 and the verdicts, may contest a rejection once with new evidence, and
 reviews again. The loop stops when the reviewer finds nothing more, at
@@ -136,10 +135,10 @@ OpenBao.
 |---|---|
 | `LLM3_API_KEY`, `ANTHROPIC_API_KEY`, ... | Whatever `[models.*].api_key_env` names |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | The GitHub App key, for check runs, comments and the read session |
-| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews and address runs on GitLab: git push and three REST reads |
+| `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
-| `HENK_API_TOKEN` | `POST /review`, `POST /plan`, `POST /address` |
+| `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
 | `HENK_DASHBOARD_CLIENT_ID`, `HENK_DASHBOARD_CLIENT_SECRET` | The GitHub OAuth App the dashboard signs in with |
 | `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
@@ -271,6 +270,8 @@ check_commands = [["cargo", "test", "--offline"]]
 Runs from before #309 stay readable: the run page and `henk runs show`
 still show their lanes, drafts, the fact-check's verdicts and the findings
 they posted. Markers on comments Henk already posted are still recognised.
+Address runs, removed in #327, stay readable the same way: their kind
+`address`, their stages and their `address` session.
 
 ### Migrating to roles
 
@@ -343,10 +344,11 @@ email = "henk@example.com"
 - `[planning]` keeps `change_budget`, `sub_issue_cap` and `requester_id`;
   its `model`, limits and `skills` move to `[roles.planner]`.
 - `[address]` becomes `[roles.executor]`, with its `identity`, `trailers`
-  and `repositories` tables. Address runs use the executor until they are
-  removed (#327), so their defaults are now 40 turns and 600s. The
-  deprecated `check_timeout_secs` is gone: `[workspace] command_secs` is
-  the limit for every check.
+  and `repositories` tables, which now apply to the commits the review loop
+  pushes. Address runs (`henk address`, `POST /address`, `start_address`)
+  were removed in #327; `[address]` is still refused, pointing at
+  `[roles.executor]`. The deprecated `check_timeout_secs` is gone:
+  `[workspace] command_secs` is the limit for every check.
 - `[review.loop]` without `[roles.reviewer]` and `[roles.executor]`, or
   `[planning]` without `[roles.planner]`, is refused.
 
@@ -389,8 +391,8 @@ on one machine, with one review loop:
    --transcript reviewer` what the reviewer's model saw and said (`executor`
    for the executor's; `fixer` in runs before #323).
 
-Every tool call of every session (the reviewer, the executor, the planner,
-address runs) is on the run record (#190): the session, model, turn, tool
+Every tool call of every session (the reviewer, the executor, the planner)
+is on the run record (#190): the session, model, turn, tool
 and where it comes from, how it ended (`ok`, `error`, refused by the scope
 or the repeat guard, an unknown tool, malformed arguments, not run,
 cancelled), how long it ran, the size of its result, and its arguments as
@@ -495,7 +497,6 @@ henk review https://github.com/owner/repo/pull/7  # one review, now
 henk review URL1 URL2 URL3                        # several: at most 50, max_concurrent at a time
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
-henk address https://github.com/owner/repo/pull/7 --note "only the typo"
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --model proxy-fast                 # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
@@ -509,41 +510,54 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
-`POST /plan {"url", "note"?}` and `POST /address {"url", "note"?}` with
-`Authorization: Bearer $HENK_API_TOKEN` publish events too and answer
-`202 {"event": id}`.
+`POST /plan {"url", "note"?}` with `Authorization: Bearer $HENK_API_TOKEN`
+publish events too and answer `202 {"event": id}`.
 
-Besides the review loop, `henk address` (spec §3.5) is what changes code.
-Asked by a colleague, Henk reads every unresolved review thread of a GitHub
-pull request or GitLab merge request, fixes what the feedback is right
-about in a workspace, runs the configured `[roles.executor].check_commands` there,
-and pushes one commit to the pull request's branch. Only a changeset leaves
-the workspace: Henk refuses it whole when a path leads into `.git` or out
-of the repository, becomes a symbolic link or a submodule, or the run
-changed more files than allowed, and otherwise applies it to a fresh
-checkout nothing ran in and commits from there. The push is a fast-forward
-only. A fork, the default branch, a protected branch or a branch that moved
-while he worked gets nothing. Then he replies in each thread (fixed with
-the commit link, declined with why, or a question), resolves only the
-threads of his own findings that he fixed, and sums up with the run link.
-The model never holds the token or a git command; Henk's code commits and
-pushes. `[workspace]` picks the backend and its limits, per repository
-through profiles. `host` runs the checks as Henk's user with an empty
-environment, so they see none of Henk's secrets, but nothing else isolates
-them. `ssh` runs each run as a throwaway user on a sandbox host (see
-"Sandbox host" below). `henk config check` warns about what each one does
-not isolate. Every command is on the run's timeline (`henk runs show`). On
+Every inbound event is recorded in Henk's own database with what each listener
+did with it, and the payload as received (up to 256 KB). Recordings stay in
+the service; nothing is sent anywhere. While serving, Henk deletes events
+and their outcomes older than `server.keep_events_days` (30 by default) once
+an hour, and session transcripts of that age with them. Runs are kept, since
+their links are posted on the platforms. An
+event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
+run and the events that led to it at `/dashboard/runs/{id}`.
+
+### Pushing a review's fixes
+
+The review loop's executor (spec §3.5) is the only thing that changes code.
+It works in the review's workspace, and after each round Henk runs the
+configured `[roles.executor].check_commands` there and pushes one commit to
+the pull request's branch. Only a changeset leaves the workspace: Henk
+refuses it whole when a path leads into `.git` or out of the repository,
+becomes a symbolic link or a submodule, or changes more files than
+`max_changed_files` allows, and otherwise applies it to a fresh checkout
+nothing ran in and commits from there; the executor's edit tools refuse to
+write a file larger than 1 MB. The
+push is a fast-forward only. A fork, the default branch, a protected
+branch, a closed pull request or a branch that moved while he worked gets
+nothing. Nothing is posted as comments: the commits and the check's summary
+are the review's report. The model never holds the token or a git command;
+Henk's code commits and pushes. Henk recognises his own pushes by commit,
+and the run that pushed reviews them in its next round (#284).
+
+`[workspace]` picks the backend and its limits, per repository through
+profiles. `host` runs the checks as Henk's user with an empty environment,
+so they see none of Henk's secrets, but nothing else isolates them. `ssh`
+runs each workspace as a throwaway user on a sandbox host (see "Sandbox
+host" below), and `kubernetes` as a Pod of its own (see "Workspaces on
+Kubernetes"). `henk config check` warns about what each one does not
+isolate. Every command is on the run's timeline (`henk runs show`). On
 GitHub the App needs `Contents: write`. On GitLab Henk reads
 `[gitlab].token_env` himself: git pushes with it as `oauth2`, and the merge
 request's projects, the branch's protection and his account id come from
 the REST API with it in the `PRIVATE-TOKEN` header, because the MCP
 server's merge request leaves the project ids out. Without it GitLab
-reviews fail and address runs are refused. The token's account needs
-Developer access to push.
+reviews fail. The token's account needs Developer access to push.
 
-The commit ends in a trailer block, in this order: `Henk-Run` (the run),
-`Requested-by` (the requester's Discord id), the requester's
-`Co-authored-by` and `Signed-off-by`, and Henk's `Signed-off-by` last, as
+The commit's subject is "Fix review findings". It ends in a trailer block,
+in this order: `Henk-Run` (the run), `Requested-by` (the requester's
+Discord id), the requester's `Co-authored-by` and `Signed-off-by`, and
+Henk's `Signed-off-by` last, as
 the committer's. By default Henk signs off, so DCO checks pass, and the
 requester is credited as co-author; the requester does not sign off.
 `[roles.executor.trailers]` changes the defaults and
@@ -567,18 +581,9 @@ and `henk config check` warns about it. Trailer values come only from ids
 and configuration, never from a display name or a comment (spec §2, §8.3);
 `config check` refuses a malformed name or email.
 
-Every inbound event is recorded in Henk's own database with what each listener
-did with it, and the payload as received (up to 256 KB). Recordings stay in
-the service; nothing is sent anywhere. While serving, Henk deletes events
-and their outcomes older than `server.keep_events_days` (30 by default) once
-an hour, and session transcripts of that age with them. Runs are kept, since
-their links are posted on the platforms. An
-event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
-run and the events that led to it at `/dashboard/runs/{id}`.
-
 ### Sandbox host
 
-The `ssh` workspace backend (#84) runs an address run's commands on a
+The `ssh` workspace backend (#84) runs a workspace's commands on a
 machine of their own. Henk copies the pull request's checkout there, `.git`
 and all, as a new Unix user `henk-w…` with its own home; every command and
 file operation of the run is done as that user, with an empty environment
@@ -660,12 +665,11 @@ share one, holding the pull request's head, set up as above before the
 reviewer starts; a reviewer alone gets the reviewed commit, fetched by its
 sha, so a push during the review changes nothing. The reviewer's changes
 are never exported, and a reviewer that changes a file stops the loop; only
-the executor's changes, checked like an address run's, become a commit. In
-the workspace both list files (`list_files`, with a glob), search them by
+the executor's changes, checked as above, become a commit. In the
+workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
-(`read_file`), the same code tools an address run has, and on a backend
-apart from Henk run a command of their own (`bash`, #85): one test, a
-build or a grep, as the workspace's user, with the repository's toolchain
+(`read_file`), and on a backend apart from Henk run a command of their own
+(`bash`, #85): one test, a build or a grep, as the workspace's user, with the repository's toolchain
 and the profile's time and output limits. Each command is on the run's
 timeline, so `henk runs show <id>` lists what a review ran. A review whose
 workspace cannot be opened or set up fails before any session starts.
@@ -680,12 +684,12 @@ With `plan = true` on a profile, the planner gets a workspace too (#172):
 one copy of the repository at its default branch, fetched by the sha Henk
 read, set up as above and never exported, with the same code tools and
 `bash` and a prompt that asks it to ground the plan in what it read. The
-platform's tools stay for issues, pull requests and history. An address
-run gets `bash` beside `run_checks` on any backend apart from Henk: one
-test or build of its own choosing while it works, where every file it
+platform's tools stay for issues, pull requests and history. The executor
+gets `bash` beside `run_checks` on any backend apart from Henk: one test or
+build of its own choosing while it works, where every file it
 changes is part of the commit and the checks still decide. Neither is
 available on the `host` backend, where those commands would run as Henk's
-own user: `plan = true` is refused there, and an address run there keeps
+own user: `plan = true` is refused there, and the executor there keeps
 `run_checks` only.
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
@@ -793,16 +797,15 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - a health page from configuration and the database, including whether
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
-- a form that starts a review, plan or address run, and a button that
-  cancels a running one.
+- a form that starts a review or a plan, and a button that cancels a
+  running one.
 
-Starting works exactly like `POST /review`, `/plan` and `/address`: the
+Starting works exactly like `POST /review` and `/plan`: the
 request becomes an event, the listeners apply the allowlist and every
 refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
 `cancelled`: a review with a neutral check saying which GitHub account
-cancelled it, a plan or address run with one comment saying so; an address
-run cancelled before its push pushes nothing.
+cancelled it, a plan with one comment saying so.
 
 The app reads and acts only through the JSON API at `/dashboard/api/v1`,
 behind the same sign-in; every action carries the session's CSRF token in a
@@ -858,8 +861,8 @@ cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
 With `[mcp_server] enabled = true` and at least one token, `henk serve` also
 serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
 such as Claude Code can work with Henk:
-- `start_review`, `start_plan`, `start_address`: start work, exactly as
-  `POST /review`, `/plan` and `/address` do. The request becomes an event,
+- `start_review`, `start_plan`: start work, exactly as `POST /review` and
+  `/plan` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
 - `cancel_run`;
@@ -928,7 +931,7 @@ line in `docs/SPEC.md` once the team confirms it.
   trigger names the interrupted run; a closed pull request or one off the
   allowlist is not resumed. A resumed review closed as orphaned is not
   resumed again, so a review that takes Henk down cannot loop. Interrupted
-  plans and address runs are not resumed: ask again.
+  plans are not resumed: ask again.
 - §4 A plan has 20 minutes (`planning.timeout_secs`).
 - §4 On GitHub, triage sets labels, type and links; priority, effort and
   target date are not set in this version.

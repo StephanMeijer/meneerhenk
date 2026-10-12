@@ -7,7 +7,6 @@
 //!
 //! The crate is deliberately free of I/O, async and credentials (§8.4).
 
-pub mod address;
 pub mod allowlist;
 pub mod commit;
 pub mod diff;

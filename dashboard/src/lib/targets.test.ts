@@ -52,7 +52,7 @@ describe('checkUrl', () => {
 
   it('names the target when it fits', () => {
     expect(checkUrl('review', 'https://github.com/docspec/app/pull/7')).toEqual({ ok: 'pull request docspec/app #7' });
-    expect(checkUrl('address', 'https://gitlab.com/g/p/-/merge_requests/5')).toEqual({ ok: 'merge request g/p #5' });
+    expect(checkUrl('review', 'https://gitlab.com/g/p/-/merge_requests/5')).toEqual({ ok: 'merge request g/p #5' });
     expect(checkUrl('plan', 'https://github.com/docspec/api/issues/52')).toEqual({ ok: 'issue docspec/api #52' });
   });
 
@@ -62,9 +62,6 @@ describe('checkUrl', () => {
     });
     expect(checkUrl('review', 'https://github.com/docspec/api/issues/52')).toEqual({
       problem: 'This is an issue. A review needs a pull request URL.',
-    });
-    expect(checkUrl('address', 'https://github.com/docspec/api/issues/52')).toEqual({
-      problem: 'This is an issue. Addressing feedback needs a pull request URL.',
     });
     expect(checkUrl('review', 'nope')).toEqual({ problem: 'Not a GitHub pull request or GitLab merge request URL.' });
     expect(checkUrl('plan', 'nope')).toEqual({ problem: 'Not a GitHub or GitLab issue URL.' });

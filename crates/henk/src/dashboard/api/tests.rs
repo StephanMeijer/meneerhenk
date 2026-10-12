@@ -803,6 +803,97 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
     }
 }
 
+/// An address run from before #327 still reads in full: its stages, its
+/// session and its transcript.
+#[tokio::test]
+async fn an_address_run_from_before_its_removal_still_reads_in_full() {
+    use henk_store::{Stage, StageState, StageWrite};
+
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-address").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Address,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: Some("github:5821".into()),
+            trigger: "dashboard".into(),
+            link: format!("{ORIGIN}/runs/r-address"),
+        })
+        .await
+        .unwrap();
+    store.start_lane(&run, "address", "model-a").await.unwrap();
+    store
+        .finish_lane(&run, "address", LaneStatus::Finished, 6, 300, 30, None)
+        .await
+        .unwrap();
+    store
+        .record_transcript(
+            &run,
+            &TranscriptRecord {
+                at: String::new(),
+                session: "address".into(),
+                model: "model-a".into(),
+                stop: "EndTurn".into(),
+                turns: 6,
+                bytes: 2,
+                body: "{}".into(),
+            },
+        )
+        .await
+        .unwrap();
+    for (stage, detail) in [
+        (Stage::Workspace, "workspace ready"),
+        (Stage::Session, "2 threads settled"),
+        (Stage::Commit, "1 file changed"),
+        (Stage::Push, "pushed abc1234"),
+        (Stage::Replies, "2 replies"),
+    ] {
+        store
+            .stage(&run, &StageWrite::now(stage, StageState::Done, detail))
+            .await
+            .unwrap();
+    }
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-address", &cookie).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail = detail.json();
+    assert_eq!(detail["run"]["kind"], "address");
+    assert_eq!(detail["lanes"][0]["name"], "address");
+    let stages: Vec<&str> = detail["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| stage["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        ["workspace", "session", "commit", "push", "replies"]
+    );
+    let listed = get(&f, "/dashboard/api/v1/runs?kind=address", &cookie)
+        .await
+        .json();
+    assert_eq!(listed["items"][0]["id"], "r-address");
+
+    let shown = crate::runs::render(
+        &store.run(&run).await.unwrap().unwrap(),
+        &store.lanes(&run).await.unwrap(),
+        &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
+        &store.transcripts(&run).await.unwrap(),
+        &store.drafts(&run).await.unwrap(),
+        &store.findings(&run).await.unwrap(),
+        &store.events(&run).await.unwrap(),
+    );
+    for line in ["lanes (1)", "address", "transcripts (1)"] {
+        assert!(shown.contains(line), "{line}:\n{shown}");
+    }
+}
+
 #[tokio::test]
 async fn a_query_that_does_not_parse_is_a_json_bad_request() {
     let f = fixture("https://127.0.0.1:9");
@@ -1544,7 +1635,14 @@ async fn a_review_cancelled_during_its_checkout_does_not_count_as_going_without(
         "checking out abc1234",
     )
     .await;
-    crate::stages::cancelled(&**store, &id, "someone", "").await;
+    crate::stages::end(
+        &**store,
+        &id,
+        henk_store::StageState::Skipped,
+        "cancelled by someone",
+        "cancelled by someone",
+    )
+    .await;
     store
         .finish_run(&id, RunStatus::Cancelled, None, None)
         .await
@@ -1653,17 +1751,11 @@ fn api_types_are_current() {
 }
 
 #[tokio::test]
-async fn an_address_run_is_startable_only_where_address_runs_are_configured() {
-    let f = fixture_with(
-        "https://127.0.0.1:9",
-        crate::dashboard::app::Assets(&[]),
-        |s| {
-            s.roles.executor = Some(toml::from_str("model = \"m\"\nrequester_id = 3").unwrap());
-        },
-    );
+async fn a_review_and_a_plan_are_what_can_be_started() {
+    let f = fixture("https://127.0.0.1:9");
     let (cookie, _) = viewer(&f);
     let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
-    assert_eq!(me["startable"], json!(["review", "plan", "address"]));
+    assert_eq!(me["startable"], json!(["review", "plan"]));
 }
 
 #[tokio::test]

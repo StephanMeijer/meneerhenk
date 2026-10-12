@@ -1,4 +1,4 @@
-//! Cancelling one run (#69). While a review, plan or address run may run,
+//! Cancelling one run (#69). While a review or a plan may run,
 //! its cancellation token is registered here under its run id. Someone
 //! signed in to the dashboard cancels it by id; the run then sees who did,
 //! ends as `Cancelled` and says so in one comment, instead of reading the
@@ -150,10 +150,8 @@ pub fn cancelled_reason(by: &str) -> String {
 /// The comment a cancelled run leaves, without its marker. `by` is the
 /// requester id, never a display name (§2); [`cancelled_via`] says where the
 /// cancel came from, and the account is named as a reader knows it.
-/// `nothing_pushed` adds that nothing was pushed, for an address run, the
-/// one run that pushes.
 #[must_use]
-pub fn cancelled_notice(by: &str, link: &str, nothing_pushed: bool) -> String {
+pub fn cancelled_notice(by: &str, link: &str) -> String {
     let who = if let Some(id) = by.strip_prefix("github:") {
         format!("GitHub account {id}")
     } else if let Some(name) = by.strip_prefix("mcp:") {
@@ -165,12 +163,7 @@ pub fn cancelled_notice(by: &str, link: &str, nothing_pushed: bool) -> String {
         "" => format!("by {who}"),
         via => format!("{via} by {who}"),
     };
-    let pushed = if nothing_pushed {
-        " Nothing was pushed."
-    } else {
-        ""
-    };
-    format!("Cancelled {how}.{pushed}\n\nRun: {link}")
+    format!("Cancelled {how}.\n\nRun: {link}")
 }
 
 #[cfg(test)]
@@ -227,24 +220,22 @@ mod tests {
 
     #[test]
     fn the_notice_names_an_id_and_is_in_style() {
-        let review = cancelled_notice("github:1234", "https://henk/runs/r-1", false);
+        let review = cancelled_notice("github:1234", "https://henk/runs/r-1");
         assert_eq!(
             review,
             "Cancelled from the dashboard by GitHub account 1234.\n\nRun: https://henk/runs/r-1"
         );
-        let address = cancelled_notice("github:1234", "https://henk/runs/r-1", true);
-        assert!(address.contains("Nothing was pushed."));
-        let mcp = cancelled_notice("mcp:claude", "https://henk/runs/r-1", false);
+        let mcp = cancelled_notice("mcp:claude", "https://henk/runs/r-1");
         assert_eq!(
             mcp, "Cancelled over MCP by client claude.\n\nRun: https://henk/runs/r-1",
             "not from the dashboard"
         );
-        let other = cancelled_notice("discord:3", "https://henk/runs/r-1", false);
+        let other = cancelled_notice("discord:3", "https://henk/runs/r-1");
         assert_eq!(
             other,
             "Cancelled by discord:3.\n\nRun: https://henk/runs/r-1"
         );
-        for text in [review, address, mcp, other] {
+        for text in [review, mcp, other] {
             assert!(henk_domain::text::is_in_style(&text), "{text}");
         }
     }
@@ -262,7 +253,7 @@ mod tests {
         ] {
             assert_eq!(cancelled_via(by), via, "{by}");
             assert_eq!(cancelled_reason(by), reason, "{by}");
-            let notice = cancelled_notice(by, "https://henk/runs/r-1", false);
+            let notice = cancelled_notice(by, "https://henk/runs/r-1");
             assert!(notice.contains(via), "{notice}");
         }
     }

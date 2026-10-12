@@ -68,7 +68,7 @@ FROM docker.io/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce9
 
 # Debian slim with git and CA certificates (#254): Henk runs git itself to
 # check out the reviewed commit, copy the planner's repository and clone
-# for an address run, so the runtime needs it. Distroless had no git, and
+# for the review loop's push, so the runtime needs it. Distroless had no git, and
 # every checkout failed while the reviews still completed. Node's
 # libstdc++ is in the base. The user is uid and gid 65532, as before.
 # This RUN is the one step that runs on the target platform, so a cross

@@ -2704,12 +2704,6 @@ requester_id = 3
                 remote: self.remote.to_string_lossy().into_owned(),
             })
         }
-        async fn open_threads(
-            &self,
-            _: &ReviewTarget,
-        ) -> Result<Vec<henk_platform::push::OpenThread>, henk_platform::PlatformError> {
-            Err(unused())
-        }
         async fn git_credential(
             &self,
         ) -> Result<Option<henk_platform::push::GitCredential>, henk_platform::PlatformError>
@@ -2742,31 +2736,6 @@ requester_id = 3
                     "no user {id}"
                 ))),
             }
-        }
-        fn commit_url(&self, _: &ReviewTarget, _: &str) -> String {
-            String::new()
-        }
-        async fn reply_in_thread(
-            &self,
-            _: &ReviewTarget,
-            _: &henk_platform::push::OpenThread,
-            _: &str,
-        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
-            Err(unused())
-        }
-        async fn resolve_thread(
-            &self,
-            _: &ReviewTarget,
-            _: &str,
-        ) -> Result<(), henk_platform::PlatformError> {
-            Err(unused())
-        }
-        async fn post_comment(
-            &self,
-            _: &ReviewTarget,
-            _: &str,
-        ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
-            Err(unused())
         }
     }
 
@@ -3100,10 +3069,7 @@ requester_id = 3
         // One commit, for f1; the rejections changed nothing.
         let (head, log) = crate::git::tests::remote_feature(remote.path()).await;
         assert!(log.contains("review loop round 1"), "{log}");
-        assert_eq!(
-            f.app.own_pushes.pushed_for(&head),
-            Some(crate::push::PushedFor::ReviewedByRun)
-        );
+        assert!(f.app.own_pushes.has(&head));
         // The new head gets the review's check too, not only the commit the
         // review started at: nothing else reviews it.
         let reported = f.writer.finished_commits.lock().unwrap().clone();
@@ -3516,11 +3482,7 @@ requester_id = 3
 
         let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_ne!(head, before, "round 1 pushed");
-        assert_eq!(
-            f.app.own_pushes.pushed_for(&head),
-            Some(crate::push::PushedFor::ReviewedByRun),
-            "so nothing else reviews it"
-        );
+        assert!(f.app.own_pushes.has(&head), "so nothing else reviews it");
         let reported = f.writer.finished_commits.lock().unwrap().clone();
         assert_eq!(reported.len(), 2, "{reported:?}");
         assert!(reported.contains(&before), "{reported:?}");
@@ -4554,10 +4516,7 @@ requester_id = 3
         }
         assert_ne!(head, f.head.as_str(), "pushed");
         assert!(summary.contains("pushed 1 commit "), "{summary}");
-        assert_eq!(
-            f.app.own_pushes.pushed_for(&head),
-            Some(crate::push::PushedFor::ReviewedByRun)
-        );
+        assert!(f.app.own_pushes.has(&head));
         assert!(
             log.starts_with("meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"),
             "{log}"

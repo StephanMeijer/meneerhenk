@@ -563,7 +563,7 @@ pub struct LaneRecord {
     pub finished_at: Option<String>,
 }
 
-/// One stage of a run (#226): the steps a review, plan or address run goes
+/// One stage of a run (#226): the steps a review or a plan goes
 /// through, in the order they come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Stage {
@@ -577,21 +577,22 @@ pub enum Stage {
     Diff,
     /// The review's workspaces were checked out.
     Checkout,
-    /// The planner's or address run's workspace was set up.
+    /// The planner's workspace was set up (and an address run's, before
+    /// #327).
     Workspace,
     /// The review lanes ran.
     Lanes,
-    /// The planner's or address run's session ran.
+    /// The planner's session ran (and an address run's, before #327).
     Session,
     /// The drafts were checked.
     FactCheck,
-    /// The address run's commit was made.
+    /// An address run's commit was made; runs before #327 only.
     Commit,
-    /// The address run's commit was pushed.
+    /// The executor's commit was pushed, or an address run's before #327.
     Push,
     /// What came of it was written on the platform.
     Publish,
-    /// The address run replied to the threads.
+    /// An address run replied to the threads; runs before #327 only.
     Replies,
     /// The run ended.
     Done,

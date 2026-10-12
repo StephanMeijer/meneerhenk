@@ -632,7 +632,7 @@ pub(crate) mod tests {
         changed.sort();
         assert_eq!(changed, ["NEW.md", "src/a.rs"]);
         let commit = checkout
-            .commit(&identity(), "Address review feedback\n\nHenk-Run: r-1\n")
+            .commit(&identity(), "Fix review findings\n\nHenk-Run: r-1\n")
             .await
             .unwrap();
         checkout.push("feature").await.unwrap();

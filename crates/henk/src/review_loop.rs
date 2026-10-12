@@ -6,7 +6,7 @@
 //! Both work in one workspace at the pull request's head, taking turns:
 //! after a push the workspace holds the new head, so nothing has to move.
 //! The reviewer's view of it is never exported; only the executor's changes,
-//! checked like an address run's (§3.5), become a commit.
+//! checked against the push rules (§3.5), become a commit.
 //!
 //! A pull request the loop may not push to (a fork, the default or a
 //! protected branch) or whose branch moved after the review was queued is
@@ -29,7 +29,7 @@ use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::role::Role;
 use henk_domain::run::RunId;
-use henk_domain::workspace::{EnvLane, Profile};
+use henk_domain::workspace::Profile;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
 use henk_platform::push::{GitCredential, PullFacts, PushWriter};
@@ -53,7 +53,7 @@ use crate::push::{Pusher, stop_if_cancelled};
 use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::traced::Traced;
-use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
+use crate::workspace::{Workspace, checked_changeset, never_exported, setup};
 
 /// The most of a pushed commit's patch the reviewer is shown in its resume
 /// message; the rest it reads in the workspace.
@@ -389,8 +389,8 @@ impl<'a> Rounds<'a> {
         if let Err(error) = store.end_loop(run, stop.as_str(), self.round).await {
             tracing::warn!(%error, "could not record why the loop stopped");
         }
-        // A cancel is a skip, as for every other stage of a cancelled run
-        // (`stages::cancelled`), not a failure of the loop.
+        // A cancel is a skip, as for every other stage of a cancelled run,
+        // not a failure of the loop.
         let cancelled = matches!(stop, LoopStop::Cancelled);
         let failed = !cancelled && !stop.ended_well();
         let ledger = self.handoff.ledger();
@@ -748,7 +748,6 @@ impl<'a> Rounds<'a> {
             target: self.on.target,
             run: self.on.run,
             requester: &self.requester,
-            pushed_for: crate::push::PushedFor::ReviewedByRun,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher
@@ -807,7 +806,7 @@ fn reviewer_tools(
     handoff: &Arc<Handoff>,
     bash: Option<Duration>,
 ) -> ToolSet {
-    let reviewing = for_lane(Arc::clone(workspace), EnvLane::Review);
+    let reviewing = never_exported(Arc::clone(workspace));
     let files = Arc::new(DiffFiles::new(Arc::clone(diff)));
     let mut tools = ToolSet::new();
     tools.add(ListChangedFiles(Arc::clone(&files)));

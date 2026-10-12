@@ -78,9 +78,9 @@ describe('Run', () => {
     expect(dialog?.textContent).toContain('lane-a is still working.');
     const effects = [...(dialog?.querySelectorAll('li') ?? [])].map((li) => li.textContent);
     expect(effects).toEqual([
-      'All lanes stop now. Drafts still waiting are marked cancelled.',
-      'On the pull request, one comment and the check say it was cancelled and name you, github:5821.',
-      'Nothing already posted is removed.',
+      'The reviewer and the executor stop now. Nothing more is pushed.',
+      'On the pull request, the check says it was cancelled and names you, github:5821.',
+      'A fix already pushed stays on the branch.',
     ]);
     expect(document.activeElement?.textContent).toBe('Keep running');
     buttonNamed('Keep running')?.click();

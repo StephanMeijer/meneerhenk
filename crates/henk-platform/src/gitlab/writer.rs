@@ -59,15 +59,15 @@ impl GitLabWriter {
         }
     }
 
-    /// Adds the REST reads and the git credential an address run (§3.5)
-    /// needs. Without them the writer reviews but does not address.
+    /// Adds the REST reads and the git credential pushing (§3.5) needs.
+    /// Without them the writer reviews but does not push.
     #[must_use]
     pub fn with_rest(mut self, rest: GitLabRest) -> Self {
         self.rest = Some(rest);
         self
     }
 
-    /// Whether this writer can do an address run.
+    /// Whether this writer can push.
     #[must_use]
     pub fn can_push(&self) -> bool {
         self.rest.is_some()
@@ -76,7 +76,7 @@ impl GitLabWriter {
     pub(crate) fn rest(&self) -> Result<&GitLabRest, PlatformError> {
         self.rest.as_ref().ok_or_else(|| {
             PlatformError::Auth(
-                "GitLab address runs need the GitLab token, which is not set".to_owned(),
+                "pushing to GitLab needs the GitLab token, which is not set".to_owned(),
             )
         })
     }
@@ -182,23 +182,6 @@ impl GitLabWriter {
             limit: MAX_PAGES * PAGE_SIZE,
         })
     }
-
-    /// All discussions of a merge request, across pages.
-    pub(crate) async fn discussions(
-        &self,
-        target: &ReviewTarget,
-    ) -> Result<Vec<Value>, PlatformError> {
-        self.call_tool_all(
-            "mr_discussions",
-            Self::base_args(target),
-            &["items", "discussions"],
-        )
-        .await
-    }
-}
-
-pub(crate) fn note_body(note: &Value) -> &str {
-    note.get("body").and_then(Value::as_str).unwrap_or("")
 }
 
 pub(crate) fn note_id(note: &Value) -> Option<String> {
@@ -207,10 +190,6 @@ pub(crate) fn note_id(note: &Value) -> Option<String> {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     }
-}
-
-pub(crate) fn is_system(note: &Value) -> bool {
-    note.get("system").and_then(Value::as_bool).unwrap_or(false)
 }
 
 #[async_trait::async_trait]
@@ -461,10 +440,22 @@ mod tests {
         GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk")
     }
 
+    /// Every page of `mr_discussions`, as a listing that pages reads them.
+    async fn all_discussions(fake: &FakeServer) -> Result<Vec<Value>, PlatformError> {
+        writer(fake)
+            .await
+            .call_tool_all(
+                "mr_discussions",
+                GitLabWriter::base_args(&target()),
+                &["items", "discussions"],
+            )
+            .await
+    }
+
     #[tokio::test]
     async fn discussions_on_the_eleventh_page_are_read() {
         let fake = paged_discussions(11);
-        let discussions = writer(&fake).await.discussions(&target()).await.unwrap();
+        let discussions = all_discussions(&fake).await.unwrap();
         assert_eq!(discussions.len(), 1001);
         assert_eq!(discussions[1000]["id"], "d-11-0");
         assert_eq!(fake.calls().len(), 11);
@@ -480,7 +471,7 @@ mod tests {
                 (0..count).map(|i| discussion(page, i)).collect(),
             ))
         });
-        let discussions = writer(&fake).await.discussions(&target()).await.unwrap();
+        let discussions = all_discussions(&fake).await.unwrap();
         assert_eq!(
             discussions.len(),
             10_000,
@@ -492,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn a_discussion_list_past_the_cap_is_an_error() {
         let fake = paged_discussions(u64::MAX);
-        let result = writer(&fake).await.discussions(&target()).await;
+        let result = all_discussions(&fake).await;
         assert!(
             matches!(result, Err(PlatformError::TooMany { limit: 10_000, .. })),
             "{result:?}"

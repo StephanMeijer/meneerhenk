@@ -21,7 +21,7 @@ use tracing::warn;
 use crate::app::App;
 use crate::git::{Checkout, ScratchDir};
 use crate::workspace::traced::Traced;
-use crate::workspace::{Workspace, WorkspaceProvider, for_lane, setup};
+use crate::workspace::{Workspace, WorkspaceProvider, never_exported, setup};
 
 /// The name the planner's workspace goes by on the run record.
 const PLANNER: &str = "planner";
@@ -73,7 +73,6 @@ pub async fn open_for_plan(
             profile.clone(),
             run.clone(),
             PLANNER.to_owned(),
-            EnvLane::Plan,
         )
         .await;
         anyhow::Ok((workspace?, head))
@@ -139,7 +138,6 @@ async fn open_one(
     profile: Profile,
     run: RunId,
     name: String,
-    lane: EnvLane,
 ) -> (String, anyhow::Result<Arc<dyn Workspace>>) {
     let opened = match provider.open(&source, &profile).await {
         Ok(opened) => opened,
@@ -153,7 +151,7 @@ async fn open_one(
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
     match setup::prepare(&traced, &profile).await {
-        Ok(ready) => (name, Ok(for_lane(ready, lane))),
+        Ok(ready) => (name, Ok(never_exported(ready))),
         Err(error) => {
             traced.close().await;
             (name, Err(error))

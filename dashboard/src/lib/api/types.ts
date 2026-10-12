@@ -15,8 +15,7 @@ login: string,
  */
 csrf: string, 
 /**
- * What `POST /runs` can start here: `review`, `plan`, and `address`
- * when address runs are configured.
+ * What `POST /runs` can start here: `review` and `plan`.
  */
 startable: Array<string>, };
 
@@ -235,7 +234,8 @@ check_id: string | null,
  */
 heartbeat_at: string | null, 
 /**
- * Its sessions: review lanes, checks, the planner, the address run.
+ * Its sessions: the reviewer, the executor, the planner; older runs
+ * have review lanes, checks and an address run's session.
  */
 lanes: Array<Lane>, 
 /**
@@ -323,7 +323,7 @@ export type WaitingReview = {
  */
 run_id: string, 
 /**
- * `review`; plans and address runs join the queue with #79.
+ * `review`; plans join the queue with #79.
  */
 kind: string, 
 /**
@@ -1020,7 +1020,7 @@ url: string,
  */
 commit?: string | null, 
 /**
- * A note for a plan or an address run.
+ * A note for a plan.
  */
 note?: string | null, };
 

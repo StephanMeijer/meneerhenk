@@ -1,8 +1,7 @@
 //! The setup stage (#93): before the model's first command, the profile's
 //! toolchain is installed and its setup commands run, in the tree's root,
 //! each on the run's timeline. Every run that gets a workspace goes through
-//! it: the review loop's, the planner's when its profile asks, and an
-//! address run's.
+//! it: the review loop's, and the planner's when its profile asks.
 
 use std::sync::Arc;
 use std::time::Duration;

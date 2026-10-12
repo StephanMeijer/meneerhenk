@@ -1,4 +1,4 @@
-//! The stages of a run (#226): where a review, plan or address run is, for
+//! The stages of a run (#226): where a review or a plan is, for
 //! the dashboard's pipeline. A stage is recorded as the run reaches it and
 //! again when it ends. Recording one never fails a run: a store error is a
 //! warning, and the timeline keeps its lines as before.
@@ -70,19 +70,6 @@ pub async fn failed(store: &dyn RunStore, run: &RunId) {
         "did not complete",
     )
     .await;
-}
-
-/// Ends the stages of a run a person cancelled: `cancelled by github:1234`,
-/// and `more` after it when there is more to say.
-pub async fn cancelled(store: &dyn RunStore, run: &RunId, by: &str, more: &str) {
-    let line = format!("cancelled by {by}{more}");
-    end(store, run, StageState::Skipped, &line, &line).await;
-}
-
-/// `1 open thread`, `3 open threads`.
-#[must_use]
-pub fn count(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The request's stage alone: when it came and who asked.

@@ -64,7 +64,7 @@ pub struct Config {
     /// it with a message that says what replaced it.
     #[serde(default)]
     address: Option<toml::Value>,
-    /// Where an address run's tools and checks run (§3.5).
+    /// Where a model's tools and the project's checks run.
     #[serde(default)]
     pub workspace: WorkspaceConfig,
     /// External MCP servers by alias.
@@ -413,7 +413,7 @@ pub struct GitLabConfig {
     /// Henk's GitLab username.
     pub username: String,
     /// Env var with the personal access token: the MCP servers sign in with
-    /// it, and address runs (§3.5) push and read the merge request with it.
+    /// it, and Henk pushes (§3.5) and reads the merge request with it.
     #[serde(default = "default_gitlab_token_env")]
     pub token_env: String,
     /// Alias of the `[mcp.*]` server lanes read GitLab through.
@@ -658,8 +658,8 @@ impl Default for ReviewConfig {
     }
 }
 
-/// Limits every model session shares: the review loop's sessions, planners
-/// and address runs.
+/// Limits every model session shares: the review loop's sessions and the
+/// planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentFileConfig {
@@ -815,8 +815,7 @@ fn default_role_timeout_secs() -> u64 {
 }
 
 /// The executor (#322): the agent that changes the code, and how what it
-/// changes becomes a commit and a push. Address runs use it too until they
-/// are removed (#327).
+/// changes becomes a commit and a push (§3.5).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
@@ -940,7 +939,7 @@ fn default_max_changed_files() -> usize {
     20
 }
 
-/// Where an address run's tools and checks run (§3.5): the default
+/// Where a model's tools and the project's checks run: the default
 /// profile's backend and limits, named profiles, and which repository uses
 /// which profile.
 #[derive(Debug, Clone, Deserialize)]
@@ -1314,7 +1313,7 @@ pub struct PersonConfig {
     pub name: String,
     /// What they do on the team.
     pub role: String,
-    /// Their GitHub user id: the address-run commit credits them with the
+    /// Their GitHub user id: a commit Henk pushes credits them with the
     /// noreply address of this account.
     #[serde(default)]
     pub github_id: Option<u64>,
@@ -1465,7 +1464,7 @@ pub struct Settings {
     pub roles: RolesConfig,
     /// Planning.
     pub planning: Option<PlanningConfig>,
-    /// Where an address run's tools and checks run, per repository.
+    /// Where a model's tools and the project's checks run, per repository.
     pub workspace: WorkspacePolicy,
     /// The sandbox host of the `ssh` backend, when configured.
     pub workspace_ssh: Option<SshConfig>,
@@ -2007,7 +2006,7 @@ impl Settings {
 
     /// Why Henk's own process needs `git`, in words, one reason each; empty
     /// when it does not (#254). Henk checks out the reviewed commit, copies
-    /// the planner's repository and clones for an address run itself, on
+    /// the planner's repository and clones to push the executor's fixes, on
     /// its own side, with the platform's credential (§8.4), whatever the
     /// workspace backend.
     #[must_use]
@@ -2023,7 +2022,7 @@ impl Settings {
             }
         }
         if self.roles.executor.is_some() {
-            reasons.push("address runs".to_owned());
+            reasons.push("the executor's pushes".to_owned());
         }
         reasons
     }
@@ -2209,7 +2208,7 @@ impl Settings {
         if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
                 out,
-                "Pushes:          for Team Lead {}; {} files, {} checks; address runs use the executor until #327",
+                "Pushes:          for Team Lead {}; {} files, {} checks",
                 executor.requester_id,
                 executor.max_changed_files,
                 executor.check_commands.len()
@@ -2704,7 +2703,7 @@ github_owners = ["docspec"]
         ))
         .and_then(Config::into_settings)
         .unwrap();
-        assert_eq!(address.needs_git(), ["address runs"]);
+        assert_eq!(address.needs_git(), ["the executor's pushes"]);
     }
 
     #[test]

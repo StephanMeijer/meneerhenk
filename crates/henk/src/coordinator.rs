@@ -13,7 +13,6 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::address::{AddressRequest, run_address};
 use crate::app::App;
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
@@ -272,7 +271,6 @@ pub struct Coordinator {
     active: Arc<Mutex<HashMap<Key, Active>>>,
     review_slots: Arc<Semaphore>,
     generation: Mutex<u64>,
-    addressing: Arc<Mutex<std::collections::HashSet<Key>>>,
     /// Marked whenever [`Coordinator::slots`] may read differently, so the
     /// overview's stream need not wait for its next snapshot.
     slots_changed: Arc<watch::Sender<()>>,
@@ -294,7 +292,6 @@ impl Coordinator {
             active: Arc::new(Mutex::new(HashMap::new())),
             review_slots: Arc::new(Semaphore::new(slots)),
             generation: Mutex::new(0),
-            addressing: Arc::new(Mutex::new(std::collections::HashSet::new())),
             slots_changed: Arc::new(watch::Sender::new(())),
         }
     }
@@ -490,7 +487,7 @@ impl Coordinator {
         (decision, run)
     }
 
-    /// Cancels a running review, plan or address run on behalf of `by`
+    /// Cancels a running review or plan on behalf of `by`
     /// (#69). A cancelled review leaves the running set at once, so a new
     /// request for the same pull request starts afresh instead of joining
     /// it. False when the run is not one this process is running.
@@ -532,56 +529,6 @@ impl Coordinator {
             }
         });
         run
-    }
-
-    /// Starts an address run (§3.5) in the background. One per pull request
-    /// at a time: a second request while one runs is refused, not queued, so
-    /// two runs never push to the same branch.
-    ///
-    /// # Errors
-    ///
-    /// Returns the reason when an address run is already going on it.
-    pub fn submit_address(
-        &self,
-        target: ReviewTarget,
-        note: Option<String>,
-        trigger: String,
-        requester: Option<String>,
-    ) -> Result<RunId, String> {
-        let key = Key::of(&target);
-        {
-            let Ok(mut busy) = self.addressing.lock() else {
-                return Err("coordinator lock poisoned".to_owned());
-            };
-            if !busy.insert(key.clone()) {
-                return Err(format!(
-                    "an address run is already going on #{}",
-                    target.number
-                ));
-            }
-        }
-        let run = new_run_id();
-        let request = AddressRequest {
-            target,
-            note,
-            trigger,
-            run: Some(run.clone()),
-            requester,
-        };
-        let app = Arc::clone(&self.app);
-        let addressing = Arc::clone(&self.addressing);
-        let cancel = app.shutdown.child_token();
-        let cancellable = app.cancels.register(run.clone(), cancel.clone());
-        tokio::spawn(async move {
-            let _cancellable = cancellable;
-            if let Err(error) = run_address(&app, request, cancel).await {
-                warn!(%error, "address run ended with an error");
-            }
-            if let Ok(mut busy) = addressing.lock() {
-                busy.remove(&key);
-            }
-        });
-        Ok(run)
     }
 }
 
