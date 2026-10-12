@@ -3,9 +3,9 @@
 /// Henk's persona (spec §7). Prepended to every system prompt.
 pub const PERSONA: &str = include_str!("../prompts/persona.md");
 
-/// Appended to an address run's instructions when its workspace lets the
+/// Appended to the executor's instructions when its workspace lets the
 /// model run commands of its own (#172).
-pub const ADDRESS_BASH: &str = include_str!("../prompts/address_bash.md");
+pub const EXECUTOR_BASH: &str = include_str!("../prompts/executor_bash.md");
 
 /// Appended to the planner's instructions when it has a workspace at the
 /// default branch (#172). `{{branch}}` and `{{commit}}` say which;
@@ -15,16 +15,13 @@ pub const PLAN_WORKSPACE: &str = include_str!("../prompts/plan_workspace.md");
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
-/// Instructions for an address run (§3.5).
-pub const ADDRESS: &str = include_str!("../prompts/address.md");
-
 /// Instructions for the reviewer of a review loop (#284). `{{ref}}` and
 /// `{{repo}}` say which pull request.
 pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
 
-/// Instructions for the fixer of a review loop (#284). `{{ref}}`,
+/// Instructions for the executor of a review loop (#284). `{{ref}}`,
 /// `{{repo}}` and `{{max_files}}` are filled in.
-pub const LOOP_FIXER: &str = include_str!("../prompts/loop_fixer.md");
+pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
@@ -70,19 +67,18 @@ mod tests {
     fn persona_is_in_style() {
         assert!(henk_domain::text::is_in_style(PERSONA));
         assert!(henk_domain::text::is_in_style(PLANNER));
-        assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
-        assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
+        assert!(henk_domain::text::is_in_style(EXECUTOR_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
-        assert!(henk_domain::text::is_in_style(LOOP_FIXER));
+        assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
         for tool in ["report_finding", "finish_round", "reopens"] {
             assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
         }
         for tool in ["list_findings", "give_verdict", "run_checks"] {
-            assert!(LOOP_FIXER.contains(&format!("`{tool}`")), "{tool}");
+            assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
-        assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
+        assert!(EXECUTOR_BASH.contains("`bash`") && EXECUTOR_BASH.contains("`mktemp`"));
         assert!(PLAN_WORKSPACE.contains("{{tools}}"));
         assert!(PLAN_WORKSPACE.contains("`list_commits`"));
         // The planner's copy is one commit without history (#183).

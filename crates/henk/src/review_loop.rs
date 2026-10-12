@@ -1,19 +1,19 @@
-//! The reviewer↔fixer loop (#284), which is the review (#309): a reviewer
-//! reviews the pull request, a fixer fixes what holds and Henk pushes it to the
+//! The reviewer↔executor loop (#284), which is the review (#309): a reviewer
+//! reviews the pull request, an executor fixes what holds and Henk pushes it to the
 //! pull request's branch, and each resumes its own conversation the next
 //! round, until the reviewer finds nothing more or the rounds run out.
 //!
 //! Both work in one workspace at the pull request's head, taking turns:
 //! after a push the workspace holds the new head, so nothing has to move.
-//! The reviewer's view of it is never exported; only the fixer's changes,
-//! checked like an address run's (§3.5), become a commit.
+//! The reviewer's view of it is never exported; only the executor's changes,
+//! checked against the push rules (§3.5), become a commit.
 //!
 //! A pull request the loop may not push to (a fork, the default or a
 //! protected branch) or whose branch moved after the review was queued is
 //! reviewed by the reviewer alone (#307): one round at the reviewed commit,
-//! no fixer, nothing pushed, and its findings stand, in the check.
+//! no executor, nothing pushed, and its findings stand, in the check.
 //!
-//! Interim until #285 and #286: the reviewer's findings and the fixer's
+//! Interim until #285 and #286: the reviewer's findings and the executor's
 //! report are plain text, and the loop ends on `NO FINDINGS`, at
 //! `max_rounds`, or at the first round that cannot go on.
 
@@ -23,37 +23,37 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::address::push_refusal;
 use henk_domain::diff::ReviewDiff;
+use henk_domain::push::push_refusal;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
 use henk_domain::role::Role;
 use henk_domain::run::RunId;
-use henk_domain::workspace::{EnvLane, Profile};
+use henk_domain::workspace::Profile;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, GitCredential, PullFacts};
+use henk_platform::push::{GitCredential, PullFacts, PushWriter};
 use henk_session::{ResumableSession, RoundOutcome};
 use henk_store::{Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::address_tools::{AddressContext, AddressState, edit_tools};
 use crate::app::App;
 use crate::cancel::is_cancelled;
 use crate::checks::{describe, run_checks};
 use crate::config::LoopConfig;
 use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
+use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::git::{Checkout, ScratchDir, git_command};
 use crate::loop_tools::{
-    FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding, finding_text,
-    fixer_continuation, reviewer_continuation, verdict_text,
+    FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding,
+    executor_continuation, finding_text, reviewer_continuation, verdict_text,
 };
 use crate::push::{Pusher, stop_if_cancelled};
 use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::traced::Traced;
-use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
+use crate::workspace::{Workspace, checked_changeset, never_exported, setup};
 
 /// The most of a pushed commit's patch the reviewer is shown in its resume
 /// message; the rest it reads in the workspace.
@@ -75,7 +75,7 @@ pub(crate) struct LoopTarget<'a> {
 /// How a loop ended, for the review's summary.
 #[derive(Debug)]
 pub(crate) struct LoopReport {
-    /// The reviewer and the fixer, as the summary counts lanes.
+    /// The reviewer and the executor, as the summary counts lanes.
     pub(crate) results: Vec<LaneResult>,
     /// For the check: rounds, commits pushed and why it stopped, then the
     /// findings that still stand.
@@ -113,7 +113,7 @@ pub(crate) async fn run_loop(
         .as_ref()
         .ok_or_else(|| anyhow!("the review loop is not configured"))?;
     let store = &*app.store;
-    let writer = app.address_writer(target.repo.platform())?;
+    let writer = app.push_writer(target.repo.platform())?;
     let facts = writer
         .pull_facts(target)
         .await
@@ -171,8 +171,8 @@ pub(crate) async fn run_loop(
     // and every backend destroys itself then too.
     let ended = rounds.run(facts, &diff, cancel).await;
     rounds.reviewer.finish(store, run).await;
-    if let Some(fixer) = &mut rounds.fixer {
-        fixer.finish(store, run).await;
+    if let Some(executor) = &mut rounds.executor {
+        executor.finish(store, run).await;
     }
     workspace.close().await;
     rounds.conclude(ended).await
@@ -228,14 +228,14 @@ struct Rounds<'a> {
     on: LoopTarget<'a>,
     config: &'a LoopConfig,
     workspace: Arc<dyn Workspace>,
-    fixing: Arc<AddressContext>,
+    fixing: Arc<EditContext>,
     handoff: Arc<Handoff>,
     reviewer: ResumableSession,
     /// None when the reviewer reviews alone.
-    fixer: Option<ResumableSession>,
+    executor: Option<ResumableSession>,
     /// Why the reviewer reviews alone, if it does (#307).
     alone: Option<String>,
-    writer: Arc<dyn AddressWriter>,
+    writer: Arc<dyn PushWriter>,
     credential: Option<GitCredential>,
     requester: String,
     /// The round under way, or the last one.
@@ -246,8 +246,8 @@ struct Rounds<'a> {
     deadline: tokio::time::Instant,
     /// The reviewer's limit per round, from `[roles.reviewer]`.
     reviewer_round: Duration,
-    /// The fixer's limit per round, from `[roles.executor]`.
-    fixer_round: Duration,
+    /// The executor's limit per round, from `[roles.executor]`.
+    executor_round: Duration,
 }
 
 impl<'a> Rounds<'a> {
@@ -257,7 +257,7 @@ impl<'a> Rounds<'a> {
         profile: &Profile,
         workspace: &Arc<dyn Workspace>,
         diff: &Arc<ReviewDiff>,
-        writer: Arc<dyn AddressWriter>,
+        writer: Arc<dyn PushWriter>,
         credential: Option<GitCredential>,
     ) -> anyhow::Result<Self> {
         let app = on.app;
@@ -292,24 +292,22 @@ impl<'a> Rounds<'a> {
             &reviewer.tools(Role::Reviewer),
         );
 
-        // The fixer edits and checks, as an address run does, without the
-        // review threads.
-        let fixing = Arc::new(AddressContext {
+        // The executor edits and checks.
+        let fixing = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
-            threads: Vec::new(),
             check_commands: address.check_commands.clone(),
             check_timeout: command_limit,
             max_changed_files: address.max_changed_files,
             // Told of bash only when it has it: the backend runs model
             // commands and [roles.executor] tools grant it.
             bash: bash && Role::Executor.grants(&address.tools(), "bash"),
-            state: Mutex::new(AddressState::default()),
+            state: Mutex::new(EditState::default()),
         });
-        let mut fixer_system = format!(
+        let mut executor_system = format!(
             "{}\n\n{}",
             prompts::PERSONA,
             prompts::render(
-                prompts::LOOP_FIXER,
+                prompts::LOOP_EXECUTOR,
                 &[
                     ("ref", &reference),
                     ("repo", &repo),
@@ -318,15 +316,15 @@ impl<'a> Rounds<'a> {
             )
         );
         if fixing.bash {
-            fixer_system = format!("{fixer_system}\n\n{}", prompts::ADDRESS_BASH);
+            executor_system = format!("{executor_system}\n\n{}", prompts::EXECUTOR_BASH);
         }
-        let mut fixer_tools = edit_tools(&fixing);
-        fixer_tools.add(ListFindings(Arc::clone(&handoff)));
-        fixer_tools.add(GiveVerdict(Arc::clone(&handoff)));
-        let fixer_tools = equip_and_grant(
+        let mut executor_tools = edit_tools(&fixing);
+        executor_tools.add(ListFindings(Arc::clone(&handoff)));
+        executor_tools.add(GiveVerdict(Arc::clone(&handoff)));
+        let executor_tools = equip_and_grant(
             Role::Executor,
-            &mut fixer_system,
-            fixer_tools,
+            &mut executor_system,
+            executor_tools,
             app.settings.skills.select(&address.skills),
             &address.tools(),
         );
@@ -343,15 +341,15 @@ impl<'a> Rounds<'a> {
                 limits(reviewer.max_turns(Role::Reviewer), reviewer_round),
             )
             .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
-            fixer: Some(
+            executor: Some(
                 ResumableSession::new(
-                    "fixer",
+                    "executor",
                     app.model(&address.model)?,
-                    fixer_system,
-                    fixer_tools,
+                    executor_system,
+                    executor_tools,
                     limits(address.max_turns, address.timeout_secs),
                 )
-                .with_continuation(fixer_continuation(Arc::clone(&handoff))),
+                .with_continuation(executor_continuation(Arc::clone(&handoff))),
             ),
             alone: None,
             fixing,
@@ -363,7 +361,7 @@ impl<'a> Rounds<'a> {
             pushed: Vec::new(),
             deadline: tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs),
             reviewer_round: Duration::from_secs(reviewer_round),
-            fixer_round: Duration::from_secs(address.timeout_secs),
+            executor_round: Duration::from_secs(address.timeout_secs),
         })
     }
 
@@ -396,8 +394,8 @@ impl<'a> Rounds<'a> {
         if let Err(error) = store.end_loop(run, stop.as_str(), self.round).await {
             tracing::warn!(%error, "could not record why the loop stopped");
         }
-        // A cancel is a skip, as for every other stage of a cancelled run
-        // (`stages::cancelled`), not a failure of the loop.
+        // A cancel is a skip, as for every other stage of a cancelled run,
+        // not a failure of the loop.
         let cancelled = matches!(stop, LoopStop::Cancelled);
         let failed = !cancelled && !stop.ended_well();
         let ledger = self.handoff.ledger();
@@ -427,8 +425,8 @@ impl<'a> Rounds<'a> {
         } else {
             LaneOutcome::Finished
         };
-        let sessions: &[&str] = if self.fixer.is_some() {
-            &["fixer", "reviewer"]
+        let sessions: &[&str] = if self.executor.is_some() {
+            &["executor", "reviewer"]
         } else {
             &["reviewer"]
         };
@@ -513,7 +511,7 @@ impl<'a> Rounds<'a> {
         Ok(LoopStop::MaxRounds(self.config.max_rounds))
     }
 
-    /// The fixer's half of `round`: it gives `findings` their verdicts,
+    /// The executor's half of `round`: it gives `findings` their verdicts,
     /// what it fixed is pushed, and the reviewer's next message comes back,
     /// or why the loop stops.
     async fn fix(
@@ -524,27 +522,27 @@ impl<'a> Rounds<'a> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Result<String, LoopStop>> {
         let (store, run) = (&*self.on.app.store, self.on.run);
-        if let Some(stop) = self.out_of_time("fixer", round) {
+        if let Some(stop) = self.out_of_time("executor", round) {
             return Ok(Err(stop));
         }
-        let doing = format!("round {round}: fixer");
+        let doing = format!("round {round}: executor");
         stages::mark(store, run, Stage::Lanes, StageState::Running, doing).await;
         let handed = format!(
             "Round {round}. The reviewer's findings, as data:\n\n{}\n\nCheck each against the code, fix the ones that hold, and give every one its verdict with give_verdict.",
             findings.join("\n\n")
         );
-        let Some(fixer) = self.fixer.as_mut() else {
-            return Err(anyhow!("the review loop has no fixer"));
+        let Some(executor) = self.executor.as_mut() else {
+            return Err(anyhow!("the review loop has no executor"));
         };
-        let fix = fixer
+        let fix = executor
             .resume(store, run, ChatMessage::user(handed), cancel.clone())
             .await;
-        if let Some(stop) = self.broke_off("fixer", &fix) {
+        if let Some(stop) = self.broke_off("executor", &fix) {
             return Ok(Err(stop));
         }
         let silent = self
             .handoff
-            .with_ledger(|ledger| ledger.close_all("the fixer gave no verdict"))
+            .with_ledger(|ledger| ledger.close_all("the executor gave no verdict"))
             .unwrap_or_default();
         self.handoff.record_verdicts(&silent).await;
         let pushed = self.push_round(facts, cancel).await?;
@@ -574,11 +572,11 @@ impl<'a> Rounds<'a> {
         let contest = "To contest a rejection, once, report the finding again with new evidence and name it in reopens.";
         let next = match pushed {
             Pushed::Nothing => format!(
-                "Round {}. The fixer pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
+                "Round {}. The executor pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                 round + 1
             ),
             Pushed::Commit { sha, patch } => format!(
-                "Round {}. The fixer pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
+                "Round {}. The executor pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                 round + 1
             ),
             Pushed::Stopped(stop) => return Ok(Err(stop)),
@@ -588,7 +586,7 @@ impl<'a> Rounds<'a> {
 
     /// Keeps both conversations within their budget: what the earlier
     /// rounds came to, in place of all but the last round (#286). The
-    /// reviewer's summary starts with its task, `opening`; the fixer never
+    /// reviewer's summary starts with its task, `opening`; the executor never
     /// had that task or its tools, so its summary is the findings and the
     /// commits alone.
     fn compact(&mut self, opening: &str, round: u32) {
@@ -604,8 +602,8 @@ impl<'a> Rounds<'a> {
         );
         self.reviewer
             .compact_rounds(&format!("{opening}\n\n{earlier}"), 1);
-        if let Some(fixer) = &mut self.fixer {
-            fixer.compact_rounds(&earlier, 1);
+        if let Some(executor) = &mut self.executor {
+            executor.compact_rounds(&earlier, 1);
         }
     }
 
@@ -624,7 +622,7 @@ impl<'a> Rounds<'a> {
         let (session, round_limit) = if who == "reviewer" {
             (Some(&mut self.reviewer), self.reviewer_round)
         } else {
-            (self.fixer.as_mut(), self.fixer_round)
+            (self.executor.as_mut(), self.executor_round)
         };
         let limit = left.min(round_limit);
         if let Some(session) = session {
@@ -633,10 +631,10 @@ impl<'a> Rounds<'a> {
         None
     }
 
-    /// The reviewer reviews alone, without a fixer, when `why` says why.
+    /// The reviewer reviews alone, without an executor, when `why` says why.
     fn alone(mut self, why: Option<String>) -> Self {
         if why.is_some() {
-            self.fixer = None;
+            self.executor = None;
         }
         self.alone = why;
         self
@@ -647,7 +645,7 @@ impl<'a> Rounds<'a> {
         self.alone.clone().map(LoopStop::ReviewOnly)
     }
 
-    /// The stop when a finding of `round` repeats one the fixer fixed:
+    /// The stop when a finding of `round` repeats one the executor fixed:
     /// the two are going in circles (#286). The repeat stays unsettled.
     async fn repeated(&self, round: u32) -> Option<LoopStop> {
         let ledger = self.handoff.ledger();
@@ -667,7 +665,7 @@ impl<'a> Rounds<'a> {
         Some(LoopStop::RepeatingFinding { finding, of })
     }
 
-    /// The findings the reviewer reported in `round`, for the fixer, or why
+    /// The findings the reviewer reported in `round`, for the executor, or why
     /// the loop stops. Only a finished round can converge: prose, an empty
     /// reply or a cut-off answer after the nudges is no review.
     fn reported(&self, round: u32) -> Result<Vec<String>, LoopStop> {
@@ -706,7 +704,7 @@ impl<'a> Rounds<'a> {
         )))
     }
 
-    /// Checks what the fixer changed and pushes it as one commit; the
+    /// Checks what the executor changed and pushes it as one commit; the
     /// workspace then counts from the new head.
     async fn push_round(
         &mut self,
@@ -734,7 +732,7 @@ impl<'a> Rounds<'a> {
         .await;
         if results.iter().any(|r| !r.passed()) {
             return Ok(Pushed::Stopped(LoopStop::BuildFailing(format!(
-                "the checks fail after the fixer's changes in round {}, so nothing was pushed: {}",
+                "the checks fail after the executor's changes in round {}, so nothing was pushed: {}",
                 self.round,
                 describe(&results).trim()
             ))));
@@ -744,7 +742,7 @@ impl<'a> Rounds<'a> {
             Ok(changes) => changes,
             Err(why) => {
                 return Ok(Pushed::Stopped(LoopStop::PushRefused(format!(
-                    "the fixer's changes in round {} cannot be pushed: {why}",
+                    "the executor's changes in round {} cannot be pushed: {why}",
                     self.round
                 ))));
             }
@@ -756,7 +754,6 @@ impl<'a> Rounds<'a> {
             target: self.on.target,
             run: self.on.run,
             requester: &self.requester,
-            pushed_for: crate::push::PushedFor::ReviewedByRun,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         let checkout = pusher
@@ -815,7 +812,7 @@ fn reviewer_tools(
     handoff: &Arc<Handoff>,
     bash: Option<Duration>,
 ) -> ToolSet {
-    let reviewing = for_lane(Arc::clone(workspace), EnvLane::Review);
+    let reviewing = never_exported(Arc::clone(workspace));
     let files = Arc::new(DiffFiles::new(Arc::clone(diff)));
     let mut tools = ToolSet::new();
     tools.add(ListChangedFiles(Arc::clone(&files)));
@@ -867,7 +864,7 @@ fn round_limits(
 
 /// What one round's push did.
 enum Pushed {
-    /// The fixer changed nothing.
+    /// The executor changed nothing.
     Nothing,
     /// One commit, with its patch for the reviewer.
     Commit { sha: String, patch: String },

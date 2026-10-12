@@ -1,8 +1,8 @@
 //! GitLab: the writer over a write-mode MCP session, and the few REST reads
-//! an address run needs besides.
+//! pushing needs besides.
 
-pub mod address;
 pub mod issues;
+pub mod push;
 pub mod rest;
 pub mod writer;
 

@@ -5,11 +5,11 @@
 //! Everything a model reads goes through MCP; everything Henk writes goes
 //! through a [`PlatformWriter`], which is code, not prompt (spec §8.4).
 
-pub mod address;
 pub mod error;
 pub mod github;
 pub mod gitlab;
 pub mod issue;
+pub mod push;
 pub mod webhook;
 pub mod writer;
 

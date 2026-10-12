@@ -1,5 +1,5 @@
 //! Session reliability (#229): how each session of the recent reviews
-//! ended, the review loop's reviewer and fixer, and the lanes and
+//! ended, the review loop's reviewer and executor, and the lanes and
 //! fact-checks of reviews from before the loop (#310). A session that
 //! keeps dropping out makes reviews thinner; this shows it without opening
 //! runs one by one.
@@ -89,8 +89,9 @@ pub(super) fn lane_stats(endings: &[LaneEnding]) -> LaneStats {
 
     let mut rows: BTreeMap<&str, LaneRow> = BTreeMap::new();
     for ending in endings {
-        let row = rows.entry(&ending.name).or_insert_with(|| LaneRow {
-            name: ending.name.clone(),
+        let name = row_name(&ending.name);
+        let row = rows.entry(name).or_insert_with(|| LaneRow {
+            name: name.to_owned(),
             kind: session_kind(&ending.name).to_owned(),
             models: Vec::new(),
             outcomes: vec![None; reviews.len()],
@@ -142,12 +143,22 @@ fn tally(row: &mut LaneRow, ending: &LaneEnding) {
     }
 }
 
-/// The reviewer, then the fixer; then lanes, by name; then the
+/// The row a session goes in: the `fixer` of a review before #323 is the
+/// executor's, so one row spans old and new reviews.
+fn row_name(session: &str) -> &str {
+    if session == "fixer" {
+        "executor"
+    } else {
+        session
+    }
+}
+
+/// The reviewer, then the executor; then lanes, by name; then the
 /// fact-check sessions, by number.
 fn order(name: &str) -> (u8, u32, String) {
     match (name, name.strip_prefix("check-")) {
         ("reviewer", _) => (0, 0, String::new()),
-        ("fixer", _) => (1, 0, String::new()),
+        ("executor", _) => (1, 0, String::new()),
         (_, Some(number)) => (3, number.parse().unwrap_or(u32::MAX), name.to_owned()),
         (_, None) => (2, 0, name.to_owned()),
     }
@@ -319,10 +330,13 @@ mod tests {
     }
 
     #[test]
-    fn a_review_loops_reviewer_and_fixer_come_first_as_their_own_kinds() {
-        // r-2 ran the loop; r-1 ran lanes before it (#310).
+    fn a_review_loops_reviewer_and_executor_come_first_as_their_own_kinds() {
+        // r-3 ran the loop; r-2 too, before #323 named its executor fixer;
+        // r-1 ran lanes before the loop (#310).
         let endings = [
-            ending("r-2", "fixer", "m-f", LaneStatus::TimedOut, None),
+            ending("r-3", "executor", "m-e", LaneStatus::TimedOut, None),
+            ending("r-3", "reviewer", "m-r", LaneStatus::Finished, None),
+            ending("r-2", "fixer", "m-f", LaneStatus::Finished, None),
             ending("r-2", "reviewer", "m-r", LaneStatus::Finished, None),
             ending("r-1", "check-1", "c", LaneStatus::Finished, None),
             ending("r-1", "lane-a", "m-a", LaneStatus::Finished, None),
@@ -337,13 +351,16 @@ mod tests {
             rows,
             [
                 ("reviewer", "reviewer"),
-                ("fixer", "fixer"),
+                ("executor", "executor"),
                 ("lane-a", "lane"),
                 ("check-1", "check"),
             ]
         );
         assert!(stats.lanes[0].outcomes[0].is_none(), "no reviewer in r-1");
-        assert_eq!(stats.lanes[1].reasons.time_limit, 1);
+        let executor = &stats.lanes[1];
+        assert_eq!(executor.ran, 2, "the fixer of r-2 is in the executor's row");
+        assert_eq!(executor.models, ["m-e", "m-f"]);
+        assert_eq!(executor.reasons.time_limit, 1);
     }
 
     #[test]

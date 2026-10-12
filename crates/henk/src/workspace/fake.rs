@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use henk_domain::address::WorkspacePath;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::{FileMode, Profile, RawChange};
 
 use henk_domain::ignore::PathFilter;
@@ -39,8 +39,9 @@ type Files = BTreeMap<String, (Vec<u8>, bool)>;
 pub struct FakeProvider {
     /// Answers by command line, joined with spaces.
     pub script: BTreeMap<String, Scripted>,
-    /// Changes `export` reports on top of the real ones, to stand for what
-    /// only another backend could produce (a link, a submodule).
+    /// Changes `export` reports on top of the real ones, once there are
+    /// any, to stand for what only another backend could produce (a link,
+    /// a submodule) alongside a change.
     pub inject: Vec<Exported>,
     /// Set when the workspace is closed or dropped.
     pub closed: Arc<AtomicBool>,
@@ -311,7 +312,9 @@ impl Workspace for FakeWorkspace {
                 });
             }
         }
-        changes.extend(self.provider.inject.iter().cloned());
+        if !changes.is_empty() {
+            changes.extend(self.provider.inject.iter().cloned());
+        }
         Ok(changes)
     }
 

@@ -843,7 +843,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
     async fn live_kube_export_stops_what_the_run_left_running() {
-        use henk_domain::address::WorkspacePath;
+        use henk_domain::path::WorkspacePath;
         let _one = LIVE.lock().await;
         let provider = live_provider().await;
         let source = crate::workspace::contract::source("henk-kube-live-stop-src");
@@ -889,7 +889,7 @@ pub(crate) mod tests {
     #[tokio::test]
     #[ignore = "needs a cluster (HENK_TEST_KUBE_*)"]
     async fn live_kube_what_a_run_orphans_is_reaped() {
-        use henk_domain::address::WorkspacePath;
+        use henk_domain::path::WorkspacePath;
         let _one = LIVE.lock().await;
         let provider = live_provider().await;
         let source = crate::workspace::contract::source("henk-kube-live-reap-src");
@@ -948,7 +948,7 @@ pub(crate) mod tests {
         let result = ws
             .exec(
                 &argv,
-                &henk_domain::address::WorkspacePath::root(),
+                &henk_domain::path::WorkspacePath::root(),
                 Duration::from_mins(1),
             )
             .await
@@ -966,7 +966,7 @@ pub(crate) mod tests {
         let after = ws
             .exec(
                 &["true".to_owned()],
-                &henk_domain::address::WorkspacePath::root(),
+                &henk_domain::path::WorkspacePath::root(),
                 Duration::from_secs(10),
             )
             .await;

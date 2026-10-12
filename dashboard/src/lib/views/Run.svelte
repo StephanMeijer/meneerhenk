@@ -147,32 +147,26 @@
   /** How the run's stages go, in a line, by kind. */
   function pipelineNote(detail: RunDetail): string {
     if (detail.run.kind === 'review') {
-      return 'Lanes review the same commit at once. The fact-check starts when every lane has ended.';
+      return 'The reviewer and the executor take turns until the reviewer finds nothing more.';
     }
-    if (detail.run.kind === 'address') return 'One commit to the branch, then replies on the threads.';
+    if (detail.run.kind === 'address') return 'One commit to the branch, then replies on the threads (before #327).';
     return '';
   }
 
   /** What a cancel does, by kind of run: the facts of `review.rs`,
-   * `plan.rs`, `address.rs` and `cancel.rs` (#230). */
+   * `plan.rs` and `cancel.rs` (#230). */
   function cancelEffects(detail: RunDetail): string[] {
     const you = who === null ? 'you' : `you, ${who}`;
     const where = detail.run.platform === 'gitlab' ? 'merge request' : 'pull request';
     if (detail.run.kind === 'review') {
       return [
-        'All lanes stop now. Drafts still waiting are marked cancelled.',
-        `On the ${where}, one comment and the check say it was cancelled and name ${you}.`,
-        'Nothing already posted is removed.',
+        'The reviewer and the executor stop now. Nothing more is pushed.',
+        `On the ${where}, the check says it was cancelled and names ${you}.`,
+        'A fix already pushed stays on the branch.',
       ];
     }
     if (detail.run.kind === 'plan') {
       return ['The planner stops now.', `On the issue, one comment says it was cancelled and names ${you}.`];
-    }
-    if (detail.run.kind === 'address') {
-      return [
-        'The address run stops now. If it had not pushed yet, nothing is pushed.',
-        `On the ${where}, one comment says it was cancelled and names ${you}.`,
-      ];
     }
     return [`Henk stops now and says it was cancelled, naming ${you}.`];
   }

@@ -1,6 +1,5 @@
 //! Committing a checked changeset as Henk and pushing it to a pull
-//! request's branch as a fast-forward: what an address run (§3.5) and the
-//! review loop (#284) share.
+//! request's branch as a fast-forward, for the review loop (#284, §3.5).
 //!
 //! Every guard is here, so both get all of them: the branch is read again
 //! just before the push and must not have moved, Henk must still be allowed
@@ -12,13 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use henk_domain::address::push_refusal;
 use henk_domain::allowlist::Platform;
 use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
+use henk_domain::push::push_refusal;
 use henk_domain::run::RunId;
 use henk_domain::workspace::Change;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, CommitIdentity, GitCredential, PullFacts};
+use henk_platform::push::{CommitIdentity, GitCredential, PullFacts, PushWriter};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -40,15 +39,11 @@ pub(crate) fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancel
 /// Who pushes for one run, to one pull request.
 pub(crate) struct Pusher<'a> {
     pub(crate) app: &'a App,
-    pub(crate) writer: Arc<dyn AddressWriter>,
+    pub(crate) writer: Arc<dyn PushWriter>,
     pub(crate) target: &'a ReviewTarget,
     pub(crate) run: &'a RunId,
     /// Who asked, as the commit message names them.
     pub(crate) requester: &'a str,
-    /// What the commit is for: reviewed in the run that pushes it, as the
-    /// review loop's is (#284), or reviewed as usual, as an address run's
-    /// is (§3.5, #298). Either way it goes in [`App::own_pushes`].
-    pub(crate) pushed_for: PushedFor,
 }
 
 impl Pusher<'_> {
@@ -87,7 +82,7 @@ impl Pusher<'_> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<String> {
         let Some(config) = self.app.settings.roles.executor.as_ref() else {
-            return Err(anyhow!("address runs need [roles.executor]"));
+            return Err(anyhow!("pushing needs [roles.executor]"));
         };
         let henk = self.henk_identity(config).await?;
         let policy = config.trailer_policy(&self.target.repo);
@@ -146,8 +141,8 @@ impl Pusher<'_> {
         // The last moment a cancel can still stop the push.
         stop_if_cancelled(cancel)?;
         // Known before the platform tells anyone, so its event about this
-        // commit finds it (#284, #298).
-        self.app.own_pushes.record(&sha, self.pushed_for);
+        // commit finds it (#284).
+        self.app.own_pushes.record(&sha);
         checkout
             .push(&facts.push.head_ref)
             .await
@@ -220,42 +215,30 @@ impl Pusher<'_> {
 /// about it to arrive.
 const OWN_PUSH_TTL: Duration = Duration::from_hours(24);
 
-/// What a commit Henk pushed is for, as the review listener treats its
-/// new-commits event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PushedFor {
-    /// A review loop's commit: the loop reviews it in the run that pushed
-    /// it, so the event starts no review (#284).
-    ReviewedByRun,
-    /// An address run's commit: a new commit like any other, reviewed as
-    /// usual (§3.5), though Henk's own account pushed it (#298).
-    Review,
-}
-
-/// The commits this process pushed and what each is for, so the event
-/// about one is recognised by the commit, not by who sent it. In memory:
+/// The commits this process pushed, so the event about one is recognised
+/// by the commit, not by who sent it: the review loop reviews its commits
+/// in the run that pushed them (#284). In memory:
 /// after a restart, an event about an earlier push is treated as anyone's,
 /// and the sender check drops it as Henk's own.
 #[derive(Debug, Default, Clone)]
-pub struct OwnPushes(Arc<Mutex<HashMap<String, (Instant, PushedFor)>>>);
+pub struct OwnPushes(Arc<Mutex<HashMap<String, Instant>>>);
 
 impl OwnPushes {
-    /// Remembers `sha` as pushed by Henk for `why`, and forgets what is too
-    /// old.
-    pub fn record(&self, sha: &str, why: PushedFor) {
+    /// Remembers `sha` as pushed by Henk, and forgets what is too old.
+    pub fn record(&self, sha: &str) {
         if let Ok(mut pushed) = self.0.lock() {
-            pushed.retain(|_, (at, _)| at.elapsed() < OWN_PUSH_TTL);
-            pushed.insert(sha.to_ascii_lowercase(), (Instant::now(), why));
+            pushed.retain(|_, at| at.elapsed() < OWN_PUSH_TTL);
+            pushed.insert(sha.to_ascii_lowercase(), Instant::now());
         }
     }
 
-    /// What Henk pushed `sha` for, if Henk pushed it.
+    /// Whether Henk pushed `sha`.
     #[must_use]
-    pub fn pushed_for(&self, sha: &str) -> Option<PushedFor> {
-        let pushed = self.0.lock().ok()?;
-        pushed
-            .get(&sha.to_ascii_lowercase())
-            .filter(|(at, _)| at.elapsed() < OWN_PUSH_TTL)
-            .map(|(_, why)| *why)
+    pub fn has(&self, sha: &str) -> bool {
+        self.0.lock().is_ok_and(|pushed| {
+            pushed
+                .get(&sha.to_ascii_lowercase())
+                .is_some_and(|at| at.elapsed() < OWN_PUSH_TTL)
+        })
     }
 }

@@ -1,13 +1,13 @@
 //! The setup stage (#93): before the model's first command, the profile's
 //! toolchain is installed and its setup commands run, in the tree's root,
 //! each on the run's timeline. Every run that gets a workspace goes through
-//! it: an address run, and a review lane when its profile asks (#170).
+//! it: the review loop's, and the planner's when its profile asks.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
-use henk_domain::address::WorkspacePath;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::{Profile, Toolchain};
 
 use super::Workspace;

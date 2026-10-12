@@ -27,8 +27,7 @@ pub struct Me {
     pub login: String,
     /// The CSRF token every action sends in `X-CSRF-Token`.
     pub csrf: String,
-    /// What `POST /runs` can start here: `review`, `plan`, and `address`
-    /// when address runs are configured.
+    /// What `POST /runs` can start here: `review` and `plan`.
     pub startable: Vec<String>,
 }
 
@@ -136,7 +135,7 @@ pub struct Slots {
 pub struct WaitingReview {
     /// The run it will be; cancel it with `POST /runs/{id}/cancel`.
     pub run_id: String,
-    /// `review`; plans and address runs join the queue with #79.
+    /// `review`; plans join the queue with #79.
     pub kind: String,
     /// `github` or `gitlab`.
     pub platform: String,
@@ -322,7 +321,8 @@ pub struct RunDetail {
     pub check_id: Option<String>,
     /// RFC 3339: when its process last said it was alive.
     pub heartbeat_at: Option<String>,
-    /// Its sessions: review lanes, checks, the planner, the address run.
+    /// Its sessions: the reviewer, the executor, the planner; older runs
+    /// have review lanes, checks and an address run's session.
     pub lanes: Vec<Lane>,
     /// What happened to findings on the platform.
     pub findings: Vec<Finding>,
@@ -342,9 +342,9 @@ pub struct RunDetail {
 }
 
 /// One stage of a run: a review goes `requested`, `queued`, `started`,
-/// `diff`, `checkout`, `lanes`, `fact_check`, `publish`, `done`; a plan or
-/// an address run goes through `workspace`, `session` and, for an address
-/// run, `commit`, `push` and `replies` instead.
+/// `diff`, `checkout`, `lanes`, `push`, `publish`, `done`; a plan goes
+/// through `workspace` and `session` instead. Runs before #309 have
+/// `fact_check`, and address runs before #327 `commit` and `replies`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Stage {
@@ -877,7 +877,7 @@ pub struct StartRequest {
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub commit: Option<String>,
-    /// A note for a plan or an address run.
+    /// A note for a plan.
     #[serde(default)]
     #[cfg_attr(test, ts(optional = nullable))]
     pub note: Option<String>,

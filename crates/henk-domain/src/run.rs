@@ -128,7 +128,8 @@ pub enum RunKind {
     DiscordTurn,
     /// One mail reply (§6).
     MailReply,
-    /// Addressing the review feedback on one pull request (§3.5).
+    /// Addressing the review feedback on one pull request; runs before
+    /// #327 only.
     Address,
 }
 

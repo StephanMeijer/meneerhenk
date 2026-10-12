@@ -1,4 +1,4 @@
-//! Henk's address-run commit (§3.5): who it is by, who it credits, and its
+//! The commit Henk pushes (§3.5): who it is by, who it credits, and its
 //! message with a trailer block `git interpret-trailers` reads.
 //!
 //! Every trailer value comes from an id or from configuration, never from a
@@ -192,7 +192,7 @@ impl Default for TrailerPolicy {
     }
 }
 
-/// The message of Henk's one commit (§3.5, §8.6): a subject, what he fixed,
+/// The message of a commit Henk pushes (§3.5, §8.6): a subject, what he fixed,
 /// then one blank line and the trailers in a fixed order: `Henk-Run`,
 /// `Requested-by`, the requester's `Co-authored-by` and `Signed-off-by`,
 /// and Henk's `Signed-off-by` last, as the committer's.
@@ -208,7 +208,7 @@ pub fn commit_message(
     requester: Option<&CommitPerson>,
     policy: TrailerPolicy,
 ) -> String {
-    let mut message = String::from("Address review feedback\n");
+    let mut message = String::from("Fix review findings\n");
     if !fixed.is_empty() {
         message.push('\n');
         for note in fixed {
@@ -303,7 +303,7 @@ mod tests {
         );
         assert_eq!(
             message,
-            "Address review feedback\n\n\
+            "Fix review findings\n\n\
              - src/a.rs: off-by-one in the loop\n\n\
              Henk-Run: r-20261006-0000beef\n\
              Requested-by: discord:3\n\

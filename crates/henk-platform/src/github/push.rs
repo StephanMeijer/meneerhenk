@@ -1,17 +1,15 @@
-//! What an address run (§3.5) needs from GitHub beyond the review writer.
+//! What pushing to a pull request needs from GitHub beyond the review writer.
 
-use henk_domain::address::PushFacts;
+use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::Value;
 
 use henk_domain::allowlist::RepoRef;
 
-use crate::address::{
-    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, RepoHead, ThreadNote,
-};
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
-use crate::writer::{PlatformWriter as _, PostedComment, ReviewTarget};
+use crate::push::{CommitIdentity, GitCredential, PullFacts, PushWriter, RepoHead};
+use crate::writer::ReviewTarget;
 
 fn text(value: &Value, pointer: &str) -> String {
     value
@@ -28,35 +26,7 @@ fn path_segment(branch: &str) -> String {
 }
 
 #[async_trait::async_trait]
-impl AddressWriter for GitHubWriter {
-    async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
-        let threads = self
-            .api()
-            .review_threads(target.repo.owner(), target.repo.name(), target.number)
-            .await?;
-        Ok(threads
-            .into_iter()
-            .filter(|t| !t.resolved && !t.id.is_empty() && !t.comments.is_empty())
-            .map(|t| OpenThread {
-                thread_id: t.id,
-                path: t.path,
-                line: t.line,
-                outdated: t.outdated,
-                notes: t
-                    .comments
-                    .into_iter()
-                    .map(|c| ThreadNote {
-                        comment_id: c.database_id.to_string(),
-                        by_henk: c.author == self.bot_login(),
-                        author: c.author,
-                        author_id: c.author_id,
-                        body: c.body,
-                    })
-                    .collect(),
-            })
-            .collect())
-    }
-
+impl PushWriter for GitHubWriter {
     async fn pull_facts(&self, target: &ReviewTarget) -> Result<PullFacts, PlatformError> {
         let pr = self
             .api()
@@ -165,38 +135,5 @@ impl AddressWriter for GitHubWriter {
             .filter(|login| !login.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| PlatformError::Decode(format!("user {id} without login")))
-    }
-
-    async fn resolve_thread(
-        &self,
-        _target: &ReviewTarget,
-        thread_id: &str,
-    ) -> Result<(), PlatformError> {
-        self.api().resolve_review_thread(thread_id).await
-    }
-
-    fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String {
-        let remote = self.api().git_remote(&target.repo.path());
-        format!("{}/commit/{sha}", remote.trim_end_matches(".git"))
-    }
-
-    async fn reply_in_thread(
-        &self,
-        target: &ReviewTarget,
-        thread: &OpenThread,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        let first = thread
-            .first()
-            .ok_or_else(|| PlatformError::Decode("thread without comments".to_owned()))?;
-        self.reply(target, &first.comment_id, true, body).await
-    }
-
-    async fn post_comment(
-        &self,
-        target: &ReviewTarget,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        crate::writer::PlatformWriter::post_comment(self, target, body).await
     }
 }

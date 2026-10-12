@@ -1,5 +1,5 @@
 //! The web dashboard (#36): what Henk is doing and has done, behind a GitHub
-//! sign-in. Someone signed in may also start a review, plan or address run,
+//! sign-in. Someone signed in may also start a review or a plan,
 //! and cancel one that is running (#69). The dashboard is a single-page app
 //! built from `dashboard/` and served at `/dashboard` ([`app`], #199, #201);
 //! it reads and acts only through the JSON API at `/dashboard/api/v1`

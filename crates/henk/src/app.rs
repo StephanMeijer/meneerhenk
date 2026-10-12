@@ -7,9 +7,9 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow};
 use henk_llm::{ModelClient, client_for};
 use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
-use henk_platform::address::AddressWriter;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::{GitLabRest, GitLabWriter};
+use henk_platform::push::PushWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
 use henk_store::{PgStore, RunStore, SqliteStore};
 use secrecy::SecretString;
@@ -44,8 +44,8 @@ pub struct App {
     pub feed: crate::live::Feed,
     /// The runs a person may cancel from the dashboard, and who did (#69).
     pub cancels: crate::cancel::Cancels,
-    /// Opens the workspaces address runs work in (§3.5), on the backend
-    /// each profile names; tests swap in another.
+    /// Opens the workspaces runs work in, on the backend each profile
+    /// names; tests swap in another.
     pub workspace_provider: Arc<dyn WorkspaceProvider>,
     /// The commits Henk pushed, whose events start no review (#284).
     pub own_pushes: crate::push::OwnPushes,
@@ -55,9 +55,9 @@ pub struct App {
     /// Tests: the session `read_session` returns instead of starting one.
     #[cfg(test)]
     pub test_session: Option<Arc<dyn McpSession>>,
-    /// Tests: what `address_writer` returns for every platform.
+    /// Tests: what `push_writer` returns for every platform.
     #[cfg(test)]
-    pub test_address_writer: Option<Arc<dyn AddressWriter>>,
+    pub test_push_writer: Option<Arc<dyn PushWriter>>,
     /// Tests: the tracker `issue_writer` returns for every platform.
     #[cfg(test)]
     pub test_issue_writer: Option<Arc<dyn IssueWriter>>,
@@ -155,8 +155,8 @@ impl App {
                     .await
                     .with_context(|| format!("MCP server {}", gitlab.write_mcp_server))?;
                 let writer = GitLabWriter::new(Arc::new(session), gitlab.username.clone());
-                // Address runs (§3.5) push with the token and read what the
-                // MCP server does not give; it goes to git's environment and
+                // Henk pushes the executor's fixes with the token (§3.5) and
+                // reads what the MCP server does not give; it goes to git's environment and
                 // a request header, never to argv, a log or a model.
                 let writer = if let Some(token) = env_var(&gitlab.token_env) {
                     writer.with_rest(
@@ -166,7 +166,7 @@ impl App {
                 } else {
                     warn!(
                         variable = %gitlab.token_env,
-                        "not set; address runs on GitLab are refused"
+                        "not set; reviews on GitLab cannot push"
                     );
                     writer
                 };
@@ -176,7 +176,7 @@ impl App {
         };
 
         // The sandbox host's key is read now, so a missing or broken one
-        // stops Henk at start instead of failing the first address run.
+        // stops Henk at start instead of failing the first review on it.
         let ssh = crate::workspace::ssh_provider(&settings)?;
         let kubernetes = crate::workspace::kubernetes_provider(&settings).await?;
 
@@ -197,7 +197,7 @@ impl App {
             #[cfg(test)]
             test_session: None,
             #[cfg(test)]
-            test_address_writer: None,
+            test_push_writer: None,
             #[cfg(test)]
             test_issue_writer: None,
         })
@@ -285,32 +285,30 @@ impl App {
         }
     }
 
-    /// What an address run (§3.5) reads and writes on a platform.
+    /// What Henk reads and writes on a platform to push.
     ///
     /// # Errors
     ///
     /// Returns an error when the platform is not configured, or GitLab is
     /// without its token.
-    pub fn address_writer(
+    pub fn push_writer(
         &self,
         platform: henk_domain::allowlist::Platform,
-    ) -> anyhow::Result<Arc<dyn AddressWriter>> {
+    ) -> anyhow::Result<Arc<dyn PushWriter>> {
         #[cfg(test)]
-        if let Some(writer) = &self.test_address_writer {
+        if let Some(writer) = &self.test_push_writer {
             return Ok(Arc::clone(writer));
         }
         match platform {
             henk_domain::allowlist::Platform::GitHub => self
                 .github
                 .clone()
-                .map(|w| w as Arc<dyn AddressWriter>)
+                .map(|w| w as Arc<dyn PushWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
             henk_domain::allowlist::Platform::GitLab => match &self.gitlab {
-                Some(writer) if writer.can_address() => {
-                    Ok(Arc::clone(writer) as Arc<dyn AddressWriter>)
-                }
+                Some(writer) if writer.can_push() => Ok(Arc::clone(writer) as Arc<dyn PushWriter>),
                 Some(_) => Err(anyhow!(
-                    "addressing review feedback on GitLab needs the token in ${}",
+                    "pushing to GitLab needs the token in ${}",
                     self.settings
                         .gitlab
                         .as_ref()

@@ -29,14 +29,14 @@ describe('StartForm', () => {
     await settle();
     const kinds = [...document.querySelectorAll<HTMLInputElement>('input[type=radio]')].map((r) => r.value);
     expect(kinds).toEqual(['review', 'plan']);
-    expect(document.body.textContent).toContain('Lanes review a commit; findings are posted as comments.');
+    expect(document.body.textContent).toContain("The reviewer and the executor fix what holds on the pull request's branch.");
     expect(document.querySelector<HTMLInputElement>('input[value=review]')?.checked).toBe(true);
     expect(label()).toBe('Pull request URL');
     expect(button()?.textContent).toBe('Start review');
   });
 
   it('says what the URL names, and why it does not fit, as you type', async () => {
-    render(StartForm, { startable: ['review', 'plan', 'address'], start: vi.fn(), go: vi.fn() });
+    render(StartForm, { startable: ['review', 'plan'], start: vi.fn(), go: vi.fn() });
     await settle();
     fill('url', 'https://github.com/docspec/app/pull/7');
     await settle(1);
@@ -56,7 +56,7 @@ describe('StartForm', () => {
   it('posts the request as JSON and opens the event it became', async () => {
     const start = vi.fn(() => Promise.resolve({ event_id: 'e-9' }));
     const go = vi.fn();
-    render(StartForm, { startable: ['review', 'plan', 'address'], start, go });
+    render(StartForm, { startable: ['review', 'plan'], start, go });
     await settle();
     choose('plan');
     await settle(1);

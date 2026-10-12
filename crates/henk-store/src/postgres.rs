@@ -222,8 +222,10 @@ fn window(
 /// kind is the session name's, as [`crate::session_kind`] reads it.
 const CALL_FILTER: &str = "($1::text IS NULL OR c.tool = $1) AND ($2::text IS NULL OR c.model = $2)
      AND ($3::text IS NULL OR ($3 = 'check' AND c.session LIKE 'check-%')
-          OR ($3 = c.session AND c.session IN ('planner', 'address', 'reviewer', 'fixer'))
-          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address', 'reviewer', 'fixer')))
+          OR ($3 = c.session AND c.session IN ('planner', 'address', 'reviewer'))
+          OR ($3 = 'executor' AND c.session IN ('executor', 'fixer'))
+          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%'
+              AND c.session NOT IN ('planner', 'address', 'reviewer', 'executor', 'fixer')))
      AND ($4::timestamptz IS NULL OR c.at >= $4)
      AND ($5::timestamptz IS NULL OR c.at < $5)";
 

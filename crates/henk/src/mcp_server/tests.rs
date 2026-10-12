@@ -79,7 +79,7 @@ async fn start_henk(mcp_server: &str, tokens: Vec<Token>) -> Henk {
         workspace_provider: Arc::new(crate::workspace::host::HostProvider),
         test_writer: Some(writer),
         test_session: None,
-        test_address_writer: None,
+        test_push_writer: None,
         test_issue_writer: None,
     });
     let composed = crate::server::compose_with_secrets(&app, None, None, None);
@@ -187,7 +187,6 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
             "health",
             "list_runs",
             "list_tool_calls",
-            "start_address",
             "start_plan",
             "start_review",
         ]
@@ -421,7 +420,7 @@ async fn doctor_says_which_tokens_are_set_and_probe_lists_the_tools() {
             .contains("not set; MCP client reader cannot connect")
     );
     assert!(
-        said[2].0.contains("11 tools at http://127.0.0.1:"),
+        said[2].0.contains("10 tools at http://127.0.0.1:"),
         "{said:?}"
     );
     assert!(said[2].0.ends_with("as claude\")"), "{said:?}");

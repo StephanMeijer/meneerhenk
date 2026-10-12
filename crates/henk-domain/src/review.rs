@@ -557,7 +557,7 @@ mod tests {
     fn findings_a_review_loop_left_open_are_neutral_not_a_pass() {
         let mut left = outcome(
             &[
-                ("fixer", LaneOutcome::Finished),
+                ("executor", LaneOutcome::Finished),
                 ("reviewer", LaneOutcome::Finished),
             ],
             0,

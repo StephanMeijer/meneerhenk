@@ -60,10 +60,10 @@ pub(crate) struct StartReview {
     commit: Option<String>,
 }
 
-/// A plan or address run to start.
+/// A plan to start.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct StartWithNote {
-    /// The issue's (plan) or pull request's (address) web address.
+    /// The issue's web address.
     url: String,
     /// A note for the run, in your words.
     note: Option<String>,
@@ -126,7 +126,8 @@ pub(crate) struct ToolCalls {
 pub(crate) struct TranscriptRef {
     /// The run id.
     run_id: String,
-    /// The session: `lane-a`, `check-1`, `planner`, `address`.
+    /// The session: `reviewer`, `executor`, `planner`; older runs have
+    /// `lane-a`, `check-1` or `address`.
     session: String,
     /// The first message to show, from 0.
     from_message: Option<usize>,
@@ -253,23 +254,6 @@ impl HenkMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let request = StartRequest {
             kind: "plan".to_owned(),
-            url: input.url,
-            commit: None,
-            note: input.note,
-        };
-        self.start(&parts, &request).await
-    }
-
-    #[tool(
-        description = "Start an address run on a pull request, as POST /address does: Henk works on the review feedback and pushes one commit to the pull request's own branch. Answers the event id, and the run id once it started."
-    )]
-    async fn start_address(
-        &self,
-        Parameters(input): Parameters<StartWithNote>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let request = StartRequest {
-            kind: "address".to_owned(),
             url: input.url,
             commit: None,
             note: input.note,
@@ -515,7 +499,7 @@ impl ServerHandler for HenkMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("meneer-henk", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Meneer Henk reviews pull requests, plans issues and addresses review feedback. Start work with start_review, start_plan or start_address, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
+                "Meneer Henk reviews pull requests, fixing what the review finds, and plans issues. Start work with start_review or start_plan, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
             )
     }
 }

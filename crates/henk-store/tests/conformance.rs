@@ -126,11 +126,12 @@ fn draft(number: &str, lane: &str, row: u32, body: &str) -> DraftRecord {
     }
 }
 
-/// The reviewer and fixer of a review loop are kinds of their own, not
-/// lanes (#310); a lane of an older review stays a lane.
+/// The reviewer and executor of a review loop are kinds of their own, not
+/// lanes (#310); the `fixer` of a run before #323 counts as the executor,
+/// and a lane of an older review stays a lane.
 async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
-    for (turn, session) in (1u32..).zip(["reviewer", "fixer", "lane-a"]) {
+    for (turn, session) in (1u32..).zip(["reviewer", "executor", "fixer", "lane-a"]) {
         store
             .record_tool_call(
                 &id("r-1"),
@@ -151,11 +152,7 @@ async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
             .await
             .unwrap();
     }
-    for (kind, session) in [
-        ("reviewer", "reviewer"),
-        ("fixer", "fixer"),
-        ("lane", "lane-a"),
-    ] {
+    for (kind, calls) in [("reviewer", 1), ("executor", 2), ("lane", 1)] {
         let usage = store
             .tool_usage(&ToolCallFilter {
                 session_kind: Some(kind.into()),
@@ -164,9 +161,12 @@ async fn a_review_loops_sessions_are_their_own_kinds(store: &dyn RunStore) {
             .await
             .unwrap();
         assert_eq!(
-            usage.into_iter().map(|u| u.session).collect::<Vec<_>>(),
-            [kind],
-            "{session}"
+            usage
+                .into_iter()
+                .map(|u| (u.session, u.tally.calls))
+                .collect::<Vec<_>>(),
+            [(kind.to_owned(), calls)],
+            "{kind}"
         );
     }
 }
@@ -469,7 +469,7 @@ async fn a_loop_run_keeps_why_it_stopped(store: &dyn RunStore) {
     );
 }
 
-/// A review loop's findings (#285) keep the fixer's verdicts, and stay out
+/// A review loop's findings (#285) keep the executor's verdicts, and stay out
 /// of the overview's drafts per day.
 async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
     let run = new_run("r-loop");
@@ -492,7 +492,7 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
         let decision = DraftDecision {
             at: String::new(),
             verdict,
-            checker: "fixer".into(),
+            checker: "executor".into(),
             reason: "why".into(),
             same_as: String::new(),
             comment_id: String::new(),

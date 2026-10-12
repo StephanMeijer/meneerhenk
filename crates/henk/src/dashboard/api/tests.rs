@@ -685,6 +685,215 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     }
 }
 
+/// A review loop run from before #323 named its executor `fixer`: its
+/// session, transcript and verdicts still read in full.
+#[tokio::test]
+async fn a_loop_run_with_a_fixer_still_reads_in_full() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-fixer").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "new commits".into(),
+            link: format!("{ORIGIN}/runs/r-fixer"),
+        })
+        .await
+        .unwrap();
+    for (session, model) in [("reviewer", "model-r"), ("fixer", "model-f")] {
+        store.start_lane(&run, session, model).await.unwrap();
+        store
+            .finish_lane(&run, session, LaneStatus::Finished, 2, 50, 5, None)
+            .await
+            .unwrap();
+    }
+    let body = json!({
+        "session": "fixer",
+        "model": "model-f",
+        "stop": "EndTurn",
+        "turns": 1,
+        "usage": {"input_tokens": 10, "output_tokens": 3},
+        "system": "You fix.",
+        "messages": [
+            {"role": "user", "blocks": [{"text": "Fix f1."}]},
+            {"role": "assistant", "blocks": [{"text": "Fixed."}]}
+        ]
+    })
+    .to_string();
+    store
+        .record_transcript(
+            &run,
+            &TranscriptRecord {
+                at: String::new(),
+                session: "fixer".into(),
+                model: "model-f".into(),
+                stop: "EndTurn".into(),
+                turns: 1,
+                bytes: u64::try_from(body.len()).unwrap(),
+                body,
+            },
+        )
+        .await
+        .unwrap();
+    let finding = DraftRecord {
+        at: String::new(),
+        draft: "f1".into(),
+        lane: "reviewer".into(),
+        model: "model-r".into(),
+        kind: henk_store::LOOP_FINDING_KIND.into(),
+        path: "src/a.rs".into(),
+        line: 3,
+        target: String::new(),
+        body: "x is never set.".into(),
+        decision: None,
+    };
+    store.record_draft(&run, &finding).await.unwrap();
+    let decision = DraftDecision {
+        at: String::new(),
+        verdict: DraftVerdict::Fixed,
+        checker: "fixer".into(),
+        reason: "Set x.".into(),
+        same_as: String::new(),
+        comment_id: "abc123".into(),
+    };
+    store.decide_draft(&run, "f1", &decision).await.unwrap();
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-fixer", &cookie).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail = detail.json();
+    let names: Vec<&str> = detail["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| lane["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["fixer", "reviewer"]);
+    assert_eq!(detail["drafts"][0]["decision"]["verdict"], "fixed");
+    assert_eq!(detail["drafts"][0]["decision"]["checker"], "fixer");
+    let transcript = get(
+        &f,
+        "/dashboard/api/v1/runs/r-fixer/transcripts/fixer",
+        &cookie,
+    )
+    .await;
+    assert_eq!(transcript.status, StatusCode::OK, "{}", transcript.body);
+
+    let shown = crate::runs::render(
+        &store.run(&run).await.unwrap().unwrap(),
+        &store.lanes(&run).await.unwrap(),
+        &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
+        &store.transcripts(&run).await.unwrap(),
+        &store.drafts(&run).await.unwrap(),
+        &store.findings(&run).await.unwrap(),
+        &store.events(&run).await.unwrap(),
+    );
+    for line in [
+        "lanes (2)",
+        "transcripts (1)",
+        "fixed by fixer in abc123: Set x.",
+    ] {
+        assert!(shown.contains(line), "{line}:\n{shown}");
+    }
+}
+
+/// An address run from before #327 still reads in full: its stages, its
+/// session and its transcript.
+#[tokio::test]
+async fn an_address_run_from_before_its_removal_still_reads_in_full() {
+    use henk_store::{Stage, StageState, StageWrite};
+
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-address").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Address,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: Some("github:5821".into()),
+            trigger: "dashboard".into(),
+            link: format!("{ORIGIN}/runs/r-address"),
+        })
+        .await
+        .unwrap();
+    store.start_lane(&run, "address", "model-a").await.unwrap();
+    store
+        .finish_lane(&run, "address", LaneStatus::Finished, 6, 300, 30, None)
+        .await
+        .unwrap();
+    store
+        .record_transcript(
+            &run,
+            &TranscriptRecord {
+                at: String::new(),
+                session: "address".into(),
+                model: "model-a".into(),
+                stop: "EndTurn".into(),
+                turns: 6,
+                bytes: 2,
+                body: "{}".into(),
+            },
+        )
+        .await
+        .unwrap();
+    for (stage, detail) in [
+        (Stage::Workspace, "workspace ready"),
+        (Stage::Session, "2 threads settled"),
+        (Stage::Commit, "1 file changed"),
+        (Stage::Push, "pushed abc1234"),
+        (Stage::Replies, "2 replies"),
+    ] {
+        store
+            .stage(&run, &StageWrite::now(stage, StageState::Done, detail))
+            .await
+            .unwrap();
+    }
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-address", &cookie).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail = detail.json();
+    assert_eq!(detail["run"]["kind"], "address");
+    assert_eq!(detail["lanes"][0]["name"], "address");
+    let stages: Vec<&str> = detail["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| stage["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stages,
+        ["workspace", "session", "commit", "push", "replies"]
+    );
+    let listed = get(&f, "/dashboard/api/v1/runs?kind=address", &cookie)
+        .await
+        .json();
+    assert_eq!(listed["items"][0]["id"], "r-address");
+
+    let shown = crate::runs::render(
+        &store.run(&run).await.unwrap().unwrap(),
+        &store.lanes(&run).await.unwrap(),
+        &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
+        &store.transcripts(&run).await.unwrap(),
+        &store.drafts(&run).await.unwrap(),
+        &store.findings(&run).await.unwrap(),
+        &store.events(&run).await.unwrap(),
+    );
+    for line in ["lanes (1)", "address", "transcripts (1)"] {
+        assert!(shown.contains(line), "{line}:\n{shown}");
+    }
+}
+
 #[tokio::test]
 async fn a_query_that_does_not_parse_is_a_json_bad_request() {
     let f = fixture("https://127.0.0.1:9");
@@ -1426,7 +1635,14 @@ async fn a_review_cancelled_during_its_checkout_does_not_count_as_going_without(
         "checking out abc1234",
     )
     .await;
-    crate::stages::cancelled(&**store, &id, "someone", "").await;
+    crate::stages::end(
+        &**store,
+        &id,
+        henk_store::StageState::Skipped,
+        "cancelled by someone",
+        "cancelled by someone",
+    )
+    .await;
     store
         .finish_run(&id, RunStatus::Cancelled, None, None)
         .await
@@ -1535,17 +1751,11 @@ fn api_types_are_current() {
 }
 
 #[tokio::test]
-async fn an_address_run_is_startable_only_where_address_runs_are_configured() {
-    let f = fixture_with(
-        "https://127.0.0.1:9",
-        crate::dashboard::app::Assets(&[]),
-        |s| {
-            s.roles.executor = Some(toml::from_str("model = \"m\"\nrequester_id = 3").unwrap());
-        },
-    );
+async fn a_review_and_a_plan_are_what_can_be_started() {
+    let f = fixture("https://127.0.0.1:9");
     let (cookie, _) = viewer(&f);
     let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
-    assert_eq!(me["startable"], json!(["review", "plan", "address"]));
+    assert_eq!(me["startable"], json!(["review", "plan"]));
 }
 
 #[tokio::test]

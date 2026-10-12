@@ -93,7 +93,7 @@ pub(super) fn fixture_with(
         own_pushes: crate::push::OwnPushes::default(),
         test_writer: None,
         test_session: None,
-        test_address_writer: None,
+        test_push_writer: None,
         test_issue_writer: None,
     });
     let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
@@ -107,9 +107,6 @@ pub(super) fn fixture_with(
                 writers,
             )),
             Arc::new(crate::listeners::PlanListener::new(Arc::clone(
-                &coordinator,
-            ))),
-            Arc::new(crate::listeners::AddressListener::new(Arc::clone(
                 &coordinator,
             ))),
         ],
