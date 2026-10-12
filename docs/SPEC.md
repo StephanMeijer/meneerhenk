@@ -124,7 +124,9 @@ complete.
 A pull request the loop may not push to (a fork, the default or a protected
 branch) or whose branch moved after the review was queued is reviewed by
 the reviewer alone: one round at the reviewed commit, nothing pushed, and
-its findings stand in the check with why they were not fixed (#307).
+its findings stand in the check with why they were not fixed (#307). On
+GitLab, whose commit status carries only the count, that summary is
+posted as the summary note as well.
 
 Before #309 a review was a set of independent **lanes**, one model each,
 that posted their findings as line comments after a second model
@@ -138,13 +140,14 @@ the pull requests, and their markers are still recognised (§8.1).
 | Review waits for a slot | The check "Meneer Henk", *queued* (grey), "Waiting for a review slot", linked to the dashboard's overview, which lists it. A review that gets a slot at once skips this | Nothing: a pending commit status could block a merge where pipelines must succeed |
 | Review starts | The check "Meneer Henk", *in progress*, linked to the run: the queued one moves on, or a new one | Henk's award emoji on the MR *(in development)* |
 | During | Nothing but the commits Henk pushes for the executor (§3.2) | The same |
-| Review ends | The check's **summary**: "No issues found" or "N issues found", and the loop's report: how many rounds it ran, what it settled and pushed, why it stopped, and the findings that still stand | No note: the commit status below |
+| Review ends | The check's **summary**: "No issues found" or "N issues found", and the loop's report: how many rounds it ran, what it settled and pushed, why it stopped, and the findings that still stand | No note, but for the reviewer alone (§3.2), which posts its summary as a note. The commit status below |
 | Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). When the loop pushed, the last commit it pushed gets the same check. A review superseded by a newer commit completes neutral with "Superseded by a newer commit." A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
 - **A review posts nothing.** No comment, summary or failure note: the
   check, or on GitLab the commit status, is what it leaves, with the commits
-  the loop pushed. Comments posted by lanes before #309 stay as they are;
-  nothing folds them.
+  the loop pushed. The one exception is the reviewer alone on GitLab
+  (§3.2): its findings are not fixed, so its summary is a note. Comments
+  posted by lanes before #309 stay as they are; nothing folds them.
 - **The count** is the number of the loop's findings that still stand when
   it ends: those the executor would not fix and those left unsettled. A loop
   that ran out of rounds with the reviewer's last findings unanswered is
@@ -320,7 +323,9 @@ Henk then:
 4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
    configurable) with one commit, "Resolve #N: <title>", with the run and
    the requester in its trailers. A branch of that name that exists already
-   is never pushed over.
+   is never pushed over: the run picks the name before the session, and
+   when origin has it, takes `-2`, `-3` and on. With ten names taken it
+   stops before the session and says so on the issue.
 5. **Opens a pull request** of that branch into the default branch, ready
    for review. Its description closes the issue and says what was done and
    what was left out, with the run link.
@@ -707,15 +712,19 @@ surprising reading of the earlier wording; veto any that is wrong.
   the same refusals, and Henk's persona says so instead of "never change
   code". A pull request the loop may not push to is reviewed by the
   reviewer alone, not by the lanes, and the check carries the loop's
-  report and the findings that still stand (#307). The lanes go in #309.
+  report and the findings that still stand (#307); on GitLab the reviewer
+  alone posts them as the summary note. The lanes go in #309.
 - §1.1, §3.2, §3.3, §8.5, §8.6, §9: the review loop is the review (#309).
   Lanes and the fact-check are removed, not kept as a fallback, and
   reviews need `[review.loop]` and `[address]`. A review posts no comment,
   summary or failure note and folds nothing; the check carries what it
-  says. The fixer's verdicts replace the fact-check. Open questions 3, 4
-  and 5 are decided, and stay in §10 so the numbers of the others do not
-  change. The A.1 gap on lanes repeating each other is gone with the
-  promise. Comments posted by lanes stay, and their markers are still read.
+  says. The one exception is the reviewer alone on GitLab, whose findings
+  are not fixed and whose commit status carries only the count: it posts
+  its summary note (#307). The fixer's verdicts replace the fact-check.
+  Open questions 3, 4 and 5 are decided, and stay in §10 so the numbers of
+  the others do not change. The A.1 gap on lanes repeating each other is
+  gone with the promise. Comments posted by lanes stay, and their markers
+  are still read.
 - §2: an MCP read token reads runs, events and health; the fact-check's
   quality figures are removed with the fact-check (#310).
 - §8 invariant 4: each role has a fixed tool ceiling that configuration can

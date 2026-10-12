@@ -1246,15 +1246,14 @@ struct WorkspaceParts {
 }
 
 impl WorkspaceConfig {
-    /// The policy, with `check_timeout_secs` from `[address]` as the default
-    /// profile's command limit when it is set.
+    /// The policy, the sandbox host and the cluster, checked together: a
+    /// profile on the ssh backend needs `[workspace.ssh]`, one on the
+    /// kubernetes backend `[workspace.kubernetes]`. The default profile's
+    /// command limit is `[workspace].command_secs`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::Workspace`] when the policy is unusable.
-    /// The policy, the sandbox host and the cluster, checked together: a
-    /// profile on the ssh backend needs `[workspace.ssh]`, one on the
-    /// kubernetes backend `[workspace.kubernetes]`.
     fn into_parts(mut self) -> Result<WorkspaceParts, ConfigError> {
         let ssh = self.ssh.take();
         let kubernetes = self.kubernetes.take();
@@ -1675,8 +1674,8 @@ fn moved(old: &str, new: &str) -> ConfigError {
 }
 
 /// Each configured role: its model exists, its tools are within its
-/// ceiling (#171) and its limits are above zero; the executor's push
-/// settings hold.
+/// ceiling (#171) and include `load_skill` when it lists skills, and its
+/// limits are above zero; the executor's push settings hold.
 fn validate_roles(
     roles: &RolesConfig,
     models: &BTreeMap<String, ModelFileConfig>,
@@ -1689,6 +1688,7 @@ fn validate_roles(
                 Role::Planner,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns(Role::Planner),
                 r.timeout_secs(Role::Planner),
             )
@@ -1698,6 +1698,7 @@ fn validate_roles(
                 Role::Reviewer,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns(Role::Reviewer),
                 r.timeout_secs(Role::Reviewer),
             )
@@ -1707,20 +1708,27 @@ fn validate_roles(
                 Role::Executor,
                 &r.model,
                 r.tools.as_deref(),
+                &r.skills,
                 r.max_turns,
                 r.timeout_secs,
             )
         }),
     ];
-    for (role, model, tools, max_turns, timeout_secs) in agents.into_iter().flatten() {
+    for (role, model, tools, skills, max_turns, timeout_secs) in agents.into_iter().flatten() {
         if !models.contains_key(model) {
             return Err(ConfigError::UnknownModel {
                 what: format!("roles.{role}"),
                 model: model.clone(),
             });
         }
-        role.narrow(tools)
+        let granted = role
+            .narrow(tools)
             .map_err(|e| ConfigError::Role(e.to_string()))?;
+        if !skills.is_empty() && !Role::loads_skills(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] lists skills, but its tools leave out load_skill: add load_skill to tools or remove the skills"
+            )));
+        }
         if max_turns == 0 || timeout_secs == 0 {
             return Err(ConfigError::Role(format!(
                 "roles.{role}: max_turns and timeout_secs must be above zero"
@@ -1856,18 +1864,9 @@ fn validate_execution(execution: &ExecutionConfig, roles: &RolesConfig) -> Resul
         ));
     }
     let prefix = &execution.branch_prefix;
-    let valid = prefix.ends_with('/')
-        && prefix.len() > 1
-        && !prefix.starts_with('/')
-        && !prefix.starts_with('-')
-        && !prefix.contains("//")
-        && !prefix.contains("..")
-        && prefix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
-    if !valid {
+    if !henk_domain::execute::is_branch_prefix(prefix) {
         return Err(ConfigError::Role(format!(
-            "execution.branch_prefix {prefix:?} must be letters, digits, -, _ or . ending in /, such as \"henk/\""
+            "execution.branch_prefix {prefix:?} must be letters, digits, -, _ or . ending in /, such as \"henk/\", with no part that starts with . or ends in .lock"
         )));
     }
     if execution.run_timeout_secs == 0 {
@@ -1894,6 +1893,27 @@ fn validate_planning(
     ] {
         if missing {
             return Err(ConfigError::Role(format!("[planning] needs {role}")));
+        }
+    }
+    // The planner and the reviewer hand points and answers to each other:
+    // a reviewer without raise_point would let a plan through unreviewed,
+    // and a planner without write_plan or answer_point never publishes or
+    // answers.
+    let sides = [
+        roles
+            .planner
+            .as_ref()
+            .map(|r| (Role::Planner, r.tools(Role::Planner))),
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| (Role::Reviewer, r.tools(Role::Reviewer))),
+    ];
+    for (role, granted) in sides.into_iter().flatten() {
+        if let Some(tool) = role.missing_plan_handoff(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] tools leave out {tool}, which [planning] needs: add {tool} to tools"
+            )));
         }
     }
     if planning.max_rounds == 0 {
@@ -1937,6 +1957,23 @@ fn validate_loop(review_loop: Option<&LoopConfig>, roles: &RolesConfig) -> Resul
     ] {
         if missing {
             return Err(ConfigError::Role(format!("[review.loop] needs {role}")));
+        }
+    }
+    // The loop's two sides hand findings and verdicts to each other: a
+    // role whose tools leave out its side of the handoff never ends a
+    // round the way the loop waits for.
+    let sides = [
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| (Role::Reviewer, r.tools(Role::Reviewer))),
+        roles.executor.as_ref().map(|r| (Role::Executor, r.tools())),
+    ];
+    for (role, granted) in sides.into_iter().flatten() {
+        if let Some(tool) = role.missing_handoff(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] tools leave out {tool}, which the review loop needs: add {tool} to tools"
+            )));
         }
     }
     if review_loop.max_rounds == 0 {
@@ -2985,10 +3022,91 @@ github_owners = ["docspec"]
             unknown,
             "[roles.reviewer] tools: teleport is not a tool Henk has"
         );
-        let web = reviewer(r#"["read_file", "web_fetch"]"#).unwrap();
-        assert!(web.describe().contains("reaches the web"));
+        // Only the planner's session is built with web_fetch (#334).
+        let web = reviewer(r#"["read_file", "web_fetch"]"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            web,
+            "[roles.reviewer] tools: the reviewer may not have web_fetch"
+        );
         let role = address("", "[roles.auditor]\nmodel = \"m\"\n").unwrap_err();
         assert!(matches!(role, ConfigError::Syntax(_)), "{role}");
+    }
+
+    /// The review loop needs each side's handoff tools (#334).
+    #[test]
+    fn the_loop_refuses_roles_without_their_handoff_tools() {
+        let reviewer = |tools: &str| {
+            address(
+                "",
+                &format!("[review.loop]\n[roles.reviewer]\nmodel = \"m\"\n{tools}"),
+            )
+        };
+        assert_eq!(
+            reviewer("tools = [\"read_file\", \"finish_round\"]\n")
+                .unwrap_err()
+                .to_string(),
+            "[roles.reviewer] tools leave out report_finding, which the review loop needs: add report_finding to tools"
+        );
+        assert_eq!(
+            reviewer("tools = [\"read_file\", \"report_finding\"]\n")
+                .unwrap_err()
+                .to_string(),
+            "[roles.reviewer] tools leave out finish_round, which the review loop needs: add finish_round to tools"
+        );
+        assert!(
+            reviewer("tools = [\"read_file\", \"report_finding\", \"finish_round\"]\n").is_ok()
+        );
+        let executor = |tools: &str| {
+            address(
+                "",
+                &format!("tools = {tools}\n[review.loop]\n[roles.reviewer]\nmodel = \"m\"\n"),
+            )
+        };
+        assert_eq!(
+            executor(r#"["edit_file", "give_verdict"]"#)
+                .unwrap_err()
+                .to_string(),
+            "[roles.executor] tools leave out list_findings, which the review loop needs: add list_findings to tools"
+        );
+        assert_eq!(
+            executor(r#"["edit_file", "list_findings"]"#)
+                .unwrap_err()
+                .to_string(),
+            "[roles.executor] tools leave out give_verdict, which the review loop needs: add give_verdict to tools"
+        );
+        assert!(executor(r#"["edit_file", "list_findings", "give_verdict"]"#).is_ok());
+        // Without the loop, the reviewer's list is its own business.
+        assert!(
+            address(
+                "",
+                "[roles.reviewer]\nmodel = \"m\"\ntools = [\"read_file\"]\n"
+            )
+            .is_ok()
+        );
+    }
+
+    /// A role told of skills must be able to load them (#334).
+    #[test]
+    fn a_role_with_skills_keeps_load_skill() {
+        let reviewer = |tools: &str| {
+            address(
+                "",
+                &format!(
+                    "[skills]\ndir = \"skills\"\n[roles.reviewer]\nmodel = \"m\"\nskills = [\"rust-errors\"]\n{tools}"
+                ),
+            )
+        };
+        let without = reviewer("tools = [\"read_file\", \"report_finding\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            without,
+            "[roles.reviewer] lists skills, but its tools leave out load_skill: add load_skill to tools or remove the skills"
+        );
+        assert!(reviewer("tools = [\"read_file\", \"load_skill\"]\n").is_ok());
+        assert!(reviewer("").is_ok(), "the defaults have load_skill");
     }
 
     /// The keys that moved to the roles (#322): a file that still has one
@@ -3071,7 +3189,9 @@ github_owners = ["docspec"]
             (config.run_timeout_secs, config.branch_prefix.as_str()),
             (3600, "henk/")
         );
-        for bad in ["henk", "/henk/", "-x/", "a//b/", "a..b/", "h nk/", "/"] {
+        for bad in [
+            "henk", "/henk/", "-x/", "a//b/", "a..b/", "h nk/", "/", "./", ".h/", "a.lock/",
+        ] {
             let error = execution(&format!(
                 "[execution]\nbranch_prefix = \"{bad}\"\n{executor}"
             ))
@@ -3108,6 +3228,41 @@ github_owners = ["docspec"]
         assert_eq!(error.to_string(), "[planning] needs [roles.planner]");
         let error = planning(planner).unwrap_err();
         assert_eq!(error.to_string(), "[planning] needs [roles.reviewer]");
+        for (extra, (role, tool)) in [
+            (
+                format!(
+                    "{planner}{reviewer}tools = [\"read_file\", \"report_finding\", \"finish_round\"]\n"
+                ),
+                ("reviewer", "raise_point"),
+            ),
+            (
+                format!("{planner}{reviewer}tools = [\"read_file\", \"raise_point\"]\n"),
+                ("reviewer", "finish_round"),
+            ),
+            (
+                format!("{reviewer}{planner}tools = [\"read_file\", \"answer_point\"]\n"),
+                ("planner", "write_plan"),
+            ),
+            (
+                format!("{reviewer}{planner}tools = [\"read_file\", \"write_plan\"]\n"),
+                ("planner", "answer_point"),
+            ),
+        ] {
+            let message = planning(&extra).unwrap_err().to_string();
+            assert_eq!(
+                message,
+                format!(
+                    "[roles.{role}] tools leave out {tool}, which [planning] needs: add {tool} to tools"
+                )
+            );
+            assert!(henk_domain::text::is_in_style(&message), "{message}");
+        }
+        assert!(
+            planning(&format!(
+                "{planner}tools = [\"read_file\", \"write_plan\", \"answer_point\"]\n{reviewer}tools = [\"read_file\", \"raise_point\", \"finish_round\"]\n"
+            ))
+            .is_ok()
+        );
         let error = planning(&format!("max_rounds = 0\n{planner}{reviewer}")).unwrap_err();
         assert_eq!(error.to_string(), "planning.max_rounds must be at least 1");
         let settings = planning(&format!("{planner}{reviewer}")).unwrap();
