@@ -191,10 +191,10 @@ sequenceDiagram
         V-->>L: finish_round
         opt findings, and an executor
             L->>F: resume: the round's findings
-            F->>K: read, edit_file, write_file, run_checks
+            F->>K: read, edit_file, write_file, bash (the repository's checks)
             F->>DB: give_verdict
             F-->>L: end of turn
-            L->>K: run_checks, export, checked_changeset
+            L->>K: export, checked_changeset
             L->>P: commit_and_push
             P->>A: pull_facts again: head unchanged, push still allowed
             P->>GH: fresh checkout, apply, commit, push fast-forward
@@ -231,9 +231,10 @@ round resumes its own conversation, and a session's row, timeline and
 transcript cover all its rounds. The reviewer reads the diff per file with
 line numbers (`diff_tools.rs`) and the code in the workspace
 (`code_tools.rs`), and hands over what it found with `report_finding`, then
-`finish_round`. The executor gets the round's findings as data, edits and runs
-the checks with the edit tools (`edit_tools.rs`: `edit_file`, `write_file`,
-`run_checks`, paths parsed by `henk_domain::path`), and gives each finding
+`finish_round`. The executor gets the round's findings as data, edits with
+the edit tools (`edit_tools.rs`: `edit_file`, `write_file`, paths parsed by
+`henk_domain::path`), runs the repository's own checks with `bash` on a
+backend apart from Henk (#396), and gives each finding
 one verdict with `give_verdict`:
 fixed, rejected or won't fix. Findings and verdicts live in the
 `henk_domain::review_loop::Ledger` and go on the run's drafts with the kind
@@ -241,9 +242,10 @@ fixed, rejected or won't fix. Findings and verdicts live in the
 A session that stops short of `finish_round` or a verdict is nudged at most
 twice (`loop_tools.rs`), then what it left is settled for it.
 
-What the executor changed is checked before it is pushed (§3.5): the
-configured checks must pass in the workspace, and `checked_changeset`
-refuses `.git`, escapes, links, submodules and too many files. `push.rs`
+What the executor changed is checked before it is pushed (§3.5):
+`checked_changeset` refuses `.git`, escapes, links, submodules and too many
+files. Henk runs no checks of his own; the executor ran the repository's,
+and the pull request's CI is the final word. `push.rs`
 then applies the changeset to a fresh checkout that nothing ran in, commits
 it as Henk ("Fix review findings") and pushes it as a fast-forward, after
 reading the branch again: a head that moved, or a branch Henk may no longer
@@ -254,8 +256,7 @@ executor's verdicts; a rejection may be contested once, with new evidence.
 
 The loop stops (`henk_domain::review_loop::LoopStop`) when a round has no new
 findings (converged), at `max_rounds`, when a finding repeats one that was
-fixed, when the reviewer alone has had its round, when the checks fail after
-the executor's changes, when a push is refused, when the reviewer changed its
+fixed, when the reviewer alone has had its round, when a push is refused, when the reviewer changed its
 workspace, when a session fails or runs out of time (per round its role's
 `timeout_secs`, for the whole loop `run_timeout_secs`, #286), or on a
 cancel. Every finding then gets one final verdict; one left without is
@@ -351,7 +352,7 @@ sequenceDiagram
     participant G as git.rs
     participant DB as RunStore
 
-    L->>K: run_checks (each one on the run's timeline), export
+    L->>K: export
     L->>L: checked_changeset: .git, escapes, links, submodules, file limit
     L->>P: checkout
     P->>G: fresh clone_at head, credential via env only
@@ -422,7 +423,7 @@ flowchart TD
     N -- "list_files, read_file, search, bash" --> F6["the session's own Workspace<br/>a reviewer's or planner's never exported"]
     N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the executor"]
     N -- "list_findings, give_verdict" --> F2["the executor: one verdict per finding<br/>on the drafts, for the reviewer"]
-    N -- "edit_file, write_file, run_checks" --> F3["the executor's Workspace<br/>pushed only by Henk, after the checks"]
+    N -- "edit_file, write_file, bash" --> F3["the executor's Workspace<br/>pushed only by Henk, its changeset checked"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["the planner's PlanDraft, within ChangeBudget<br/>to the IssueWriter only once the review is done"]
     N -- "raise_point, finish_round" --> F7["the plan's reviewer: a point into the PointLedger<br/>and a plan_point draft, for the planner"]
     N -- "list_points, answer_point, withdraw_change" --> F9["the planner: one answer per point<br/>on the drafts, for the reviewer"]
@@ -465,7 +466,7 @@ stateDiagram-v2
     }
     Running --> Superseded: a newer commit arrived
     Summarising --> Finished: converged, max_rounds, a repeated finding, or the reviewer alone
-    Summarising --> Failed: checks failed, push refused, a session failed or ran out of time
+    Summarising --> Failed: push refused, a session failed or ran out of time
     Running --> Failed: the diff, the pull request or the workspace could not be read
     Superseded --> [*]: check neutral, no comment, names the run that replaced it
     Finished --> [*]: check success or neutral, the loop's report in its summary
@@ -662,11 +663,11 @@ sequenceDiagram
     E->>I: issue: open, not a pull request
     E->>W: repo_head: the default branch and its head
     E->>K: clone_at the head, open_prepared (setup)
-    E->>X: the issue as material, edit tools, run_checks, propose_pull_request
-    X->>K: read, edit, run_checks
+    E->>X: the issue as material, edit tools, bash, propose_pull_request
+    X->>K: read, edit, bash (the repository's checks)
     X->>E: propose_pull_request(summary, left_out)
-    E->>K: export, run_checks, checked_changeset
-    alt no change, failing checks, refused changeset or the branch exists
+    E->>K: export, checked_changeset
+    alt no change, refused changeset or the branch exists
         E->>I: comment: no pull request, why, run link
     else
         E->>P: commit_and_push(PushTo::NewBranch henk/N-title, "Resolve #N: title")
@@ -683,8 +684,8 @@ comes from `workspace::open_prepared`, shared with the review loop: a clone
 of the default branch's head, set up as the profile says. The executor's
 tools are the loop's edit tools plus `propose_pull_request`
 (`execute_tools.rs`); nothing it holds reaches git or the platform. Henk's
-code then runs the checks, checks the changeset, and pushes and opens as
-above. GitHub opens the pull request with `POST /repos/{repo}/pulls`;
+code then checks the changeset, and pushes and opens as above; it runs no
+checks of its own (#396). GitHub opens the pull request with `POST /repos/{repo}/pulls`;
 GitLab through the `gitlab-write` MCP server's `create_merge_request`.
 
 Henk's own pull request is reviewed because the coordinator asks for it

@@ -110,8 +110,9 @@ complete.
   (it holds but is not for this pull request, and why). A finding that has
   no verdict when the loop ends, or whose fix was never pushed, is
   *unsettled*.
-- **Henk pushes the executor's changes** to the pull request's branch, once the
-  project's configured checks pass on them (§3.5).
+- **Henk pushes the executor's changes** to the pull request's branch. The
+  executor runs the repository's own checks; Henk trusts it, and the pull
+  request's CI is the final word (§3.5).
 - **The reviewer reviews again.** It resumes its own conversation, is told
   which commits were added, and reviews as it sees fit. New findings go back
   to the executor, which resumes its own conversation too.
@@ -156,7 +157,7 @@ the pull requests, and their markers are still recognised (§8.1).
 - **A loop that ends on its own completes the review**: the reviewer found
   nothing more, the rounds ran out, or the reviewer reported again what the
   executor had fixed. One that broke off (a session failed or reached its time
-  limit, the checks failed on the executor's changes, a push was refused) did
+  limit, a push was refused) did
   *not complete*, and the check says why.
 - **A failed check is Henk's failure, not the code's.** The GitHub check
   concludes *failure* only when the review did not complete. The check is
@@ -199,9 +200,13 @@ request is a merge request.
    repository, becomes a symbolic link or a submodule, or more files
    changed than the configured limit allows. The executor cannot write a
    file larger than 1 MB.
-3. **The checks pass first.** The project's configured checks run on the
-   change, with no credentials and a time limit. A change that fails them
-   is not pushed, and the loop stops.
+3. **The executor runs the checks; Henk trusts it.** The executor finds
+   how the repository checks itself (its CI configuration, build files,
+   contributor notes) and runs those checks on its change in the workspace,
+   where it has a shell, and says which it ran. Henk runs no checks of his
+   own before a push: the pull request's CI is the final word, and the
+   reviewer sees the next round's state as usual. Where the executor has no
+   shell, it runs no checks and CI decides.
 4. **One commit per round.** Henk applies the changeset to a clean
    checkout that nothing ran in, commits it there as "Fix review findings",
    with the run and the requester in its trailers, and pushes it. Only a
@@ -314,12 +319,12 @@ Henk then:
 1. **Checks out the default branch** at its head, in a throwaway workspace
    set up as the repository's profile says.
 2. **Has the executor work on it.** The executor reads the issue, with any
-   plan in it (§4), as material, changes the code and runs the project's
-   checks, in one conversation. It ends by proposing the pull request: what
-   it changed, and what it left out and why.
+   plan in it (§4), as material, changes the code and runs the repository's
+   own checks, in one conversation. It ends by proposing the pull request:
+   what it changed, which checks it ran, and what it left out and why.
 3. **Checks the change** as for a review loop's round (§3.5): only the
-   changeset leaves the workspace, within the same limits, and the
-   project's checks must pass.
+   changeset leaves the workspace, within the same limits. Henk runs no
+   checks of his own; the pull request's CI decides.
 4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
    configurable) with one commit, "Resolve #N: <title>", with the run and
    the requester in its trailers. A branch of that name that exists already
@@ -334,8 +339,8 @@ Henk then:
    turns on it as on any pull request (§3.2).
 
 **Every execute run ends.** Either the pull request is open, or one comment
-on the issue says why there is none (the checks fail, nothing changed, the
-branch exists), with a link to the run. A cancel says so on the issue; a
+on the issue says why there is none (nothing changed, the branch exists),
+with a link to the run. A cancel says so on the issue; a
 run that does not finish within its time limit has failed.
 
 ---

@@ -38,15 +38,16 @@ works from the diff Henk fetched once (`list_changed_files`,
 Henk). It hands each finding to the executor with `report_finding` and ends
 its round with `finish_round`; nothing is posted on the pull request. The
 executor reads them (`list_findings`), checks each against the code, fixes
-what holds with its edit tools (`edit_file`, `write_file`, `run_checks`,
-and `bash` on a backend apart from Henk) and gives each its verdict with
-`give_verdict`: fixed, rejected (it does not hold) or won't fix. Henk runs
-`[roles.executor].check_commands`, checks the changeset (see "Pushing a
-review's fixes") and pushes it as one commit to the pull request's branch. The
+what holds with its edit tools (`edit_file`, `write_file`, and `bash` on a
+backend apart from Henk, where it also runs the repository's own checks)
+and gives each its verdict with `give_verdict`: fixed, rejected (it does
+not hold) or won't fix. Henk runs no checks of his own: he checks the
+changeset (see "Pushing a review's fixes") and pushes it as one commit to
+the pull request's branch, and the pull request's CI is the final word. The
 next round each resumes its own conversation: the reviewer sees the commit
 and the verdicts, may contest a rejection once with new evidence, and
 reviews again. The loop stops when the reviewer finds nothing more, at
-`max_rounds` or its time limit, when the checks fail or a push is refused,
+`max_rounds` or its time limit, when a push is refused,
 when the reviewer reports again what was fixed, or when a session breaks
 off. A finding without a verdict by then ends unsettled.
 
@@ -217,8 +218,8 @@ A review needs `[review.loop]` with `[roles.reviewer]` and
 `[roles.executor]`; without either role the configuration is refused.
 `max_rounds` (50 by default) caps the rounds and `run_timeout_secs` (3600)
 limits the whole loop: no round starts after it, and a round under way
-gets only what is left. The executor's `check_commands`,
-`max_changed_files`, identity and trailers apply to every commit the loop
+gets only what is left. The executor's `max_changed_files`, identity and
+trailers apply to every commit the loop
 pushes, and its `requester_id` is who those commits are requested by.
 Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`;
 execute runs need `[execution]` with `[roles.executor]`.
@@ -289,7 +290,6 @@ max_turns = 40       # was lane_max_turns
 [roles.executor]
 model = "claude"
 requester_id = 523456789012345678
-check_commands = [["cargo", "test", "--offline"]]
 ```
 
 - `lanes` becomes `[roles.reviewer]` and `[roles.executor]`: one model
@@ -302,8 +302,8 @@ check_commands = [["cargo", "test", "--offline"]]
   a lane or the fact-check go too; a role takes skills of its own.
 - `[roles.executor]` is required, since the loop pushes: on
   GitHub the App needs `Contents: write`, on GitLab Henk needs
-  `[gitlab].token_env`. Its `check_commands` decide whether a round's fixes
-  are pushed.
+  `[gitlab].token_env`. Its `check_commands` are gone since #396 (see
+  "Migrating to repository checks").
 - `[workspace] review = true` is no longer needed: every review works in a
   workspace.
 - Nothing is posted on the pull request any more. The run page, `henk runs
@@ -372,7 +372,6 @@ model = "claude"
 timeout_secs = 600
 max_turns = 40
 requester_id = 523456789012345678
-check_commands = [["cargo", "test", "--offline"]]
 [roles.executor.identity]
 name = "Meneer Henk"
 email = "henk@example.com"
@@ -389,12 +388,34 @@ email = "henk@example.com"
   and `repositories` tables, which now apply to the commits the review loop
   pushes. Address runs (`henk address`, `POST /address`, `start_address`)
   were removed in #327; `[address]` is still refused, pointing at
-  `[roles.executor]`. The deprecated `check_timeout_secs` is gone:
-  `[workspace] command_secs` is the limit for every check.
+  `[roles.executor]`. The deprecated `check_timeout_secs` is gone, and
+  since #396 so is `check_commands` (see "Migrating to repository
+  checks").
 - `[review.loop]` without `[roles.reviewer]` and `[roles.executor]`, or
   `[planning]` without `[roles.planner]` and `[roles.reviewer]` (#328), is
   refused. The reviewer reviews plans as well as pull requests, with the
   same `[roles.reviewer]` settings.
+
+### Migrating to repository checks
+
+Since #396 Henk runs no checks of his own. `[roles.executor].check_commands`,
+one list for every repository, and the `run_checks` tool are gone: a
+configuration that still has the key, or `run_checks` in
+`[roles.executor] tools`, is refused with a message that points here.
+
+- Remove `check_commands`. On a backend apart from Henk the executor finds
+  how each repository checks itself (its CI configuration, `Makefile` or
+  `justfile`, `mise.toml` tasks, `CONTRIBUTING.md`, `AGENTS.md`) and runs
+  what fits the change with `bash`, from one test to the full set. It says
+  which checks it ran in its verdicts and in an execute run's pull request.
+- Make sure each repository states its checks where a developer would look,
+  and that the workspace image or the profile's toolchain has the tools
+  they need.
+- Henk trusts the executor: a round's changeset is pushed under the rules in
+  "Pushing a review's fixes", and the pull request's CI is the final word.
+  A loop no longer stops with `build_failing`.
+- On the `host` backend the executor has no `bash`, so it runs no checks
+  and CI decides.
 
 ### The OpenAI provider is `openai`
 
@@ -632,15 +653,17 @@ issue to a pull request (spec §4a, #329): from the dashboard's start form,
 MCP `start_execute`, `POST /execute` or `henk execute <issue-url>`. Nothing
 starts one on its own. The executor works in a workspace on the default
 branch's head, reads the issue and any plan in it, changes the code, runs
-the checks and ends with `propose_pull_request`: what it changed and what
-it left out. Henk then checks the changeset as for a review loop's round
+the repository's own checks with `bash` where it has it, and ends with
+`propose_pull_request`: what it changed, which checks it ran, and what it
+left out. Henk then checks the changeset as for a review loop's round
 (below), commits it as "Resolve #N: <title>" with the same identity and
 trailers, pushes it to a new branch `henk/<issue>-<title>`, never over a
 branch that exists, and opens a ready pull request whose description
 closes the issue. Then he asks for its review, a run of its own: the
-reviewer and the executor work on it as on any pull request. When the
-checks fail, nothing changed or the branch exists, there is no pull
-request and one comment on the issue says why, with the run link.
+reviewer and the executor work on it as on any pull request, and its CI
+is the final word on the checks. When nothing changed or the branch
+exists, there is no pull request and one comment on the issue says why,
+with the run link.
 
 ```toml
 [execution]
@@ -648,7 +671,7 @@ run_timeout_secs = 3600   # the executor's time for one issue
 branch_prefix = "henk/"   # every branch Henk makes starts with it
 ```
 
-`[execution]` needs `[roles.executor]`, whose model, `max_turns`, checks,
+`[execution]` needs `[roles.executor]`, whose model, `max_turns`,
 `max_changed_files`, identity and trailers it uses. On GitHub the App also
 needs `Pull requests: write`. On GitLab Henk opens the merge request
 through the `gitlab-write` MCP server, so `create_merge_request` must be in
@@ -658,9 +681,10 @@ the review starts because the execute run asks for it.
 ### Pushing a review's fixes
 
 The review loop's executor (spec §3.5) is the only thing that changes code.
-It works in the review's workspace, and after each round Henk runs the
-configured `[roles.executor].check_commands` there and pushes one commit to
-the pull request's branch. Only a changeset leaves the workspace: Henk
+It works in the review's workspace and runs the repository's own checks
+there with `bash` (#396). Henk trusts it: he runs no checks of his own, and
+after each round pushes one commit to the pull request's branch, whose CI
+is the final word. Only a changeset leaves the workspace: Henk
 refuses it whole when a path leads into `.git` or out of the repository,
 becomes a symbolic link or a submodule, or changes more files than
 `max_changed_files` allows, and otherwise applies it to a fresh checkout
@@ -674,8 +698,10 @@ Henk's code commits and pushes. Henk recognises his own pushes by commit,
 and the run that pushed reviews them in its next round (#284).
 
 `[workspace]` picks the backend and its limits, per repository through
-profiles. `host` runs the checks as Henk's user with an empty environment,
-so they see none of Henk's secrets, but nothing else isolates them. `ssh`
+profiles. `host` runs the setup steps as Henk's user with an empty
+environment, so they see none of Henk's secrets, but nothing else isolates
+them; no model gets `bash` there, so the executor runs no checks and CI
+decides. `ssh`
 runs each workspace as a throwaway user on a sandbox host (see "Sandbox
 host" below), and `kubernetes` as a Pod of its own (see "Workspaces on
 Kubernetes"). `henk config check` warns about what each one does not
@@ -821,17 +847,18 @@ one copy of the repository at its default branch, fetched by the sha Henk
 read, set up as above and never exported, with the same code tools and
 `bash` and a prompt that asks it to ground the plan in what it read. The
 platform's tools stay for issues, pull requests and history. The executor
-gets `bash` beside `run_checks` on any backend apart from Henk: one test or
-build of its own choosing while it works, where every file it
-changes is part of the commit and the checks still decide. Neither is
+gets `bash` on any backend apart from Henk, and runs the repository's own
+checks with it: one test while it works, the full set its CI runs before
+it finishes, where every file it changes is part of the commit. Neither is
 available on the `host` backend, where those commands would run as Henk's
-own user: `plan = true` is refused there, and the executor there keeps
-`run_checks` only.
+own user: `plan = true` is refused there, and the executor there runs no
+checks, so CI decides.
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
 
 A review runs the profile's setup on code that anyone who can open a pull
-request chose, from a fork too, and the executor's checks on what it pushes.
+request chose, from a fork too, and the executor's checks with `bash` on
+what it pushes.
 On the `host` backend that code runs as Henk's own user, next to his
 configuration and keys, so give repositories that take pull requests from
 people you do not trust a profile on a backend apart from Henk.

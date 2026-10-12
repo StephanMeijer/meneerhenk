@@ -902,11 +902,11 @@ pub struct ExecutorConfig {
     /// Files one push may change.
     #[serde(default = "default_max_changed_files")]
     pub max_changed_files: usize,
-    /// The project's checks, each an argument list such as
-    /// `["cargo", "test"]`, run in the workspace with an empty environment
-    /// and `[workspace] command_secs` each.
+    /// Henk's one list of checks for every repository, removed in #396:
+    /// read only to refuse it with a message that says what replaced it.
+    /// The executor runs each repository's own checks with `bash`.
     #[serde(default)]
-    pub check_commands: Vec<Vec<String>>,
+    pub check_commands: Option<toml::Value>,
     /// The Team Lead on whose behalf CLI and API runs push.
     pub requester_id: DiscordUserId,
     /// Who Henk commits as, author and committer alike. Absent: the App's
@@ -1817,13 +1817,9 @@ fn validate_executor(
             "roles.executor.max_changed_files must be above zero".to_owned(),
         ));
     }
-    if executor
-        .check_commands
-        .iter()
-        .any(|argv| argv.first().is_none_or(|program| program.trim().is_empty()))
-    {
+    if executor.check_commands.is_some() {
         return Err(ConfigError::Role(
-            "roles.executor.check_commands has an empty command".to_owned(),
+            "roles.executor.check_commands was removed: the executor finds and runs the repository's own checks with bash, and the pull request's CI decides. Remove it; the README's \"Migrating to repository checks\" says how".to_owned(),
         ));
     }
     executor
@@ -2459,7 +2455,7 @@ impl Settings {
             let _ = match backend {
                 BackendKind::Host => writeln!(
                     out,
-                    "Warning: the host backend is not isolated; checks run as Henk's user, and {unenforced} limits are not enforced."
+                    "Warning: the host backend is not isolated; setup commands run as Henk's user, the executor has no bash there and runs no checks, so the pull request's CI decides, and {unenforced} limits are not enforced."
                 ),
                 BackendKind::Ssh => writeln!(
                     out,
@@ -2506,10 +2502,8 @@ impl Settings {
         if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
                 out,
-                "Pushes:          for Team Lead {}; {} files, {} checks",
-                executor.requester_id,
-                executor.max_changed_files,
-                executor.check_commands.len()
+                "Pushes:          for Team Lead {}; {} files",
+                executor.requester_id, executor.max_changed_files
             );
             self.describe_commits(executor, out);
         }
@@ -3069,14 +3063,11 @@ github_owners = ["docspec"]
         let parse = |extra: &str| {
             Config::parse(&format!("{with_model}{extra}")).and_then(Config::into_settings)
         };
-        let settings = parse(
-            "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[\"cargo\", \"test\"]]\n",
-        )
-        .unwrap();
+        let settings = parse("[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n").unwrap();
         let executor = settings.roles.executor.as_ref().unwrap();
         assert_eq!((executor.max_turns, executor.timeout_secs), (40, 600));
         assert_eq!(executor.max_changed_files, 20);
-        assert_eq!(executor.check_commands, [["cargo", "test"]]);
+        assert!(executor.check_commands.is_none());
         assert_eq!(executor.tools(), Role::Executor.default_tools());
         assert!(
             settings
@@ -3098,10 +3089,6 @@ github_owners = ["docspec"]
                 "zero limit",
             ),
             (
-                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[]]\n",
-                "empty command",
-            ),
-            (
                 "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\npush_force = true\n",
                 "unknown field",
             ),
@@ -3116,6 +3103,29 @@ github_owners = ["docspec"]
         ] {
             assert!(parse(bad).is_err(), "{why}");
         }
+
+        // The one list of checks for every repository is gone (#396): a
+        // config that still has it says what replaced it.
+        let removed = parse(
+            "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[\"cargo\", \"test\"]]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            removed.contains("roles.executor.check_commands was removed"),
+            "{removed}"
+        );
+        assert!(
+            removed.contains("\"Migrating to repository checks\""),
+            "{removed}"
+        );
+        assert!(henk_domain::text::is_in_style(&removed), "{removed}");
+        let listed = parse(
+            "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ntools = [\"edit_file\", \"run_checks\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(listed.contains("run_checks was removed"), "{listed}");
     }
 
     /// The example with every commented setting after `[roles.executor]` switched
@@ -3941,7 +3951,7 @@ github_owners = ["docspec"]
         assert!(text.contains("; for docspec/big"), "{text}");
         assert!(
             text.contains(
-                "Warning: the host backend is not isolated; checks run as Henk's user, and memory, cpu, pids and disk limits are not enforced."
+                "Warning: the host backend is not isolated; setup commands run as Henk's user, the executor has no bash there and runs no checks, so the pull request's CI decides, and memory, cpu, pids and disk limits are not enforced."
             ),
             "{text}"
         );

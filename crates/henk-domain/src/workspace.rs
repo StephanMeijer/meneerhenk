@@ -1,4 +1,4 @@
-//! Workspaces (§3.5): where a model's file tools and a project's checks run,
+//! Workspaces (§3.5): where a model's file tools and its commands run,
 //! what limits hold there, and which changes may leave it.
 //!
 //! A workspace is a backend choice: the host, or a sandbox host reached over

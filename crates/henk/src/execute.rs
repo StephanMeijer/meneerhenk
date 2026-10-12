@@ -1,7 +1,8 @@
 //! The execute run (§4a, #329): the executor takes an issue to a pull
 //! request. It works in a workspace on the default branch's head, in one
-//! conversation from the issue to its proposal. Henk's code then runs the
-//! checks, commits the checked changeset, pushes it to a new branch under
+//! conversation from the issue to its proposal, and runs the repository's
+//! own checks with `bash` where it has it (#396). Henk's code then commits
+//! the checked changeset, pushes it to a new branch under
 //! `[execution] branch_prefix` and opens a ready pull request that closes
 //! the issue. The pull request is then reviewed like any other, in a run
 //! of its own with fresh sessions (#321); the coordinator asks for it.
@@ -28,7 +29,6 @@ use tracing::{info, instrument};
 
 use crate::app::App;
 use crate::cancel::Cancelled;
-use crate::checks::{describe, run_checks};
 use crate::config::{ExecutionConfig, ExecutorConfig};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
@@ -354,8 +354,7 @@ impl Work<'_> {
         let profile = self.app.settings.workspace.profile_for(&repo.path());
         let editing = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
-            check_commands: self.executor.check_commands.clone(),
-            check_timeout: Duration::from_secs(profile.limits.command_secs),
+            command_timeout: Duration::from_secs(profile.limits.command_secs),
             max_changed_files: self.executor.max_changed_files,
             // Told of bash only when it has it: the backend runs model
             // commands and [roles.executor] tools grant it.
@@ -550,8 +549,9 @@ impl Work<'_> {
         }
     }
 
-    /// What the executor changed, once the checks pass and the push rules
-    /// hold: the changeset Henk commits.
+    /// What the executor changed, once the push rules hold: the changeset
+    /// Henk commits. Henk runs no checks of his own; the executor ran the
+    /// repository's, and the pull request's CI is the final word (#396).
     async fn checked(
         &self,
         workspace: &Arc<dyn Workspace>,
@@ -567,19 +567,6 @@ impl Work<'_> {
             };
             return Err(no_pull(why));
         }
-        let results = run_checks(
-            workspace.as_ref(),
-            &editing.check_commands,
-            editing.check_timeout,
-        )
-        .await;
-        if results.iter().any(|r| !r.passed()) {
-            return Err(no_pull(format!(
-                "the checks fail after the executor's changes: {}",
-                describe(&results).trim()
-            )));
-        }
-        let exported = workspace.export().await.context("listing the changes")?;
         checked_changeset(exported, editing.max_changed_files)
             .map_err(|why| no_pull(format!("the executor's changes cannot be pushed: {why}")))
     }
@@ -613,7 +600,7 @@ mod tests {
         bare_remote, remote_branch_file, remote_branch_log, remote_branches, remote_feature,
     };
     use crate::plan_tools::tests::FakeIssueWriter;
-    use crate::workspace::fake::{FakeProvider, Scripted};
+    use crate::workspace::fake::FakeProvider;
 
     const CONFIG: &str = r#"
 [discord]
@@ -641,7 +628,6 @@ model = "scripted"
 [roles.executor]
 model = "m"
 requester_id = 3
-check_commands = [["make", "check"]]
 "#;
 
     /// The repository as an execute run sees it: its default branch is
@@ -707,27 +693,13 @@ check_commands = [["make", "check"]]
         _remote: ScratchDir,
     }
 
-    /// An app whose executor follows `script`, on a fresh remote `name`,
-    /// where `make check` exits `check`.
-    async fn fixture(name: &str, script: Vec<Completion>, check: i32) -> Fixture {
+    /// An app whose executor follows `script`, on a fresh remote `name`.
+    async fn fixture(name: &str, script: Vec<Completion>) -> Fixture {
         let (remote, _) = bare_remote(name).await;
         let settings = Config::parse(CONFIG)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        let mut provider = FakeProvider::default();
-        provider.script.insert(
-            "make check".to_owned(),
-            Scripted {
-                code: check,
-                output: if check == 0 {
-                    "ok\n"
-                } else {
-                    "test csv_export failed\n"
-                }
-                .to_owned(),
-                ..Scripted::default()
-            },
-        );
+        let provider = FakeProvider::default();
         let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
         models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
@@ -828,17 +800,7 @@ check_commands = [["make", "check"]]
 
     #[tokio::test]
     async fn an_issue_becomes_a_branch_and_a_pull_request_that_closes_it() {
-        let f = fixture(
-            "henk-exec-ok",
-            vec![
-                write_csv(),
-                call("run_checks", json!({})),
-                propose(),
-                done(),
-            ],
-            0,
-        )
-        .await;
+        let f = fixture("henk-exec-ok", vec![write_csv(), propose(), done()]).await;
         let report = run_execute(&f.app, request("r-exec-1"), CancellationToken::new())
             .await
             .unwrap();
@@ -923,30 +885,25 @@ check_commands = [["make", "check"]]
     }
 
     #[tokio::test]
-    async fn failing_checks_open_nothing_and_the_issue_says_why() {
-        let f = fixture("henk-exec-red", vec![write_csv(), propose(), done()], 1).await;
-        let error = run_execute(&f.app, request("r-exec-2"), CancellationToken::new())
+    async fn henk_runs_no_checks_of_his_own_and_the_executors_change_is_proposed() {
+        let f = fixture("henk-exec-trusted", vec![write_csv(), propose(), done()]).await;
+        run_execute(&f.app, request("r-exec-2"), CancellationToken::new())
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains("execution failed"), "{error}");
-        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
-        assert!(f.hub.opened.lock().unwrap().is_empty());
-        let comments = f.tracker.comments.lock().unwrap().clone();
-        assert_eq!(comments.len(), 1);
-        let comment = &comments[0];
+            .unwrap();
+        assert_eq!(f.hub.opened.lock().unwrap().len(), 1, "the pull request");
+        assert_eq!(record(&f, "r-exec-2").await.status, RunStatus::Finished);
+        // The executor runs the repository's checks with bash where it has
+        // it; Henk runs none before the push, and CI decides (#396).
         assert!(
-            comment.starts_with("I opened no pull request for this issue: the checks fail"),
-            "{comment}"
+            f.provider.ran.lock().unwrap().is_empty(),
+            "{:?}",
+            f.provider.ran.lock().unwrap()
         );
-        assert!(comment.contains("make check"), "{comment}");
-        assert!(comment.contains("/runs/r-exec-2"), "{comment}");
-        assert_eq!(record(&f, "r-exec-2").await.status, RunStatus::Failed);
-        assert_eq!(f.provider.live(), 0);
     }
 
     #[tokio::test]
     async fn an_executor_that_changes_nothing_or_proposes_nothing_opens_nothing() {
-        let f = fixture("henk-exec-none", vec![propose(), done()], 0).await;
+        let f = fixture("henk-exec-none", vec![propose(), done()]).await;
         run_execute(&f.app, request("r-exec-3"), CancellationToken::new())
             .await
             .unwrap_err();
@@ -957,12 +914,7 @@ check_commands = [["make", "check"]]
         );
 
         // Nudged twice, it still ends without a proposal.
-        let f = fixture(
-            "henk-exec-mute",
-            vec![write_csv(), done(), done(), done()],
-            0,
-        )
-        .await;
+        let f = fixture("henk-exec-mute", vec![write_csv(), done(), done(), done()]).await;
         run_execute(&f.app, request("r-exec-4"), CancellationToken::new())
             .await
             .unwrap_err();
@@ -1000,7 +952,7 @@ check_commands = [["make", "check"]]
     /// next free name and never pushes over the branch that is there.
     #[tokio::test]
     async fn a_branch_that_exists_is_never_pushed_over_and_a_rerun_takes_the_next_name() {
-        let f = fixture("henk-exec-taken", vec![write_csv(), propose(), done()], 0).await;
+        let f = fixture("henk-exec-taken", vec![write_csv(), propose(), done()]).await;
         let first = "henk/9-export-runs".to_owned();
         let head = taken(&f, "henk-exec-taken-other", std::slice::from_ref(&first)).await;
 
@@ -1025,7 +977,7 @@ check_commands = [["make", "check"]]
     /// before the executor starts, and pushes nothing.
     #[tokio::test]
     async fn a_run_with_no_free_branch_name_stops_before_the_session() {
-        let f = fixture("henk-exec-all-taken", vec![], 0).await;
+        let f = fixture("henk-exec-all-taken", vec![]).await;
         let names: Vec<String> = (1..=BRANCH_TRIES)
             .map(|n| branch_candidate("henk/9-export-runs", n))
             .collect();
@@ -1064,7 +1016,7 @@ check_commands = [["make", "check"]]
             ("henk-exec-bash", None, true),
             ("henk-exec-nobash", Some(without), false),
         ] {
-            let mut f = fixture(name, vec![done()], 0).await;
+            let mut f = fixture(name, vec![done()]).await;
             f.app.settings.workspace.default.backend = henk_domain::workspace::BackendKind::Ssh;
             f.app.settings.roles.executor.as_mut().unwrap().tools = tools;
             run_execute(
@@ -1089,7 +1041,7 @@ check_commands = [["make", "check"]]
 
     #[tokio::test]
     async fn pull_requests_and_closed_issues_are_not_taken_on() {
-        let f = fixture("henk-exec-closed", vec![], 0).await;
+        let f = fixture("henk-exec-closed", vec![]).await;
         f.tracker.issue.lock().unwrap().open = false;
         let error = run_execute(&f.app, request("r-exec-6"), CancellationToken::new())
             .await

@@ -41,7 +41,6 @@ use tracing::info;
 
 use crate::app::App;
 use crate::cancel::is_cancelled;
-use crate::checks::{describe, run_checks};
 use crate::config::LoopConfig;
 use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
@@ -279,11 +278,11 @@ impl<'a> Rounds<'a> {
             &reviewer.tools(Role::Reviewer),
         );
 
-        // The executor edits and checks.
+        // The executor edits, and runs the repository's checks with bash
+        // where it has it (#396).
         let fixing = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
-            check_commands: address.check_commands.clone(),
-            check_timeout: command_limit,
+            command_timeout: command_limit,
             max_changed_files: address.max_changed_files,
             // Told of bash only when it has it: the backend runs model
             // commands and [roles.executor] tools grant it.
@@ -697,8 +696,10 @@ impl<'a> Rounds<'a> {
         )))
     }
 
-    /// Checks what the executor changed and pushes it as one commit; the
-    /// workspace then counts from the new head.
+    /// Pushes what the executor changed as one commit, once the changeset
+    /// passes Henk's rules; the workspace then counts from the new head.
+    /// Henk runs no checks of his own: the executor runs the repository's
+    /// checks, and the pull request's CI is the final word (#396).
     async fn push_round(
         &mut self,
         facts: &mut PullFacts,
@@ -708,29 +709,14 @@ impl<'a> Rounds<'a> {
         let Some(address) = app.settings.roles.executor.as_ref() else {
             return Err(anyhow!("the review loop needs [roles.executor]"));
         };
-        let workspace = self.workspace.as_ref();
-        if workspace
+        let exported = self
+            .workspace
             .export()
             .await
-            .context("listing the changes")?
-            .is_empty()
-        {
+            .context("listing the changes")?;
+        if exported.is_empty() {
             return Ok(Pushed::Nothing);
         }
-        let results = run_checks(
-            workspace,
-            &address.check_commands,
-            self.fixing.check_timeout,
-        )
-        .await;
-        if results.iter().any(|r| !r.passed()) {
-            return Ok(Pushed::Stopped(LoopStop::BuildFailing(format!(
-                "the checks fail after the executor's changes in round {}, so nothing was pushed: {}",
-                self.round,
-                describe(&results).trim()
-            ))));
-        }
-        let exported = workspace.export().await.context("listing the changes")?;
         let changes = match checked_changeset(exported, address.max_changed_files) {
             Ok(changes) => changes,
             Err(why) => {
@@ -779,7 +765,7 @@ impl<'a> Rounds<'a> {
         facts.head = new_head;
         let short = facts.head.short().to_owned();
         let patch = head_patch(&checkout).await;
-        workspace
+        self.workspace
             .baseline()
             .await
             .context("counting from the pushed commit")?;

@@ -37,12 +37,12 @@ const REVIEWER: &[&str] = &[
     "raise_point",
     "finish_round",
 ];
-/// What only the executor has: editing, the checks, its side of the
-/// handoff, and proposing the pull request for an issue (#329).
+/// What only the executor has: editing, its side of the handoff, and
+/// proposing the pull request for an issue (#329). It runs the
+/// repository's checks with `bash` (#396).
 const EXECUTOR: &[&str] = &[
     "edit_file",
     "write_file",
-    "run_checks",
     "list_findings",
     "give_verdict",
     "propose_pull_request",
@@ -261,9 +261,17 @@ pub enum CeilingError {
     },
 }
 
+/// The executor's tool that ran Henk's configured checks, until the
+/// executor ran the repository's own with `bash` (#396).
+const REMOVED_RUN_CHECKS: &str = "run_checks";
+
 impl fmt::Display for CeilingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unknown { role, tool } if tool == REMOVED_RUN_CHECKS => write!(
+                f,
+                "[roles.{role}] tools: run_checks was removed: the executor runs the repository's own checks with bash; the README's \"Migrating to repository checks\" says how"
+            ),
             Self::Unknown { role, tool } => {
                 write!(f, "[roles.{role}] tools: {tool} is not a tool Henk has")
             }
@@ -327,7 +335,7 @@ mod tests {
     fn only_the_executor_edits_and_only_the_planner_writes_to_the_tracker() {
         for role in Role::ALL {
             assert_eq!(role.allows("edit_file"), role == Role::Executor, "{role}");
-            assert_eq!(role.allows("run_checks"), role == Role::Executor, "{role}");
+            assert!(!role.allows("run_checks"), "{role}: removed in #396");
             assert_eq!(
                 role.allows("create_sub_issue"),
                 role == Role::Planner,
@@ -446,6 +454,19 @@ mod tests {
                 .to_string(),
             "[roles.planner] tools: teleport is not a tool Henk has"
         );
+        let removed = Role::Executor
+            .narrow(Some(&tools(&["edit_file", "run_checks"])))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            removed.starts_with("[roles.executor] tools: run_checks was removed"),
+            "{removed}"
+        );
+        assert!(
+            removed.contains("\"Migrating to repository checks\""),
+            "{removed}"
+        );
+        assert!(crate::text::is_in_style(&removed), "{removed}");
     }
 
     #[test]

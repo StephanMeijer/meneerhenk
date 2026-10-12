@@ -172,8 +172,6 @@ pub enum LoopStop {
         /// The fixed finding it repeats.
         of: FindingId,
     },
-    /// The checks fail after the executor's changes; nothing was pushed.
-    BuildFailing(String),
     /// The run's time limit, or a session's in a round.
     Timeout(String),
     /// A session broke off: a model error, a refusal, a turn limit.
@@ -199,7 +197,6 @@ impl LoopStop {
             Self::Converged => "converged",
             Self::MaxRounds(_) => "max_rounds",
             Self::RepeatingFinding { .. } => "repeating_finding",
-            Self::BuildFailing(_) => "build_failing",
             Self::Timeout(_) => "timeout",
             Self::SessionFailed(_) => "session_failed",
             Self::WorkspaceChanged => "workspace_changed",
@@ -240,10 +237,9 @@ impl fmt::Display for LoopStop {
                 f,
                 "the reviewer reported {of} again as {finding} after it was fixed"
             ),
-            Self::BuildFailing(why)
-            | Self::Timeout(why)
-            | Self::SessionFailed(why)
-            | Self::PushRefused(why) => f.write_str(why),
+            Self::Timeout(why) | Self::SessionFailed(why) | Self::PushRefused(why) => {
+                f.write_str(why)
+            }
             Self::WorkspaceChanged => {
                 f.write_str("the reviewer changed the workspace; nothing was pushed")
             }
