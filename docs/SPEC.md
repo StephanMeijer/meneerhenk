@@ -22,7 +22,7 @@ and code reviewer with a fixed persona. He works where the team works:
 | Discord voice channel *(in development)* | Listens, and answers out loud |
 
 He is **advisory**. He never approves, blocks or merges. He changes code in
-two cases only: as the fixer of a review loop (§3.2), and when a colleague
+two cases only: as the executor of a review loop (§3.2), and when a colleague
 asks him to address the review feedback on a pull request (§3.5). Either
 way only on that pull request's own branch, never on a fork, the default
 branch or a protected branch.
@@ -32,9 +32,9 @@ branch or a protected branch.
 | Term | Meaning |
 |---|---|
 | **Run** | One execution of a review, a plan, an address run, a Discord turn or a mail reply. Every run has a link. |
-| **Review loop** | What a review is: a reviewer and a fixer taking turns on one pull request (§3.2). |
-| **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the fixer (§3.2). |
-| **Fixer** | The model session in a review loop that checks each finding against the code and fixes the ones that hold (§3.2). |
+| **Review loop** | What a review is: a reviewer and an executor taking turns on one pull request (§3.2). |
+| **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the executor (§3.2). |
+| **Executor** | The model session in a review loop that checks each finding against the code and fixes the ones that hold (§3.2). |
 | **Lane** | Before #309, one independent reviewer inside a review. Old runs still show them, and the run record still lists each model session of a run as a lane. |
 | **Finding** | One problem the reviewer reports, at one line. Before #309 a lane posted each as a comment. |
 | **Summary** | What the check says when a review ends (§3.3). |
@@ -88,7 +88,7 @@ change against the target branch.
 ### 3.2 How he reviews
 
 A review is one **review loop** (`[review.loop]`, #283): two model
-sessions, a **reviewer** and a **fixer**, working on one pull request in a
+sessions, a **reviewer** and an **executor**, working on one pull request in a
 checkout of it. Reviews need `[review.loop]` with `[roles.reviewer]` and
 `[roles.executor]` (#322); without `[review.loop]` Henk does not review
 (#309). A review that cannot get its checkout does not
@@ -103,18 +103,18 @@ complete.
   default, or whatever is configured instead. They are listed as not
   reviewed and carry no finding. A change made only of such files is
   reported as "nothing to review", which is a completed review.
-- **The reviewer hands its findings straight to the fixer.** Nothing is
+- **The reviewer hands its findings straight to the executor.** Nothing is
   posted on the pull request: no comment, no summary.
-- **The fixer checks each finding against the code** and gives it one
+- **The executor checks each finding against the code** and gives it one
   verdict: *fixed*, *rejected* (it does not hold, and why) or *won't fix*
   (it holds but is not for this pull request, and why). A finding that has
   no verdict when the loop ends, or whose fix was never pushed, is
   *unsettled*.
-- **Henk pushes the fixer's changes** to the pull request's branch, once the
+- **Henk pushes the executor's changes** to the pull request's branch, once the
   project's configured checks pass on them.
 - **The reviewer reviews again.** It resumes its own conversation, is told
   which commits were added, and reviews as it sees fit. New findings go back
-  to the fixer, which resumes its own conversation too.
+  to the executor, which resumes its own conversation too.
 - This repeats until the reviewer finds nothing more, or a limit ends it: a
   number of rounds, or a time limit per round and in all.
 - What the loop did and the findings that still stand (won't fix and
@@ -137,7 +137,7 @@ the pull requests, and their markers are still recognised (§8.1).
 |---|---|---|
 | Review waits for a slot | The check "Meneer Henk", *queued* (grey), "Waiting for a review slot", linked to the dashboard's overview, which lists it. A review that gets a slot at once skips this | Nothing: a pending commit status could block a merge where pipelines must succeed |
 | Review starts | The check "Meneer Henk", *in progress*, linked to the run: the queued one moves on, or a new one | Henk's award emoji on the MR *(in development)* |
-| During | Nothing but the commits Henk pushes for the fixer (§3.2) | The same |
+| During | Nothing but the commits Henk pushes for the executor (§3.2) | The same |
 | Review ends | The check's **summary**: "No issues found" or "N issues found", and the loop's report: how many rounds it ran, what it settled and pushed, why it stopped, and the findings that still stand | No note: the commit status below |
 | Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). When the loop pushed, the last commit it pushed gets the same check. A review superseded by a newer commit completes neutral with "Superseded by a newer commit." A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
@@ -146,14 +146,14 @@ the pull requests, and their markers are still recognised (§8.1).
   the loop pushed. Comments posted by lanes before #309 stay as they are;
   nothing folds them.
 - **The count** is the number of the loop's findings that still stand when
-  it ends: those the fixer would not fix and those left unsettled. A loop
+  it ends: those the executor would not fix and those left unsettled. A loop
   that ran out of rounds with the reviewer's last findings unanswered is
   no pass either: it completes neutral, "The review loop left findings
   open."
 - **A loop that ends on its own completes the review**: the reviewer found
   nothing more, the rounds ran out, or the reviewer reported again what the
-  fixer had fixed. One that broke off (a session failed or reached its time
-  limit, the checks failed on the fixer's changes, a push was refused) did
+  executor had fixed. One that broke off (a session failed or reached its time
+  limit, the checks failed on the executor's changes, a push was refused) did
   *not complete*, and the check says why.
 - **A failed check is Henk's failure, not the code's.** The GitHub check
   concludes *failure* only when the review did not complete. The check is
@@ -209,7 +209,7 @@ His push is a new commit like any other: it is reviewed as usual (§3.1),
 and that review never starts another address run (§8.1). Henk knows the
 commit he pushed, so its new-commits event is reviewed although his own
 account sent it, which the sender check would otherwise drop (#298). A
-review loop (#284) is the exception: it reviews the fixer's commits in the run that
+review loop (#284) is the exception: it reviews the executor's commits in the run that
 pushed them, so the new-commits event of one is ignored, whoever it names
 as the sender, and the last one gets that review's check.
 
@@ -459,7 +459,7 @@ These hold everywhere:
    never start work, and his replies never mention himself.
 2. **Henk is advisory.** A review never fails or blocks a pull/merge request
    or pipeline. He never approves, requests changes or merges. He pushes
-   only as the fixer of a review loop (§3.2) or in an address run a
+   only as the executor of a review loop (§3.2) or in an address run a
    colleague asked for (§3.5), only to that pull request's own branch,
    never to a fork, the default branch or a protected branch, and never
    with force.
@@ -475,7 +475,7 @@ These hold everywhere:
    narrow a role's tools, never widen them (#171).
 5. **Scope is fixed per task.**
    - A review loop works only on its own pull/merge request: the reviewer
-     at its own commit and those the fixer added, the fixer pushing only to
+     at its own commit and those the executor added, the executor pushing only to
      that pull request's branch.
    - A planner can change only its own issue and that issue's relations.
    - An address run can push only to its own pull request's branch, on top
@@ -501,7 +501,7 @@ These hold everywhere:
 ## 9. Out of scope
 
 - Writing or committing code nobody asked for, or opening pull/merge
-  requests. The exceptions are a review loop's fixer (§3.2) and an address
+  requests. The exceptions are a review loop's executor (§3.2) and an address
   run (§3.5).
 - Approving, blocking or merging.
 - Acting in channels, repositories or accounts outside the allowlists.
@@ -523,7 +523,7 @@ then a line in the section named.
 3. **§3.2 Simultaneous findings.** Decided 2026-10-12 (#309): there are no
    lanes. One reviewer reports each finding once, and nothing is posted.
 4. **§3.3 Dropped lanes in the summary.** Decided 2026-10-12 (#309): the
-   sessions a summary can name are the reviewer and the fixer, never a
+   sessions a summary can name are the reviewer and the executor, never a
    model.
 5. **§3.3 Resolved threads.** Decided 2026-10-12 (#309): a review opens no
    threads. *N* counts the loop's findings that still stand.
@@ -656,6 +656,8 @@ surprising reading of the earlier wording; veto any that is wrong.
   `[roles.reviewer]` and `[roles.executor]` (#322). `[address]` and the
   model and limit keys of `[review.loop]` and `[planning]` moved there; a
   stage whose role is missing is refused.
+- §1.1, §3.2: the review loop's fixer is the executor (#323), the role
+  that changes the code. Runs before #323 name its session `fixer`.
 
 ## Revision notes (2026-10-07)
 

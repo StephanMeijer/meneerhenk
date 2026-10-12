@@ -685,6 +685,124 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     }
 }
 
+/// A review loop run from before #323 named its executor `fixer`: its
+/// session, transcript and verdicts still read in full.
+#[tokio::test]
+async fn a_loop_run_with_a_fixer_still_reads_in_full() {
+    let f = fixture("https://127.0.0.1:9");
+    let (cookie, _) = viewer(&f);
+    let store = &f.dashboard.app.store;
+    let run = RunId::parse("r-fixer").unwrap();
+    store
+        .create_run(&NewRun {
+            id: run.clone(),
+            kind: RunKind::Review,
+            platform: Platform::GitHub,
+            repo: "docspec/app".into(),
+            target: 7,
+            commit: None,
+            requester: None,
+            trigger: "new commits".into(),
+            link: format!("{ORIGIN}/runs/r-fixer"),
+        })
+        .await
+        .unwrap();
+    for (session, model) in [("reviewer", "model-r"), ("fixer", "model-f")] {
+        store.start_lane(&run, session, model).await.unwrap();
+        store
+            .finish_lane(&run, session, LaneStatus::Finished, 2, 50, 5, None)
+            .await
+            .unwrap();
+    }
+    let body = json!({
+        "session": "fixer",
+        "model": "model-f",
+        "stop": "EndTurn",
+        "turns": 1,
+        "usage": {"input_tokens": 10, "output_tokens": 3},
+        "system": "You fix.",
+        "messages": [
+            {"role": "user", "blocks": [{"text": "Fix f1."}]},
+            {"role": "assistant", "blocks": [{"text": "Fixed."}]}
+        ]
+    })
+    .to_string();
+    store
+        .record_transcript(
+            &run,
+            &TranscriptRecord {
+                at: String::new(),
+                session: "fixer".into(),
+                model: "model-f".into(),
+                stop: "EndTurn".into(),
+                turns: 1,
+                bytes: u64::try_from(body.len()).unwrap(),
+                body,
+            },
+        )
+        .await
+        .unwrap();
+    let finding = DraftRecord {
+        at: String::new(),
+        draft: "f1".into(),
+        lane: "reviewer".into(),
+        model: "model-r".into(),
+        kind: henk_store::LOOP_FINDING_KIND.into(),
+        path: "src/a.rs".into(),
+        line: 3,
+        target: String::new(),
+        body: "x is never set.".into(),
+        decision: None,
+    };
+    store.record_draft(&run, &finding).await.unwrap();
+    let decision = DraftDecision {
+        at: String::new(),
+        verdict: DraftVerdict::Fixed,
+        checker: "fixer".into(),
+        reason: "Set x.".into(),
+        same_as: String::new(),
+        comment_id: "abc123".into(),
+    };
+    store.decide_draft(&run, "f1", &decision).await.unwrap();
+
+    let detail = get(&f, "/dashboard/api/v1/runs/r-fixer", &cookie).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    let detail = detail.json();
+    let names: Vec<&str> = detail["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| lane["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["fixer", "reviewer"]);
+    assert_eq!(detail["drafts"][0]["decision"]["verdict"], "fixed");
+    assert_eq!(detail["drafts"][0]["decision"]["checker"], "fixer");
+    let transcript = get(
+        &f,
+        "/dashboard/api/v1/runs/r-fixer/transcripts/fixer",
+        &cookie,
+    )
+    .await;
+    assert_eq!(transcript.status, StatusCode::OK, "{}", transcript.body);
+
+    let shown = crate::runs::render(
+        &store.run(&run).await.unwrap().unwrap(),
+        &store.lanes(&run).await.unwrap(),
+        &henk_store::ToolUsage::from_calls(&store.tool_calls(&run).await.unwrap()),
+        &store.transcripts(&run).await.unwrap(),
+        &store.drafts(&run).await.unwrap(),
+        &store.findings(&run).await.unwrap(),
+        &store.events(&run).await.unwrap(),
+    );
+    for line in [
+        "lanes (2)",
+        "transcripts (1)",
+        "fixed by fixer in abc123: Set x.",
+    ] {
+        assert!(shown.contains(line), "{line}:\n{shown}");
+    }
+}
+
 #[tokio::test]
 async fn a_query_that_does_not_parse_is_a_json_bad_request() {
     let f = fixture("https://127.0.0.1:9");

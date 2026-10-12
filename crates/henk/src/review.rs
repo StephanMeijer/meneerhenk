@@ -668,8 +668,8 @@ fn stop_if_ended(review: ReviewRun<'_>, cancel: &CancellationToken) -> anyhow::R
     })
 }
 
-/// A review as a reviewer↔fixer loop (#284, #285): the reviewer's findings
-/// go to the fixer, never to the pull request. Nothing is posted; what the
+/// A review as a reviewer↔executor loop (#284, #285): the reviewer's findings
+/// go to the executor, never to the pull request. Nothing is posted; what the
 /// loop did is on the run, and its report, with the findings that still
 /// stand, is the end of the check's summary. A pull request the loop may
 /// not push to (a fork, the default or a protected branch) or whose branch
@@ -893,7 +893,7 @@ diff --git a/src/a.rs b/src/a.rs
  }
 ";
 
-    /// A review loop whose reviewer and fixer are both model `m` (#308).
+    /// A review loop whose reviewer and executor are both model `m` (#308).
     const CONFIG: &str = r#"
 [discord]
 channel_id = 1
@@ -943,7 +943,7 @@ requester_id = 3
     }
 
     /// An app whose writer, read session and model are fakes, reviewing as
-    /// a review loop with `model` as reviewer and fixer, on a fresh local
+    /// a review loop with `model` as reviewer and executor, on a fresh local
     /// remote `name` whose head is the reviewed commit. `diff` is the diff
     /// the writer serves.
     async fn fixture(name: &str, diff: &str, model: ScriptedClient) -> Fixture {
@@ -1179,7 +1179,7 @@ requester_id = 3
         assert_eq!(
             sessions,
             [("reviewer", LaneStatus::Finished)],
-            "no fixer: nothing to fix"
+            "no executor: nothing to fix"
         );
     }
 
@@ -2883,7 +2883,7 @@ requester_id = 3
         )
     }
 
-    /// A review loop of reviewer `r` and fixer `f` (#284), each its own
+    /// A review loop of reviewer `r` and executor `f` (#284), each its own
     /// scripted model, with `settings` in `[review.loop]`.
     fn loop_config_with(settings: &str) -> String {
         let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
@@ -2900,7 +2900,7 @@ requester_id = 3
             )
     }
 
-    /// The fixture of a looping test: the app, the reviewer, the fixer and
+    /// The fixture of a looping test: the app, the reviewer, the executor and
     /// the remote, which is returned to be kept.
     type Looping = (
         Fixture,
@@ -2909,15 +2909,15 @@ requester_id = 3
         crate::git::ScratchDir,
     );
 
-    /// A reviewer `r` and a fixer `f`, each scripted, on a fresh local
+    /// A reviewer `r` and an executor `f`, each scripted, on a fresh local
     /// remote served by [`LoopHub`]; the remote is returned to be kept.
     async fn looping(
         name: &str,
         reviewer: ScriptedClient,
-        fixer: ScriptedClient,
+        executor: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
     ) -> Looping {
-        looping_with(name, "", reviewer, fixer, provider).await
+        looping_with(name, "", reviewer, executor, provider).await
     }
 
     /// [`looping`] with more `[review.loop]` settings.
@@ -2925,11 +2925,11 @@ requester_id = 3
         name: &str,
         settings: &str,
         reviewer: ScriptedClient,
-        fixer: ScriptedClient,
+        executor: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
     ) -> Looping {
         let lanes = ScriptedClient::new("m", []);
-        looping_on(name, "o/r", settings, lanes, reviewer, fixer, provider).await
+        looping_on(name, "o/r", settings, lanes, reviewer, executor, provider).await
     }
 
     /// [`looping`] on a pull request whose branch is in `head_repo`, with
@@ -2939,10 +2939,10 @@ requester_id = 3
         head_repo: &'static str,
         lanes: ScriptedClient,
         reviewer: ScriptedClient,
-        fixer: ScriptedClient,
+        executor: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
     ) -> Looping {
-        looping_on(name, head_repo, "", lanes, reviewer, fixer, provider).await
+        looping_on(name, head_repo, "", lanes, reviewer, executor, provider).await
     }
 
     /// [`looping_from`] with more `[review.loop]` settings.
@@ -2952,7 +2952,7 @@ requester_id = 3
         settings: &str,
         lanes: ScriptedClient,
         reviewer: ScriptedClient,
-        fixer: ScriptedClient,
+        executor: ScriptedClient,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
     ) -> Looping {
         let (remote, head) = crate::git::tests::bare_remote(name).await;
@@ -2963,15 +2963,16 @@ requester_id = 3
             credential: None,
         });
         let mut f = fixture_on(DIFF, lanes, &config, head.as_str(), provider, Some(hub)).await;
-        let (reviewer, fixer) = (Arc::new(reviewer), Arc::new(fixer));
+        let (reviewer, executor) = (Arc::new(reviewer), Arc::new(executor));
         f.app.models.insert(
             "r".to_owned(),
             Arc::clone(&reviewer) as Arc<dyn ModelClient>,
         );
-        f.app
-            .models
-            .insert("f".to_owned(), Arc::clone(&fixer) as Arc<dyn ModelClient>);
-        (f, reviewer, fixer, remote)
+        f.app.models.insert(
+            "f".to_owned(),
+            Arc::clone(&executor) as Arc<dyn ModelClient>,
+        );
+        (f, reviewer, executor, remote)
     }
 
     /// The text of every message of a request, in order.
@@ -3045,8 +3046,8 @@ requester_id = 3
     }
 
     #[tokio::test]
-    async fn the_fixer_gives_each_finding_one_verdict_and_nothing_is_posted() {
-        let (f, reviewer, fixer, remote) = looping(
+    async fn the_executor_gives_each_finding_one_verdict_and_nothing_is_posted() {
+        let (f, reviewer, executor, remote) = looping(
             "review-loop",
             ScriptedClient::new(
                 "r",
@@ -3109,7 +3110,7 @@ requester_id = 3
                 (
                     "f1".into(),
                     "fixed".into(),
-                    "fixer".into(),
+                    "executor".into(),
                     fixed_why,
                     head.clone(),
                     String::new()
@@ -3117,7 +3118,7 @@ requester_id = 3
                 (
                     "f2".into(),
                     "rejected".into(),
-                    "fixer".into(),
+                    "executor".into(),
                     "main returns (), see src/a.rs:1.".into(),
                     String::new(),
                     String::new()
@@ -3125,7 +3126,7 @@ requester_id = 3
                 (
                     "f3".into(),
                     "rejected".into(),
-                    "fixer".into(),
+                    "executor".into(),
                     "nothing reads an exit code here.".into(),
                     String::new(),
                     "f2".into()
@@ -3159,7 +3160,7 @@ requester_id = 3
             refused.contains("f2 was rejected twice and is closed"),
             "{refused}"
         );
-        let fixing = fixer.requests();
+        let fixing = executor.requests();
         assert_eq!(fixing.len(), 6);
         let second = texts(&fixing[4]);
         assert!(second.iter().any(|t| t == "Both settled."), "{second:?}");
@@ -3184,8 +3185,8 @@ requester_id = 3
         assert_eq!(f.writer.finished.lock().unwrap()[0].open_findings, 0);
         let lanes = f.app.store.lanes(&run).await.unwrap();
         let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["fixer", "reviewer"]);
-        for session in ["reviewer", "fixer"] {
+        assert_eq!(names, ["executor", "reviewer"]);
+        for session in ["reviewer", "executor"] {
             assert!(
                 f.app
                     .store
@@ -3207,8 +3208,8 @@ requester_id = 3
     }
 
     #[tokio::test]
-    async fn a_finding_the_fixer_gives_no_verdict_ends_unsettled() {
-        let (f, _, fixer, remote) = looping(
+    async fn a_finding_the_executor_gives_no_verdict_ends_unsettled() {
+        let (f, _, executor, remote) = looping(
             "review-loop-silent",
             ScriptedClient::new(
                 "r",
@@ -3230,7 +3231,7 @@ requester_id = 3
             .await
             .unwrap();
         assert_eq!(
-            fixer.requests().len(),
+            executor.requests().len(),
             3,
             "nudged twice, then settled for it"
         );
@@ -3238,7 +3239,7 @@ requester_id = 3
         assert_eq!(findings.len(), 1);
         assert_eq!(
             (findings[0].1.as_str(), findings[0].3.as_str()),
-            ("unsettled", "the fixer gave no verdict")
+            ("unsettled", "the executor gave no verdict")
         );
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
@@ -3249,7 +3250,7 @@ requester_id = 3
     #[tokio::test]
     async fn a_reviewer_that_reports_a_fixed_finding_again_stops_the_loop() {
         let claim = "x must be 3, the caller divides by it";
-        let (f, _, fixer, remote) = looping(
+        let (f, _, executor, remote) = looping(
             "review-loop-repeat",
             ScriptedClient::new(
                 "r",
@@ -3283,7 +3284,11 @@ requester_id = 3
             (Some("repeating_finding"), Some(2)),
             "at the repeat, not at max_rounds (50)"
         );
-        assert_eq!(fixer.requests().len(), 3, "the fixer never got the repeat");
+        assert_eq!(
+            executor.requests().len(),
+            3,
+            "the executor never got the repeat"
+        );
         let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
         let findings = loop_findings(&f.app, &run).await;
         assert_eq!(findings[0].1, "fixed");
@@ -3302,7 +3307,7 @@ requester_id = 3
     #[tokio::test]
     async fn a_reviewer_that_changes_the_workspace_and_repeats_a_fixed_finding_fails() {
         let claim = "x must be 3, the caller divides by it";
-        let (f, _, fixer, _remote) = looping(
+        let (f, _, executor, _remote) = looping(
             "review-loop-scribble",
             ScriptedClient::new(
                 "r",
@@ -3341,13 +3346,17 @@ requester_id = 3
             "{:?}",
             report.summary
         );
-        assert_eq!(fixer.requests().len(), 3, "the fixer never got round 2");
+        assert_eq!(
+            executor.requests().len(),
+            3,
+            "the executor never got round 2"
+        );
         assert!(!report.outcome.unwrap().completed());
     }
 
     #[tokio::test]
     async fn a_round_the_time_ran_out_before_is_not_counted() {
-        let (f, reviewer, fixer, _remote) = looping_with(
+        let (f, reviewer, executor, _remote) = looping_with(
             "review-loop-no-time",
             "run_timeout_secs = 0\n",
             ScriptedClient::new("r", []),
@@ -3364,7 +3373,7 @@ requester_id = 3
             (record.loop_stop.as_deref(), record.loop_rounds),
             (Some("timeout"), Some(0))
         );
-        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        assert!(reviewer.requests().is_empty() && executor.requests().is_empty());
         let summary = report.summary.unwrap();
         assert!(summary.contains("ran 0 rounds"), "{summary}");
         assert!(
@@ -3375,7 +3384,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn the_loop_stops_at_its_time_limit() {
-        let (f, reviewer, fixer, _remote) = looping_with(
+        let (f, reviewer, executor, _remote) = looping_with(
             "review-loop-slow",
             "run_timeout_secs = 1\n",
             ScriptedClient::new("r", [say("Thinking.")]).with_delay(Duration::from_secs(3)),
@@ -3391,13 +3400,13 @@ requester_id = 3
             (Some("timeout"), Some(1))
         );
         assert_eq!(reviewer.requests().len(), 1);
-        assert!(fixer.requests().is_empty());
+        assert!(executor.requests().is_empty());
         assert_nothing_posted(&f.writer);
     }
 
     #[tokio::test]
     async fn a_reviewer_that_never_finishes_its_round_is_not_convergence() {
-        let (f, reviewer, fixer, remote) = looping(
+        let (f, reviewer, executor, remote) = looping(
             "review-loop-unfinished",
             ScriptedClient::new("r", (0..3).map(|_| say("Done."))),
             ScriptedClient::new("f", [say("Nothing to do.")]),
@@ -3410,7 +3419,7 @@ requester_id = 3
             .await
             .unwrap();
         assert_eq!(reviewer.requests().len(), 3, "nudged twice, then stopped");
-        assert!(fixer.requests().is_empty());
+        assert!(executor.requests().is_empty());
         let summary = report.summary.unwrap();
         assert!(!report.outcome.unwrap().completed(), "{summary}");
         assert!(!summary.contains("converged"), "{summary}");
@@ -3427,7 +3436,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn without_a_workspace_the_loop_ends_at_once_and_pushes_nothing() {
-        let (f, reviewer, fixer, remote) = looping(
+        let (f, reviewer, executor, remote) = looping(
             "review-loop-none",
             ScriptedClient::new("r", [say("src/a.rs:2: wrong.")]),
             ScriptedClient::new("f", [edit("let x = 1;", "let x = 3;")]),
@@ -3442,7 +3451,7 @@ requester_id = 3
         let error = record.error.unwrap_or_default();
         assert!(error.contains("needs a workspace"), "{error}");
         assert!(error.contains("the sandbox host is down"), "{error}");
-        assert!(reviewer.requests().is_empty() && fixer.requests().is_empty());
+        assert!(reviewer.requests().is_empty() && executor.requests().is_empty());
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(before, after, "nothing pushed");
         assert_no_stage_running(&f.app, &run).await;
@@ -3450,7 +3459,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_loop_stopped_after_it_pushed_still_reports_the_check_on_the_new_head() {
-        let (f, _reviewer, _fixer, remote) = looping(
+        let (f, _reviewer, _executor, remote) = looping(
             "review-loop-stopped",
             ScriptedClient::new(
                 "r",
@@ -3517,7 +3526,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_loop_out_of_rounds_with_findings_open_is_no_pass() {
-        let (mut f, _reviewer, _fixer, _remote) = looping(
+        let (mut f, _reviewer, _executor, _remote) = looping(
             "review-loop-rounds",
             ScriptedClient::new(
                 "r",
@@ -3565,8 +3574,8 @@ requester_id = 3
     }
 
     #[tokio::test]
-    async fn a_compacted_fixer_keeps_its_own_history_not_the_reviewer_s_task() {
-        let (mut f, reviewer, fixer, _remote) = looping(
+    async fn a_compacted_executor_keeps_its_own_history_not_the_reviewer_s_task() {
+        let (mut f, reviewer, executor, _remote) = looping(
             "review-loop-compact",
             ScriptedClient::new(
                 "r",
@@ -3612,9 +3621,9 @@ requester_id = 3
         assert!(first.contains(earlier), "{first}");
         assert!(first.contains("get_file_diff"), "{first}");
         assert!(first.contains("f2 at src/a.rs:1"), "{first}");
-        // The fixer's round 3: the summary, never the reviewer's task or a
+        // The executor's round 3: the summary, never the reviewer's task or a
         // tool it does not have.
-        let fixing = fixer.requests();
+        let fixing = executor.requests();
         assert_eq!(fixing.len(), 6);
         let first = texts(&fixing[4]).into_iter().next().unwrap();
         assert!(first.contains(earlier), "{first}");
@@ -3625,7 +3634,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
-        let (mut f, _reviewer, _fixer, remote) = looping(
+        let (mut f, _reviewer, _executor, remote) = looping(
             "review-loop-cancel-push",
             ScriptedClient::new(
                 "r",
@@ -3740,11 +3749,11 @@ requester_id = 3
     }
 
     /// A pull request the loop may not push to is reviewed by the reviewer
-    /// alone (#307): one round, no fixer, nothing pushed or posted, and the
+    /// alone (#307): one round, no executor, nothing pushed or posted, and the
     /// finding stands in the check, with why it was not fixed.
     #[tokio::test]
     async fn a_pull_request_from_a_fork_is_reviewed_by_the_reviewer_alone() {
-        let (f, reviewer, fixer, remote) = looping_from(
+        let (f, reviewer, executor, remote) = looping_from(
             "review-loop-fork",
             "someone/r",
             ScriptedClient::new("m", (0..4).map(|_| done())),
@@ -3785,7 +3794,7 @@ requester_id = 3
         assert_eq!(outcome.summary(), summary, "the check says the same");
 
         assert!(!reviewer.requests().is_empty(), "the reviewer reviewed");
-        assert!(fixer.requests().is_empty(), "no fixer");
+        assert!(executor.requests().is_empty(), "no executor");
         assert!(f.model.requests().is_empty(), "no lane");
         let lanes = f.app.store.lanes(&run).await.unwrap();
         let names: Vec<_> = lanes.iter().map(|l| l.name.as_str()).collect();
@@ -3820,7 +3829,7 @@ requester_id = 3
     /// A reviewer alone that finds nothing passes the check.
     #[tokio::test]
     async fn a_pull_request_from_a_fork_with_nothing_to_find_passes() {
-        let (f, _, fixer, _remote) = looping_from(
+        let (f, _, executor, _remote) = looping_from(
             "review-loop-fork-clean",
             "someone/r",
             ScriptedClient::new("m", []),
@@ -3840,7 +3849,7 @@ requester_id = 3
         assert!(summary.starts_with("No issues found."), "{summary}");
         assert!(summary.contains("reviewed only, since"), "{summary}");
         assert!(!summary.contains("Open findings"), "{summary}");
-        assert!(fixer.requests().is_empty());
+        assert!(executor.requests().is_empty());
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.loop_stop.as_deref(), Some("review_only"));
     }
@@ -3881,7 +3890,7 @@ requester_id = 3
     #[tokio::test]
     async fn a_branch_that_moved_after_queueing_is_reviewed_alone_at_the_queued_commit() {
         let peek = Arc::new(Peek::default());
-        let (f, reviewer, fixer, remote) = looping_from(
+        let (f, reviewer, executor, remote) = looping_from(
             "review-loop-moved",
             "o/r",
             ScriptedClient::new("m", []),
@@ -3907,7 +3916,7 @@ requester_id = 3
             "{summary}"
         );
         assert!(report.outcome.unwrap().completed(), "{summary}");
-        assert!(!reviewer.requests().is_empty() && fixer.requests().is_empty());
+        assert!(!reviewer.requests().is_empty() && executor.requests().is_empty());
         let seen = peek.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_ne!(seen[0], "moved on\n", "the queued commit, not the new head");

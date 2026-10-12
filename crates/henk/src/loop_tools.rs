@@ -1,5 +1,5 @@
 //! The tools of a review loop's handoff (#285): the reviewer reports each
-//! finding and finishes its round, and the fixer lists the round's findings
+//! finding and finishes its round, and the executor lists the round's findings
 //! and gives each one verdict. Nothing here reaches the platform; every
 //! finding and verdict goes on the run's drafts, and the loop passes them
 //! on to the other side.
@@ -93,17 +93,17 @@ impl Handoff {
     }
 }
 
-/// A verdict as the drafts table keeps it: the fixer's, or the loop's own
+/// A verdict as the drafts table keeps it: the executor's, or the loop's own
 /// for an unsettled finding; a fix with its commit.
 fn decision(verdict: &LoopVerdict) -> DraftDecision {
     let (stored, checker, commit) = match verdict {
         LoopVerdict::Fixed { commit, .. } => (
             DraftVerdict::Fixed,
-            "fixer",
+            "executor",
             commit.clone().unwrap_or_default(),
         ),
-        LoopVerdict::Rejected { .. } => (DraftVerdict::Rejected, "fixer", String::new()),
-        LoopVerdict::WontFix { .. } => (DraftVerdict::WontFix, "fixer", String::new()),
+        LoopVerdict::Rejected { .. } => (DraftVerdict::Rejected, "executor", String::new()),
+        LoopVerdict::WontFix { .. } => (DraftVerdict::WontFix, "executor", String::new()),
         LoopVerdict::Unsettled { .. } => (DraftVerdict::Unsettled, "", String::new()),
     };
     DraftDecision {
@@ -158,10 +158,10 @@ pub fn reviewer_continuation(handoff: Arc<Handoff>) -> ContinuationFactory {
     })
 }
 
-/// The fixer's nudge: a verdict for every finding of the round, at most
+/// The executor's nudge: a verdict for every finding of the round, at most
 /// [`NUDGES`] times.
 #[must_use]
-pub fn fixer_continuation(handoff: Arc<Handoff>) -> ContinuationFactory {
+pub fn executor_continuation(handoff: Arc<Handoff>) -> ContinuationFactory {
     Arc::new(move || {
         let handoff = Arc::clone(&handoff);
         let nudged = AtomicU32::new(0);
@@ -183,7 +183,7 @@ pub fn fixer_continuation(handoff: Arc<Handoff>) -> ContinuationFactory {
     })
 }
 
-/// `report_finding`: one finding, to the fixer.
+/// `report_finding`: one finding, to the executor.
 pub struct ReportFinding(pub Arc<Handoff>);
 
 #[async_trait::async_trait]
@@ -191,7 +191,7 @@ impl Tool for ReportFinding {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("report_finding"),
-            description: "Reports one finding to the fixer: one real problem this change introduces, at one line. Nothing is posted on the pull request. To contest the fixer's rejection of a finding, once, report it again with new evidence and name it in reopens.".to_owned(),
+            description: "Reports one finding to the executor: one real problem this change introduces, at one line. Nothing is posted on the pull request. To contest the executor's rejection of a finding, once, report it again with new evidence and name it in reopens.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -274,7 +274,7 @@ impl Tool for FinishRound {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("finish_round"),
-            description: "Ends your round once every finding is reported: the fixer gets them next. Lists the files you covered. With no new findings this round, the review is done.".to_owned(),
+            description: "Ends your round once every finding is reported: the executor gets them next. Lists the files you covered. With no new findings this round, the review is done.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -333,7 +333,7 @@ impl Tool for ListFindings {
     }
 }
 
-/// `give_verdict`: the fixer's one verdict on one finding.
+/// `give_verdict`: the executor's one verdict on one finding.
 pub struct GiveVerdict(pub Arc<Handoff>);
 
 #[async_trait::async_trait]

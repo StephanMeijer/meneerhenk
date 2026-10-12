@@ -27,7 +27,7 @@
   const KINDS: Record<string, string> = {
     all: 'every kind',
     reviewer: 'reviewers',
-    fixer: 'fixers',
+    executor: 'executors',
     planner: 'planner',
     address: 'address runs',
     lane: 'review lanes (before the loop)',

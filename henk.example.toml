@@ -257,7 +257,7 @@ requester_id = 523456789012345678
 # toolchain = "mise"
 # setup = [["npm", "ci"]]
 # Reviews get a workspace too: the review loop's, at the pull request's
-# head, set up as above; only the fixer's checked changes leave it. Refused
+# head, set up as above; only the executor's checked changes leave it. Refused
 # on the host backend: a review runs setup on the pull request's code.
 # review = true
 # The planner gets a workspace too: the default branch, set up as above,

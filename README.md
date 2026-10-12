@@ -31,14 +31,14 @@ planner gets the read-only session, filtered and pinned by a guard that
 rewrites every call to its own repository (§8.5). Every model gets tools
 of Henk's own whose implementations enforce the rules of the spec in code.
 
-A review is a loop of two sessions (#284, #309), a reviewer and a fixer,
+A review is a loop of two sessions (#284, #309), a reviewer and an executor,
 taking turns in one workspace at the pull request's head. The reviewer
 works from the diff Henk fetched once (`list_changed_files`,
 `get_file_diff`, every line numbered on both sides) and the workspace
 (`list_files`, `search`, `read_file`, and `bash` on a backend apart from
-Henk). It hands each finding to the fixer with `report_finding` and ends
+Henk). It hands each finding to the executor with `report_finding` and ends
 its round with `finish_round`; nothing is posted on the pull request. The
-fixer reads them (`list_findings`), checks each against the code, fixes
+executor reads them (`list_findings`), checks each against the code, fixes
 what holds with an address run's tools (`edit_file`, `write_file`,
 `run_checks`, and `bash` on a backend apart from Henk) and gives each its
 verdict with `give_verdict`: fixed, rejected (it does not hold) or won't
@@ -74,7 +74,7 @@ conversation passes a size budget (`review.max_conversation_chars` and
 stubs until it is well under it, so the history stays append-only for
 several turns and the provider's prompt cache keeps paying (Anthropic
 models are marked for caching); a reviewer that ends its turn without
-finishing its round, or is cut off at the output cap, and a fixer that
+finishing its round, or is cut off at the output cap, and an executor that
 leaves a finding without a verdict, are asked again, at most twice a
 round; and a session that repeats one tool call with the same arguments
 is refused and then stopped as stuck (`agent.max_repeated_calls`, for
@@ -256,7 +256,7 @@ check_commands = [["cargo", "test", "--offline"]]
 - `lane_timeout_secs` becomes `timeout_secs` and `lane_max_turns` becomes
   `max_turns` on each role, now per round. Their defaults are the old
   ones, 600 and 40.
-- `[review.fact_check]` goes with nothing in its place: the fixer checks
+- `[review.fact_check]` goes with nothing in its place: the executor checks
   each finding against the code and rejects what does not hold. Skills on
   a lane or the fact-check go too; a role takes skills of its own.
 - `[roles.executor]` is required, since the loop pushes: on
@@ -386,10 +386,10 @@ on one machine, with one review loop:
    nothing is pushed). The run id is printed first; `henk runs show <id>`
    prints the run, its rounds, sessions, tool calls, transcripts, findings
    with their verdicts and timeline afterwards, and `henk runs show <id>
-   --transcript reviewer` what the reviewer's model saw and said (`fixer`
-   for the fixer's).
+   --transcript reviewer` what the reviewer's model saw and said (`executor`
+   for the executor's; `fixer` in runs before #323).
 
-Every tool call of every session (the reviewer, the fixer, the planner,
+Every tool call of every session (the reviewer, the executor, the planner,
 address runs) is on the run record (#190): the session, model, turn, tool
 and where it comes from, how it ended (`ok`, `error`, refused by the scope
 or the repeat guard, an unknown tool, malformed arguments, not run,
@@ -655,12 +655,12 @@ toolchain = "mise"
 setup = [["npm", "ci"]]
 ```
 
-Every review works in a workspace (#284): the reviewer and the fixer
+Every review works in a workspace (#284): the reviewer and the executor
 share one, holding the pull request's head, set up as above before the
 reviewer starts; a reviewer alone gets the reviewed commit, fetched by its
 sha, so a push during the review changes nothing. The reviewer's changes
 are never exported, and a reviewer that changes a file stops the loop; only
-the fixer's changes, checked like an address run's, become a commit. In
+the executor's changes, checked like an address run's, become a commit. In
 the workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), the same code tools an address run has, and on a backend
@@ -691,7 +691,7 @@ own user: `plan = true` is refused there, and an address run there keeps
 not read Unicode as the `search` tool needs.
 
 A review runs the profile's setup on code that anyone who can open a pull
-request chose, from a fork too, and the fixer's checks on what it pushes.
+request chose, from a fork too, and the executor's checks on what it pushes.
 On the `host` backend that code runs as Henk's own user, next to his
 configuration and keys, so give repositories that take pull requests from
 people you do not trust a profile on a backend apart from Henk.
@@ -779,7 +779,7 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - the runs, with what is running now updating itself, filters by kind,
   status, platform and repository, and paging;
 - each run with its sessions, tool calls, the review loop's findings and
-  the fixer's verdicts, timeline and the events that led to it, and each
+  the executor's verdicts, timeline and the events that led to it, and each
   session's whole conversation; a running run updates as it happens:
   sessions start and end, tool calls, findings and verdicts appear,
   without a reload. A review from before #309 still shows its lanes, their
@@ -788,7 +788,7 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
 - tools: how each tool fared per model and kind of session, with error
   and refusal rates, the calls that went wrong with their arguments, and on
   each run every call by turn, linked to that turn of the conversation;
-- sessions: how often the reviewer and the fixer (and the lanes of
+- sessions: how often the reviewer and the executor (and the lanes of
   reviews from before #309) finished, timed out or did not, and why;
 - a health page from configuration and the database, including whether
   `git` runs where Henk does and how many recent reviews got the
@@ -915,7 +915,7 @@ line in `docs/SPEC.md` once the team confirms it.
 - §3.1 GitHub drafts are not reviewed until marked ready (`review.github_drafts`).
 - §3.1 One review per pull/merge request at a time: the same commit joins
   the running review, a newer commit supersedes it.
-- §3.2 A review is the reviewer and fixer loop (#309): nothing is posted
+- §3.2 A review is the reviewer and executor loop (#309): nothing is posted
   on the pull request, and the check's summary carries the loop's report.
 - §3.3 A session that reaches its round's time limit, or a loop that
   reaches `run_timeout_secs`, stops the loop: what was pushed stands,

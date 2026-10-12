@@ -1101,7 +1101,7 @@ mod tests {
             max_conversation_chars: 10,
             ..AgentConfig::default()
         };
-        let mut session = ResumableSession::new("fixer", model, "s", ToolSet::new(), limits);
+        let mut session = ResumableSession::new("executor", model, "s", ToolSet::new(), limits);
         for round in ["round 1", "round 2", "round 3"] {
             session
                 .resume(
@@ -1174,7 +1174,7 @@ mod tests {
             max_conversation_chars: 10,
             ..AgentConfig::default()
         };
-        let mut session = ResumableSession::new("fixer", model, "s", ToolSet::new(), limits);
+        let mut session = ResumableSession::new("executor", model, "s", ToolSet::new(), limits);
         let round = async |session: &mut ResumableSession, text: &str| {
             session
                 .resume(
@@ -1200,7 +1200,11 @@ mod tests {
             "no thinking replayed after the edit"
         );
         assert_eq!(sent.messages.len(), 3);
-        let stored = store.transcript(&run_id(), "fixer").await.unwrap().unwrap();
+        let stored = store
+            .transcript(&run_id(), "executor")
+            .await
+            .unwrap()
+            .unwrap();
         let body: serde_json::Value = serde_json::from_str(&stored.body).unwrap();
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 8, "every round: {body}");

@@ -495,8 +495,8 @@ pub struct ReviewConfig {
     /// Whether GitHub draft pull requests are reviewed (open question 1).
     #[serde(default)]
     pub github_drafts: bool,
-    /// The reviewer↔fixer loop (#284): a review is one reviewer and one
-    /// fixer taking turns. Absent: reviews are off.
+    /// The reviewer↔executor loop (#284): a review is one reviewer and one
+    /// executor taking turns. Absent: reviews are off.
     #[serde(default, rename = "loop")]
     pub r#loop: Option<LoopConfig>,
     /// Changed files no review reads (§3.2): lockfiles and generated
@@ -563,13 +563,13 @@ pub struct SkillsConfig {
     pub dir: String,
 }
 
-/// The reviewer↔fixer loop (#284): a reviewer reviews, a fixer fixes what
+/// The reviewer↔executor loop (#284): a reviewer reviews, an executor fixes what
 /// holds and pushes to the pull request's branch, and each resumes its own
 /// conversation the next round.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopConfig {
-    /// Rounds at most: one round is a reviewer turn and a fixer turn.
+    /// Rounds at most: one round is a reviewer turn and an executor turn.
     #[serde(default = "default_loop_max_rounds")]
     pub max_rounds: u32,
     /// Wall-clock limit for the whole loop, in seconds (#286): no round

@@ -1,5 +1,5 @@
-//! The findings of a reviewer↔fixer loop (#285): what the reviewer reports,
-//! and the one verdict the fixer, or the loop's end, gives each.
+//! The findings of a reviewer↔executor loop (#285): what the reviewer reports,
+//! and the one verdict the executor, or the loop's end, gives each.
 //!
 //! The reviewer may contest a rejection once, by reporting the finding
 //! again with new evidence; a finding rejected twice is closed. A `fixed`
@@ -46,19 +46,19 @@ pub struct Report {
 /// The one verdict a finding ends with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopVerdict {
-    /// The fixer fixed it; `commit` once Henk pushed the fix.
+    /// The executor fixed it; `commit` once Henk pushed the fix.
     Fixed {
-        /// What the fixer changed.
+        /// What the executor changed.
         what: String,
         /// The pushed commit.
         commit: Option<String>,
     },
-    /// The fixer showed it does not hold.
+    /// The executor showed it does not hold.
     Rejected {
         /// Why, naming the code that shows it.
         reason: String,
     },
-    /// It holds, but the fixer will not fix it here.
+    /// It holds, but the executor will not fix it here.
     WontFix {
         /// Why, such as out of the pull request's scope.
         reason: String,
@@ -164,7 +164,7 @@ pub enum LoopStop {
     Converged,
     /// The rounds ran out.
     MaxRounds(u32),
-    /// The reviewer reported again what the fixer fixed: they are going in
+    /// The reviewer reported again what the executor fixed: they are going in
     /// circles.
     RepeatingFinding {
         /// The new report.
@@ -172,7 +172,7 @@ pub enum LoopStop {
         /// The fixed finding it repeats.
         of: FindingId,
     },
-    /// The checks fail after the fixer's changes; nothing was pushed.
+    /// The checks fail after the executor's changes; nothing was pushed.
     BuildFailing(String),
     /// The run's time limit, or a session's in a round.
     Timeout(String),
@@ -180,7 +180,7 @@ pub enum LoopStop {
     SessionFailed(String),
     /// The reviewer changed files in the workspace.
     WorkspaceChanged,
-    /// The fixer's changes could not be pushed.
+    /// The executor's changes could not be pushed.
     PushRefused(String),
     /// Someone or something cancelled the run.
     Cancelled,
@@ -223,7 +223,7 @@ impl LoopStop {
     }
 
     /// Whether the loop stopped with the reviewer's last findings open: at
-    /// `max_rounds` the fixer's answer to them was never reviewed, so the
+    /// `max_rounds` the executor's answer to them was never reviewed, so the
     /// review is no pass even with no finding left unsettled.
     #[must_use]
     pub fn left_findings_open(&self) -> bool {
@@ -505,7 +505,7 @@ impl Ledger {
     }
 
     /// Whether the finding still stands at the end of a run: unsettled, or
-    /// one the fixer would not fix.
+    /// one the executor would not fix.
     fn stands(finding: &LoopFinding) -> bool {
         matches!(
             finding.verdict,

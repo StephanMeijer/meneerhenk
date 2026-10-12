@@ -9,7 +9,7 @@
   import Problem from '$lib/ui/Problem.svelte';
 
   /** How each session ended over the last reviews (#229): the review
-   * loop's reviewer and fixer, and the lanes and fact-checks of reviews
+   * loop's reviewer and executor, and the lanes and fact-checks of reviews
    * from before the loop. A square per review, oldest left; a row with
    * many gaps in green is a session that makes reviews thinner. */
   let { load = laneStats }: { load?: (query: string) => Promise<LaneStats> } = $props();

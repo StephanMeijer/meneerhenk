@@ -42,7 +42,7 @@
 <div class="page-head">
   <h1>Sessions</h1>
   <p class="intro">
-    How each review session ended: the loop's reviewer and fixer, and the lanes and fact-checks of
+    How each review session ended: the loop's reviewer and executor, and the lanes and fact-checks of
     reviews from before the loop. Cancelled and superseded reviews are left out: their sessions were
     stopped for them, by a person or for a newer commit.
   </p>

@@ -340,7 +340,7 @@ pub fn address_tools(ctx: &Arc<AddressContext>) -> ToolSet {
 }
 
 /// The tools to read, change and check the code, without the review
-/// threads: what the fixer of a review loop works with (#284).
+/// threads: what the executor of a review loop works with (#284).
 #[must_use]
 pub fn edit_tools(ctx: &Arc<AddressContext>) -> ToolSet {
     let mut set = ToolSet::new();

@@ -21,9 +21,9 @@ pub const ADDRESS: &str = include_str!("../prompts/address.md");
 /// `{{repo}}` say which pull request.
 pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
 
-/// Instructions for the fixer of a review loop (#284). `{{ref}}`,
+/// Instructions for the executor of a review loop (#284). `{{ref}}`,
 /// `{{repo}}` and `{{max_files}}` are filled in.
-pub const LOOP_FIXER: &str = include_str!("../prompts/loop_fixer.md");
+pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
@@ -74,12 +74,12 @@ mod tests {
         assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
-        assert!(henk_domain::text::is_in_style(LOOP_FIXER));
+        assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
         for tool in ["report_finding", "finish_round", "reopens"] {
             assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
         }
         for tool in ["list_findings", "give_verdict", "run_checks"] {
-            assert!(LOOP_FIXER.contains(&format!("`{tool}`")), "{tool}");
+            assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
         assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
         for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {

@@ -29,7 +29,7 @@ flowchart LR
     subgraph process["henk serve, one process"]
         SRV["HTTP server<br/>webhooks, API, run pages"]
         COORD["Coordinator<br/>one review per PR at a time"]
-        REV["Review orchestrator<br/>reviewer and fixer in turns"]
+        REV["Review orchestrator<br/>reviewer and executor in turns"]
         PLAN["Planner"]
         DB[("SQLite or PostgreSQL<br/>run records")]
     end
@@ -142,8 +142,8 @@ so every HTTPS client in the process shares the same rustls setup.
 
 A `synchronize` webhook from GitHub, start to finish. The GitLab path is the
 same with the writer swapped (section 10 lists the differences). A review is
-the reviewer↔fixer loop (#284, #309): a reviewer model reviews the pull
-request, a fixer model fixes what holds, and Henk pushes the fix to the pull
+the reviewer↔executor loop (#284, #309): a reviewer model reviews the pull
+request, an executor model fixes what holds, and Henk pushes the fix to the pull
 request's branch, round after round, until the reviewer finds nothing more or
 a limit stops it.
 
@@ -161,7 +161,7 @@ sequenceDiagram
     participant A as AddressWriter
     participant K as Workspace
     participant V as Reviewer session
-    participant F as Fixer session
+    participant F as Executor session
     participant P as push.rs
     participant DB as RunStore
 
@@ -189,7 +189,7 @@ sequenceDiagram
         V->>K: get_file_diff, read_file, search, bash
         V->>DB: report_finding: a loop_finding draft
         V-->>L: finish_round
-        opt findings, and a fixer
+        opt findings, and an executor
             L->>F: resume: the round's findings
             F->>K: read, edit_file, write_file, run_checks
             F->>DB: give_verdict
@@ -219,18 +219,18 @@ nothing to review and no loop.
 `AddressWriter`. When Henk may not push to it (a fork, the default or a
 protected branch, `push_refusal`) or its branch moved after the review was
 queued, the reviewer reviews alone (#307): one round at the reviewed commit,
-fetched by its sha, no fixer, nothing pushed, and its findings stand in the
+fetched by its sha, no executor, nothing pushed, and its findings stand in the
 check. Otherwise the loop clones the branch at its head. Either way it opens
 one workspace, set up as the repository's profile says (section 7a), and
 both sessions take turns in it: after a push the workspace holds the new
 head, so nothing has to move.
 
-The reviewer and the fixer are each a `henk_session::ResumableSession`: every
+The reviewer and the executor are each a `henk_session::ResumableSession`: every
 round resumes its own conversation, and a session's lane row, timeline and
 transcript cover all its rounds. The reviewer reads the diff per file with
 line numbers (`diff_tools.rs`) and the code in the workspace
 (`code_tools.rs`), and hands over what it found with `report_finding`, then
-`finish_round`. The fixer gets the round's findings as data, edits and runs
+`finish_round`. The executor gets the round's findings as data, edits and runs
 the checks as an address run does (`address_tools::edit_tools`, without the
 review threads), and gives each finding one verdict with `give_verdict`:
 fixed, rejected or won't fix. Findings and verdicts live in the
@@ -239,7 +239,7 @@ fixed, rejected or won't fix. Findings and verdicts live in the
 A session that stops short of `finish_round` or a verdict is nudged at most
 twice (`loop_tools.rs`), then what it left is settled for it.
 
-What the fixer changed is checked like an address run's changeset (§3.5):
+What the executor changed is checked like an address run's changeset (§3.5):
 the configured checks must pass in the workspace, and `checked_changeset`
 refuses `.git`, escapes, links, submodules and too many files. `push.rs`,
 shared with the address run, then applies the changeset to a fresh checkout
@@ -248,12 +248,12 @@ after reading the branch again: a head that moved, or a branch Henk may no
 longer push to, refuses the push. The commit is recorded in
 `App::own_pushes` before it leaves, so the webhook about it starts no other
 review. The reviewer's next message carries the pushed commit's patch and the
-fixer's verdicts; a rejection may be contested once, with new evidence.
+executor's verdicts; a rejection may be contested once, with new evidence.
 
 The loop stops (`henk_domain::review_loop::LoopStop`) when a round has no new
 findings (converged), at `max_rounds`, when a finding repeats one that was
 fixed, when the reviewer alone has had its round, when the checks fail after
-the fixer's changes, when a push is refused, when the reviewer changed its
+the executor's changes, when a push is refused, when the reviewer changed its
 workspace, when a session fails or runs out of time (per round its role's
 `timeout_secs`, for the whole loop `run_timeout_secs`, #286), or on a
 cancel. Every finding then gets one final verdict; one left without is
@@ -292,13 +292,13 @@ The most important picture in this file. A model never receives a credential
 or a tool that writes to a platform. What it receives is a list of tool names;
 every call goes through Henk's dispatcher, and every MCP call through the
 guard. A review's sessions get no MCP tools: the reviewer reads the diff and
-its workspace, and the fixer edits the workspace, which only Henk's code turns
+its workspace, and the executor edits the workspace, which only Henk's code turns
 into a commit (section 3).
 
 Each session's tools are built once, when the session starts, and cut to
 what its role grants (`crates/henk/src/roles.rs`, `grant`). The roles and
 their ceilings are a pure rule in `crates/henk-domain/src/role.rs`: only
-the executor (the fixer) edits, the handoff tools belong to their side of
+the executor (the executor) edits, the handoff tools belong to their side of
 the pair, and the tracker and MCP tools are the planner's. A set built
 above its role's ceiling is a bug that tests stop on. The tool list never
 changes while a session runs, so a resumed round keeps the cached prompt
@@ -319,9 +319,9 @@ flowchart TD
     T --> M
     N -- "list_changed_files, get_file_diff" --> F0["the ReviewDiff fetched once per review<br/>numbered per file"]
     N -- "list_files, read_file, search, bash" --> F6["the session's own Workspace<br/>a reviewer's or planner's never exported"]
-    N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the fixer"]
-    N -- "list_findings, give_verdict" --> F2["the fixer: one verdict per finding<br/>on the drafts, for the reviewer"]
-    N -- "edit_file, write_file, run_checks" --> F3["the fixer's or address run's Workspace<br/>pushed only by Henk, after the checks"]
+    N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the executor"]
+    N -- "list_findings, give_verdict" --> F2["the executor: one verdict per finding<br/>on the drafts, for the reviewer"]
+    N -- "edit_file, write_file, run_checks" --> F3["the executor's or address run's Workspace<br/>pushed only by Henk, after the checks"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]
@@ -357,7 +357,7 @@ stateDiagram-v2
     Joined --> [*]
     state Running {
         [*] --> Rounds
-        Rounds --> Rounds: the fixer's changes pushed, the reviewer again
+        Rounds --> Rounds: the executor's changes pushed, the reviewer again
         Rounds --> Summarising: the loop stopped
     }
     Running --> Superseded: a newer commit arrived
@@ -460,10 +460,10 @@ A session (`henk-session`) is the other abstraction: `SessionSpec` says what
 varies (model, system prompt, opening messages, tools, limits) and
 `run_session` does what every session shares (the lane row, the loop, the stop
 mapping, the timeline line). A plan and an address run are one session each.
-A review is two `ResumableSession`s, the reviewer and the fixer (only the
+A review is two `ResumableSession`s, the reviewer and the executor (only the
 reviewer when it reviews alone), each resumed once per round with its own
 conversation. The table that holds a session's row is still called `lanes`,
-after the review lanes it was made for: every session, reviewer, fixer,
+after the review lanes it was made for: every session, reviewer, executor,
 planner or address, records one row there (section 8).
 
 ## 7. Planning
@@ -560,13 +560,13 @@ A review with files to review opens one workspace, whatever the profile's
 (`workspace/traced.rs`). The reviewer sees it through `workspace::for_lane`,
 which refuses `export` for every run but an address run
 (`henk_domain::workspace::EnvLane::exports`), so nothing the reviewer does
-there can become a commit. The fixer works in the same workspace unwrapped:
+there can become a commit. The executor works in the same workspace unwrapped:
 its changes are exported, checked and pushed by `push.rs` from a fresh
 checkout, as an address run's are. The code tools on a workspace
 (`list_files`, `read_file`, `search`) are written once in `code_tools.rs` and
-shared by the address run, the loop's reviewer and fixer, and the planner
+shared by the address run, the loop's reviewer and executor, and the planner
 (`plan_workspace.rs` opens the planner's workspace), with `bash` for the
-reviewer, the fixer and the planner on a backend where the model may run
+reviewer, the executor and the planner on a backend where the model may run
 commands (`BackendKind::runs_model_commands`: not the host). A `search`
 pattern is checked in Henk (`workspace::Pattern`) in the syntax Rust's
 regex and PCRE read alike, since the host backend matches with the one and
@@ -609,7 +609,7 @@ erDiagram
     }
     lanes {
         text run_id FK
-        text name "one row per session: reviewer, fixer, planner, address"
+        text name "one row per session: reviewer, executor, planner, address"
         text model
         text status "running, finished, timed_out, did_not_finish"
         int turns
@@ -629,7 +629,7 @@ erDiagram
         text target "the rejected finding it contests"
         text body
         text verdict "fixed, rejected, wont_fix, unsettled"
-        text checker "fixer, or empty"
+        text checker "executor, or empty"
         text reason
         text comment_id "the commit of a fix"
     }
@@ -681,10 +681,10 @@ erDiagram
     }
 ```
 
-A review records one `lanes` row per session (the reviewer and the fixer),
+A review records one `lanes` row per session (the reviewer and the executor),
 its stages, and in `drafts` every finding the reviewer reported, with the
 kind `loop_finding`, and the verdict it ended with: `fixed` with the commit in
-`comment_id`, `rejected` or `wont_fix` by the fixer, or `unsettled` when the
+`comment_id`, `rejected` or `wont_fix` by the executor, or `unsettled` when the
 loop gave it one. Its `findings` stay empty, since nothing is posted. The
 names are those of the review lanes the tables were made for (#309 removed
 the lanes and the fact-check): the `lanes`, `drafts`, `findings` and `stages`

@@ -1345,8 +1345,10 @@ const DAY_DRAFTS: &str = concat!(
 const CALL_FILTER: &str = concat!(
     "(?1 IS NULL OR c.tool = ?1) AND (?2 IS NULL OR c.model = ?2)",
     " AND (?3 IS NULL OR (?3 = 'check' AND c.session LIKE 'check-%')",
-    " OR (?3 = c.session AND c.session IN ('planner', 'address', 'reviewer', 'fixer'))",
-    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address', 'reviewer', 'fixer')))",
+    " OR (?3 = c.session AND c.session IN ('planner', 'address', 'reviewer'))",
+    " OR (?3 = 'executor' AND c.session IN ('executor', 'fixer'))",
+    " OR (?3 = 'lane' AND c.session NOT LIKE 'check-%'",
+    " AND c.session NOT IN ('planner', 'address', 'reviewer', 'executor', 'fixer')))",
     " AND (?4 IS NULL OR ",
     instant_of!("c.at"),
     " >= ?4) AND (?5 IS NULL OR ",

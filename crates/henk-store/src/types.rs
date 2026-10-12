@@ -244,9 +244,9 @@ pub enum DraftVerdict {
     Cancelled,
     /// The write to the platform failed.
     Failed,
-    /// A review loop's fixer fixed it; `comment_id` holds the commit (#285).
+    /// A review loop's executor fixed it; `comment_id` holds the commit (#285).
     Fixed,
-    /// A review loop's fixer will not fix it here (#285).
+    /// A review loop's executor will not fix it here (#285).
     WontFix,
     /// A review loop ended before its verdict held (#285).
     Unsettled,
@@ -369,13 +369,13 @@ pub struct ToolCallRecord {
 }
 
 /// What kind of session a session name is: a review loop's `reviewer`
-/// and `fixer`, `planner`, `address`, and, in reviews from before the
+/// and `executor` (named `fixer` in runs before #323), `planner`, `address`, and, in reviews from before the
 /// loop, `check` for a fact-check and `lane` for a review lane.
 #[must_use]
 pub fn session_kind(session: &str) -> &'static str {
     match session {
         "reviewer" => "reviewer",
-        "fixer" => "fixer",
+        "executor" | "fixer" => "executor",
         "planner" => "planner",
         "address" => "address",
         _ if session.starts_with("check-") => "check",
@@ -1045,7 +1045,7 @@ pub struct ToolCallFilter {
     pub tool: Option<String>,
     /// The session's model.
     pub model: Option<String>,
-    /// The kind of session ([`session_kind`]): `reviewer`, `fixer`,
+    /// The kind of session ([`session_kind`]): `reviewer`, `executor`,
     /// `planner`, `address`, `lane` or `check`.
     pub session_kind: Option<String>,
     /// Made at or after this RFC 3339 time.
@@ -1400,7 +1400,8 @@ mod tests {
         assert_eq!(session_kind("planner"), "planner");
         assert_eq!(session_kind("address"), "address");
         assert_eq!(session_kind("reviewer"), "reviewer");
-        assert_eq!(session_kind("fixer"), "fixer");
+        assert_eq!(session_kind("executor"), "executor");
+        assert_eq!(session_kind("fixer"), "executor", "before #323");
         assert_eq!(session_kind("lane-a"), "lane");
         assert_eq!(session_kind("security"), "lane");
     }
