@@ -1864,18 +1864,9 @@ fn validate_execution(execution: &ExecutionConfig, roles: &RolesConfig) -> Resul
         ));
     }
     let prefix = &execution.branch_prefix;
-    let valid = prefix.ends_with('/')
-        && prefix.len() > 1
-        && !prefix.starts_with('/')
-        && !prefix.starts_with('-')
-        && !prefix.contains("//")
-        && !prefix.contains("..")
-        && prefix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
-    if !valid {
+    if !henk_domain::execute::is_branch_prefix(prefix) {
         return Err(ConfigError::Role(format!(
-            "execution.branch_prefix {prefix:?} must be letters, digits, -, _ or . ending in /, such as \"henk/\""
+            "execution.branch_prefix {prefix:?} must be letters, digits, -, _ or . ending in /, such as \"henk/\", with no part that starts with . or ends in .lock"
         )));
     }
     if execution.run_timeout_secs == 0 {
@@ -3107,7 +3098,9 @@ github_owners = ["docspec"]
             (config.run_timeout_secs, config.branch_prefix.as_str()),
             (3600, "henk/")
         );
-        for bad in ["henk", "/henk/", "-x/", "a//b/", "a..b/", "h nk/", "/"] {
+        for bad in [
+            "henk", "/henk/", "-x/", "a//b/", "a..b/", "h nk/", "/", "./", ".h/", "a.lock/",
+        ] {
             let error = execution(&format!(
                 "[execution]\nbranch_prefix = \"{bad}\"\n{executor}"
             ))
