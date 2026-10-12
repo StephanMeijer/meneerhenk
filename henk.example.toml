@@ -61,8 +61,8 @@ token_env = "GITLAB_PERSONAL_ACCESS_TOKEN"
 mcp_server = "gitlab"
 write_mcp_server = "gitlab-write"
 
-# Models. The review loop, address runs and the planner refer to one of
-# these by id.
+# Models. The roles (the reviewer, the executor and the planner) refer to
+# one of these by id.
 [models.proxy-fast]
 provider = "open_ai"
 base_url = "https://llm3.9xx.nl/v1"
@@ -129,7 +129,7 @@ run_timeout_secs = 3600
 
 # The web dashboard at /dashboard: sign in with GitHub. Only these GitHub
 # user ids (find yours at https://api.github.com/users/<login>) get in, and
-# each of them may start reviews, plans and address runs and cancel them.
+# each of them may start reviews and plans and cancel them.
 # Sign-in uses a GitHub OAuth App, not Henk's GitHub App, so GitHub asks only
 # who someone is. Its callback is {public_base_url}/dashboard/auth/callback.
 # [dashboard]
@@ -140,8 +140,7 @@ run_timeout_secs = 3600
 # session_hours = 12
 
 # Henk's own MCP server at /mcp: an agent (Claude Code, an editor) can start
-# reviews, plans and address runs, follow and cancel them, and read their
-# health. Each client has a named token, kept in the variable
+# reviews and plans, follow and cancel them, and read their health. Each client has a named token, kept in the variable
 # env names; a read token may only read. What a client starts is asked by
 # mcp:<name>. Off unless enabled; see README "MCP server".
 # [mcp_server]
@@ -193,11 +192,11 @@ timeout_secs = 1200
 # skills = ["issue-sizing"]
 
 # The executor changes the code: in the review loop it fixes what holds and
-# Henk pushes one fast-forward commit to the pull request's branch (never a
-# fork, the default branch or a protected branch). Address runs (`henk
-# address <pull request URL>`, spec §3.5) use it too until they are removed
-# (#327), with its tools and skills. GitHub only for now; the App needs
-# "Contents: write". requester_id is who those commits are for.
+# Henk pushes one fast-forward commit per round, "Fix review findings", to
+# the pull request's branch (never a fork, the default branch, a protected
+# branch or a branch that moved; spec §3.5). On GitHub the App needs
+# "Contents: write"; on GitLab Henk pushes with [gitlab].token_env.
+# requester_id is the Team Lead those commits are for, and credit.
 [roles.executor]
 model = "claude"
 max_turns = 40
@@ -215,7 +214,7 @@ requester_id = 523456789012345678
 # name = "Meneer Henk"
 # email = "henk@example.com"
 #
-# The trailers of the one commit, after Henk-Run and Requested-by. The
+# The trailers of each commit, after Henk-Run and Requested-by. The
 # requester is credited by the platform id in their [[people]] entry, never
 # by a display name; without one they get no trailers of their own.
 # [roles.executor.trailers]
@@ -230,9 +229,10 @@ requester_id = 523456789012345678
 # [roles.executor.repositories."StephanMeijer/scratch-repo"]
 # requester_signoff = true
 
-# Where an address run's file tools and checks run. Henk copies the pull
-# request's files into a workspace; only a checked changeset comes back, and
-# he commits it in a fresh checkout nothing ran in. The "host" backend runs
+# Where the review loop's workspace is: the reviewer's and the executor's
+# file tools and the checks run there. Henk copies the pull request's files
+# into it; only the executor's checked changeset comes back, and he commits
+# it in a fresh checkout nothing ran in. The "host" backend runs
 # the checks as Henk's own user on this machine: not isolated, and only the
 # time and output limits hold. `henk config check` says so.
 # [workspace]
@@ -325,8 +325,8 @@ call_timeout_secs = 60
 discord_id = 523456789012345678
 name = "Stephan"
 role = "team lead"
-# Platform user ids (not logins): an address-run commit Stephan asked for
-# credits him as <id>+<login>@users.noreply.github.com on GitHub, or
+# Platform user ids (not logins): a commit Henk pushes for a review
+# Stephan asked for credits him as <id>+<login>@users.noreply.github.com on GitHub, or
 # <id>-<username>@users.noreply.<host> on GitLab with the host of
 # [gitlab].api_url, with the login read from the platform at run time.
 # `curl https://api.github.com/users/<login>` shows a GitHub id.

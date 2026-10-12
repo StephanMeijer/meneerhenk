@@ -50,7 +50,7 @@ metadata:
 automountServiceAccountToken: false
 ---
 # A cap for the namespace as a whole, whatever the profiles say: adjust to
-# how many workspaces run at once (lanes, the fact-checker, address runs).
+# how many workspaces run at once (one per review, one per plan).
 apiVersion: v1
 kind: ResourceQuota
 metadata:

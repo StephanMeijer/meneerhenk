@@ -4,8 +4,8 @@ What the dashboard shows and does, as JSON, at `/dashboard/api/v1` (#198).
 The dashboard app at `/dashboard` (#197) is its client. It exists only when the
 `[dashboard]` table is configured, as the dashboard does.
 
-The older `POST /review`, `/plan` and `/address` endpoints with one shared
-bearer token (`hooks/api.rs`) are a separate thing and are unchanged.
+The older `POST /review` and `/plan` endpoints with one shared bearer
+token (`hooks/api.rs`) are a separate thing and are unchanged.
 Agents use the same reads and starts over MCP at `/mcp`, with their own
 tokens (README, "MCP server"); the tools answer with the types below.
 
@@ -82,11 +82,10 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 ### `GET /me`
 
 Who is signed in, the CSRF token their actions send, and the kinds of run
-`POST /runs` can start here (`address` only where address runs are
-configured).
+`POST /runs` can start: `review` and `plan`.
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "address"]}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan"]}
 ```
 
 ### `GET /health`
@@ -105,7 +104,7 @@ Runs, newest first, each with its `lanes` (`name`, `status`) and `stages`
 
 | Query | Meaning |
 |---|---|
-| `kind` | `review`, `plan`, `address`, `discord_turn` or `mail_reply` |
+| `kind` | `review`, `plan`, `address` (runs from before #327), `discord_turn` or `mail_reply` |
 | `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
@@ -146,7 +145,8 @@ One run with everything the run record holds about it:
 - `summary`, `error`, `check_id`, `heartbeat_at`;
 - `lanes`: every model session (a review loop's `reviewer` and `executor`,
   `fixer` in runs before #323,
-  the `planner`, `address`) with turns and tokens, and its `status`:
+  the `planner`, and `address` in address runs from before #327) with
+  turns and tokens, and its `status`:
   `running`, `finished`, `timed_out` (stopped at its time limit) or
   `did_not_finish` (`error` says why). Reviews made by lanes, before #309,
   have their lanes and `check-N` fact-check sessions here;
@@ -170,8 +170,9 @@ One run with everything the run record holds about it:
   skipped when it may not), `publish` (skipped: a review posts nothing),
   `done`. Runs from before #309 can have a `fact_check` stage after
   `lanes`. A plan goes `requested`,
-  `started`, `session`, `publish`, `done`; an address run `requested`,
-  `started`, `workspace`, `session`, `commit`, `push`, `replies`, `done`.
+  `started`, `session`, `publish`, `done`. An address run, from before
+  #327, went `requested`, `started`, `workspace`, `session`, `commit`,
+  `push`, `replies`, `done`.
   Runs from before stages were kept have none.
 
 Each lane also has `started_at` and `finished_at`.
@@ -377,7 +378,8 @@ How each tool fared across runs (#203): one row per tool, model and kind of
 session (`reviewer`, `executor`, `planner`, `address`, `lane`, `check`;
 `executor` includes the `fixer` of runs before #323), the
 most calls first. `lane` and `check` (the fact-check) are sessions of
-reviews from before the loop (#309).
+reviews from before the loop (#309), and `address` the session of address
+runs from before #327.
 
 | Query | Meaning |
 |---|---|
@@ -443,8 +445,7 @@ kept) and its outcomes.
 
 ### `POST /runs`
 
-Starts a review, plan or address run, exactly as the dashboard's start
-form does. The request becomes an event like a webhook, and the listeners
+Starts a review or a plan, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
 apply the allowlist and every refusal. Read the event to see what came of
 it.
 
@@ -452,7 +453,8 @@ it.
 {"kind": "review", "url": "https://github.com/o/r/pull/7", "commit": "abc1234"}
 ```
 
-`commit` (reviews) and `note` (plans and address runs) are optional.
+`kind` is `review` or `plan`. `commit` (reviews) and `note` (plans) are
+optional.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
 ### `POST /runs/{id}/cancel`

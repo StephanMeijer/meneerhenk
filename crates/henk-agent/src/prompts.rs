@@ -14,9 +14,6 @@ pub const PLAN_WORKSPACE: &str = include_str!("../prompts/plan_workspace.md");
 /// Instructions for the planner (§4).
 pub const PLANNER: &str = include_str!("../prompts/planner.md");
 
-/// Instructions for an address run (§3.5).
-pub const ADDRESS: &str = include_str!("../prompts/address.md");
-
 /// Instructions for the reviewer of a review loop (#284). `{{ref}}` and
 /// `{{repo}}` say which pull request.
 pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
@@ -69,7 +66,6 @@ mod tests {
     fn persona_is_in_style() {
         assert!(henk_domain::text::is_in_style(PERSONA));
         assert!(henk_domain::text::is_in_style(PLANNER));
-        assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
         assert!(henk_domain::text::is_in_style(EXECUTOR_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));

@@ -8,10 +8,8 @@ use henk_domain::allowlist::RepoRef;
 
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
-use crate::push::{
-    CommitIdentity, GitCredential, OpenThread, PullFacts, PushWriter, RepoHead, ThreadNote,
-};
-use crate::writer::{PlatformWriter as _, PostedComment, ReviewTarget};
+use crate::push::{CommitIdentity, GitCredential, PullFacts, PushWriter, RepoHead};
+use crate::writer::ReviewTarget;
 
 fn text(value: &Value, pointer: &str) -> String {
     value
@@ -29,34 +27,6 @@ fn path_segment(branch: &str) -> String {
 
 #[async_trait::async_trait]
 impl PushWriter for GitHubWriter {
-    async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
-        let threads = self
-            .api()
-            .review_threads(target.repo.owner(), target.repo.name(), target.number)
-            .await?;
-        Ok(threads
-            .into_iter()
-            .filter(|t| !t.resolved && !t.id.is_empty() && !t.comments.is_empty())
-            .map(|t| OpenThread {
-                thread_id: t.id,
-                path: t.path,
-                line: t.line,
-                outdated: t.outdated,
-                notes: t
-                    .comments
-                    .into_iter()
-                    .map(|c| ThreadNote {
-                        comment_id: c.database_id.to_string(),
-                        by_henk: c.author == self.bot_login(),
-                        author: c.author,
-                        author_id: c.author_id,
-                        body: c.body,
-                    })
-                    .collect(),
-            })
-            .collect())
-    }
-
     async fn pull_facts(&self, target: &ReviewTarget) -> Result<PullFacts, PlatformError> {
         let pr = self
             .api()
@@ -165,38 +135,5 @@ impl PushWriter for GitHubWriter {
             .filter(|login| !login.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| PlatformError::Decode(format!("user {id} without login")))
-    }
-
-    async fn resolve_thread(
-        &self,
-        _target: &ReviewTarget,
-        thread_id: &str,
-    ) -> Result<(), PlatformError> {
-        self.api().resolve_review_thread(thread_id).await
-    }
-
-    fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String {
-        let remote = self.api().git_remote(&target.repo.path());
-        format!("{}/commit/{sha}", remote.trim_end_matches(".git"))
-    }
-
-    async fn reply_in_thread(
-        &self,
-        target: &ReviewTarget,
-        thread: &OpenThread,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        let first = thread
-            .first()
-            .ok_or_else(|| PlatformError::Decode("thread without comments".to_owned()))?;
-        self.reply(target, &first.comment_id, true, body).await
-    }
-
-    async fn post_comment(
-        &self,
-        target: &ReviewTarget,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError> {
-        crate::writer::PlatformWriter::post_comment(self, target, body).await
     }
 }

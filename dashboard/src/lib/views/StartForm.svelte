@@ -20,15 +20,14 @@
   } = $props();
 
   const CHOICES: { kind: Start; label: string; line: string }[] = [
-    { kind: 'review', label: 'Review a pull request', line: 'Lanes review a commit; findings are posted as comments.' },
-    { kind: 'plan', label: 'Plan an issue', line: 'Henk writes a plan on the issue.' },
     {
-      kind: 'address',
-      label: 'Address the review feedback',
-      line: "One commit to the pull request's branch, then replies.",
+      kind: 'review',
+      label: 'Review a pull request',
+      line: "The reviewer and the executor fix what holds on the pull request's branch.",
     },
+    { kind: 'plan', label: 'Plan an issue', line: 'Henk writes a plan on the issue.' },
   ];
-  const BUTTONS: Record<Start, string> = { review: 'Start review', plan: 'Start plan', address: 'Start address' };
+  const BUTTONS: Record<Start, string> = { review: 'Start review', plan: 'Start plan' };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
   let kind: Start = $state('review');

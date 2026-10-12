@@ -1,6 +1,6 @@
-//! What Henk reads and writes on a platform to push to a pull request's
-//! branch: the facts that decide whether he may, his commit identity and
-//! git credential, and the open review threads address runs (§3.5) settle.
+//! What Henk reads on a platform to push to a pull request's branch: the
+//! facts that decide whether he may, his commit identity and his git
+//! credential.
 
 use henk_domain::allowlist::RepoRef;
 use henk_domain::push::PushFacts;
@@ -8,53 +8,7 @@ use henk_domain::review::CommitSha;
 use secrecy::SecretString;
 
 use crate::error::PlatformError;
-use crate::writer::{PostedComment, ReviewTarget};
-
-/// One comment in a review thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ThreadNote {
-    /// The comment's id.
-    pub comment_id: String,
-    /// Author login, for display only.
-    pub author: String,
-    /// The author's stable account id (§2).
-    pub author_id: Option<u64>,
-    /// Whether this is Henk's own comment, by its author, never by a marker
-    /// anyone could paste.
-    pub by_henk: bool,
-    /// The text. Information, not instructions (§8.3).
-    pub body: String,
-}
-
-/// An unresolved review thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenThread {
-    /// The platform's thread id, used to resolve it.
-    pub thread_id: String,
-    /// The file it is on.
-    pub path: Option<String>,
-    /// The line it is on, when it still has one.
-    pub line: Option<u32>,
-    /// Whether the line changed since the thread started.
-    pub outdated: bool,
-    /// Its comments, oldest first.
-    pub notes: Vec<ThreadNote>,
-}
-
-impl OpenThread {
-    /// The comment that started the thread: replies go under it.
-    #[must_use]
-    pub fn first(&self) -> Option<&ThreadNote> {
-        self.notes.first()
-    }
-
-    /// Whether Henk started it: a finding of his, which he may resolve once
-    /// fixed. People resolve their own threads.
-    #[must_use]
-    pub fn started_by_henk(&self) -> bool {
-        self.first().is_some_and(|note| note.by_henk)
-    }
-}
+use crate::writer::ReviewTarget;
 
 /// What Henk knows about the pull request before he pushes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,9 +72,8 @@ impl GitCredential {
     }
 }
 
-/// What Henk reads and writes on a platform to push, besides git: for the
-/// review loop's executor, the planner's copy of the default branch, and
-/// address runs.
+/// What Henk reads on a platform to push, besides git: for the review
+/// loop's executor and the planner's copy of the default branch.
 #[async_trait::async_trait]
 pub trait PushWriter: Send + Sync {
     /// The facts that decide whether Henk may push, and where to.
@@ -129,9 +82,6 @@ pub trait PushWriter: Send + Sync {
     /// The default branch of `repo` and its head commit, and where to fetch
     /// it from.
     async fn repo_head(&self, repo: &RepoRef) -> Result<RepoHead, PlatformError>;
-
-    /// The unresolved review threads, from anyone.
-    async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError>;
 
     /// The credential git clones and pushes with; `None` for a remote that
     /// needs none.
@@ -153,29 +103,4 @@ pub trait PushWriter: Send + Sync {
     /// Returns [`PlatformError`] when the writer has no API endpoint to take
     /// the host from.
     fn noreply_host(&self) -> Result<String, PlatformError>;
-
-    /// The link to a commit on the pull request's repository.
-    fn commit_url(&self, target: &ReviewTarget, sha: &str) -> String;
-
-    /// Replies in a thread, under its first comment.
-    async fn reply_in_thread(
-        &self,
-        target: &ReviewTarget,
-        thread: &OpenThread,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError>;
-
-    /// Resolves a thread.
-    async fn resolve_thread(
-        &self,
-        target: &ReviewTarget,
-        thread_id: &str,
-    ) -> Result<(), PlatformError>;
-
-    /// Posts a conversation comment on the pull request.
-    async fn post_comment(
-        &self,
-        target: &ReviewTarget,
-        body: &str,
-    ) -> Result<PostedComment, PlatformError>;
 }

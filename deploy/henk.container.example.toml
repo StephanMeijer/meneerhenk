@@ -96,8 +96,7 @@ env = { GITLAB_API_URL = "https://gitlab.com/api/v4", GITLAB_PERMISSION_MODE = "
 pass_env = ["GITLAB_PERSONAL_ACCESS_TOKEN"]
 
 # Henk's own MCP server at /mcp: an agent (Claude Code, an editor) can start
-# reviews, plans and address runs, follow and cancel them, and read review
-# quality and health. Each client has a named token, kept in the variable
+# reviews and plans, follow and cancel them, and read their health. Each client has a named token, kept in the variable
 # env names; a read token may only read. What a client starts is asked by
 # mcp:<name>. Off unless enabled; see README "MCP server".
 # [mcp_server]

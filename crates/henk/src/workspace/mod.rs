@@ -14,8 +14,7 @@ use std::time::Duration;
 use henk_domain::ignore::PathFilter;
 use henk_domain::path::{PathError, WorkspacePath};
 use henk_domain::workspace::{
-    BackendKind, Change, ChangeKind, EnvLane, FileMode, Limits, Profile, RawChange,
-    changeset_refusal,
+    BackendKind, Change, ChangeKind, FileMode, Limits, Profile, RawChange, changeset_refusal,
 };
 
 #[cfg(test)]
@@ -535,17 +534,13 @@ impl WorkspaceProvider for Backends {
     }
 }
 
-/// `workspace` as a run of kind `lane` may use it: a workspace whose
-/// changes are never taken out (a review's, #170) refuses `export`, so no
-/// tool or later change can turn what a lane did there into a commit
-/// (§8.2). An address run's is returned as it is.
+/// `workspace` with its changes never taken out, as the reviewer's and the
+/// planner's are (#170): it refuses `export`, so no tool or later change
+/// can turn what was done there into a commit (§8.2). The executor's is
+/// used as it is.
 #[must_use]
-pub fn for_lane(workspace: Arc<dyn Workspace>, lane: EnvLane) -> Arc<dyn Workspace> {
-    if lane.exports() {
-        workspace
-    } else {
-        Arc::new(NoExport { inner: workspace })
-    }
+pub fn never_exported(workspace: Arc<dyn Workspace>) -> Arc<dyn Workspace> {
+    Arc::new(NoExport { inner: workspace })
 }
 
 /// A workspace nothing is ever exported from; everything else passes.
@@ -1026,7 +1021,7 @@ mod tests {
             .open(source.path(), &Profile::default())
             .await
             .unwrap();
-        let review = for_lane(Arc::clone(&opened), EnvLane::Review);
+        let review = never_exported(Arc::clone(&opened));
         let path = WorkspacePath::parse("a.txt").unwrap();
         review.write(&path, b"two\n").await.unwrap();
         assert_eq!(review.read(&path, 100).await.unwrap(), b"two\n");
@@ -1037,8 +1032,6 @@ mod tests {
             1,
             "the change is there"
         );
-        let address = for_lane(Arc::clone(&opened), EnvLane::Address);
-        assert_eq!(address.export().await.unwrap().len(), 1);
         review.close().await;
         assert_eq!(provider.live(), 0);
     }

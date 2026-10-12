@@ -182,22 +182,19 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// Whether a run of this kind opens a workspace with this profile. An
-    /// address run always does; a review or a planner only when the profile
-    /// says so and not on the host backend.
+    /// Whether a run of this kind opens a workspace with this profile: only
+    /// when the profile says so and not on the host backend.
     ///
     /// A review workspace runs the setup stage on the pull request's code,
     /// and anyone who can open a pull request, from a fork too, decides
     /// what that code is. On the host it would run as Henk's own user,
     /// beside his configuration, database and keys (§8.4), so a review
-    /// gets a workspace only on a backend apart from Henk. An address run
-    /// is asked for by a colleague and touches only the repository's own
-    /// branches (§3.5). A planner's workspace holds the default branch,
+    /// gets a workspace only on a backend apart from Henk. A planner's
+    /// workspace holds the default branch,
     /// but its model runs commands there, so it too stays off the host.
     #[must_use]
     pub const fn serves(&self, lane: EnvLane) -> bool {
         match lane {
-            EnvLane::Address => true,
             EnvLane::Review => self.review && self.backend.runs_model_commands(),
             EnvLane::Plan => self.plan && self.backend.runs_model_commands(),
         }
@@ -299,56 +296,10 @@ impl WorkspacePolicy {
 /// A kind of run that may get a workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvLane {
-    /// A review lane (§3.2).
+    /// A review (§3.2).
     Review,
     /// A planner (§4).
     Plan,
-    /// An address run (§3.5).
-    Address,
-}
-
-impl EnvLane {
-    /// Whether what the run changed in its workspace is ever taken out.
-    /// Only an address run's is, and only to become its one commit
-    /// (§3.5); a review or a plan never changes the pull request (§8.2).
-    #[must_use]
-    pub const fn exports(self) -> bool {
-        matches!(self, Self::Address)
-    }
-}
-
-/// What a model can do in a workspace, through Henk's tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolKind {
-    /// List files.
-    List,
-    /// Read a file.
-    Read,
-    /// Search file contents.
-    Search,
-    /// Replace text in a file.
-    Edit,
-    /// Write a whole file.
-    Write,
-    /// Run a configured command.
-    Exec,
-}
-
-/// The workspace tools a lane gets. Only an address run has a workspace
-/// for now; reviews and plans read through their MCP sessions (§8.5).
-#[must_use]
-pub fn tools(lane: EnvLane) -> &'static [ToolKind] {
-    match lane {
-        EnvLane::Review | EnvLane::Plan => &[],
-        EnvLane::Address => &[
-            ToolKind::List,
-            ToolKind::Read,
-            ToolKind::Search,
-            ToolKind::Edit,
-            ToolKind::Write,
-            ToolKind::Exec,
-        ],
-    }
 }
 
 /// What a path is in git's terms.
@@ -607,13 +558,6 @@ mod tests {
     }
 
     #[test]
-    fn only_an_address_run_gets_workspace_tools() {
-        assert!(tools(EnvLane::Review).is_empty());
-        assert!(tools(EnvLane::Plan).is_empty());
-        assert!(tools(EnvLane::Address).contains(&ToolKind::Exec));
-    }
-
-    #[test]
     fn a_planner_gets_a_workspace_only_off_the_host_and_when_asked() {
         let mut profile = Profile::default();
         assert!(!BackendKind::Host.runs_model_commands());
@@ -637,14 +581,6 @@ mod tests {
             !policy.default.serves(EnvLane::Review),
             "review is its own switch"
         );
-        assert!(!EnvLane::Plan.exports());
-    }
-
-    #[test]
-    fn only_an_address_run_is_exported() {
-        assert!(EnvLane::Address.exports());
-        assert!(!EnvLane::Review.exports());
-        assert!(!EnvLane::Plan.exports());
     }
 
     #[test]
@@ -653,7 +589,6 @@ mod tests {
             backend: BackendKind::Ssh,
             ..Profile::default()
         };
-        assert!(profile.serves(EnvLane::Address));
         assert!(!profile.serves(EnvLane::Review));
         assert!(!profile.serves(EnvLane::Plan));
         profile.review = true;
@@ -672,6 +607,5 @@ mod tests {
             !profile.serves(EnvLane::Review),
             "the pull request's setup would run as Henk"
         );
-        assert!(profile.serves(EnvLane::Address));
     }
 }

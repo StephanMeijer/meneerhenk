@@ -155,8 +155,8 @@ impl App {
                     .await
                     .with_context(|| format!("MCP server {}", gitlab.write_mcp_server))?;
                 let writer = GitLabWriter::new(Arc::new(session), gitlab.username.clone());
-                // Address runs (§3.5) push with the token and read what the
-                // MCP server does not give; it goes to git's environment and
+                // Henk pushes the executor's fixes with the token (§3.5) and
+                // reads what the MCP server does not give; it goes to git's environment and
                 // a request header, never to argv, a log or a model.
                 let writer = if let Some(token) = env_var(&gitlab.token_env) {
                     writer.with_rest(
@@ -166,7 +166,7 @@ impl App {
                 } else {
                     warn!(
                         variable = %gitlab.token_env,
-                        "not set; address runs on GitLab are refused"
+                        "not set; reviews on GitLab cannot push"
                     );
                     writer
                 };
@@ -176,7 +176,7 @@ impl App {
         };
 
         // The sandbox host's key is read now, so a missing or broken one
-        // stops Henk at start instead of failing the first address run.
+        // stops Henk at start instead of failing the first review on it.
         let ssh = crate::workspace::ssh_provider(&settings)?;
         let kubernetes = crate::workspace::kubernetes_provider(&settings).await?;
 
@@ -308,7 +308,7 @@ impl App {
             henk_domain::allowlist::Platform::GitLab => match &self.gitlab {
                 Some(writer) if writer.can_push() => Ok(Arc::clone(writer) as Arc<dyn PushWriter>),
                 Some(_) => Err(anyhow!(
-                    "addressing review feedback on GitLab needs the token in ${}",
+                    "pushing to GitLab needs the token in ${}",
                     self.settings
                         .gitlab
                         .as_ref()

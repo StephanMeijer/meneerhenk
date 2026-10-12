@@ -125,15 +125,15 @@ flowchart TB
 
 | Crate | Modules | Depends on |
 |---|---|---|
-| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
+| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `workspace`, `path`, `push`, `commit`, `discord`, `mail` | serde, thiserror, serde_json |
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
 | `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
-| `henk-platform` | `webhook`, `writer`, `issue`, `github/{app,api,writer,issues}`, `gitlab/{writer,issues}` | domain, llm, mcp, ring, hmac |
+| `henk-platform` | `webhook`, `writer`, `push`, `issue`, `github/{app,api,writer,push,issues}`, `gitlab/{writer,push,issues}` | domain, llm, mcp, ring, hmac |
 | `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
-| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `push`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
+| `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
@@ -158,7 +158,7 @@ sequenceDiagram
     participant R as review.rs
     participant W as GitHubWriter
     participant L as review_loop.rs
-    participant A as AddressWriter
+    participant A as PushWriter
     participant K as Workspace
     participant V as Reviewer session
     participant F as Executor session
@@ -216,12 +216,13 @@ at all fails the review; one whose every file is ignored completes it with
 nothing to review and no loop.
 
 `review_loop::run_loop` reads the pull request's facts through the
-`AddressWriter`. When Henk may not push to it (a fork, the default or a
-protected branch, `push_refusal`) or its branch moved after the review was
+`PushWriter` (`henk_platform::push`). When Henk may not push to it (a fork,
+the default or a protected branch, `henk_domain::push::push_refusal`) or its branch moved after the review was
 queued, the reviewer reviews alone (#307): one round at the reviewed commit,
 fetched by its sha, no executor, nothing pushed, and its findings stand in the
 check. Otherwise the loop clones the branch at its head. Either way it opens
-one workspace, set up as the repository's profile says (section 7a), and
+one workspace, set up as the repository's profile says ("The workspace",
+below), and
 both sessions take turns in it: after a push the workspace holds the new
 head, so nothing has to move.
 
@@ -231,21 +232,22 @@ transcript cover all its rounds. The reviewer reads the diff per file with
 line numbers (`diff_tools.rs`) and the code in the workspace
 (`code_tools.rs`), and hands over what it found with `report_finding`, then
 `finish_round`. The executor gets the round's findings as data, edits and runs
-the checks as an address run does (`address_tools::edit_tools`, without the
-review threads), and gives each finding one verdict with `give_verdict`:
+the checks with the edit tools (`edit_tools.rs`: `edit_file`, `write_file`,
+`run_checks`, paths parsed by `henk_domain::path`), and gives each finding
+one verdict with `give_verdict`:
 fixed, rejected or won't fix. Findings and verdicts live in the
 `henk_domain::review_loop::Ledger` and go on the run's drafts with the kind
 `loop_finding` (section 8); nothing reaches the pull request but the push.
 A session that stops short of `finish_round` or a verdict is nudged at most
 twice (`loop_tools.rs`), then what it left is settled for it.
 
-What the executor changed is checked like an address run's changeset (§3.5):
-the configured checks must pass in the workspace, and `checked_changeset`
-refuses `.git`, escapes, links, submodules and too many files. `push.rs`,
-shared with the address run, then applies the changeset to a fresh checkout
-that nothing ran in, commits it as Henk and pushes it as a fast-forward,
-after reading the branch again: a head that moved, or a branch Henk may no
-longer push to, refuses the push. The commit is recorded in
+What the executor changed is checked before it is pushed (§3.5): the
+configured checks must pass in the workspace, and `checked_changeset`
+refuses `.git`, escapes, links, submodules and too many files. `push.rs`
+then applies the changeset to a fresh checkout that nothing ran in, commits
+it as Henk ("Fix review findings") and pushes it as a fast-forward, after
+reading the branch again: a head that moved, or a branch Henk may no longer
+push to, refuses the push ("The push", below). The commit is recorded in
 `App::own_pushes` before it leaves, so the webhook about it starts no other
 review. The reviewer's next message carries the pushed commit's patch and the
 executor's verdicts; a rejection may be contested once, with new evidence.
@@ -286,6 +288,81 @@ prompt and the end of the conversation carry a cache marker, so each turn
 reads what the last one wrote; the run timeline records how much of the
 prompt came from the cache.
 
+### The workspace
+
+The models' tools talk only to a `Workspace` (`crates/henk/src/workspace`);
+the backend is a configuration choice (`[workspace]`, per repository
+through profiles): `host`, or `ssh` to a sandbox host where each workspace
+is a throwaway user, made and removed by a script Henk sends with every
+request as root (`workspace/sandbox.sh`; nothing is installed there), or
+`kubernetes`, a Pod per workspace in a sandbox namespace, where Henk runs
+the same script through `pods/exec` in its single-user mode and the Pod is
+the boundary (`workspace/kubernetes.rs`; both on `workspace/remote.rs`).
+On the `host` and `ssh` backends the record of changes is a git directory
+outside the tree that nothing a check runs can write, `HOME` is outside the
+tree, and `.git` (the `ssh` backend leaves the checkout's own in the tree
+for the workspace's commands) is never something a tool reads or the
+changeset carries. What is pushed is never the tree the checks ran in, only
+the checked changeset applied to a fresh checkout. Every backend passes the
+same contract tests (`workspace/contract.rs`).
+
+A review with files to review opens one workspace, whatever the profile's
+`review` says (#284): the loop's, at the pull request's head, through the
+setup stage (`workspace/setup.rs`: the toolchain, `mise` in its safe mode,
+then the profile's `setup` steps), with every command recorded on the run
+(`workspace/traced.rs`). The reviewer sees it through
+`workspace::never_exported`, which refuses `export`, so nothing the
+reviewer does there can become a commit. The executor works in the same
+workspace unwrapped: its changes are exported, checked and pushed by
+`push.rs` from a fresh checkout. The code tools on a workspace
+(`list_files`, `read_file`, `search`) are written once in `code_tools.rs` and
+shared by the loop's reviewer and executor and the planner
+(`plan_workspace.rs` opens the planner's workspace); the executor's edit
+tools are in `edit_tools.rs`. `bash` is there for the reviewer, the
+executor and the planner on a backend where the model may run commands
+(`BackendKind::runs_model_commands`: not the host). A `search` pattern is
+checked in Henk (`workspace::Pattern`) in the syntax Rust's regex and PCRE
+read alike, since the host backend matches with the one and the `ssh`
+backend with `grep -P`.
+
+### The push
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as review_loop.rs
+    participant K as Workspace
+    participant P as push.rs
+    participant W as PushWriter (GitHub, GitLab)
+    participant G as git.rs
+    participant DB as RunStore
+
+    L->>K: run_checks (each one on the run's timeline), export
+    L->>L: checked_changeset: .git, escapes, links, submodules, file limit
+    L->>P: checkout
+    P->>G: fresh clone_at head, credential via env only
+    L->>P: commit_and_push(changeset)
+    P->>W: user_login of the requester's configured id, for the noreply address
+    P->>W: pull_facts again: head unchanged, push_refusal: fork, default, protected, closed
+    P->>G: apply the changeset, exactly its files changed
+    P->>G: commit with Henk-Run, Requested-by and the trailers
+    P->>P: record the commit in App::own_pushes
+    P->>G: push, fast-forward only
+    P-->>L: the commit
+    L->>DB: the commit on the finding's verdict
+```
+
+The rules of the changeset are pure functions in `henk-domain`:
+`henk_domain::workspace::changeset_refusal` (`.git`, escapes, links,
+submodules, `max_changed_files`), `henk_domain::path` (a path that stays in
+the repository), `henk_domain::push::push_refusal` (closed, a fork, the
+default branch, a protected branch) and `henk_domain::commit` (who the
+commit is by, who it credits, the message and its trailers). `push.rs` (`Pusher`) is the one place that
+commits and pushes; git gets the platform credential through its
+environment only, never argv, a log or a model. Every refusal happens
+before the push, and a refused push stops the loop with what was pushed
+before it standing.
+
 ## 4. Where a tool call goes
 
 The most important picture in this file. A model never receives a credential
@@ -321,7 +398,7 @@ flowchart TD
     N -- "list_files, read_file, search, bash" --> F6["the session's own Workspace<br/>a reviewer's or planner's never exported"]
     N -- "report_finding, finish_round" --> F1["the reviewer: a finding into the Ledger<br/>and a loop_finding draft, for the executor"]
     N -- "list_findings, give_verdict" --> F2["the executor: one verdict per finding<br/>on the drafts, for the reviewer"]
-    N -- "edit_file, write_file, run_checks" --> F3["the executor's or address run's Workspace<br/>pushed only by Henk, after the checks"]
+    N -- "edit_file, write_file, run_checks" --> F3["the executor's Workspace<br/>pushed only by Henk, after the checks"]
     N -- "write_plan, set_title, add_labels, set_fields, link_issue, ..." --> F4["ChangeBudget::spend<br/>IssueWriter call"]
     N -- "web_fetch" --> F5["https only, no private hosts<br/>GET with nothing but the URL"]
     N -- "load_skill" --> F8["a body from the agent's own skills<br/>read from SKILL.md at start, no path"]
@@ -409,7 +486,7 @@ again (`ReviewTrigger::resumed_from` reads its trigger back): its process
 died while it ran, and a review that takes Henk down would otherwise come
 back on every start. One a shutdown stopped is resumed. Once Henk is told
 to stop, the resumer asks for nothing more: its own reviews are ending
-interrupted then. Plans and address runs are not resumed.
+interrupted then. Plans are not resumed.
 
 ## 6. Hooks, events and listeners
 
@@ -459,12 +536,13 @@ real recordings. Recordings never leave the service.
 A session (`henk-session`) is the other abstraction: `SessionSpec` says what
 varies (model, system prompt, opening messages, tools, limits) and
 `run_session` does what every session shares (the lane row, the loop, the stop
-mapping, the timeline line). A plan and an address run are one session each.
+mapping, the timeline line). A plan is one session.
 A review is two `ResumableSession`s, the reviewer and the executor (only the
 reviewer when it reviews alone), each resumed once per round with its own
 conversation. The table that holds a session's row is still called `lanes`,
-after the review lanes it was made for: every session, reviewer, executor,
-planner or address, records one row there (section 8).
+after the review lanes it was made for: every session, reviewer, executor or
+planner, records one row there (section 8), as the `address` session of a
+run from before #327 did.
 
 ## 7. Planning
 
@@ -505,77 +583,6 @@ parsed and rendered by `henk_domain::plan`. `set_description` keeps that region
 intact; `write_plan` keeps the session log and replaces the plan; the session
 entry is appended by code after the run, never by the model.
 
-## 7a. Addressing review feedback
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as CLI or POST /address
-    participant R as address.rs
-    participant W as AddressWriter (GitHub, GitLab)
-    participant G as git.rs (checkout)
-    participant S as workspace (host)
-    participant A as Agent
-    participant DB as RunStore
-
-    U->>R: run_address(pull request, note)
-    R->>W: pull_facts, push_refusal: fork, default, protected, closed
-    R->>DB: create_run (kind address)
-    R->>W: open_threads (Henk's notes by author, never by marker)
-    R->>G: clone_at head, credential via env only
-    R->>S: open: copy the files without .git, the clone is removed
-    R->>A: tools on the workspace: read, search, edit, write, run_checks, settle_thread
-    A-->>R: edits in the workspace, an outcome per thread
-    R->>S: run_checks (each one on the run's timeline), export the changeset
-    R->>R: changeset_refusal: .git, escapes, links, submodules, file limit
-    R->>S: close (also on failure, cancel or drop)
-    R->>W: user_login of the requester's configured id, for the noreply address
-    R->>W: pull_facts again: head unchanged?
-    R->>G: fresh clone_at head, apply the changeset, commit with Henk-Run, Requested-by and the trailers
-    R->>G: push, fast-forward only
-    R->>W: reply per thread, resolve Henk's own fixed findings, summary
-    R->>DB: finish_run
-```
-
-The model's tools talk only to a `Workspace` (`crates/henk/src/workspace`);
-the backend is a configuration choice (`[workspace]`, per repository
-through profiles): `host`, or `ssh` to a sandbox host where each run is a
-throwaway user, made and removed by a script Henk sends with every request
-as root (`workspace/sandbox.sh`; nothing is installed there), or
-`kubernetes`, a Pod per workspace in a sandbox namespace, where Henk runs
-the same script through `pods/exec` in its single-user mode and the Pod is
-the boundary (`workspace/kubernetes.rs`; both on `workspace/remote.rs`).
-On the `host` and `ssh` backends
-the record of changes is a git directory outside the tree that nothing a
-check runs can write, `HOME` is outside the tree, and `.git` (the `ssh`
-backend leaves the checkout's own in the tree for the run's commands) is
-never something a tool reads or the changeset carries. What is pushed is
-never the tree the checks ran in, only the checked changeset applied to a
-fresh checkout. Every backend passes the same contract tests
-(`workspace/contract.rs`).
-
-A review with files to review opens one workspace, whatever the profile's
-`review` says (#284): the loop's, at the pull request's head, through the same setup stage
-(`workspace/setup.rs`), with every command recorded on the run
-(`workspace/traced.rs`). The reviewer sees it through `workspace::for_lane`,
-which refuses `export` for every run but an address run
-(`henk_domain::workspace::EnvLane::exports`), so nothing the reviewer does
-there can become a commit. The executor works in the same workspace unwrapped:
-its changes are exported, checked and pushed by `push.rs` from a fresh
-checkout, as an address run's are. The code tools on a workspace
-(`list_files`, `read_file`, `search`) are written once in `code_tools.rs` and
-shared by the address run, the loop's reviewer and executor, and the planner
-(`plan_workspace.rs` opens the planner's workspace), with `bash` for the
-reviewer, the executor and the planner on a backend where the model may run
-commands (`BackendKind::runs_model_commands`: not the host). A `search`
-pattern is checked in Henk (`workspace::Pattern`) in the syntax Rust's
-regex and PCRE read alike, since the host backend matches with the one and
-the `ssh` backend with `grep -P`.
-
-Every error happens before the push: a failed run posts a failure comment
-saying nothing was pushed. After the push, replies and the summary are
-best-effort, so a run that pushed is never reported as failed.
-
 ## 8. Run records
 
 ```mermaid
@@ -590,7 +597,7 @@ erDiagram
     event_outcomes }o--o| runs : led_to
     runs {
         text id PK "r-YYYYMMDD-xxxxxxxx"
-        text kind "review, plan or address"
+        text kind "review or plan (address in old runs)"
         text platform
         text repo
         int target "PR, MR or issue number"
@@ -609,7 +616,7 @@ erDiagram
     }
     lanes {
         text run_id FK
-        text name "one row per session: reviewer, executor, planner, address"
+        text name "one row per session: reviewer, executor, planner"
         text model
         text status "running, finished, timed_out, did_not_finish"
         int turns
@@ -709,7 +716,7 @@ flowchart LR
     end
     subgraph henk["Henk's process: enforces"]
         GUARD["scope::guard"]
-        TOOLS["loop_tools, address_tools, plan_tools"]
+        TOOLS["loop_tools, edit_tools, plan_tools"]
         STYLE["text::style_violations"]
         ALLOW["Allowlist"]
         MARK["Marker"]
@@ -772,7 +779,6 @@ too; without a dashboard they are not served.
 | Review started | check run `in_progress` | award emoji on the merge request |
 | Loop push | git over HTTPS with the App installation token as `x-access-token` | git over HTTPS with the personal access token as `oauth2` |
 | Review ended | check `success`, `neutral` or `failure` | commit status always `success`, count in the description |
-| Thread state | GraphQL review threads: `isResolved`, who replied | `mr_discussions`: `resolved`, who replied |
 | Mention reply | reply in the review thread, or a conversation comment | reply in the discussion, or a note |
 
 ## 11. Configuration and secrets
@@ -788,7 +794,7 @@ carries it, and the deployment fills those variables from OpenBao.
 |---|---|---|
 | `[models.*].api_key_env` | `App::build` | the model client, as a bearer token or `x-api-key` |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting |
-| `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for address runs | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
+| `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for the review loop's push | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
 | `HENK_GITHUB_WEBHOOK_SECRET`, `HENK_GITLAB_WEBHOOK_TOKEN` | `server::router` | signature and token checks |
 | `HENK_API_TOKEN` | `server::router` | `POST /review` and `POST /plan` |
 
