@@ -47,7 +47,7 @@
   const KINDS: RunMessage['kind'][] = [
     'snapshot',
     'run',
-    'lanes',
+    'sessions',
     'tool_call',
     'draft',
     'finding',
@@ -118,7 +118,7 @@
     const key: string | null = selected;
     if (detail === null || key === null || !key.startsWith('lane:')) return null;
     const name = key.slice('lane:'.length);
-    return detail.lanes.find((lane) => lane.name === name) ?? null;
+    return detail.sessions.find((lane) => lane.name === name) ?? null;
   });
 
   /** The timeline lines of what is selected: a lane's own lines, or the
@@ -182,7 +182,7 @@
 
   /** The sessions still going, for the confirmation. */
   function stillWorking(detail: RunDetail): string {
-    const names = detail.lanes.filter((lane) => lane.status === 'running').map((lane) => lane.name);
+    const names = detail.sessions.filter((lane) => lane.status === 'running').map((lane) => lane.name);
     if (names.length === 0) return '';
     return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} still working.`;
   }
@@ -371,7 +371,7 @@
         <h2>Pipeline</h2>
         <span class="note">{pipelineNote(d)} Select a box to open its log.</span>
       </div>
-      <div class="panel-body"><Pipeline stages={d.stages} lanes={d.lanes} bind:selected /></div>
+      <div class="panel-body"><Pipeline stages={d.stages} lanes={d.sessions} bind:selected /></div>
     </section>
   {/if}
 
@@ -391,7 +391,7 @@
             <div class="meta">
               <span class="mono">{finding.comment_id}</span>
               <Status word={finding.action} vocabulary="action" kind="action" />
-              <span class="mono muted">{finding.lane}</span>
+              <span class="mono muted">{finding.session}</span>
               <code>{finding.path}:{finding.line}</code>
               <span class="muted mono" title={utc(finding.at)}>{clockTime(finding.at)}</span>
             </div>
@@ -407,10 +407,10 @@
     </section>
   {/if}
 
-  {#if d.lanes.length > 0}
+  {#if d.sessions.length > 0}
     <section class="panel fold">
       <details open={d.stages.length === 0}>
-        <summary class="panel-head"><h2>Lanes</h2><span class="count-badge">{d.lanes.length}</span></summary>
+        <summary class="panel-head"><h2>Lanes</h2><span class="count-badge">{d.sessions.length}</span></summary>
       <div class="scroll">
         <table>
           <thead>
@@ -421,7 +421,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each d.lanes as lane (lane.name)}
+            {#each d.sessions as lane (lane.name)}
               <tr>
                 <td class="mono">
                   {#if d.transcripts.some((t) => t.session === lane.name)}
@@ -465,7 +465,7 @@
             {#each d.drafts as draft (draft.id)}
               <tr>
                 <td class="mono">{draft.id}</td>
-                <td class="mono">{draft.lane}</td>
+                <td class="mono">{draft.session}</td>
                 <td><code>{draftPlace(draft)}</code></td>
                 <td class="text">{draftWhat(draft)}</td>
                 <td><Status word={draft.decision?.verdict ?? 'waiting'} vocabulary="verdict" kind="verdict" text={verdictText(draft)} /></td>

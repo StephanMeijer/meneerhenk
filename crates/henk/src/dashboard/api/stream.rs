@@ -26,8 +26,8 @@ use tokio::sync::{broadcast, mpsc};
 use super::ApiError;
 use super::runs::{run_detail, run_of};
 use super::types::{
-    Draft, Finding, Heartbeat, Lane, LaneDot, Progress, RunDetail, RunEvent, RunMessage,
-    RunSummary, RunUpdate, RunningMessage, RunningSnapshot, Slots, Stage, StageDot, ToolCall,
+    Draft, Finding, Heartbeat, Progress, RunDetail, RunEvent, RunMessage, RunSummary, RunUpdate,
+    RunningMessage, RunningSnapshot, Session, SessionDot, Slots, Stage, StageDot, ToolCall,
     TranscriptRef, WaitingReview,
 };
 use crate::dashboard::Dashboard;
@@ -121,7 +121,9 @@ fn event<T: serde::Serialize>(message: &T, id: Option<String>) -> Option<Event> 
 fn message(dashboard: &Dashboard, change: &Change) -> RunMessage {
     match &change.kind {
         ChangeKind::Run(run) => RunMessage::Run(update(dashboard, run)),
-        ChangeKind::Sessions(lanes) => RunMessage::Lanes(lanes.iter().map(Lane::from).collect()),
+        ChangeKind::Sessions(sessions) => {
+            RunMessage::Sessions(sessions.iter().map(Session::from).collect())
+        }
         ChangeKind::ToolCall(call) => RunMessage::ToolCall(ToolCall::from(call)),
         ChangeKind::Draft(draft) => RunMessage::Draft(Draft::from(draft)),
         ChangeKind::Finding(finding) => RunMessage::Finding(Finding::from(finding)),
@@ -344,19 +346,20 @@ fn slots(dashboard: &Dashboard) -> Slots {
     }
 }
 
-/// A running run's lanes or stages as the overview's dots, from a change
+/// A running run's sessions or stages as the overview's dots, from a change
 /// on the feed: no store read.
 fn progress(change: &Change) -> Option<Progress> {
     let run_id = change.run.as_str().to_owned();
     match &change.kind {
-        ChangeKind::Sessions(lanes) => Some(Progress {
+        ChangeKind::Sessions(sessions) => Some(Progress {
             run_id,
-            lanes: Some(
-                lanes
+            sessions: Some(
+                sessions
                     .iter()
-                    .map(|lane| LaneDot {
-                        name: lane.name.clone(),
-                        status: lane.status.as_str().to_owned(),
+                    .map(|session| SessionDot {
+                        name: session.name.clone(),
+                        role: session.role.as_str().to_owned(),
+                        status: session.status.as_str().to_owned(),
                     })
                     .collect(),
             ),
@@ -364,7 +367,7 @@ fn progress(change: &Change) -> Option<Progress> {
         }),
         ChangeKind::Stages(stages) => Some(Progress {
             run_id,
-            lanes: None,
+            sessions: None,
             stages: Some(
                 stages
                     .iter()

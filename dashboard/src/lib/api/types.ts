@@ -93,12 +93,14 @@ loop_stop: string | null,
  */
 loop_rounds: number | null, 
 /**
- * Where each of its lanes stands, for lists (#225). Empty where the
- * whole run is sent with its lanes, and on a `run` stream message.
+ * Where each of its sessions stands, for lists (#225). Empty where
+ * the whole run is sent with its sessions, and on a `run` stream
+ * message.
  */
-lanes: Array<LaneDot>, 
+sessions: Array<SessionDot>, 
 /**
- * Where each of its stages stands, for lists (#225). Empty as `lanes`.
+ * Where each of its stages stands, for lists (#225). Empty as
+ * `sessions`.
  */
 stages: Array<StageDot>, };
 
@@ -136,9 +138,10 @@ tool: string,
  */
 model: string, 
 /**
- * `lane`, `check`, `planner` or `address`.
+ * The role of the sessions that made the calls: `planner`, `reviewer`
+ * or `executor`; older runs also `lane`, `check` and `address`.
  */
-session_kind: string, 
+role: string, 
 /**
  * Every call.
  */
@@ -209,7 +212,7 @@ count: number,
  */
 slots: Slots, };
 
-export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "lanes", "data": Array<Lane> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
+export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "sessions", "data": Array<Session> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
 export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots };
 
@@ -238,7 +241,7 @@ heartbeat_at: string | null,
  * Its sessions: the reviewer, the executor, the planner; older runs
  * have review lanes, checks and an address run's session.
  */
-lanes: Array<Lane>, 
+sessions: Array<Session>, 
 /**
  * What happened to findings on the platform.
  */
@@ -269,11 +272,16 @@ requests: Array<EventSummary>,
  */
 stages: Array<Stage>, };
 
-export type LaneDot = { 
+export type SessionDot = { 
 /**
- * `lane-a`, `check-1`, `planner`.
+ * `reviewer`, `executor`, `planner`; `lane-a`, `check-1` in older runs.
  */
 name: string, 
+/**
+ * `planner`, `reviewer` or `executor`; older runs also `lane`, `check`
+ * and `address`.
+ */
+role: string, 
 /**
  * `running`, `finished`, `timed_out` or `did_not_finish`.
  */
@@ -295,11 +303,11 @@ export type Progress = {
  */
 run_id: string, 
 /**
- * Every lane, when lanes moved; `null` when only stages did.
+ * Every session, when sessions moved; `null` when only stages did.
  */
-lanes: Array<LaneDot> | null, 
+sessions: Array<SessionDot> | null, 
 /**
- * Every stage, when stages moved; `null` when only lanes did.
+ * Every stage, when stages moved; `null` when only sessions did.
  */
 stages: Array<StageDot> | null, };
 
@@ -405,19 +413,20 @@ failed: number,
  */
 findings_posted: number, 
 /**
- * Drafts the lanes wrote.
+ * Drafts written.
  */
 drafts: number, };
 
-export type LaneStats = { 
+export type SessionStats = { 
 /**
  * The reviews, oldest first: the grid's columns.
  */
 reviews: Array<ReviewMark>, 
 /**
- * The lanes, then the fact-check sessions: the grid's rows.
+ * The reviewer and the executor, then older reviews' lanes and
+ * fact-check sessions: the grid's rows.
  */
-lanes: Array<LaneRow>, };
+sessions: Array<SessionRow>, };
 
 export type SessionMessage = { "kind": "snapshot", "data": LiveSnapshot } | { "kind": "message", "data": LiveMessage } | { "kind": "end", "data": SessionEnd };
 
@@ -463,15 +472,15 @@ run_id: string,
  */
 started_at: string, };
 
-export type LaneRow = { 
+export type SessionRow = { 
 /**
- * `lane-a`, `check-1`.
+ * `reviewer`, `executor`; `lane-a`, `check-1` in older reviews.
  */
 name: string, 
 /**
- * `lane` or `check`.
+ * `reviewer` or `executor`; older reviews also `lane` and `check`.
  */
-kind: string, 
+role: string, 
 /**
  * The models it ran, newest first.
  */
@@ -479,7 +488,7 @@ models: Array<string>,
 /**
  * Per review in `reviews`, how it ended; `null` where it did not run.
  */
-outcomes: Array<LaneOutcome | null>, 
+outcomes: Array<SessionOutcome | null>, 
 /**
  * The reviews it ran in.
  */
@@ -499,9 +508,9 @@ did_not_finish: number,
 /**
  * Why it timed out or did not finish, counted.
  */
-reasons: LaneReasons, };
+reasons: SessionReasons, };
 
-export type LaneOutcome = { 
+export type SessionOutcome = { 
 /**
  * The run.
  */
@@ -520,7 +529,7 @@ status: string,
  */
 reason: string | null, };
 
-export type LaneReasons = { 
+export type SessionReasons = { 
 /**
  * Stopped at the time limit.
  */
@@ -574,12 +583,17 @@ export type Heartbeat = {
  */
 at: string, };
 
-export type Lane = { 
+export type Session = { 
 /**
  * `reviewer`, `executor`, `planner`; `lane-a`, `check-1` and
  * `address` in older runs.
  */
 name: string, 
+/**
+ * The role it ran in: `planner`, `reviewer` or `executor`; older runs
+ * also `lane`, `check` and `address`.
+ */
+role: string, 
 /**
  * The model.
  */
@@ -615,7 +629,7 @@ cache_write_tokens: number,
  */
 error: string | null, 
 /**
- * The turn of its latest tool call: how far a running lane has come,
+ * The turn of its latest tool call: how far a running session has come,
  * since turns and tokens are stored when it ends.
  */
 last_call_turn: number | null, 
@@ -634,9 +648,9 @@ export type Finding = {
  */
 at: string, 
 /**
- * The lane.
+ * The session.
  */
-lane: string, 
+session: string, 
 /**
  * The file.
  */
@@ -665,11 +679,11 @@ at: string,
  */
 id: string, 
 /**
- * The lane that wrote it.
+ * The session that wrote it.
  */
-lane: string, 
+session: string, 
 /**
- * The lane's model.
+ * The session's model.
  */
 model: string, 
 /**

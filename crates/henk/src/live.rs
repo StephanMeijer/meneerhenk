@@ -355,7 +355,7 @@ impl RunStore for Announcing {
     async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+    ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
         self.inner.sessions_of(runs).await
     }
 
@@ -788,7 +788,7 @@ mod tests {
         async fn sessions_of(
             &self,
             runs: &[RunId],
-        ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+        ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
             self.inner.sessions_of(runs).await
         }
         async fn session_endings(

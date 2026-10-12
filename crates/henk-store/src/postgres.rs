@@ -586,7 +586,7 @@ impl RunStore for PgStore {
     async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+    ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
@@ -595,12 +595,19 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT run_id, name, status FROM sessions WHERE run_id = ANY($1) ORDER BY run_id, name",
+                "SELECT run_id, name, role, status FROM sessions WHERE run_id = ANY($1) ORDER BY run_id, name",
                 &[&ids],
             )
             .await?
             .iter()
-            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    row.try_get(3)?,
+                ))
+            })
             .collect::<Result<Vec<_>, StoreError>>()?;
         session_dots(rows)
     }

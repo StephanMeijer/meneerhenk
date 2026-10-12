@@ -3,7 +3,7 @@
   import { health as loadHealth, laneStats, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import { serverNow } from '$lib/clock';
-  import type { Health, LaneStats, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
+  import type { Health, SessionStats, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
   import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
@@ -43,7 +43,7 @@
     loadCount?: (query: string) => Promise<RunCount>;
     loadHealth?: () => Promise<Health>;
     loadStats?: () => Promise<OverviewStats>;
-    loadLanes?: (query: string) => Promise<LaneStats>;
+    loadLanes?: (query: string) => Promise<SessionStats>;
     connect?: Connect;
     now?: () => Date;
   } = $props();
@@ -114,7 +114,7 @@
   /** Where a running run's lanes are, in a line: `lanes: 1 running, 1 did
    * not finish`, or `planner: running`. */
   function lanesLine(run: RunSummary): string {
-    const sessions = run.lanes.filter((lane) => !lane.name.startsWith('check-'));
+    const sessions = run.sessions.filter((lane) => !lane.name.startsWith('check-'));
     if (sessions.length === 0) return '';
     if (run.kind !== 'review') {
       return sessions.map((lane) => `${lane.name}: ${lookOf(lane.status).label}`).join(', ');
@@ -166,7 +166,7 @@
           </span>
           <span class="trigger">{run.trigger}{#if run.requester}<span class="sub who">{run.requester}</span>{/if}</span>
           <span class="progress">
-            <StageStepper stages={run.stages} lanes={run.lanes} />
+            <StageStepper stages={run.stages} lanes={run.sessions} />
             <span class="muted">{lanesLine(run)}</span>
           </span>
           <span class="num duration">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</span>

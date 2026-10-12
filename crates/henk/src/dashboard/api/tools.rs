@@ -34,7 +34,7 @@ pub struct ToolQuery {
     outcome: Option<String>,
     tool: Option<String>,
     model: Option<String>,
-    session_kind: Option<String>,
+    role: Option<String>,
     since: Option<String>,
     until: Option<String>,
     limit: Option<u32>,
@@ -58,11 +58,11 @@ impl ToolQuery {
                 )));
             }
         };
-        let role = match given(self.session_kind.as_ref()) {
+        let role = match given(self.role.as_ref()) {
             None => None,
             Some(kind) => Some(SessionRole::parse(&kind).ok_or_else(|| {
                 let roles: Vec<&str> = SessionRole::ALL.iter().map(|r| r.as_str()).collect();
-                ApiError::bad_request(format!("session_kind is one of {}.", roles.join(", ")))
+                ApiError::bad_request(format!("role is one of {}.", roles.join(", ")))
             })?),
         };
         let before = match self.cursor.as_deref() {
@@ -113,7 +113,7 @@ fn summary_row(usage: ToolUsage) -> ToolSummaryRow {
     ToolSummaryRow {
         tool: usage.tool,
         model: usage.model,
-        session_kind: usage.session,
+        role: usage.session,
         calls: tally.calls,
         errors: tally.errors,
         refusals: tally.refusals,
@@ -145,7 +145,7 @@ pub async fn summary(
             .cmp(&a.calls)
             .then_with(|| a.tool.cmp(&b.tool))
             .then_with(|| a.model.cmp(&b.model))
-            .then_with(|| a.session_kind.cmp(&b.session_kind))
+            .then_with(|| a.role.cmp(&b.role))
     });
     Ok(Json(rows))
 }

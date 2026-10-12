@@ -1067,7 +1067,7 @@ impl RunStore for SqliteStore {
     async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+    ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
         if runs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1075,11 +1075,11 @@ impl RunStore for SqliteStore {
         self.with(|c| {
             let rows = c
                 .prepare(&format!(
-                    "SELECT run_id, name, status FROM sessions WHERE run_id IN ({marks}) ORDER BY run_id, name"
+                    "SELECT run_id, name, role, status FROM sessions WHERE run_id IN ({marks}) ORDER BY run_id, name"
                 ))?
                 .query_map(
                     rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
             session_dots(rows)

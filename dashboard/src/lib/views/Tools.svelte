@@ -48,9 +48,9 @@
 
   let period = $derived(PERIODS[query.get('period') ?? ''] === undefined ? '30d' : (query.get('period') as string));
   let kind = $derived(
-    KINDS[query.get('session_kind') ?? ''] === undefined || query.get('session_kind') === 'all'
+    KINDS[query.get('role') ?? ''] === undefined || query.get('role') === 'all'
       ? 'all'
-      : (query.get('session_kind') as string),
+      : (query.get('role') as string),
   );
   let outcome = $derived(query.get('outcome') ?? 'problems');
   let since = $derived(periodSince(period, now()));
@@ -64,13 +64,13 @@
     ).toString();
 
   let kindParam = $derived(kind === 'all' ? null : kind);
-  let summaryQuery = $derived(encode({ model: query.get('model'), session_kind: kindParam, since }));
+  let summaryQuery = $derived(encode({ model: query.get('model'), role: kindParam, since }));
   let callsQuery = $derived(
     encode({
       outcome: outcome === 'all' ? null : outcome,
       tool: query.get('tool'),
       model: query.get('model'),
-      session_kind: kindParam,
+      role: kindParam,
       since,
       cursor: query.get('cursor'),
     }),
@@ -89,7 +89,7 @@
     navigate(
       withQuery('/tools', {
         period: value('period'),
-        session_kind: value('session_kind'),
+        role: value('role'),
         model: value('model'),
         outcome,
         tool: query.get('tool'),
@@ -121,7 +121,7 @@
       </label>
       <label>
         sessions
-        <select name="session_kind" value={kind}>
+        <select name="role" value={kind}>
           {#each Object.entries(KINDS) as [value, label] (value)}
             <option {value}>{label}</option>
           {/each}
@@ -147,15 +147,15 @@
             </tr>
           </thead>
           <tbody>
-            {#each summaryRows as row (`${row.tool}/${row.model}/${row.session_kind}`)}
+            {#each summaryRows as row (`${row.tool}/${row.model}/${row.role}`)}
               <tr>
                 <td>
-                  <a href={href(at({ tool: row.tool, model: row.model, session_kind: row.session_kind, outcome: 'all' }))} use:link title="Show these calls">
+                  <a href={href(at({ tool: row.tool, model: row.model, role: row.role, outcome: 'all' }))} use:link title="Show these calls">
                     <code>{row.tool}</code>
                   </a>
                 </td>
                 <td class="mono">{row.model}</td>
-                <td>{row.session_kind}</td>
+                <td>{row.role}</td>
                 <td class="num">{count(row.calls)}</td>
                 <td class="num">{count(row.errors)}</td>
                 <td class="num">{count(row.refusals)}</td>

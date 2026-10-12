@@ -77,19 +77,24 @@ pub struct RunSummary {
     pub loop_stop: Option<String>,
     /// How many rounds a review loop ran (#286).
     pub loop_rounds: Option<u32>,
-    /// Where each of its lanes stands, for lists (#225). Empty where the
-    /// whole run is sent with its lanes, and on a `run` stream message.
-    pub lanes: Vec<LaneDot>,
-    /// Where each of its stages stands, for lists (#225). Empty as `lanes`.
+    /// Where each of its sessions stands, for lists (#225). Empty where
+    /// the whole run is sent with its sessions, and on a `run` stream
+    /// message.
+    pub sessions: Vec<SessionDot>,
+    /// Where each of its stages stands, for lists (#225). Empty as
+    /// `sessions`.
     pub stages: Vec<StageDot>,
 }
 
-/// A lane as a list shows it: its name and status.
+/// A session as a list shows it: its name, role and status.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct LaneDot {
-    /// `lane-a`, `check-1`, `planner`.
+pub struct SessionDot {
+    /// `reviewer`, `executor`, `planner`; `lane-a`, `check-1` in older runs.
     pub name: String,
+    /// `planner`, `reviewer` or `executor`; older runs also `lane`, `check`
+    /// and `address`.
+    pub role: String,
     /// `running`, `finished`, `timed_out` or `did_not_finish`.
     pub status: String,
 }
@@ -104,15 +109,15 @@ pub struct StageDot {
     pub state: String,
 }
 
-/// The lanes and stages of one run moved on: a message of `/runs/stream`.
+/// The sessions and stages of one run moved on: a message of `/runs/stream`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Progress {
     /// Which run.
     pub run_id: String,
-    /// Every lane, when lanes moved; `null` when only stages did.
-    pub lanes: Option<Vec<LaneDot>>,
-    /// Every stage, when stages moved; `null` when only lanes did.
+    /// Every session, when sessions moved; `null` when only stages did.
+    pub sessions: Option<Vec<SessionDot>>,
+    /// Every stage, when stages moved; `null` when only sessions did.
     pub stages: Option<Vec<StageDot>>,
 }
 
@@ -204,14 +209,16 @@ pub struct OverviewStats {
     pub days: Vec<DayStats>,
 }
 
-/// How the lanes of the recent reviews ended (#229): `GET /stats/lanes`.
+/// How the sessions of the recent reviews ended (#229):
+/// `GET /stats/sessions`.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct LaneStats {
+pub struct SessionStats {
     /// The reviews, oldest first: the grid's columns.
     pub reviews: Vec<ReviewMark>,
-    /// The lanes, then the fact-check sessions: the grid's rows.
-    pub lanes: Vec<LaneRow>,
+    /// The reviewer and the executor, then older reviews' lanes and
+    /// fact-check sessions: the grid's rows.
+    pub sessions: Vec<SessionRow>,
 }
 
 /// One review in the grid.
@@ -224,18 +231,18 @@ pub struct ReviewMark {
     pub started_at: String,
 }
 
-/// One lane or fact-check session, by name, across the reviews.
+/// One session, by name, across the reviews.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct LaneRow {
-    /// `lane-a`, `check-1`.
+pub struct SessionRow {
+    /// `reviewer`, `executor`; `lane-a`, `check-1` in older reviews.
     pub name: String,
-    /// `lane` or `check`.
-    pub kind: String,
+    /// `reviewer` or `executor`; older reviews also `lane` and `check`.
+    pub role: String,
     /// The models it ran, newest first.
     pub models: Vec<String>,
     /// Per review in `reviews`, how it ended; `null` where it did not run.
-    pub outcomes: Vec<Option<LaneOutcome>>,
+    pub outcomes: Vec<Option<SessionOutcome>>,
     /// The reviews it ran in.
     pub ran: u64,
     /// Of those, finished.
@@ -245,13 +252,13 @@ pub struct LaneRow {
     /// Of those, did not finish.
     pub did_not_finish: u64,
     /// Why it timed out or did not finish, counted.
-    pub reasons: LaneReasons,
+    pub reasons: SessionReasons,
 }
 
-/// How a lane ended in one review.
+/// How a session ended in one review.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct LaneOutcome {
+pub struct SessionOutcome {
     /// The run.
     pub run_id: String,
     /// The model it ran.
@@ -263,10 +270,10 @@ pub struct LaneOutcome {
     pub reason: Option<String>,
 }
 
-/// Why lanes did not finish, counted.
+/// Why sessions did not finish, counted.
 #[derive(Debug, Default, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct LaneReasons {
+pub struct SessionReasons {
     /// Stopped at the time limit.
     pub time_limit: u64,
     /// The model endpoint's rate limit.
@@ -296,7 +303,7 @@ pub struct DayStats {
     pub failed: u64,
     /// Findings posted: new comments, checked or not.
     pub findings_posted: u64,
-    /// Drafts the lanes wrote.
+    /// Drafts written.
     pub drafts: u64,
 }
 
@@ -324,7 +331,7 @@ pub struct RunDetail {
     pub heartbeat_at: Option<String>,
     /// Its sessions: the reviewer, the executor, the planner; older runs
     /// have review lanes, checks and an address run's session.
-    pub lanes: Vec<Lane>,
+    pub sessions: Vec<Session>,
     /// What happened to findings on the platform.
     pub findings: Vec<Finding>,
     /// A review's drafts and what became of each (#189).
@@ -418,11 +425,11 @@ pub enum RunMessage {
     Snapshot(Box<RunDetail>),
     /// The run started, ended or got its check.
     Run(RunUpdate),
-    /// A lane started or ended: every lane of the run.
-    Lanes(Vec<Lane>),
+    /// A session started or ended: every session of the run.
+    Sessions(Vec<Session>),
     /// A session called a tool.
     ToolCall(ToolCall),
-    /// A lane queued a draft, or the check decided one.
+    /// A session queued a draft, or a verdict decided one.
     Draft(Draft),
     /// Something was done with a finding.
     Finding(Finding),
@@ -494,7 +501,7 @@ pub enum RunningMessage {
     Snapshot(RunningSnapshot),
     /// A run started or ended.
     Run(Box<RunSummary>),
-    /// A running run's lanes or stages moved on.
+    /// A running run's sessions or stages moved on.
     Progress(Progress),
     /// A review started waiting, took or freed a slot, or left the queue.
     Slots(Slots),
@@ -519,8 +526,9 @@ pub struct ToolSummaryRow {
     pub tool: String,
     /// The model.
     pub model: String,
-    /// `lane`, `check`, `planner` or `address`.
-    pub session_kind: String,
+    /// The role of the sessions that made the calls: `planner`, `reviewer`
+    /// or `executor`; older runs also `lane`, `check` and `address`.
+    pub role: String,
     /// Every call.
     pub calls: u64,
     /// Calls the tool reported as failed.
@@ -559,10 +567,13 @@ pub struct ToolCallItem {
 /// One session of a run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
-pub struct Lane {
+pub struct Session {
     /// `reviewer`, `executor`, `planner`; `lane-a`, `check-1` and
     /// `address` in older runs.
     pub name: String,
+    /// The role it ran in: `planner`, `reviewer` or `executor`; older runs
+    /// also `lane`, `check` and `address`.
+    pub role: String,
     /// The model.
     pub model: String,
     /// `running`, `finished`, `timed_out` (stopped at its time limit; what
@@ -581,7 +592,7 @@ pub struct Lane {
     pub cache_write_tokens: u64,
     /// Why it did not finish.
     pub error: Option<String>,
-    /// The turn of its latest tool call: how far a running lane has come,
+    /// The turn of its latest tool call: how far a running session has come,
     /// since turns and tokens are stored when it ends.
     pub last_call_turn: Option<u32>,
     /// RFC 3339: when it started.
@@ -596,8 +607,8 @@ pub struct Lane {
 pub struct Finding {
     /// RFC 3339.
     pub at: String,
-    /// The lane.
-    pub lane: String,
+    /// The session.
+    pub session: String,
     /// The file.
     pub path: String,
     /// The line.
@@ -609,7 +620,7 @@ pub struct Finding {
     pub action: String,
 }
 
-/// A lane's draft and what became of it (#189).
+/// A session's draft and what became of it (#189).
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct Draft {
@@ -617,9 +628,9 @@ pub struct Draft {
     pub at: String,
     /// Its number in the review: `d3`.
     pub id: String,
-    /// The lane that wrote it.
-    pub lane: String,
-    /// The lane's model.
+    /// The session that wrote it.
+    pub session: String,
+    /// The session's model.
     pub model: String,
     /// `finding`, `rewrite` or `withdrawal`.
     pub kind: String,
@@ -960,27 +971,28 @@ impl RunSummary {
             superseded_by: run.superseded_by.as_ref().map(|by| by.as_str().to_owned()),
             loop_stop: run.loop_stop.clone(),
             loop_rounds: run.loop_rounds,
-            lanes: Vec::new(),
+            sessions: Vec::new(),
             stages: Vec::new(),
         }
     }
 }
 
-impl From<&SessionRecord> for Lane {
-    fn from(lane: &SessionRecord) -> Self {
+impl From<&SessionRecord> for Session {
+    fn from(session: &SessionRecord) -> Self {
         Self {
-            name: lane.name.clone(),
-            model: lane.model.clone(),
-            status: lane.status.as_str().to_owned(),
-            turns: lane.turns,
-            input_tokens: lane.input_tokens,
-            output_tokens: lane.output_tokens,
-            cache_read_tokens: lane.cache_read_tokens,
-            cache_write_tokens: lane.cache_write_tokens,
-            error: lane.error.clone(),
+            name: session.name.clone(),
+            role: session.role.as_str().to_owned(),
+            model: session.model.clone(),
+            status: session.status.as_str().to_owned(),
+            turns: session.turns,
+            input_tokens: session.input_tokens,
+            output_tokens: session.output_tokens,
+            cache_read_tokens: session.cache_read_tokens,
+            cache_write_tokens: session.cache_write_tokens,
+            error: session.error.clone(),
             last_call_turn: None,
-            started_at: lane.started_at.clone(),
-            finished_at: lane.finished_at.clone(),
+            started_at: session.started_at.clone(),
+            finished_at: session.finished_at.clone(),
         }
     }
 }
@@ -989,7 +1001,7 @@ impl From<&FindingRecord> for Finding {
     fn from(finding: &FindingRecord) -> Self {
         Self {
             at: finding.at.clone(),
-            lane: finding.session.clone(),
+            session: finding.session.clone(),
             path: finding.path.clone(),
             line: finding.line,
             comment_id: finding.comment_id.clone(),
@@ -1003,7 +1015,7 @@ impl From<&DraftRecord> for Draft {
         Self {
             at: draft.at.clone(),
             id: draft.draft.clone(),
-            lane: draft.session.clone(),
+            session: draft.session.clone(),
             model: draft.model.clone(),
             kind: draft.kind.clone(),
             path: draft.path.clone(),

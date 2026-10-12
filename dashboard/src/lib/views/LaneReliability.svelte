@@ -1,6 +1,6 @@
 <script lang="ts">
   import { laneStats } from '$lib/api/client';
-  import type { LaneOutcome, LaneRow, LaneStats } from '$lib/api/types';
+  import type { SessionOutcome, SessionRow, SessionStats } from '$lib/api/types';
   import { LANE_REASONS, ratePercent } from '$lib/format';
   import { href, link, runPath } from '$lib/router';
   import { lookOf } from '$lib/status';
@@ -12,7 +12,7 @@
    * loop's reviewer and executor, and the lanes and fact-checks of reviews
    * from before the loop. A square per review, oldest left; a row with
    * many gaps in green is a session that makes reviews thinner. */
-  let { load = laneStats }: { load?: (query: string) => Promise<LaneStats> } = $props();
+  let { load = laneStats }: { load?: (query: string) => Promise<SessionStats> } = $props();
 
   const LAST = 30;
   /** How many of the newest outcomes the text equivalent reads out. */
@@ -22,15 +22,15 @@
 
   const day = (iso: string): string => iso.slice(0, 10);
 
-  function says(outcome: LaneOutcome, at: string): string {
+  function says(outcome: SessionOutcome, at: string): string {
     const why = outcome.reason === null ? '' : `, ${LANE_REASONS[outcome.reason] ?? outcome.reason}`;
     return `${day(at)} ${outcome.model}: ${lookOf(outcome.status).label}${why}`;
   }
 
   /** The row as a sentence, for screen readers. */
-  function sentence(row: LaneRow): string {
+  function sentence(row: SessionRow): string {
     const last = row.outcomes
-      .filter((o): o is LaneOutcome => o !== null)
+      .filter((o): o is SessionOutcome => o !== null)
       .slice(-SAID)
       .map((o) => lookOf(o.status).label);
     const timed = row.timed_out > 0 ? `, ${row.timed_out} timed out` : '';
@@ -41,7 +41,7 @@
   const modelsText = (models: string[]): string =>
     models.length > 1 ? `${models[0] ?? ''} and ${models.length - 1} more` : (models[0] ?? '');
 
-  const share = (row: LaneRow): number | null => (row.ran === 0 ? null : row.did_not_finish / row.ran);
+  const share = (row: SessionRow): number | null => (row.ran === 0 ? null : row.did_not_finish / row.ran);
 </script>
 
 <section class="panel" aria-labelledby="lanes-title">
@@ -52,11 +52,11 @@
   {#await stats}
     <Loading />
   {:then result}
-    {#if result.lanes.length === 0}
+    {#if result.sessions.length === 0}
       <Empty why="No review has ended yet." />
     {:else}
       <ul class="lanes">
-        {#each result.lanes as row (row.name)}
+        {#each result.sessions as row (row.name)}
           <li>
             <span class="name">
               <span class="mono">{row.name}</span>

@@ -17,9 +17,9 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use super::types::{
-    Cancelled, Draft, EventSummary, Finding, Lane, LaneDot, Page, RunCount, RunDetail, RunEvent,
-    RunSummary, Stage, StageDot, StartRequest, Started, ToolCall, ToolUsageRow, Transcript,
-    TranscriptRef,
+    Cancelled, Draft, EventSummary, Finding, Page, RunCount, RunDetail, RunEvent, RunSummary,
+    Session, SessionDot, Stage, StageDot, StartRequest, Started, ToolCall, ToolUsageRow,
+    Transcript, TranscriptRef,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::app::App;
@@ -126,7 +126,7 @@ pub(crate) async fn list_runs(app: &App, query: &RunQuery) -> Result<Page<RunSum
     })
 }
 
-/// Runs as lists show them: each with where its lanes and stages stand,
+/// Runs as lists show them: each with where its sessions and stages stand,
 /// read for all of them at once (#225).
 pub(super) async fn summaries(
     app: &App,
@@ -134,18 +134,19 @@ pub(super) async fn summaries(
 ) -> Result<Vec<RunSummary>, StoreError> {
     let ids: Vec<RunId> = runs.iter().map(|r| r.id.clone()).collect();
     let store = &app.store;
-    let lanes = store.sessions_of(&ids).await?;
+    let sessions = store.sessions_of(&ids).await?;
     let stages = store.stages_of(&ids).await?;
     let settings = &app.settings;
     Ok(runs
         .iter()
         .map(|run| {
             let mut summary = RunSummary::from_record(settings, run);
-            summary.lanes = lanes
+            summary.sessions = sessions
                 .iter()
-                .filter(|(of, _, _)| *of == run.id)
-                .map(|(_, name, status)| LaneDot {
+                .filter(|(of, _, _, _)| *of == run.id)
+                .map(|(_, name, role, status)| SessionDot {
                     name: name.clone(),
+                    role: role.as_str().to_owned(),
                     status: status.as_str().to_owned(),
                 })
                 .collect();
@@ -183,7 +184,7 @@ pub(crate) async fn run_of(app: &App, id: String) -> Result<RunRecord, ApiError>
         .ok_or_else(|| ApiError::not_found("No such run."))
 }
 
-/// `GET /runs/{id}`: one run with its lanes, findings, drafts, transcripts,
+/// `GET /runs/{id}`: one run with its sessions, findings, drafts, transcripts,
 /// tool usage, timeline and requests.
 pub async fn detail(
     State(dashboard): State<Arc<Dashboard>>,
@@ -199,18 +200,18 @@ pub async fn detail(
 pub(crate) async fn run_detail(app: &App, run: &RunRecord) -> Result<RunDetail, ApiError> {
     let store = &app.store;
     let calls = store.tool_calls(&run.id).await?;
-    let lanes = store
+    let sessions = store
         .sessions(&run.id)
         .await?
         .iter()
-        .map(|lane| {
-            let mut lane = Lane::from(lane);
-            lane.last_call_turn = calls
+        .map(|session| {
+            let mut session = Session::from(session);
+            session.last_call_turn = calls
                 .iter()
-                .filter(|c| c.session == lane.name)
+                .filter(|c| c.session == session.name)
                 .map(|c| c.turn)
                 .max();
-            lane
+            session
         })
         .collect();
     Ok(RunDetail {
@@ -218,7 +219,7 @@ pub(crate) async fn run_detail(app: &App, run: &RunRecord) -> Result<RunDetail, 
         error: run.error.clone(),
         check_id: run.check_id.clone(),
         heartbeat_at: run.heartbeat_at.clone(),
-        lanes,
+        sessions,
         findings: store
             .findings(&run.id)
             .await?

@@ -100,8 +100,8 @@ calling a model or an MCP server (that is `henk doctor --probe`).
 
 ### `GET /runs`
 
-Runs, newest first, each with its `lanes` (`name`, `status`) and `stages`
-(`name`, `state`) as dots for lists (#225). Every filter is optional:
+Runs, newest first, each with its `sessions` (`name`, `role`, `status`) and
+`stages` (`name`, `state`) as dots for lists (#225). Every filter is optional:
 
 | Query | Meaning |
 |---|---|
@@ -137,27 +137,29 @@ How many runs the filters of `GET /runs` match, over every page.
 
 ### `GET /runs/{id}`
 
-Each lane also has `last_call_turn`: the turn of its latest tool call.
-
 One run with everything the run record holds about it:
 
 - `run`: the summary above; a review replaced by a review of a newer
   commit has status `superseded` and names that run in `superseded_by`;
 - `summary`, `error`, `check_id`, `heartbeat_at`;
-- `lanes`: every model session (a review loop's `reviewer` and `executor`,
-  `fixer` in runs before #323,
-  a plan's `planner` and `reviewer`, and `address` in address runs from
-  before #327) with
-  turns and tokens (`input_tokens` the whole prompt, of which
+- `sessions`: every model session, each with its `name` and its `role`:
+  `planner`, `reviewer` or `executor` (a review loop's `reviewer` and
+  `executor`, a plan's `planner` and `reviewer`, an execute run's
+  `executor`). Sessions of older runs keep their names and carry a history
+  role (#324): the `fixer` of runs before #323 is `executor`, the review
+  lanes of reviews before #309 are `lane` and their `check-N` fact-check
+  sessions `check`, and the session of an address run from before #327 is
+  `address`. Each has turns and tokens (`input_tokens` the whole prompt, of which
   `cache_read_tokens` came from the model's prompt cache and
   `cache_write_tokens` went into it, #330), and its `status`:
   `running`, `finished`, `timed_out` (stopped at its time limit) or
-  `did_not_finish` (`error` says why). Reviews made by lanes, before #309,
-  have their lanes and `check-N` fact-check sessions here;
-- `findings`: what was done with a finding comment on the platform. Only
-  reviews made by lanes have any: a review loop posts nothing;
-- `drafts`: a review loop's findings, `kind` `loop_finding` from the
-  `reviewer`, each with the executor's `decision`: `fixed` (its commit in
+  `did_not_finish` (`error` says why), `started_at`, `finished_at`, and
+  `last_call_turn`: the turn of its latest tool call;
+- `findings`: what was done with a finding comment on the platform, with
+  the `session` that wrote it. Only reviews made by lanes have any: a
+  review loop posts nothing;
+- `drafts`: each with the `session` that wrote it. A review loop's
+  findings, `kind` `loop_finding` from the `reviewer`, each with the executor's `decision`: `fixed` (its commit in
   `comment_id`), `rejected`, `wont_fix`, or `unsettled` when the loop ended
   first (#285). A plan's drafts are its reviewer's points, `kind`
   `plan_point`, with `path` the part of the plan the point is about, `line`
@@ -174,10 +176,10 @@ One run with everything the run record holds about it:
   `started_at`, `ended_at` and `detail`, one line in Henk's own words
   (`12 files, +340 -25; 1 not reviewed`). A review goes `requested`,
   `queued` (the wait for a review slot), `started`, `diff`, `checkout`,
-  `lanes` (the review loop's rounds), `push` (when the loop pushed, or
+  `rounds` (the review loop's rounds), `push` (when the loop pushed, or
   skipped when it may not), `publish` (skipped: a review posts nothing),
-  `done`. Runs from before #309 can have a `fact_check` stage after
-  `lanes`. A plan goes `requested`,
+  `done`. Reviews from before #324 have `lanes` where `rounds` is, and runs
+  from before #309 can have a `fact_check` stage after it. A plan goes `requested`,
   `started`, `session` (the planner's draft and the review's rounds),
   `publish` (nothing reaches the issue before it), `done`. A run's
   `loop_stop` and `loop_rounds` say why and after how many rounds a review
@@ -189,18 +191,16 @@ One run with everything the run record holds about it:
   `push`, `replies`, `done`.
   Runs from before stages were kept have none.
 
-Each lane also has `started_at` and `finished_at`.
-
 ```json
 {
   "run": {"id": "r-...", "kind": "review", "status": "finished", "...": "..."},
   "summary": "No issues found.\n\nThe review loop ran 2 rounds, settled 1 finding, pushed 1 commit and stopped: converged, the reviewer found nothing more.",
   "error": null, "check_id": "4711", "heartbeat_at": "...",
-  "lanes": [{"name": "reviewer", "model": "claude-opus-5-5", "status": "finished",
+  "sessions": [{"name": "reviewer", "role": "reviewer", "model": "claude-opus-5-5", "status": "finished",
              "turns": 22, "input_tokens": 452700, "output_tokens": 3500,
              "cache_read_tokens": 431000, "cache_write_tokens": 21000, "error": null}],
   "findings": [],
-  "drafts": [{"at": "...", "id": "f1", "lane": "reviewer", "model": "claude-opus-5-5",
+  "drafts": [{"at": "...", "id": "f1", "session": "reviewer", "model": "claude-opus-5-5",
               "kind": "loop_finding", "path": "src/a.rs", "line": 4, "target": "", "body": "...",
               "decision": {"at": "...", "verdict": "fixed", "checker": "executor",
                            "reason": "...", "same_as": "", "comment_id": "9f8e7d6c5b4a"}}],
@@ -259,7 +259,7 @@ above; `RunMessage` in `types.ts` is the union.
 |---|---|---|
 | `snapshot` | `RunDetail` | First, and whenever the stream cannot replay what was missed |
 | `run` | `RunUpdate`: the run, summary, error, check id | The run started, ended or got its check |
-| `lanes` | `Lane[]`, every session | A session started or ended |
+| `sessions` | `Session[]`, every session | A session started or ended |
 | `tool_call` | `ToolCall` | A session called a tool |
 | `draft` | `Draft` | The reviewer reported a finding or raised a point on a plan, or the executor or planner answered it |
 | `finding` | `Finding` | Something was done with a finding comment; only a review by lanes did that |
@@ -282,7 +282,7 @@ above; `RunMessage` in `types.ts` is the union.
   not on this process's feed: its stream sends a fresh `snapshot` every 5
   seconds until the run ends.
 - Turns and tokens of a session are stored when it ends. While it runs,
-  `last_call_turn` on its lane (from its latest tool call) says how far it
+  `last_call_turn` on its session (from its latest tool call) says how far it
   has come.
 - A client that falls far behind is dropped and reconnects; it never holds
   up a run. A comment line every 15 seconds keeps the connection open.
@@ -326,8 +326,8 @@ What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the
 newest running runs, at most 100, how many run, and the review `slots`)
 on connect and every 30 seconds, a `run` message (`RunSummary`) whenever
 a run of this process starts or ends, and a `progress` message (`run_id`
-with its `lanes` or its `stages` as dots, the other `null`) whenever a
-running run's lanes or stages move on (#225), and a `slots` message
+with its `sessions` or its `stages` as dots, the other `null`) whenever a
+running run's sessions or stages move on (#225), and a `slots` message
 (`Slots`) whenever a review of this process starts waiting, takes or
 frees a slot, or leaves the queue. `RunningMessage` in
 `types.ts` is the union.
@@ -357,16 +357,17 @@ every day from `from` to `to` with:
 - `findings_posted`: new comments, checked (`posted`) or not
   (`unverified`); improved comments are not new. Only reviews by lanes,
   before #309, posted any;
-- `drafts`: drafts the lanes wrote. A review loop's findings and a plan
+- `drafts`: drafts the review lanes wrote. A review loop's findings and a plan
   review's points are left out (#285, #328), so days since #309 have
   none.
 
-### `GET /stats/lanes`
+### `GET /stats/sessions`
 
 How each session of the recent reviews ended (#229): the review loop's
 `reviewer` and `executor` (`fixer` before #323, in the executor's row),
 and in reviews from before the loop (#309), the
-lanes and the `check-N` fact-check sessions. The path keeps its name.
+lanes and the `check-N` fact-check sessions. It was `GET /stats/lanes`
+before #325, which now answers 404.
 `last` (1 to 200, default 30) asks for the newest reviews; `since` (RFC
 3339) for every review started since then, the newest 1000 of them. Not
 both. Only reviews that ended on their own count: running ones are left
@@ -374,10 +375,10 @@ out, and so are cancelled and superseded ones, whose sessions were
 cancelled for them by a person or for a newer commit.
 
 The answer has `reviews` (`run_id`, `started_at`), oldest first, and
-`lanes`: the sessions, the `reviewer` and the `executor` first, then the
-review lanes by name, then the `check-N` sessions by number. Each has:
+`sessions`: the `reviewer` and the `executor` first, then the review lanes
+by name, then the `check-N` sessions by number. Each has:
 
-- `kind`: `reviewer`, `executor`, `lane` or `check`; `models`: the models it
+- `name`; `role`: `reviewer`, `executor`, `lane` or `check`; `models`: the models it
   ran, newest first;
 - `outcomes`: one per review in `reviews`, in the same order: `run_id`,
   the `model` it ran there, `status` (`finished`, `timed_out`,
@@ -390,18 +391,18 @@ review lanes by name, then the `check-N` sessions by number. Each has:
 
 ### `GET /tool-calls/summary`
 
-How each tool fared across runs (#203): one row per tool, model and kind of
-session (`reviewer`, `executor`, `planner`, `address`, `lane`, `check`;
-`executor` includes the `fixer` of runs before #323), the
-most calls first. `lane` and `check` (the fact-check) are sessions of
-reviews from before the loop (#309), and `address` the session of address
-runs from before #327.
+How each tool fared across runs (#203): one row per tool, model and
+session `role` (`planner`, `reviewer`, `executor`, `address`, `lane`,
+`check`; `executor` includes the `fixer` of runs before #323), the most
+calls first. The role is the one stored with the session (#324): `lane`
+and `check` (the fact-check) are sessions of reviews from before the loop
+(#309), and `address` the session of address runs from before #327.
 
 | Query | Meaning |
 |---|---|
 | `since`, `until` | Calls made at or after `since`, and before `until` (RFC 3339) |
 | `tool`, `model` | Exactly |
-| `session_kind` | `reviewer`, `executor`, `planner`, `address`, `lane` or `check` |
+| `role` | `planner`, `reviewer`, `executor`, `lane`, `check` or `address` |
 
 Each row has `calls`, `errors` (the tool failed), `refusals` (the scope
 guard or the repeat guard stopped it), `other` (never ran: an unknown tool,
@@ -409,7 +410,7 @@ malformed arguments, a cancel), `total_ms`, and `error_rate` and
 `refusal_rate`, from 0 to 1.
 
 ```json
-[{"tool": "read_file", "model": "claude-opus-5-5", "session_kind": "reviewer",
+[{"tool": "read_file", "model": "claude-opus-5-5", "role": "reviewer",
   "calls": 40, "errors": 4, "refusals": 0, "other": 0, "total_ms": 1600,
   "error_rate": 0.1, "refusal_rate": 0.0}]
 ```
@@ -423,7 +424,7 @@ keeps that session's conversation; transcripts are pruned on their own.
 | Query | Meaning |
 |---|---|
 | `outcome` | `ok`, `error`, `refused_scope`, `refused_repeat`, `unknown_tool`, `malformed_arguments`, `not_run`, `cancelled`, or `problems` for everything but `ok` |
-| `tool`, `model`, `session_kind`, `since`, `until` | As for the summary |
+| `tool`, `model`, `role`, `since`, `until` | As for the summary |
 | `limit`, `cursor` | Paging |
 
 ```json

@@ -47,7 +47,7 @@
             <td class="num">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</td>
             {#if lanes}
               <td class="lane-icons">
-                {#each run.lanes.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}
+                {#each run.sessions.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}
                   {@const look = lookOf(lane.status)}
                   <span class="tone-{look.tone} lane-icon" title="{lane.name}: {look.label}">
                     <Icon name={look.icon} size={13} /><span class="visually-hidden">{lane.name}: {look.label}</span>
