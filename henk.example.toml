@@ -176,9 +176,9 @@ requester_id = 523456789012345678
 # limits, tools and skills. max_turns and timeout_secs hold per turn: a
 # round of the review loop, or the planner's whole run. `tools` narrows a
 # role's tools within what the role may ever have; left out, the role gets
-# its defaults, and only the planner reaches the web. `henk config check`
-# lists each role's tools when they differ, and refuses a tool the role may
-# not have. Moving from [address] and the old [review.loop] and [planning]
+# its defaults. Only the planner may have web_fetch, and a role that lists
+# skills keeps load_skill. `henk config check` lists each role's tools when
+# they differ, and refuses a tool the role may not have. Moving from [address] and the old [review.loop] and [planning]
 # keys: README, "Migrating to roles".
 [roles.reviewer]
 model = "opus"
@@ -196,8 +196,8 @@ timeout_secs = 1200
 # Henk pushes one fast-forward commit to the pull request's branch (never a
 # fork, the default branch or a protected branch). Address runs (`henk
 # address <pull request URL>`, spec §3.5) use it too until they are removed
-# (#327). GitHub only for now; the App needs "Contents: write". requester_id
-# is who those commits are for.
+# (#327), with its tools and skills. GitHub only for now; the App needs
+# "Contents: write". requester_id is who those commits are for.
 [roles.executor]
 model = "claude"
 max_turns = 40
