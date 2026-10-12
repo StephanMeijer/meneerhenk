@@ -533,7 +533,7 @@ async fn an_execute_request_starts_an_execute_run_where_execution_is_configured(
     );
 
     // App::build reads the model's key: PATH is set wherever tests run.
-    let executor = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\nmodel = \"m\"\n[execution]\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    let executor = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\n[models.m]\nendpoint = \"m\"\nmodel = \"m\"\n[execution]\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
     let h = Harness::configured(
         FakeWriter {
             head: SHA.to_owned(),

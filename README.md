@@ -159,7 +159,7 @@ OpenBao.
 
 | Variable | Used by |
 |---|---|
-| `LLM3_API_KEY`, `ANTHROPIC_API_KEY`, ... | Whatever `[models.*].api_key_env` names |
+| `LLM3_API_KEY`, `ANTHROPIC_API_KEY`, ... | Whatever `[endpoints.*].api_key_env` names |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | The GitHub App key, for check runs, comments and the read session |
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
@@ -185,6 +185,17 @@ records stay in their file, readable with `henk runs show` by pointing
 Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
 the list (see `henk.example.toml`), and a change made only of such files is
 reported as nothing to review.
+
+Models are declared in two layers (#368). An `[endpoints.<id>]` says where
+and how they are reached: `provider` (`openai` or `anthropic`), `base_url`,
+`api_key_env`, and optionally `headers` sent with every request. Declare
+one per server or account, as many of one provider as there are. A
+`[models.<id>]` says which model on which endpoint and how to call it:
+`endpoint`, `model` (the provider's name for it), `max_tokens`,
+`timeout_secs`, `effort` and `prompt_cache`. The same model may be declared
+twice, say with two efforts, and the models of one endpoint share its
+connections. `henk config check` lists the endpoints, then the models, and
+says which no role or model uses.
 
 Henk's agents are **roles** (#321), each configured once: `[roles.reviewer]`,
 `[roles.executor]` (the agent that changes the code) and `[roles.planner]`.
@@ -392,9 +403,55 @@ Since #364 the provider for OpenAI and compatible endpoints is spelled
 configuration loads, with a message that names `openai`; there is no alias.
 
 ```toml
-[models.gpt]
+[endpoints.openai]
 provider = "openai"
 ```
+
+### Endpoints and models
+
+Since #368 a model no longer says where it is reached: `provider`,
+`base_url` and `api_key_env` moved from `[models.*]` to `[endpoints.*]`,
+and a model names its endpoint. A model that still has one of them is
+refused with `<key> was removed from [models.<id>]: it is
+[endpoints.<endpoint>].<key> now`. Before:
+
+```toml
+[models.claude]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-5-5"
+
+[models.opus]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-opus-5-5"
+effort = "high"
+```
+
+After:
+
+```toml
+[endpoints.anthropic]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+# headers = { "X-Team" = "henk" }   # optional, sent with every request
+
+[models.claude]
+endpoint = "anthropic"
+model = "claude-sonnet-5-5"
+
+[models.opus]
+endpoint = "anthropic"
+model = "claude-opus-5-5"
+effort = "high"
+```
+
+Roles keep naming models by id. `henk llm models` lists what an endpoint
+serves and takes `--endpoint <id>` instead of `--model`. `henk doctor`
+checks each endpoint once and then each model on it.
 
 ## Check a deployment
 
@@ -421,8 +478,8 @@ on one machine, with one review loop:
 3. Export the secrets named in `henk.toml` in the shell that runs Henk:
    at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
    reads them; they are never written anywhere.
-4. `henk llm models --model <id>` lists what the endpoint serves; put the
-   chosen name in `[models.<id>].model`.
+4. `henk llm models --endpoint <id>` lists what the endpoint serves; put
+   the chosen name in `[models.<id>].model`.
 5. `henk doctor --probe` until it reports `0 failing check(s)`.
 6. `henk mcp probe --server github --show pull_request_read` shows what the
    planner's read-only session will see.
@@ -494,12 +551,12 @@ RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review 
 cargo run -q -- review <url> --commit <sha>                                              # a specific commit, not the head: the reviewer alone, nothing pushed
 cargo run -q -- runs show r-20261005-8f8b812b                                            # the run, rounds, findings, timeline
 cargo run -q -- runs show r-20261005-8f8b812b --transcript reviewer                      # what the reviewer's model saw and said
-cargo run -q -- llm models --model proxy                                                 # model names the endpoint serves
+cargo run -q -- llm models --endpoint proxy                                              # model names the endpoint serves
 ```
 
 Another model is a name from `llm models` in `[models.<id>].model`, or a
-second `[models.*]` block named as the `model` of `[roles.reviewer]` or
-`[roles.executor]`. Another repository is one more entry in
+second `[models.*]` block, on one of the `[endpoints]`, named as the
+`model` of `[roles.reviewer]` or `[roles.executor]`. Another repository is one more entry in
 `[allowlist].github_repositories`.
 
 ## Container image
@@ -543,7 +600,7 @@ henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk execute https://github.com/owner/repo/issues/9   # issue to pull request, then its review
 henk llm probe --model proxy-fast                  # one prompt to a model
-henk llm models --model proxy-fast                 # what that endpoint serves
+henk llm models --endpoint proxy                   # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
 henk mcp probe --server other --platform gitlab    # an alias [github] and [gitlab] do not name
 henk runs show r-20261005-1a2b3c4d                 # a run from the configured database

@@ -37,23 +37,31 @@ username = "meneerhenk"
 mcp_server = "gitlab"
 write_mcp_server = "gitlab-write"
 
-[models.proxy-fast]
+# Endpoints: where models are reached and how (#368). One per server or
+# account; any number of the same provider, each with its own id. headers
+# (optional) are sent with every request, for a gateway that wants them.
+[endpoints.proxy]
 provider = "openai"
 base_url = "https://llm3.9xx.nl/v1"
 api_key_env = "LLM3_API_KEY"
-model = "fast-model"
+# headers = { "X-Team" = "henk" }
 
-[models.claude]
+[endpoints.anthropic]
 provider = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
+
+[models.proxy-fast]
+endpoint = "proxy"
+model = "fast-model"
+
+[models.claude]
+endpoint = "anthropic"
 model = "claude-sonnet-5-5"
 max_tokens = 16384
 
 [models.opus]
-provider = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key_env = "ANTHROPIC_API_KEY"
+endpoint = "anthropic"
 model = "claude-opus-5-5"
 effort = "high"
 max_tokens = 16384

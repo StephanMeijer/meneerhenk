@@ -87,19 +87,33 @@ where
     }
 }
 
-/// Builds the shared HTTP client.
+/// Builds the HTTP client one endpoint's models share (#368). It has no
+/// overall timeout: each model sets its own on every request.
 ///
 /// # Errors
 ///
 /// Returns [`LlmError::InvalidConfig`] when reqwest cannot build a client,
 /// which only happens when no TLS provider is installed.
-pub fn build_client(timeout: Duration) -> Result<reqwest::Client, LlmError> {
+pub fn build_endpoint_client() -> Result<reqwest::Client, LlmError> {
     ensure_tls_provider();
     reqwest::Client::builder()
-        .timeout(timeout)
         .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| LlmError::InvalidConfig(format!("http client: {error}")))
+}
+
+/// `request` with the model's per-attempt timeout and its endpoint's extra
+/// headers (#368).
+pub(crate) fn prepared(
+    request: reqwest::RequestBuilder,
+    config: &crate::client::ModelConfig,
+) -> reqwest::RequestBuilder {
+    config
+        .headers
+        .iter()
+        .fold(request.timeout(config.timeout), |request, (name, value)| {
+            request.header(name.as_str(), value.as_str())
+        })
 }
 
 /// Installs rustls's ring provider if the process has none yet.

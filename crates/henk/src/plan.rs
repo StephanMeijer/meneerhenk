@@ -778,15 +778,19 @@ installation_id = 2
 bot_login = "h[bot]"
 [mcp.github]
 command = "unused"
+[endpoints.m]
+provider = "openai"
+base_url = "https://x.test/v1"
+api_key_env = "UNUSED"
 [models.m]
-provider = "openai"
-base_url = "https://x.test/v1"
-api_key_env = "UNUSED"
+endpoint = "m"
 model = "scripted"
-[models.r]
+[endpoints.r]
 provider = "openai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
+[models.r]
+endpoint = "r"
 model = "scripted-reviewer"
 [planning]
 requester_id = 3

@@ -118,6 +118,8 @@ pub struct ModelConfig {
     /// conversation for prompt caching. Off for a proxy that rejects
     /// `cache_control`.
     pub prompt_cache: bool,
+    /// Extra headers the endpoint wants on every request (#368).
+    pub headers: Vec<(String, String)>,
 }
 
 impl ModelConfig {
@@ -128,13 +130,27 @@ impl ModelConfig {
     }
 }
 
-/// Builds the client for a configuration.
+/// Builds the client for a configuration, with an HTTP client of its own.
+///
+/// # Errors
+///
+/// As [`client_with`], and [`LlmError::InvalidConfig`] when no HTTP client
+/// can be built.
+pub fn client_for(config: ModelConfig) -> Result<Arc<dyn ModelClient>, LlmError> {
+    client_with(config, crate::http::build_endpoint_client()?)
+}
+
+/// Builds the client for a configuration over `http`, the HTTP client the
+/// models of one endpoint share (#368).
 ///
 /// # Errors
 ///
 /// Returns [`LlmError::InvalidConfig`] for an empty model or base URL, or a
 /// base URL that is not `http(s)://`.
-pub fn client_for(config: ModelConfig) -> Result<Arc<dyn ModelClient>, LlmError> {
+pub fn client_with(
+    config: ModelConfig,
+    http: reqwest::Client,
+) -> Result<Arc<dyn ModelClient>, LlmError> {
     if config.model.trim().is_empty() {
         return Err(LlmError::InvalidConfig("model name is empty".to_owned()));
     }
@@ -150,7 +166,7 @@ pub fn client_for(config: ModelConfig) -> Result<Arc<dyn ModelClient>, LlmError>
         ));
     }
     Ok(match config.provider {
-        Provider::OpenAi => Arc::new(OpenAiClient::new(config)?),
-        Provider::Anthropic => Arc::new(AnthropicClient::new(config)?),
+        Provider::OpenAi => Arc::new(OpenAiClient::with_http(config, http)),
+        Provider::Anthropic => Arc::new(AnthropicClient::with_http(config, http)),
     })
 }

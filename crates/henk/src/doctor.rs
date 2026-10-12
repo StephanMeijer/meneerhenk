@@ -428,68 +428,42 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         ));
         return checks;
     }
-    for (id, model) in &settings.models {
-        let name = format!("model {id}");
-        let config = match model.to_client_config(env_var) {
-            Ok(config) => config,
-            Err(variable) => {
-                checks.push(Check::fail(
-                    name,
-                    format!("environment variable {variable} is not set"),
-                ));
-                continue;
-            }
-        };
-        if !probe {
-            checks.push(Check::ok(
-                name,
-                format!(
-                    "{} at {} (key present; use --probe to call it)",
-                    model.model, model.base_url
-                ),
-            ));
-            continue;
+    // Each endpoint once (#368), then each model on a usable one.
+    let mut usable = std::collections::BTreeSet::new();
+    for id in settings.endpoints.keys() {
+        let check = check_endpoint(settings, id, probe).await;
+        if !check.is_failure() {
+            usable.insert(id.as_str());
         }
-        let client = match henk_llm::client_for(config) {
-            Ok(client) => client,
-            Err(error) => {
-                checks.push(Check::fail(name, error.to_string()));
-                continue;
-            }
-        };
-        let request = henk_llm::CompletionRequest {
-            messages: vec![henk_llm::ChatMessage::user(
-                "Reply with the single word: ready",
-            )],
-            // A thinking model spends its cap on thinking first; give it
-            // the configured one rather than cutting it off before it answers.
-            max_tokens: model.effort.is_none().then_some(16),
-            ..Default::default()
-        };
-        match tokio::time::timeout(Duration::from_mins(1), client.complete(&request)).await {
-            Ok(Ok(completion)) => checks.push(Check::ok(
-                name,
-                format!("answered: {:?}", completion.message.text().trim()),
-            )),
-            Ok(Err(error)) => checks.push(Check::fail(name, error.to_string())),
-            Err(_) => checks.push(Check::fail(name, "no answer within 60s")),
-        }
+        checks.push(check);
     }
-    let unused: Vec<&str> = settings
-        .models
-        .keys()
-        .filter(|id| {
-            let roles = &settings.roles;
-            roles.planner.as_ref().is_none_or(|r| &r.model != *id)
-                && roles.reviewer.as_ref().is_none_or(|r| &r.model != *id)
-                && roles.executor.as_ref().is_none_or(|r| &r.model != *id)
-        })
-        .map(String::as_str)
-        .collect();
+    for (id, model) in &settings.models {
+        checks.push(if usable.contains(model.endpoint.as_str()) {
+            check_model(settings, id, probe).await
+        } else {
+            Check::fail(
+                format!("model {id}"),
+                format!("its endpoint {} is not usable (see above)", model.endpoint),
+            )
+        });
+    }
+    let unused = settings.unused_models();
     if !unused.is_empty() {
         checks.push(Check::warn(
             "models",
             format!("configured but used by no role: {}", unused.join(", ")),
+        ));
+    }
+    let idle: Vec<&str> = settings
+        .endpoints
+        .keys()
+        .filter(|id| settings.models.values().all(|m| &m.endpoint != *id))
+        .map(String::as_str)
+        .collect();
+    if !idle.is_empty() {
+        checks.push(Check::warn(
+            "endpoints",
+            format!("configured but used by no model: {}", idle.join(", ")),
         ));
     }
     if settings.review.r#loop.is_none() {
@@ -499,6 +473,87 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         ));
     }
     checks
+}
+
+/// One endpoint: its key, and with `probe` the models it serves, which
+/// should include those configured on it.
+async fn check_endpoint(settings: &Settings, id: &str, probe: bool) -> Check {
+    let name = format!("endpoint {id}");
+    let config = match settings.endpoint_config(id, env_var) {
+        Ok(config) => config,
+        Err(why) => return Check::fail(name, why),
+    };
+    if !probe {
+        return Check::ok(
+            name,
+            format!(
+                "{} at {} (key present; use --probe to call it)",
+                config.provider.as_str(),
+                config.base_url
+            ),
+        );
+    }
+    match tokio::time::timeout(Duration::from_mins(1), henk_llm::list_models(&config)).await {
+        Ok(Ok(served)) => {
+            let missing: Vec<&str> = settings
+                .models
+                .values()
+                .filter(|m| m.endpoint == id && !served.contains(&m.model))
+                .map(|m| m.model.as_str())
+                .collect();
+            if missing.is_empty() {
+                Check::ok(name, format!("serves {} models", served.len()))
+            } else {
+                Check::warn(
+                    name,
+                    format!(
+                        "serves {} models, but not {}",
+                        served.len(),
+                        missing.join(", ")
+                    ),
+                )
+            }
+        }
+        // Not every endpoint lists its models; the model probes say whether
+        // it answers.
+        Ok(Err(error)) => Check::warn(name, format!("could not list its models: {error}")),
+        Err(_) => Check::warn(name, "no model list within 60s"),
+    }
+}
+
+/// One model on a usable endpoint; with `probe`, one short call.
+async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
+    let name = format!("model {id}");
+    let Some(model) = settings.models.get(id) else {
+        return Check::fail(name, "not configured");
+    };
+    if !probe {
+        return Check::ok(name, format!("{} on {}", model.model, model.endpoint));
+    }
+    let client = match settings
+        .client_config(id, env_var)
+        .and_then(|config| henk_llm::client_for(config).map_err(|e| e.to_string()))
+    {
+        Ok(client) => client,
+        Err(why) => return Check::fail(name, why),
+    };
+    let request = henk_llm::CompletionRequest {
+        messages: vec![henk_llm::ChatMessage::user(
+            "Reply with the single word: ready",
+        )],
+        // A thinking model spends its cap on thinking first; give it the
+        // configured one rather than cutting it off before it answers.
+        max_tokens: model.effort.is_none().then_some(16),
+        ..Default::default()
+    };
+    match tokio::time::timeout(Duration::from_mins(1), client.complete(&request)).await {
+        Ok(Ok(completion)) => Check::ok(
+            name,
+            format!("answered: {:?}", completion.message.text().trim()),
+        ),
+        Ok(Err(error)) => Check::fail(name, error.to_string()),
+        Err(_) => Check::fail(name, "no answer within 60s"),
+    }
 }
 
 async fn check_github(settings: &Settings) -> Vec<Check> {
@@ -741,20 +796,56 @@ mod tests {
             .unwrap()
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     #[tokio::test]
     async fn a_model_only_address_runs_use_is_not_unused() {
         let checks = check_models(&settings(ADDRESS), false).await;
         assert!(checks.iter().all(|c| c.name != "models"), "{checks:?}");
         let spare = format!(
-            "{ADDRESS}[models.spare]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"y\"\n"
+            "{ADDRESS}[endpoints.spare]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n[models.spare]\nendpoint = \"spare\"\nmodel = \"y\"\n"
         );
         let checks = check_models(&settings(&spare), false).await;
         let unused = checks.iter().find(|c| c.name == "models").unwrap();
         assert_eq!(
             unused.verdict,
             Verdict::Warn("configured but used by no role: spare".to_owned())
+        );
+    }
+
+    /// A missing key fails its endpoint once, and each model on it says
+    /// so; an endpoint no model uses is a warning (#368).
+    #[tokio::test]
+    async fn an_endpoint_is_checked_once_and_its_models_follow_it() {
+        let text = "[endpoints.e]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"HENK_DOCTOR_TEST_UNSET_KEY\"\n[endpoints.idle]\nprovider = \"anthropic\"\nbase_url = \"https://y.test\"\napi_key_env = \"HENK_DOCTOR_TEST_UNSET_KEY\"\n[models.m]\nendpoint = \"e\"\nmodel = \"x\"\n[models.n]\nendpoint = \"e\"\nmodel = \"y\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+        let checks = check_models(&settings(text), false).await;
+        let verdict = |name: &str| {
+            checks
+                .iter()
+                .find(|c| c.name == name)
+                .map_or_else(|| panic!("no {name} in {checks:?}"), |c| c.verdict.clone())
+        };
+        assert_eq!(
+            verdict("endpoint e"),
+            Verdict::Fail("environment variable HENK_DOCTOR_TEST_UNSET_KEY is not set".to_owned())
+        );
+        assert_eq!(
+            checks
+                .iter()
+                .filter(|c| c.name.starts_with("endpoint e"))
+                .count(),
+            1,
+            "the endpoint once, not once per model"
+        );
+        for model in ["model m", "model n"] {
+            assert_eq!(
+                verdict(model),
+                Verdict::Fail("its endpoint e is not usable (see above)".to_owned())
+            );
+        }
+        assert_eq!(
+            verdict("endpoints"),
+            Verdict::Warn("configured but used by no model: idle".to_owned())
         );
     }
 
