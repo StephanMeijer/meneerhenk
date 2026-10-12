@@ -323,7 +323,9 @@ Henk then:
 4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
    configurable) with one commit, "Resolve #N: <title>", with the run and
    the requester in its trailers. A branch of that name that exists already
-   is never pushed over.
+   is never pushed over: the run picks the name before the session, and
+   when origin has it, takes `-2`, `-3` and on. With ten names taken it
+   stops before the session and says so on the issue.
 5. **Opens a pull request** of that branch into the default branch, ready
    for review. Its description closes the issue and says what was done and
    what was left out, with the run link.
