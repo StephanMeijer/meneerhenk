@@ -357,7 +357,10 @@ impl Work<'_> {
             check_commands: self.executor.check_commands.clone(),
             check_timeout: Duration::from_secs(profile.limits.command_secs),
             max_changed_files: self.executor.max_changed_files,
-            bash: profile.backend.runs_model_commands(),
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
+            bash: profile.backend.runs_model_commands()
+                && Role::Executor.grants(&self.executor.tools(), "bash"),
             state: Mutex::new(EditState::default()),
         });
         let proposed: Proposed = Arc::default();
@@ -697,6 +700,7 @@ check_commands = [["make", "check"]]
         tracker: Arc<FakeIssueWriter>,
         hub: Arc<IssueHub>,
         provider: FakeProvider,
+        model: Arc<ScriptedClient>,
         _remote: ScratchDir,
     }
 
@@ -723,7 +727,7 @@ check_commands = [["make", "check"]]
         );
         let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
-        models.insert("m".to_owned(), model as Arc<dyn ModelClient>);
+        models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         let tracker = Arc::new(FakeIssueWriter::new(
             Platform::GitHub,
             None,
@@ -755,6 +759,7 @@ check_commands = [["make", "check"]]
             tracker,
             hub,
             provider,
+            model,
             _remote: remote,
         }
     }
@@ -1040,6 +1045,43 @@ check_commands = [["make", "check"]]
             !stages.iter().any(|s| s.stage.as_str() == "session"),
             "no session: {stages:?}"
         );
+    }
+
+    /// The executor is told of `bash` only when it has it: on a backend
+    /// that runs model commands, and with `bash` in `[roles.executor]`
+    /// tools.
+    #[tokio::test]
+    async fn the_executor_hears_of_bash_only_when_its_tools_grant_it() {
+        let without: Vec<String> = Role::Executor
+            .default_tools()
+            .into_iter()
+            .filter(|tool| tool != "bash")
+            .collect();
+        for (name, tools, granted) in [
+            ("henk-exec-bash", None, true),
+            ("henk-exec-nobash", Some(without), false),
+        ] {
+            let mut f = fixture(name, vec![done()], 0).await;
+            f.app.settings.workspace.default.backend = henk_domain::workspace::BackendKind::Ssh;
+            f.app.settings.roles.executor.as_mut().unwrap().tools = tools;
+            run_execute(
+                &f.app,
+                request(&format!("r-{name}")),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            let requests = f.model.requests();
+            let first = requests.first().unwrap();
+            let names: Vec<String> = first.tools.iter().map(|t| t.name.to_string()).collect();
+            let system = first.system.clone().unwrap_or_default();
+            assert_eq!(names.iter().any(|n| n == "bash"), granted, "{names:?}");
+            assert_eq!(
+                system.contains("commands of your own in the checkout with `bash`"),
+                granted,
+                "{system}"
+            );
+        }
     }
 
     #[tokio::test]
