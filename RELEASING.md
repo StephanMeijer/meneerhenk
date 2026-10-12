@@ -20,7 +20,9 @@ Release, signed Linux binaries and a signed container image.
    artifacts below and appends them to the release.
 
 Both release jobs run only after every check in `ci.yml` passes on
-the same push.
+the same push. One of those checks, `docker`, builds the image's `build`
+stage on every pull request and push, because `release.yml` builds the
+image only after the tag is out, and a tag does not move (#313).
 
 `release_always = true` means any push to `main` whose version is ahead of
 the last tag releases, not only the merge of a release PR. That makes a
