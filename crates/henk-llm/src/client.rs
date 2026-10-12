@@ -10,6 +10,7 @@ use crate::anthropic::AnthropicClient;
 use crate::error::LlmError;
 use crate::http::RetryPolicy;
 use crate::openai::OpenAiClient;
+use crate::responses::ResponsesClient;
 use crate::types::{Completion, CompletionRequest};
 
 /// One model behind one endpoint.
@@ -41,6 +42,30 @@ impl Provider {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+/// Which OpenAI API an `openai` endpoint is called through (#365).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Api {
+    /// `POST /chat/completions`, which every OpenAI-compatible server
+    /// speaks.
+    #[default]
+    ChatCompletions,
+    /// `POST /responses`: OpenAI's current API, where a reasoning model's
+    /// reasoning is carried from turn to turn.
+    Responses,
+}
+
+impl Api {
+    /// The name configuration spells it with.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
         }
     }
 }
@@ -95,6 +120,8 @@ impl Effort {
 pub struct ModelConfig {
     /// Wire format.
     pub provider: Provider,
+    /// OpenAI style only: which API to call.
+    pub api: Api,
     /// Base URL without a trailing slash. OpenAI style: ends in `/v1`.
     /// Anthropic style: the host only.
     pub base_url: String,
@@ -109,7 +136,8 @@ pub struct ModelConfig {
     pub timeout: Duration,
     /// Retry policy.
     pub retry: RetryPolicy,
-    /// OpenAI style only: which parameter carries the output cap.
+    /// OpenAI Chat Completions only: which parameter carries the output
+    /// cap. The Responses API always sends `max_output_tokens`.
     pub max_tokens_param: MaxTokensParam,
     /// Anthropic style only: thinking effort. `None` sends neither
     /// `thinking` nor `output_config`, leaving the model's default.
@@ -160,13 +188,19 @@ pub fn client_with(
             "base_url {base:?} must start with http(s)://"
         )));
     }
+    if config.api == Api::Responses && config.provider != Provider::OpenAi {
+        return Err(LlmError::InvalidConfig(
+            "the Responses API is OpenAI's; an Anthropic endpoint has none".to_owned(),
+        ));
+    }
     if config.effort.is_some() && config.provider != Provider::Anthropic {
         return Err(LlmError::InvalidConfig(
             "effort applies to Anthropic-style endpoints only".to_owned(),
         ));
     }
-    Ok(match config.provider {
-        Provider::OpenAi => Arc::new(OpenAiClient::with_http(config, http)),
-        Provider::Anthropic => Arc::new(AnthropicClient::with_http(config, http)),
+    Ok(match (config.provider, config.api) {
+        (Provider::OpenAi, Api::Responses) => Arc::new(ResponsesClient::with_http(config, http)),
+        (Provider::OpenAi, Api::ChatCompletions) => Arc::new(OpenAiClient::with_http(config, http)),
+        (Provider::Anthropic, _) => Arc::new(AnthropicClient::with_http(config, http)),
     })
 }

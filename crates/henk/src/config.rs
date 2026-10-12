@@ -2218,6 +2218,7 @@ impl Settings {
             .ok_or_else(|| format!("environment variable {} is not set", endpoint.api_key_env))?;
         Ok(henk_llm::ModelConfig {
             provider: endpoint.provider,
+            api: henk_llm::Api::default(),
             base_url: endpoint.base_url.clone(),
             api_key: key.into(),
             model: String::new(),
