@@ -13,6 +13,8 @@ pub enum PlatformError {
         status: u16,
         /// Body, truncated.
         body: String,
+        /// How long the platform asked to wait (`Retry-After`), if it did.
+        retry_after: Option<std::time::Duration>,
     },
     /// A 2xx body did not have the expected shape.
     #[error("unexpected response: {0}")]
@@ -53,6 +55,66 @@ pub enum PlatformError {
         /// How many entries were read.
         limit: usize,
     },
+}
+
+impl PlatformError {
+    /// A status error from `status`, `body` (truncated here) and the
+    /// response's `Retry-After`.
+    pub(crate) fn status(
+        status: u16,
+        body: &str,
+        headers: Option<&reqwest::header::HeaderMap>,
+    ) -> Self {
+        Self::Status {
+            status,
+            body: truncate(body),
+            retry_after: headers.and_then(retry_after),
+        }
+    }
+
+    /// Whether trying the same request again may succeed (#338): the
+    /// platform failed or was busy (5xx, 429), asked for a wait on a 403
+    /// (GitHub's secondary rate limit), or the connection did.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Status {
+                status,
+                retry_after,
+                ..
+            } => *status >= 500 || *status == 429 || (*status == 403 && retry_after.is_some()),
+            Self::Transport(error) => error.is_timeout() || error.is_connect(),
+            _ => false,
+        }
+    }
+
+    /// The wait the platform asked for, if it did.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Status { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// The HTTP status, for a status error.
+    #[must_use]
+    pub const fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Status { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+/// `Retry-After` in seconds; an HTTP date is ignored.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    value.parse().ok().map(std::time::Duration::from_secs)
 }
 
 pub(crate) fn truncate(body: &str) -> String {

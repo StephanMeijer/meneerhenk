@@ -15,6 +15,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::debug;
 
 use crate::error::PlatformError;
+use crate::retry::{RetryPolicy, with_retry};
 
 /// The App's identity and private key.
 pub struct AppCredentials {
@@ -202,33 +203,11 @@ impl Installations {
         let id = if let Some(id) = self.known(owner) {
             id
         } else {
-            let jwt = self.credentials.jwt(SystemTime::now())?;
-            let response = http
-                .get(format!("{api_base}/repos/{owner}/{name}/installation"))
-                .bearer_auth(&jwt)
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await?;
-            let status = response.status();
-            let body = response.text().await?;
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Err(PlatformError::NotInstalled {
-                    repo: format!("{owner}/{name}"),
-                    reason: "the App is not installed there".to_owned(),
-                });
-            }
-            if !status.is_success() {
-                return Err(PlatformError::Status {
-                    status: status.as_u16(),
-                    body: crate::error::truncate(&body),
-                });
-            }
-            let value: Value =
-                serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
-            let id = value.get("id").and_then(Value::as_u64).ok_or_else(|| {
-                PlatformError::Decode("installation response without id".to_owned())
-            })?;
+            let what = format!("GET /repos/{owner}/{name}/installation");
+            let id = with_retry(RetryPolicy::default(), &what, || {
+                self.look_up(http, api_base, owner, name)
+            })
+            .await?;
             debug!(owner, installation = id, "found installation");
             self.remember(owner, id);
             id
@@ -240,6 +219,45 @@ impl Installations {
             });
         }
         Ok(id)
+    }
+
+    async fn look_up(
+        &self,
+        http: &reqwest::Client,
+        api_base: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<u64, PlatformError> {
+        let jwt = self.credentials.jwt(SystemTime::now())?;
+        let response = http
+            .get(format!("{api_base}/repos/{owner}/{name}/installation"))
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.text().await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(PlatformError::NotInstalled {
+                repo: format!("{owner}/{name}"),
+                reason: "the App is not installed there".to_owned(),
+            });
+        }
+        if !status.is_success() {
+            return Err(PlatformError::status(
+                status.as_u16(),
+                &body,
+                Some(&headers),
+            ));
+        }
+        let value: Value =
+            serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
+        value
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PlatformError::Decode("installation response without id".to_owned()))
     }
 
     /// A token for installation `id`, minted when there is none or the one
@@ -268,7 +286,11 @@ impl Installations {
         {
             return Ok(cached.token.clone());
         }
-        let fresh = mint_installation_token(http, api_base, &self.credentials, id, now).await?;
+        let what = format!("POST /app/installations/{id}/access_tokens");
+        let fresh = with_retry(RetryPolicy::default(), &what, || {
+            mint_installation_token(http, api_base, &self.credentials, id, SystemTime::now())
+        })
+        .await?;
         tokens.insert(id, fresh.clone());
         Ok(fresh.token)
     }
@@ -470,12 +492,14 @@ async fn mint_installation_token(
         .send()
         .await?;
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.text().await?;
     if !status.is_success() {
-        return Err(PlatformError::Status {
-            status: status.as_u16(),
-            body: crate::error::truncate(&body),
-        });
+        return Err(PlatformError::status(
+            status.as_u16(),
+            &body,
+            Some(&headers),
+        ));
     }
     let value: Value =
         serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
