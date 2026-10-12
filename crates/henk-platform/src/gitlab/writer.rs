@@ -13,6 +13,7 @@ use tracing::{instrument, warn};
 
 use crate::error::PlatformError;
 use crate::gitlab::rest::GitLabRest;
+use crate::retry::{RetryPolicy, create_once, with_retry};
 use crate::writer::{
     FilePatch, PlatformWriter, PostedComment, PullRequestInfo, PullRequestState, ReviewHandle,
     ReviewTarget,
@@ -34,6 +35,8 @@ pub struct GitLabWriter {
     username: String,
     rest: Option<GitLabRest>,
     bot: tokio::sync::OnceCell<BotUser>,
+    /// How a call is tried again when GitLab fails for a moment (#338).
+    retry: RetryPolicy,
 }
 
 impl std::fmt::Debug for GitLabWriter {
@@ -56,7 +59,15 @@ impl GitLabWriter {
             username: username.into(),
             rest: None,
             bot: tokio::sync::OnceCell::new(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// The same writer, trying again by `retry` (tests use a fast one).
+    #[must_use]
+    pub const fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Adds the REST reads and the git credential pushing (§3.5) needs.
@@ -103,12 +114,68 @@ impl GitLabWriter {
     }
 
     /// Calls a tool and parses its text as JSON. A result the server flags
-    /// as an error becomes [`PlatformError::ToolFailed`].
+    /// as an error becomes [`PlatformError::ToolFailed`]. A tool that is
+    /// safe to repeat is tried again when GitLab fails for a moment (#338);
+    /// one that creates something is called once, and the caller decides.
     pub(crate) async fn call_tool(
         &self,
         tool: &str,
         arguments: Value,
     ) -> Result<Value, PlatformError> {
+        if !repeatable(tool) {
+            return self.call_tool_once(tool, arguments).await;
+        }
+        with_retry(self.retry, tool, || {
+            self.call_tool_once(tool, arguments.clone())
+        })
+        .await
+    }
+
+    /// Posts a merge request note once (#338): `tool` with `arguments`,
+    /// and when it fails in a way another try might not, the merge
+    /// request's discussions are read first. A note by Henk with exactly
+    /// `body` is the one that landed before GitLab failed; each body
+    /// carries the run's marker, so an exact match is his own.
+    async fn create_note_once(
+        &self,
+        target: &ReviewTarget,
+        tool: &str,
+        arguments: Value,
+        body: &str,
+    ) -> Result<Value, PlatformError> {
+        create_once(
+            self.retry,
+            tool,
+            || self.call_tool_once(tool, arguments.clone()),
+            || async {
+                let discussions = self
+                    .call_tool_all(
+                        "mr_discussions",
+                        Self::base_args(target),
+                        &["items", "discussions"],
+                    )
+                    .await?;
+                Ok(discussions
+                    .iter()
+                    .flat_map(|d| {
+                        d.get("notes")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                    })
+                    .rev()
+                    .find(|note| {
+                        note.get("body").and_then(Value::as_str) == Some(body)
+                            && note.pointer("/author/username").and_then(Value::as_str)
+                                == Some(self.username.as_str())
+                    })
+                    .cloned())
+            },
+        )
+        .await
+    }
+
+    async fn call_tool_once(&self, tool: &str, arguments: Value) -> Result<Value, PlatformError> {
         let outcome = self.session.call_tool(tool, arguments).await?;
         if outcome.is_error {
             return Err(PlatformError::ToolFailed {
@@ -182,6 +249,21 @@ impl GitLabWriter {
             limit: MAX_PAGES * PAGE_SIZE,
         })
     }
+}
+
+/// Whether calling `tool` twice is no different from calling it once: a
+/// read, or a write that sets rather than adds. A reaction is not: GitLab
+/// refuses an award it already has.
+fn repeatable(tool: &str) -> bool {
+    tool.starts_with("get_")
+        || tool.starts_with("list_")
+        || matches!(
+            tool,
+            "mr_discussions"
+                | "update_work_item"
+                | "convert_work_item_type"
+                | "create_commit_status"
+        )
 }
 
 pub(crate) fn note_id(note: &Value) -> Option<String> {
@@ -328,7 +410,12 @@ impl PlatformWriter for GitLabWriter {
         let mut args = Self::base_args(target);
         args.insert("body".into(), json!(body));
         let created = self
-            .call_tool("create_merge_request_note", Value::Object(args))
+            .create_note_once(
+                target,
+                "create_merge_request_note",
+                Value::Object(args),
+                body,
+            )
             .await?;
         let id =
             note_id(&created).ok_or_else(|| PlatformError::Decode("note without id".to_owned()))?;
@@ -352,7 +439,12 @@ impl PlatformWriter for GitLabWriter {
             args.insert("discussion_id".into(), json!(comment_id));
             args.insert("body".into(), json!(body));
             let created = self
-                .call_tool("create_merge_request_discussion_note", Value::Object(args))
+                .create_note_once(
+                    target,
+                    "create_merge_request_discussion_note",
+                    Value::Object(args),
+                    body,
+                )
                 .await?;
             let id = note_id(&created)
                 .ok_or_else(|| PlatformError::Decode("reply without id".to_owned()))?;
