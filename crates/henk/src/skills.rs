@@ -173,14 +173,16 @@ mod tests {
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
-    const LANE_A: &str = r#"{ name = "lane-a", model = "proxy-fast" }"#;
+    /// The planner's skills in the example, commented out.
+    const PLANNING_SKILLS: &str = r#"# skills = ["issue-sizing"]"#;
 
-    fn example(lane_a: &str) -> Result<Settings, ConfigError> {
-        Config::parse(&crate::config::EXAMPLE.replacen(LANE_A, lane_a, 1))?.into_settings()
+    /// The example with `skills` in place of the planner's commented line.
+    fn example(skills: &str) -> Result<Settings, ConfigError> {
+        Config::parse(&crate::config::EXAMPLE.replacen(PLANNING_SKILLS, skills, 1))?.into_settings()
     }
 
     fn with_skills() -> Settings {
-        let mut settings = example(LANE_A).unwrap();
+        let mut settings = example(PLANNING_SKILLS).unwrap();
         settings.skills_dir = Some("skills".to_owned());
         settings
     }
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn an_agent_may_list_only_skills_that_exist() {
         let mut s = with_skills();
-        s.lanes[0].skills = vec![name("no-such-skill")];
+        s.planning.as_mut().unwrap().skills = vec![name("no-such-skill")];
         let error = attach(&mut s, Path::new(FIXTURES)).unwrap_err().to_string();
         assert!(error.contains("no-such-skill"), "{error}");
         assert!(s.skills.skills.is_empty(), "nothing is attached on failure");
@@ -231,15 +233,18 @@ mod tests {
 
     #[test]
     fn listing_skills_needs_a_skills_section() {
-        let lane = r#"{ name = "lane-a", model = "proxy-fast", skills = ["rust-errors"] }"#;
-        let error = example(lane).unwrap_err().to_string();
+        let error = example(r#"skills = ["rust-errors"]"#)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("no [skills] section"), "{error}");
     }
 
     #[test]
     fn a_malformed_skill_name_is_refused() {
-        let lane = r#"{ name = "lane-a", model = "proxy-fast", skills = ["Bad Name"] }"#;
-        assert!(matches!(example(lane), Err(ConfigError::Syntax(_))));
+        assert!(matches!(
+            example(r#"skills = ["Bad Name"]"#),
+            Err(ConfigError::Syntax(_))
+        ));
     }
 
     #[cfg(unix)]
@@ -290,7 +295,7 @@ mod tests {
 
     #[test]
     fn without_skills_nothing_is_read() {
-        let mut s = example(LANE_A).unwrap();
+        let mut s = example(PLANNING_SKILLS).unwrap();
         attach(&mut s, Path::new("/nonexistent")).unwrap();
         assert!(s.skills.skills.is_empty());
     }

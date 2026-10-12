@@ -488,6 +488,7 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
                     .r#loop
                     .as_ref()
                     .is_none_or(|l| &l.reviewer != *id && &l.fixer != *id)
+                && settings.address.as_ref().is_none_or(|a| &a.model != *id)
         })
         .map(String::as_str)
         .collect();
@@ -495,7 +496,7 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
         checks.push(Check::warn(
             "models",
             format!(
-                "configured but used by no lane, loop, fact-check or planner: {}",
+                "configured but used by no lane, loop, fact-check, address run or planner: {}",
                 unused.join(", ")
             ),
         ));
@@ -750,6 +751,24 @@ mod tests {
     }
 
     const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n";
+
+    #[tokio::test]
+    async fn a_model_only_address_runs_use_is_not_unused() {
+        let checks = check_models(&settings(ADDRESS), false).await;
+        assert!(checks.iter().all(|c| c.name != "models"), "{checks:?}");
+        let spare = format!(
+            "{ADDRESS}[models.spare]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"y\"\n"
+        );
+        let checks = check_models(&settings(&spare), false).await;
+        let unused = checks.iter().find(|c| c.name == "models").unwrap();
+        assert_eq!(
+            unused.verdict,
+            Verdict::Warn(
+                "configured but used by no lane, loop, fact-check, address run or planner: spare"
+                    .to_owned()
+            )
+        );
+    }
 
     #[tokio::test]
     async fn git_missing_from_henk_s_own_path_fails_and_says_why_it_is_needed() {

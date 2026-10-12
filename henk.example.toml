@@ -61,7 +61,8 @@ token_env = "GITLAB_PERSONAL_ACCESS_TOKEN"
 mcp_server = "gitlab"
 write_mcp_server = "gitlab-write"
 
-# Models. Each lane and the planner refer to one of these by id.
+# Models. The review loop, address runs and the planner refer to one of
+# these by id.
 [models.proxy-fast]
 provider = "open_ai"
 base_url = "https://llm3.9xx.nl/v1"
@@ -98,25 +99,13 @@ max_tokens = 16384
 timeout_secs = 300
 
 [review]
-# Lanes are independent reviewers. Names appear in summaries when a lane
-# does not finish, so they must not name a model (spec §3.2).
-lanes = [
-  # A lane may also list skills: skills = ["sql-migrations"] (see [skills]).
-  { name = "lane-a", model = "proxy-fast" },
-  { name = "lane-b", model = "claude" },
-]
-# What a lane drafts is checked after every lane has finished, so the
-# checking does not count against a lane's limit.
-lane_timeout_secs = 900
-lane_max_turns = 40
 # Every turn resends the conversation. Past this many characters, the oldest
 # tool results outside the last keep_recent_turns turns become one-line
-# stubs; the lane can call the tool again. Roughly 4 characters per token.
+# stubs; the session can call the tool again. Roughly 4 characters per token.
 max_conversation_chars = 160000
 keep_recent_turns = 2
 max_concurrent = 3
-github_drafts = false
-# Changed files no lane reviews. A pattern without / matches the file name at
+# Changed files nobody reviews. A pattern without / matches the file name at
 # any depth; ** matches any number of directories. This is the default; set
 # it to replace the list, or to [] to review everything. A change made only
 # of these files is reported as nothing to review.
@@ -125,36 +114,22 @@ ignore = [
   "**/go.sum", "**/poetry.lock", "**/uv.lock", "CHANGELOG.md",
 ]
 
-# A second model checks every finding, rewrite and withdrawal the lanes
-# draft before anything is posted (spec §3.2). It checks them together once
-# every lane has finished, in one session per checking model and ten drafts,
-# and merges drafts that report the same problem. A rejected draft is not
-# posted. backup_model checks the drafts of lanes that run on model, and
-# what model gives no verdict on. When neither does, the draft is posted
-# unchecked and the run says so. Leave the section out to post unchecked.
-# timeout_secs and max_turns are per draft: a session gets them times the
-# drafts it checks.
-[review.fact_check]
-model = "opus"
-backup_model = "claude"
-timeout_secs = 180
-max_turns = 12
-
-# The reviewer-fixer loop (#284), instead of the lanes: a reviewer reviews,
-# a fixer fixes what holds in the same workspace and Henk pushes it to the
-# pull request's branch, and each resumes its own conversation the next
-# round, until the reviewer finds nothing more or max_rounds is reached.
-# It pushes like an address run, so it needs [address] below. A pull request
-# it may not push to (a fork, the default or a protected branch, or a branch
-# that moved after the review was queued) is reviewed by the reviewer alone:
-# one round, nothing pushed, and its findings in the check.
-# [review.loop]
-# reviewer = "opus"
-# fixer = "claude"
-# max_rounds = 50
-# run_timeout_secs = 3600
-# round_timeout_secs = 600
-# round_max_turns = 40
+# The review is a reviewer-fixer loop (#283): a reviewer reviews, a fixer
+# fixes what holds in the same workspace and Henk pushes it to the pull
+# request's branch, and each resumes its own conversation the next round,
+# until the reviewer finds nothing more or max_rounds is reached. Nothing is
+# posted on the pull request; the check says what the loop did. It pushes
+# like an address run, so it needs [address] below. A pull request it may
+# not push to (a fork, the default or a protected branch, or a branch that
+# moved after the review was queued) is reviewed by the reviewer alone: one
+# round, nothing pushed, and its findings in the check.
+[review.loop]
+reviewer = "opus"
+fixer = "claude"
+max_rounds = 50
+run_timeout_secs = 3600
+round_timeout_secs = 600
+round_max_turns = 40
 
 # The web dashboard at /dashboard: sign in with GitHub. Only these GitHub
 # user ids (find yours at https://api.github.com/users/<login>) get in, and
@@ -197,7 +172,7 @@ requester_id = 523456789012345678
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then
 # Markdown). dir is relative to this file. An agent gets only the skills it
-# lists, as `skills = [...]` on a lane, [review.fact_check] or [planning];
+# lists, as `skills = [...]` on [planning];
 # it sees their names and descriptions and loads one with load_skill. Only
 # SKILL.md is read: scripts and other files in a skill folder are ignored.
 # [skills]
@@ -207,16 +182,18 @@ requester_id = 523456789012345678
 # Henk fixes what he can in a throwaway checkout, pushes one fast-forward
 # commit to the pull request's branch (never a fork, the default branch or
 # a protected branch) and replies in every thread. GitHub only for now; the
-# App needs "Contents: write". Leave the table out to switch it off.
-# [address]
-# model = "claude"
-# timeout_secs = 1800
-# max_turns = 80
-# max_changed_files = 20
+# App needs "Contents: write". The review loop pushes the same way, so a
+# configuration that reviews needs this table. Its limits and checks hold
+# for the loop's pushes too; requester_id is who those commits are for.
+[address]
+model = "claude"
+timeout_secs = 1800
+max_turns = 80
+max_changed_files = 20
 # The project's checks, run in the workspace with an empty environment and
 # [workspace] command_secs each. They run the pull request's code.
 # check_commands = [["cargo", "test", "--offline"]]
-# requester_id = 523456789012345678
+requester_id = 523456789012345678
 #
 # Who Henk commits as, author and committer alike; his Signed-off-by uses
 # the same. Left out, he commits as the App: meneer-henk[bot] with its
@@ -266,9 +243,9 @@ requester_id = 523456789012345678
 # the operator's setup commands, in order. Never steps from the repository.
 # toolchain = "mise"
 # setup = [["npm", "ci"]]
-# Reviews get workspaces too: one per lane and one for the fact-checker, at
-# the reviewed commit, set up as above, never exported. Refused on the
-# host backend: a review runs setup on the pull request's code.
+# Reviews get a workspace too: the review loop's, at the pull request's
+# head, set up as above; only the fixer's checked changes leave it. Refused
+# on the host backend: a review runs setup on the pull request's code.
 # review = true
 # The planner gets a workspace too: the default branch, set up as above,
 # never exported. Also refused on the host backend.
@@ -305,7 +282,8 @@ requester_id = 523456789012345678
 # record_argument_bytes = 4096
 
 # External MCP servers. Henk is the client; nothing here is part of Henk.
-# The read session a lane sees: read-only toolsets, no write tool at all.
+# The read session reviewers and the planner see: read-only toolsets, no
+# write tool at all.
 [mcp.github]
 command = "github-mcp-server"
 args = ["stdio"]
@@ -313,7 +291,7 @@ env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,i
 pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
 call_timeout_secs = 60
 
-# GitLab reads for lanes: read-only mode, no write tool exists in the session.
+# GitLab reads: read-only mode, no write tool exists in the session.
 [mcp.gitlab]
 command = "npx"
 args = ["-y", "@zereight/mcp-gitlab@2.1.68"]
@@ -339,7 +317,7 @@ role = "team lead"
 # <id>-<username>@users.noreply.<host> on GitLab with the host of
 # [gitlab].api_url, with the login read from the platform at run time.
 # `curl https://api.github.com/users/<login>` shows a GitHub id.
-# github_id = 1234567
+github_id = 1234567
 # gitlab_id = 7654321
 # Or credit him with this name and email instead; set both or neither.
 # commit_name = "Stephan Meijer"

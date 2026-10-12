@@ -2117,7 +2117,20 @@ impl Settings {
 
     /// The lanes, the fact-check, planning and their skills.
     fn describe_agents(&self, out: &mut String) {
-        let _ = writeln!(out, "Review lanes:");
+        if let Some(review_loop) = &self.review.r#loop {
+            let _ = writeln!(
+                out,
+                "Review loop:     reviewer {}, fixer {}; up to {} rounds, {}s a round, {}s in all",
+                review_loop.reviewer,
+                review_loop.fixer,
+                review_loop.max_rounds,
+                review_loop.round_timeout_secs,
+                review_loop.run_timeout_secs
+            );
+        }
+        if !self.lanes.is_empty() {
+            let _ = writeln!(out, "Review lanes:");
+        }
         for lane in &self.lanes {
             let _ = writeln!(
                 out,
@@ -2238,11 +2251,21 @@ impl Settings {
     /// Review limits, the repeat guard and what is not reviewed, for
     /// [`Self::describe`].
     fn describe_limits(&self, out: &mut String) {
-        let _ = writeln!(
-            out,
-            "Review limits:   {} at once, {}s and {} turns per lane",
-            self.review.max_concurrent, self.review.lane_timeout_secs, self.review.lane_max_turns
-        );
+        if self.lanes.is_empty() {
+            let _ = writeln!(
+                out,
+                "Review limits:   {} at once",
+                self.review.max_concurrent
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Review limits:   {} at once, {}s and {} turns per lane",
+                self.review.max_concurrent,
+                self.review.lane_timeout_secs,
+                self.review.lane_max_turns
+            );
+        }
         let _ = writeln!(
             out,
             "Agent guard:     {}",
@@ -2393,7 +2416,23 @@ github_owners = ["docspec"]
         let settings = Config::parse(EXAMPLE)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(settings.lanes.len(), 2);
+        let review_loop = settings.review.r#loop.as_ref().unwrap();
+        assert_eq!(
+            (review_loop.reviewer.as_str(), review_loop.fixer.as_str()),
+            ("opus", "claude")
+        );
+        assert!(
+            settings.address.is_some(),
+            "the loop pushes like an address run"
+        );
+        let described = settings.describe();
+        assert!(
+            described.contains(
+                "Review loop:     reviewer opus, fixer claude; up to 50 rounds, 600s a round, 3600s in all"
+            ),
+            "{described}"
+        );
+        assert!(!described.contains("Review lanes:"), "{described}");
         assert!(settings.github.is_some());
         assert!(settings.gitlab.is_some());
         assert_eq!(settings.mcp.len(), 3);
@@ -2636,14 +2675,15 @@ github_owners = ["docspec"]
         }
     }
 
-    /// The example with its commented `[address]` settings and the commented
-    /// fields of `[[people]]` switched on.
+    /// The example with every commented setting after `[address]` switched
+    /// on: its identity, trailers and repositories, and the commented fields
+    /// of `[[people]]`.
     fn example_with_address() -> String {
         let mut in_address = false;
         EXAMPLE
             .lines()
             .map(|line| {
-                in_address |= line == "# [address]";
+                in_address |= line == "[address]";
                 let setting = line.strip_prefix("# ").filter(|rest| {
                     let header = rest.starts_with('[') && rest.trim_end().ends_with(']');
                     header || rest.contains(" = ")
