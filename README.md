@@ -183,7 +183,9 @@ within what the role may ever have. Only the executor edits, the reviewer
 and the executor each have their side of the handoff, only the planner
 has the tracker tools and `web_fetch`, and the planner and the reviewer,
 who reviews plans too, have the MCP read tools; left out, a role gets its
-defaults. A role that lists `skills` keeps `load_skill` in its `tools`.
+defaults. A role that lists `skills` keeps `load_skill` in its `tools`,
+and with `[review.loop]` the reviewer keeps `report_finding` and
+`finish_round` and the executor `list_findings` and `give_verdict`.
 `henk config check` lists each role, refuses a tool the role may not have,
 and says which roles reach the web.
 

@@ -1906,6 +1906,23 @@ fn validate_loop(review_loop: Option<&LoopConfig>, roles: &RolesConfig) -> Resul
             return Err(ConfigError::Role(format!("[review.loop] needs {role}")));
         }
     }
+    // The loop's two sides hand findings and verdicts to each other: a
+    // role whose tools leave out its side of the handoff never ends a
+    // round the way the loop waits for.
+    let sides = [
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| (Role::Reviewer, r.tools(Role::Reviewer))),
+        roles.executor.as_ref().map(|r| (Role::Executor, r.tools())),
+    ];
+    for (role, granted) in sides.into_iter().flatten() {
+        if let Some(tool) = role.missing_handoff(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] tools leave out {tool}, which the review loop needs: add {tool} to tools"
+            )));
+        }
+    }
     if review_loop.max_rounds == 0 {
         return Err(ConfigError::Review(
             "review.loop.max_rounds must be at least 1".to_owned(),
@@ -2952,6 +2969,59 @@ github_owners = ["docspec"]
         );
         let role = address("", "[roles.auditor]\nmodel = \"m\"\n").unwrap_err();
         assert!(matches!(role, ConfigError::Syntax(_)), "{role}");
+    }
+
+    /// The review loop needs each side's handoff tools (#334).
+    #[test]
+    fn the_loop_refuses_roles_without_their_handoff_tools() {
+        let reviewer = |tools: &str| {
+            address(
+                "",
+                &format!("[review.loop]\n[roles.reviewer]\nmodel = \"m\"\n{tools}"),
+            )
+        };
+        assert_eq!(
+            reviewer("tools = [\"read_file\", \"finish_round\"]\n")
+                .unwrap_err()
+                .to_string(),
+            "[roles.reviewer] tools leave out report_finding, which the review loop needs: add report_finding to tools"
+        );
+        assert_eq!(
+            reviewer("tools = [\"read_file\", \"report_finding\"]\n")
+                .unwrap_err()
+                .to_string(),
+            "[roles.reviewer] tools leave out finish_round, which the review loop needs: add finish_round to tools"
+        );
+        assert!(
+            reviewer("tools = [\"read_file\", \"report_finding\", \"finish_round\"]\n").is_ok()
+        );
+        let executor = |tools: &str| {
+            address(
+                "",
+                &format!("tools = {tools}\n[review.loop]\n[roles.reviewer]\nmodel = \"m\"\n"),
+            )
+        };
+        assert_eq!(
+            executor(r#"["edit_file", "give_verdict"]"#)
+                .unwrap_err()
+                .to_string(),
+            "[roles.executor] tools leave out list_findings, which the review loop needs: add list_findings to tools"
+        );
+        assert_eq!(
+            executor(r#"["edit_file", "list_findings"]"#)
+                .unwrap_err()
+                .to_string(),
+            "[roles.executor] tools leave out give_verdict, which the review loop needs: add give_verdict to tools"
+        );
+        assert!(executor(r#"["edit_file", "list_findings", "give_verdict"]"#).is_ok());
+        // Without the loop, the reviewer's list is its own business.
+        assert!(
+            address(
+                "",
+                "[roles.reviewer]\nmodel = \"m\"\ntools = [\"read_file\"]\n"
+            )
+            .is_ok()
+        );
     }
 
     /// A role told of skills must be able to load them (#334).
