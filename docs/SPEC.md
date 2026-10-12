@@ -32,9 +32,12 @@ branch or a protected branch.
 | Term | Meaning |
 |---|---|
 | **Run** | One execution of a review, a plan, an address run, a Discord turn or a mail reply. Every run has a link. |
-| **Lane** | One independent reviewer inside a review (§3.2). |
-| **Finding** | One problem a lane reports, as one comment on one line. |
-| **Summary** | The comment that closes a review (§3.3). |
+| **Review loop** | What a review is: a reviewer and a fixer taking turns on one pull request (§3.2). |
+| **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the fixer (§3.2). |
+| **Fixer** | The model session in a review loop that checks each finding against the code and fixes the ones that hold (§3.2). |
+| **Lane** | Before #309, one independent reviewer inside a review. Old runs still show them, and the run record still lists each model session of a run as a lane. |
+| **Finding** | One problem the reviewer reports, at one line. Before #309 a lane posted each as a comment. |
+| **Summary** | What the check says when a review ends (§3.3). |
 | **Turn** | One unit of Discord work: one message (or a quick burst from one person) and Henk's answer to it (§5.2). |
 | **Colleague** | A Discord user with the "Collega van Henk" role (§2). |
 | **Team Lead** | The Discord user ids listed as such (§2). |
@@ -84,48 +87,48 @@ change against the target branch.
 
 ### 3.2 How he reviews
 
-- Several independent reviewers (**lanes**), each a different model, review
-  the same commit at the same time. Each reads the change and as much of the
-  surrounding code (callers, tests, configuration) as it needs.
-- Each lane reports **only real problems the change introduces**: bugs,
-  security issues, broken behaviour. No style remarks, no nitpicks.
+A review is one **review loop** (`[review.loop]`, #283): two model
+sessions, a **reviewer** and a **fixer**, working on one pull request in a
+checkout of it. Reviews need `[review.loop]` and `[address]`; without them
+Henk does not review (#309). A review that cannot get its checkout does not
+complete.
+
+- **The reviewer reviews** the commit. It reads the change and as much of
+  the surrounding code (callers, tests, configuration) as it needs, and may
+  run commands in its checkout.
+- It reports **only real problems the change introduces**: bugs, security
+  issues, broken behaviour. No style remarks, no nitpicks.
 - **Some files are not reviewed:** lockfiles and generated changelogs by
   default, or whatever is configured instead. They are listed as not
   reviewed and carry no finding. A change made only of such files is
   reported as "nothing to review", which is a completed review.
-- Each problem becomes a **comment on its line**. On GitHub that is a review
-  comment; on GitLab, a diff discussion. A lane drafts it as soon as it is
-  sure of it; drafts are posted once every lane has finished.
-- **A second model checks every draft first**, when one is configured, never
-  the model of the lane that wrote it when there is another. It checks the
-  drafts of all lanes together after the lanes, reads the code they are
-  about and confirms or rejects each. A rejected draft is not posted; the
-  lane is not asked to correct it. If no check can be made, the draft is
-  posted and the run records it as unchecked.
-- **Lanes do not repeat each other.** Before drafting, a lane looks at what is
-  already there and what other lanes have drafted. When it can explain an
-  existing finding better, it improves that comment rather than posting a
-  second one. It never rewrites a comment a person has already answered.
-  When two drafts report the same problem anyway, the check says so and only
-  one is posted.
-- **A wrong finding is withdrawn**, not left standing. A lane that sees one
-  of Henk's findings is wrong replaces its text with the reason and resolves
-  its thread, so it no longer counts. Withdrawals are checked like findings,
-  and a finding a person has answered is never withdrawn.
-- A lane that finds nothing posts nothing.
-- Which model wrote which comment is recorded invisibly on the comment, never
-  in its visible text.
+- **The reviewer hands its findings straight to the fixer.** Nothing is
+  posted on the pull request: no comment, no summary.
+- **The fixer checks each finding against the code** and gives it one
+  verdict: *fixed*, *rejected* (it does not hold, and why) or *won't fix*
+  (it holds but is not for this pull request, and why). A finding that has
+  no verdict when the loop ends, or whose fix was never pushed, is
+  *unsettled*.
+- **Henk pushes the fixer's changes** to the pull request's branch, once the
+  project's configured checks pass on them.
+- **The reviewer reviews again.** It resumes its own conversation, is told
+  which commits were added, and reviews as it sees fit. New findings go back
+  to the fixer, which resumes its own conversation too.
+- This repeats until the reviewer finds nothing more, or a limit ends it: a
+  number of rounds, or a time limit per round and in all.
+- What the loop did and the findings that still stand (won't fix and
+  unsettled) are in the check (§3.3) and the run. Each finding and its
+  verdict are in the run record.
 
-**The review loop** (`[review.loop]`, #283) replaces the lanes above. A
-reviewer reviews; a fixer checks each finding against the code, fixes the
-ones that hold and Henk pushes them to the pull request's branch; the
-reviewer reviews again, until it finds nothing more or a limit ends it.
-Nothing is posted on the pull request: the commits are there, and what the
-loop did and the findings that still stand are in the check and the run. A
-pull request the loop may not push to (a fork, the default or a protected
+A pull request the loop may not push to (a fork, the default or a protected
 branch) or whose branch moved after the review was queued is reviewed by
 the reviewer alone: one round at the reviewed commit, nothing pushed, and
 its findings stand in the check with why they were not fixed (#307).
+
+Before #309 a review was a set of independent **lanes**, one model each,
+that posted their findings as line comments after a second model
+fact-checked them. Lanes and the fact-check are gone. Their comments stay on
+the pull requests, and their markers are still recognised (§8.1).
 
 ### 3.3 What the pull/merge request shows
 
@@ -133,29 +136,32 @@ its findings stand in the check with why they were not fixed (#307).
 |---|---|---|
 | Review waits for a slot | The check "Meneer Henk", *queued* (grey), "Waiting for a review slot", linked to the dashboard's overview, which lists it. A review that gets a slot at once skips this | Nothing: a pending commit status could block a merge where pipelines must succeed |
 | Review starts | The check "Meneer Henk", *in progress*, linked to the run: the queued one moves on, or a new one | Henk's award emoji on the MR *(in development)* |
-| During | Line comments appear one by one | Diff discussions appear one by one |
-| Review ends | A **summary comment**: "No issues found" or "N issues found", and which lanes did not finish | A **summary note** with the same content |
-| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). A review superseded by a newer commit completes neutral, "Superseded by a newer commit.", and posts no comment. A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
+| During | Nothing but the commits Henk pushes for the fixer (§3.2) | The same |
+| Review ends | The check's **summary**: "No issues found" or "N issues found", and the loop's report: how many rounds it ran, what it settled and pushed, why it stopped, and the findings that still stand | No note: the commit status below |
+| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). When the loop pushed, the last commit it pushed gets the same check. A review superseded by a newer commit completes neutral with "Superseded by a newer commit." A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
-- **Only the latest summary counts.** When he posts a new summary, his
-  earlier summaries and failure comments are folded as outdated, and so are his comments in
-  resolved threads. On GitLab the earlier summary becomes an "outdated" line.
-  His conversational replies are never folded.
-- **The count** is the number of Henk's distinct findings still open on the
-  diff at that commit. Findings from earlier reviews count too, as long as
-  their line is still in the diff.
-- **Partial success is success.** A lane that fails (after retries) or hangs
-  is dropped. The review stands on the other lanes, and the summary names the
-  ones that dropped. The review counts as *not completed* only when no lane
-  finished.
+- **A review posts nothing.** No comment, summary or failure note: the
+  check, or on GitLab the commit status, is what it leaves, with the commits
+  the loop pushed. Comments posted by lanes before #309 stay as they are;
+  nothing folds them.
+- **The count** is the number of the loop's findings that still stand when
+  it ends: those the fixer would not fix and those left unsettled. A loop
+  that ran out of rounds with the reviewer's last findings unanswered is
+  no pass either: it completes neutral, "The review loop left findings
+  open."
+- **A loop that ends on its own completes the review**: the reviewer found
+  nothing more, the rounds ran out, or the reviewer reported again what the
+  fixer had fixed. One that broke off (a session failed or reached its time
+  limit, the checks failed on the fixer's changes, a push was refused) did
+  *not complete*, and the check says why.
 - **A failed check is Henk's failure, not the code's.** The GitHub check
   concludes *failure* only when the review did not complete. The check is
   advisory and must not be a required check in branch protection; a required
   check would let an incomplete review block a merge, against §8.2.
 - **An interrupted review ends too.** When Henk is stopped mid-review
-  (Ctrl-C, a shutdown), the check completes as *failure*, "Review
-  interrupted.", and nothing is posted; the next review posts. A run left
-  behind by a process that died is closed, with its check, the next time
+  (Ctrl-C, a shutdown), the check completes as *failure* with "Review
+  interrupted." A run left behind by a process that died is closed, with
+  its check, the next time
   Henk starts: a running run keeps a heartbeat, and one that has been silent
   for minutes is known to be orphaned.
 
@@ -463,17 +469,19 @@ These hold everywhere:
    tokens are held by the tools around the model. The model can only use
    them through narrow, purpose-built tools.
 5. **Scope is fixed per task.**
-   - A review lane can comment only on its own pull/merge request, at its own
-     commit.
+   - A review loop works only on its own pull/merge request: the reviewer
+     at its own commit and those the fixer added, the fixer pushing only to
+     that pull request's branch.
    - A planner can change only its own issue and that issue's relations.
    - An address run can push only to its own pull request's branch, on top
      of the head it read, and reply only in that pull request's threads.
    - An email reply can go only to that mail's correspondents.
 6. **Every visible action is traceable.** Each review, plan and mail links
-   back to its run; the run page is behind the dashboard's sign-in. Each comment carries hidden markers saying who wrote it,
-   which model, which model fact-checked it when one did and, when someone
-   asked for it, for whom. A finding withdrawn as wrong keeps who wrote it
-   and adds who withdrew it, with which model and check.
+   back to its run; the run page is behind the dashboard's sign-in. A
+   review links from its check. Each comment carries hidden markers saying
+   who wrote it, which model and, when someone asked for it, for whom.
+   Markers on findings posted by lanes before #309, which also name the
+   fact-checking model and who withdrew a finding, are still read.
 7. **Allowlists bound the world.** Henk acts only in allowlisted repositories
    and his own Discord channel, and as his own accounts. He reads the web
    freely; he writes nowhere else.
@@ -488,7 +496,8 @@ These hold everywhere:
 ## 9. Out of scope
 
 - Writing or committing code nobody asked for, or opening pull/merge
-  requests. The one exception is an address run (§3.5).
+  requests. The exceptions are a review loop's fixer (§3.2) and an address
+  run (§3.5).
 - Approving, blocking or merging.
 - Acting in channels, repositories or accounts outside the allowlists.
 - Remembering anything beyond the channel history and what he writes to his
@@ -506,13 +515,13 @@ then a line in the section named.
    pull requests?
 2. **§3.1 Overlapping reviews.** New commits arrive while a review runs, or two
    people ask for the same commit. Cancel, queue, or run side by side?
-3. **§3.2 Simultaneous findings.** Two lanes can find the same problem in the
-   same second, before either has posted. Who removes the duplicate?
-4. **§3.3 Dropped lanes in the summary.** The summary names lanes that did not
-   finish, but §3.2 says the model never appears in visible text. Are lane
-   names models?
-5. **§3.3 Resolved threads.** Does a finding in a resolved thread still count
-   in *N*?
+3. **§3.2 Simultaneous findings.** Decided 2026-10-12 (#309): there are no
+   lanes. One reviewer reports each finding once, and nothing is posted.
+4. **§3.3 Dropped lanes in the summary.** Decided 2026-10-12 (#309): the
+   sessions a summary can name are the reviewer and the fixer, never a
+   model.
+5. **§3.3 Resolved threads.** Decided 2026-10-12 (#309): a review opens no
+   threads. *N* counts the loop's findings that still stand.
 6. **§4 Time limit.** How long may a plan run before it has failed?
 7. **§4 Triage on GitLab.** Decided 2026-10-06; §4 says what triage sets on
    GitLab.
@@ -562,7 +571,6 @@ Each item breaks a promise above.
 | §8.3 Words are information | Only an instruction protects this. Planner and chat can read private code and fetch any public URL, so injected text could send data out |
 | §8.5 An email reply can go only to that mail's correspondents | The sender controls who the correspondents are (Reply-To, any number of Cc), so the promise bounds nothing |
 | §6 A failed mail stays unread and is picked up again | A mail whose workflow failed to start is never retried |
-| §3.2 Lanes do not repeat each other | Retried steps can post duplicate comments |
 | §4 Every plan ends | Plans have no time or turn limit, so a hung plan never fails and never says so |
 
 ### A.2 Risks without a promise
@@ -627,6 +635,14 @@ surprising reading of the earlier wording; veto any that is wrong.
   code". A pull request the loop may not push to is reviewed by the
   reviewer alone, not by the lanes, and the check carries the loop's
   report and the findings that still stand (#307). The lanes go in #309.
+- §1.1, §3.2, §3.3, §8.5, §8.6, §9: the review loop is the review (#309).
+  Lanes and the fact-check are removed, not kept as a fallback, and
+  reviews need `[review.loop]` and `[address]`. A review posts no comment,
+  summary or failure note and folds nothing; the check carries what it
+  says. The fixer's verdicts replace the fact-check. Open questions 3, 4
+  and 5 are decided, and stay in §10 so the numbers of the others do not
+  change. The A.1 gap on lanes repeating each other is gone with the
+  promise. Comments posted by lanes stay, and their markers are still read.
 
 ## Revision notes (2026-10-07)
 
