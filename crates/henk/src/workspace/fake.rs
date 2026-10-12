@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use henk_domain::address::WorkspacePath;
+use henk_domain::path::WorkspacePath;
 use henk_domain::workspace::{FileMode, Profile, RawChange};
 
 use henk_domain::ignore::PathFilter;

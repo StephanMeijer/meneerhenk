@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use henk_domain::address::push_refusal;
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
+use henk_domain::push::push_refusal;
 use henk_domain::review::{CommitSha, LaneName, LaneOutcome, LaneResult, ReviewOutcome};
 use henk_domain::run::RunId;
 use henk_mcp::testing::FakeServer;
@@ -521,7 +521,7 @@ const PROJECT: &str = "/api/v4/projects/9xxlab%2Ftools%2Fcli";
 
 /// Discussions the way `@zereight/mcp-gitlab` returns them: ids and author
 /// ids as strings. Henk's account is id 42.
-fn address_fake() -> FakeServer {
+fn push_fake() -> FakeServer {
     let tools = [
         "get_merge_request",
         "mr_discussions",
@@ -635,8 +635,8 @@ fn branch(protected: Option<bool>, default: bool) -> Value {
     value
 }
 
-async fn address_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
-    let fake = address_fake();
+async fn push_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
+    let fake = push_fake();
     let session = Arc::new(fake.connect("gitlab-write").await);
     let rest = GitLabRest::new(
         &format!("{}/api/v4", server.uri()),
@@ -651,7 +651,7 @@ async fn address_writer(server: &MockServer) -> (FakeServer, GitLabWriter) {
 
 #[tokio::test]
 async fn a_planner_fetches_the_default_branch_at_its_head() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, None).await;
     Mock::given(method("GET"))
@@ -663,7 +663,7 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
         )
         .mount(&server)
         .await;
-    let (_fake, writer) = address_writer(&server).await;
+    let (_fake, writer) = push_writer(&server).await;
     let head = writer.repo_head(&target().repo).await.unwrap();
     assert_eq!(head.default_branch, "main");
     assert_eq!(head.head.as_str(), SHA);
@@ -672,10 +672,10 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
 
 #[tokio::test]
 async fn open_discussions_parse_into_threads_known_by_author_id() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
-    let (_fake, writer) = address_writer(&server).await;
+    let (_fake, writer) = push_writer(&server).await;
     let threads = writer.open_threads(&target()).await.unwrap();
     assert_eq!(
         threads
@@ -710,13 +710,13 @@ async fn open_discussions_parse_into_threads_known_by_author_id() {
 
 #[tokio::test]
 async fn merge_request_facts_decide_the_push() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let target = target();
-    let refusal = |facts: &henk_platform::address::PullFacts| push_refusal(&facts.push);
+    let refusal = |facts: &henk_platform::push::PullFacts| push_refusal(&facts.push);
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -738,7 +738,7 @@ async fn merge_request_facts_decide_the_push() {
         Some(branch(Some(false), false)),
     )
     .await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -748,7 +748,7 @@ async fn merge_request_facts_decide_the_push() {
     assert!(refusal(&facts).unwrap().contains("another repository"));
 
     let server = gitlab_rest(mr("opened", 99), None, None).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -758,7 +758,7 @@ async fn merge_request_facts_decide_the_push() {
     assert!(refusal(&facts).is_some());
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(true), false))).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -767,7 +767,7 @@ async fn merge_request_facts_decide_the_push() {
     assert!(refusal(&facts).unwrap().contains("protected"));
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(None, false))).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -779,7 +779,7 @@ async fn merge_request_facts_decide_the_push() {
     );
 
     let server = gitlab_rest(mr("opened", 11), None, None).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -791,7 +791,7 @@ async fn merge_request_facts_decide_the_push() {
     );
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), true))).await;
-    let facts = address_writer(&server)
+    let facts = push_writer(&server)
         .await
         .1
         .pull_facts(&target)
@@ -801,7 +801,7 @@ async fn merge_request_facts_decide_the_push() {
 
     for state in ["closed", "merged", "locked"] {
         let server = gitlab_rest(mr(state, 11), None, Some(branch(Some(false), false))).await;
-        let facts = address_writer(&server)
+        let facts = push_writer(&server)
             .await
             .1
             .pull_facts(&target)
@@ -813,10 +813,10 @@ async fn merge_request_facts_decide_the_push() {
 
 #[tokio::test]
 async fn replies_go_to_the_discussion_and_resolving_sets_resolved() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
-    let (fake, writer) = address_writer(&server).await;
+    let (fake, writer) = push_writer(&server).await;
     let threads = writer.open_threads(&target()).await.unwrap();
     let posted = writer
         .reply_in_thread(&target(), &threads[0], "Fixed in abc: done.")
@@ -824,10 +824,9 @@ async fn replies_go_to_the_discussion_and_resolving_sets_resolved() {
         .unwrap();
     assert_eq!(posted.id, "302");
     writer.resolve_thread(&target(), "dh").await.unwrap();
-    let summary =
-        henk_platform::address::AddressWriter::post_comment(&writer, &target(), "Addressed.")
-            .await
-            .unwrap();
+    let summary = henk_platform::push::PushWriter::post_comment(&writer, &target(), "Addressed.")
+        .await
+        .unwrap();
     assert_eq!(summary.id, "301");
 
     let calls = fake.calls();
@@ -857,10 +856,10 @@ async fn replies_go_to_the_discussion_and_resolving_sets_resolved() {
 
 #[tokio::test]
 async fn henk_commits_as_his_account_with_its_noreply_address() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
-    let (_fake, writer) = address_writer(&server).await;
+    let (_fake, writer) = push_writer(&server).await;
     let identity = writer.commit_identity().await.unwrap();
     assert_eq!(identity.name, "meneerhenk");
     assert_eq!(identity.email, "42-meneerhenk@users.noreply.127.0.0.1");
@@ -874,7 +873,7 @@ async fn henk_commits_as_his_account_with_its_noreply_address() {
 
 #[tokio::test]
 async fn a_requester_is_credited_by_the_username_their_id_has_now() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
     Mock::given(method("GET"))
@@ -894,7 +893,7 @@ async fn a_requester_is_credited_by_the_username_their_id_has_now() {
         )
         .mount(&server)
         .await;
-    let (_fake, writer) = address_writer(&server).await;
+    let (_fake, writer) = push_writer(&server).await;
     assert_eq!(
         writer.user_login(77).await.unwrap(),
         "alice",
@@ -914,10 +913,10 @@ async fn a_requester_is_credited_by_the_username_their_id_has_now() {
 
 #[tokio::test]
 async fn the_token_goes_only_in_its_header() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
     let server = gitlab_rest(mr("opened", 11), None, Some(branch(Some(false), false))).await;
-    let (_fake, writer) = address_writer(&server).await;
+    let (_fake, writer) = push_writer(&server).await;
     writer.pull_facts(&target()).await.unwrap();
     writer.commit_identity().await.unwrap();
     let requests = server.received_requests().await.unwrap();
@@ -945,11 +944,11 @@ async fn the_token_goes_only_in_its_header() {
 
 #[tokio::test]
 async fn without_the_token_a_gitlab_writer_reviews_but_does_not_address() {
-    use henk_platform::address::AddressWriter as _;
+    use henk_platform::push::PushWriter as _;
 
-    let fake = address_fake();
+    let fake = push_fake();
     let writer = GitLabWriter::new(Arc::new(fake.connect("gitlab-write").await), "meneerhenk");
-    assert!(!writer.can_address());
+    assert!(!writer.can_push());
     let error = writer.pull_facts(&target()).await.unwrap_err();
     assert!(error.to_string().contains("token"), "{error}");
     assert!(writer.git_credential().await.is_err());

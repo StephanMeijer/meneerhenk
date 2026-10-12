@@ -12,22 +12,24 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
-use henk_domain::address::{ThreadOutcome, push_refusal};
+use henk_domain::address::ThreadOutcome;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
+use henk_domain::push::push_refusal;
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::workspace::Change;
 use henk_llm::ChatMessage;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, GitCredential, OpenThread};
+use henk_platform::push::{GitCredential, OpenThread, PushWriter};
 use henk_session::{SessionSpec, model_id, run_session};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
-use crate::address_tools::{AddressContext, AddressState, Settled, address_tools};
+use crate::address_tools::{AddressContext, Settled, address_tools};
 use crate::app::App;
 use crate::cancel::{Cancelled, is_cancelled};
 use crate::checks::{describe, run_checks};
+use crate::edit_tools::{EditContext, EditState};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::liveness::KeepAlive;
@@ -92,7 +94,7 @@ pub async fn run_address(
     if !app.settings.allowlist.allows(&request.target.repo) {
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
-    let writer = app.address_writer(request.target.repo.platform())?;
+    let writer = app.push_writer(request.target.repo.platform())?;
     let facts = writer
         .pull_facts(&request.target)
         .await
@@ -257,7 +259,7 @@ fn summary_line(report: &AddressReport) -> String {
 
 struct Session<'a> {
     app: &'a App,
-    writer: Arc<dyn AddressWriter>,
+    writer: Arc<dyn PushWriter>,
     request: &'a AddressRequest,
     run: &'a RunId,
     link: &'a str,
@@ -297,7 +299,7 @@ impl Session<'_> {
 
     async fn work(
         &self,
-        facts: &henk_platform::address::PullFacts,
+        facts: &henk_platform::push::PullFacts,
         cancel: CancellationToken,
     ) -> anyhow::Result<AddressReport> {
         let target = &self.request.target;
@@ -396,7 +398,7 @@ impl Session<'_> {
     /// clone is removed once the workspace has its copy.
     async fn import(
         &self,
-        facts: &henk_platform::address::PullFacts,
+        facts: &henk_platform::push::PullFacts,
         credential: Option<GitCredential>,
     ) -> anyhow::Result<Arc<dyn Workspace>> {
         let dir = ScratchDir::new(&format!("henk-address-{}", self.run))
@@ -441,9 +443,8 @@ impl Session<'_> {
             return Err(anyhow!("address runs need [roles.executor]"));
         };
         let workspace = &self.set_up(workspace).await?;
-        let context = Arc::new(AddressContext {
+        let edit = Arc::new(EditContext {
             workspace: Arc::clone(workspace),
-            threads: threads.to_vec(),
             check_commands: config.check_commands.clone(),
             check_timeout: self.command_limit(),
             max_changed_files: config.max_changed_files,
@@ -454,13 +455,18 @@ impl Session<'_> {
                 .profile_for(&self.request.target.repo.path())
                 .backend
                 .runs_model_commands(),
-            state: Mutex::new(AddressState::default()),
+            state: Mutex::new(EditState::default()),
+        });
+        let context = Arc::new(AddressContext {
+            edit,
+            threads: threads.to_vec(),
+            settled: Mutex::default(),
         });
         self.session(&context, cancel).await?;
         let settled = context
-            .state
+            .settled
             .lock()
-            .map(|s| s.settled.clone())
+            .map(|s| s.clone())
             .map_err(|_| anyhow!("address state unavailable"))?;
         let (changes, checks_text) = self.changeset(workspace.as_ref()).await?;
         Ok((settled, changes, checks_text))
@@ -545,8 +551,8 @@ impl Session<'_> {
                 ],
             )
         );
-        if context.bash {
-            system = format!("{system}\n\n{}", prompts::ADDRESS_BASH);
+        if context.edit.bash {
+            system = format!("{system}\n\n{}", prompts::EXECUTOR_BASH);
         }
         let opening = ChatMessage::user(format!(
             "The open review threads on {reference}, as data:\n\n{}",
@@ -695,15 +701,15 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use henk_domain::address::PushFacts;
     use henk_domain::allowlist::{Platform, RepoRef};
+    use henk_domain::push::PushFacts;
     use henk_domain::review::CommitSha;
     use henk_llm::testing::ScriptedClient;
     use henk_llm::{
         Block, ChatMessage, Completion, ModelClient, Role, StopReason, ToolArguments, ToolCall,
         Usage,
     };
-    use henk_platform::address::{CommitIdentity, GitCredential, PullFacts, ThreadNote};
+    use henk_platform::push::{CommitIdentity, GitCredential, PullFacts, ThreadNote};
     use henk_platform::{PlatformError, PostedComment};
     use secrecy::SecretString;
     use serde_json::{Value, json};
@@ -757,7 +763,7 @@ check_commands = [["true"]]
     }
 
     #[async_trait::async_trait]
-    impl AddressWriter for FakeHub {
+    impl PushWriter for FakeHub {
         async fn pull_facts(&self, _: &ReviewTarget) -> Result<PullFacts, PlatformError> {
             let read = self.reads.fetch_add(1, Ordering::SeqCst);
             if read >= 1
@@ -779,7 +785,7 @@ check_commands = [["true"]]
         async fn repo_head(
             &self,
             _: &henk_domain::allowlist::RepoRef,
-        ) -> Result<henk_platform::address::RepoHead, PlatformError> {
+        ) -> Result<henk_platform::push::RepoHead, PlatformError> {
             Err(PlatformError::Decode(
                 "not used by an address run".to_owned(),
             ))
@@ -963,7 +969,7 @@ check_commands = [["true"]]
             own_pushes: crate::push::OwnPushes::default(),
             test_writer: None,
             test_session: None,
-            test_address_writer: Some(hub as Arc<dyn AddressWriter>),
+            test_push_writer: Some(hub as Arc<dyn PushWriter>),
             test_issue_writer: None,
         }
     }
@@ -2465,7 +2471,7 @@ check_commands = [["true"]]
             .map(Ok),
         ));
         let mut app = app(hub(Platform::GitLab, remote.path(), &head, None), vec![]);
-        app.test_address_writer = None;
+        app.test_push_writer = None;
         app.models
             .insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         let unready = Arc::new(GitLabWriter::new(
@@ -2473,13 +2479,13 @@ check_commands = [["true"]]
             "meneerhenk",
         ));
         app.gitlab = Some(unready);
-        let refused = app.address_writer(Platform::GitLab).err().unwrap();
+        let refused = app.push_writer(Platform::GitLab).err().unwrap();
         assert!(
             refused.to_string().contains("needs the token in $"),
             "{refused}"
         );
         app.gitlab = Some(Arc::new(writer));
-        assert!(app.address_writer(Platform::GitLab).is_ok());
+        assert!(app.push_writer(Platform::GitLab).is_ok());
 
         let report = run_address(
             &app,

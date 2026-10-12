@@ -738,7 +738,7 @@ model = "m"
         script: Vec<Completion>,
         config: &str,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-        source: Option<Arc<dyn henk_platform::address::AddressWriter>>,
+        source: Option<Arc<dyn henk_platform::push::PushWriter>>,
     ) -> Fixture {
         let settings = Config::parse(config)
             .and_then(Config::into_settings)
@@ -767,7 +767,7 @@ model = "m"
                 own_pushes: crate::push::OwnPushes::default(),
                 test_writer: None,
                 test_session: Some(session),
-                test_address_writer: source,
+                test_push_writer: source,
                 test_issue_writer: Some(Arc::clone(&tracker) as Arc<dyn IssueWriter>),
             },
             tracker,
@@ -791,41 +791,41 @@ model = "m"
     /// The repository as a planner's way in sees it (#172): its default
     /// branch's head and where to fetch it, no credential. Nothing else is
     /// asked of it.
-    struct Head(henk_platform::address::RepoHead);
+    struct Head(henk_platform::push::RepoHead);
 
     fn unused() -> henk_platform::PlatformError {
         henk_platform::PlatformError::Decode("not used by a planner".to_owned())
     }
 
     #[async_trait::async_trait]
-    impl henk_platform::address::AddressWriter for Head {
+    impl henk_platform::push::PushWriter for Head {
         async fn pull_facts(
             &self,
             _: &henk_platform::ReviewTarget,
-        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+        ) -> Result<henk_platform::push::PullFacts, henk_platform::PlatformError> {
             Err(unused())
         }
         async fn repo_head(
             &self,
             _: &RepoRef,
-        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+        ) -> Result<henk_platform::push::RepoHead, henk_platform::PlatformError> {
             Ok(self.0.clone())
         }
         async fn open_threads(
             &self,
             _: &henk_platform::ReviewTarget,
-        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+        ) -> Result<Vec<henk_platform::push::OpenThread>, henk_platform::PlatformError> {
             Err(unused())
         }
         async fn git_credential(
             &self,
-        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        ) -> Result<Option<henk_platform::push::GitCredential>, henk_platform::PlatformError>
         {
             Ok(None)
         }
         async fn commit_identity(
             &self,
-        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
+        ) -> Result<henk_platform::push::CommitIdentity, henk_platform::PlatformError> {
             Err(unused())
         }
         fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
@@ -840,7 +840,7 @@ model = "m"
         async fn reply_in_thread(
             &self,
             _: &henk_platform::ReviewTarget,
-            _: &henk_platform::address::OpenThread,
+            _: &henk_platform::push::OpenThread,
             _: &str,
         ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
             Err(unused())
@@ -946,7 +946,7 @@ model = "m"
         std::fs::write(later.path().join("src/a.rs"), "moved on\n").unwrap();
         later
             .commit(
-                &henk_platform::address::CommitIdentity {
+                &henk_platform::push::CommitIdentity {
                     name: "Later".to_owned(),
                     email: "later@example.com".to_owned(),
                 },
@@ -956,7 +956,7 @@ model = "m"
             .unwrap();
         later.push("feature").await.unwrap();
 
-        let source = Head(henk_platform::address::RepoHead {
+        let source = Head(henk_platform::push::RepoHead {
             default_branch: "feature".to_owned(),
             head,
             remote: url,

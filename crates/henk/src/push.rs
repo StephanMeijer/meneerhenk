@@ -1,6 +1,6 @@
 //! Committing a checked changeset as Henk and pushing it to a pull
-//! request's branch as a fast-forward: what an address run (§3.5) and the
-//! review loop (#284) share.
+//! request's branch as a fast-forward: what the review loop (#284) and
+//! address runs (§3.5) share.
 //!
 //! Every guard is here, so both get all of them: the branch is read again
 //! just before the push and must not have moved, Henk must still be allowed
@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use henk_domain::address::push_refusal;
 use henk_domain::allowlist::Platform;
 use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
+use henk_domain::push::push_refusal;
 use henk_domain::run::RunId;
 use henk_domain::workspace::Change;
 use henk_platform::ReviewTarget;
-use henk_platform::address::{AddressWriter, CommitIdentity, GitCredential, PullFacts};
+use henk_platform::push::{CommitIdentity, GitCredential, PullFacts, PushWriter};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -40,7 +40,7 @@ pub(crate) fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancel
 /// Who pushes for one run, to one pull request.
 pub(crate) struct Pusher<'a> {
     pub(crate) app: &'a App,
-    pub(crate) writer: Arc<dyn AddressWriter>,
+    pub(crate) writer: Arc<dyn PushWriter>,
     pub(crate) target: &'a ReviewTarget,
     pub(crate) run: &'a RunId,
     /// Who asked, as the commit message names them.

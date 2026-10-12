@@ -984,7 +984,7 @@ requester_id = 3
         config: &str,
         head: &str,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
-        source: Option<Arc<dyn henk_platform::address::AddressWriter>>,
+        source: Option<Arc<dyn henk_platform::push::PushWriter>>,
     ) -> Fixture {
         let settings = Config::parse(config)
             .and_then(Config::into_settings)
@@ -1023,7 +1023,7 @@ requester_id = 3
                 own_pushes: crate::push::OwnPushes::default(),
                 test_writer: Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>),
                 test_session: Some(session),
-                test_address_writer: source,
+                test_push_writer: source,
                 test_issue_writer: None,
             },
             writer,
@@ -2596,10 +2596,10 @@ requester_id = 3
             Arc::new(provider),
         )
         .await;
-        f.app.test_address_writer = Some(Arc::new(LoopHub {
+        f.app.test_push_writer = Some(Arc::new(LoopHub {
             remote: remote.path().to_path_buf(),
             head_repo: "o/r",
-            credential: Some(henk_platform::address::GitCredential::github(
+            credential: Some(henk_platform::push::GitCredential::github(
                 GIT_TOKEN.to_owned().into(),
             )),
         }));
@@ -2681,18 +2681,18 @@ requester_id = 3
         /// comes from a fork.
         head_repo: &'static str,
         /// The credential git is given, if any.
-        credential: Option<henk_platform::address::GitCredential>,
+        credential: Option<henk_platform::push::GitCredential>,
     }
 
     #[async_trait::async_trait]
-    impl henk_platform::address::AddressWriter for LoopHub {
+    impl henk_platform::push::PushWriter for LoopHub {
         async fn pull_facts(
             &self,
             _: &ReviewTarget,
-        ) -> Result<henk_platform::address::PullFacts, henk_platform::PlatformError> {
+        ) -> Result<henk_platform::push::PullFacts, henk_platform::PlatformError> {
             let (head, _) = crate::git::tests::remote_feature(&self.remote).await;
-            Ok(henk_platform::address::PullFacts {
-                push: henk_domain::address::PushFacts {
+            Ok(henk_platform::push::PullFacts {
+                push: henk_domain::push::PushFacts {
                     open: true,
                     head_repo: Some(self.head_repo.to_owned()),
                     base_repo: "o/r".to_owned(),
@@ -2707,25 +2707,25 @@ requester_id = 3
         async fn open_threads(
             &self,
             _: &ReviewTarget,
-        ) -> Result<Vec<henk_platform::address::OpenThread>, henk_platform::PlatformError> {
+        ) -> Result<Vec<henk_platform::push::OpenThread>, henk_platform::PlatformError> {
             Err(unused())
         }
         async fn git_credential(
             &self,
-        ) -> Result<Option<henk_platform::address::GitCredential>, henk_platform::PlatformError>
+        ) -> Result<Option<henk_platform::push::GitCredential>, henk_platform::PlatformError>
         {
             Ok(self.credential.clone())
         }
         async fn repo_head(
             &self,
             _: &henk_domain::allowlist::RepoRef,
-        ) -> Result<henk_platform::address::RepoHead, henk_platform::PlatformError> {
+        ) -> Result<henk_platform::push::RepoHead, henk_platform::PlatformError> {
             Err(unused())
         }
         async fn commit_identity(
             &self,
-        ) -> Result<henk_platform::address::CommitIdentity, henk_platform::PlatformError> {
-            Ok(henk_platform::address::CommitIdentity {
+        ) -> Result<henk_platform::push::CommitIdentity, henk_platform::PlatformError> {
+            Ok(henk_platform::push::CommitIdentity {
                 name: "meneer-henk[bot]".to_owned(),
                 email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
             })
@@ -2742,7 +2742,7 @@ requester_id = 3
         async fn reply_in_thread(
             &self,
             _: &ReviewTarget,
-            _: &henk_platform::address::OpenThread,
+            _: &henk_platform::push::OpenThread,
             _: &str,
         ) -> Result<henk_platform::PostedComment, henk_platform::PlatformError> {
             Err(unused())
@@ -2806,7 +2806,7 @@ requester_id = 3
         async fn exec(
             &self,
             argv: &[String],
-            cwd: &henk_domain::address::WorkspacePath,
+            cwd: &henk_domain::path::WorkspacePath,
             timeout: Duration,
         ) -> Result<crate::workspace::ExecResult, crate::workspace::WorkspaceError> {
             self.0.exec(argv, cwd, timeout).await
@@ -2814,7 +2814,7 @@ requester_id = 3
 
         async fn read(
             &self,
-            path: &henk_domain::address::WorkspacePath,
+            path: &henk_domain::path::WorkspacePath,
             max_bytes: u64,
         ) -> Result<Vec<u8>, crate::workspace::WorkspaceError> {
             self.0.read(path, max_bytes).await
@@ -2822,7 +2822,7 @@ requester_id = 3
 
         async fn write(
             &self,
-            path: &henk_domain::address::WorkspacePath,
+            path: &henk_domain::path::WorkspacePath,
             content: &[u8],
         ) -> Result<(), crate::workspace::WorkspaceError> {
             self.0.write(path, content).await
@@ -2830,7 +2830,7 @@ requester_id = 3
 
         async fn list(
             &self,
-            dir: &henk_domain::address::WorkspacePath,
+            dir: &henk_domain::path::WorkspacePath,
             only: Option<&henk_domain::ignore::PathFilter>,
             cap: usize,
         ) -> Result<Vec<String>, crate::workspace::WorkspaceError> {
@@ -2839,14 +2839,14 @@ requester_id = 3
 
         async fn search(
             &self,
-            dir: &henk_domain::address::WorkspacePath,
+            dir: &henk_domain::path::WorkspacePath,
             pattern: &crate::workspace::Pattern,
             only: Option<&henk_domain::ignore::PathFilter>,
             context: usize,
             max_file_bytes: u64,
             cap: usize,
         ) -> Result<Vec<crate::workspace::Hit>, crate::workspace::WorkspaceError> {
-            let scribble = henk_domain::address::WorkspacePath::parse("scribble.txt").unwrap();
+            let scribble = henk_domain::path::WorkspacePath::parse("scribble.txt").unwrap();
             self.0.write(&scribble, b"the reviewer was here").await?;
             self.0
                 .search(dir, pattern, only, context, max_file_bytes, cap)
@@ -3737,7 +3737,7 @@ requester_id = 3
         std::fs::write(later.path().join("src/a.rs"), "moved on\n").unwrap();
         later
             .commit(
-                &henk_platform::address::CommitIdentity {
+                &henk_platform::push::CommitIdentity {
                     name: "Later".to_owned(),
                     email: "later@example.com".to_owned(),
                 },

@@ -17,6 +17,7 @@ mod coordinator;
 mod dashboard;
 mod diff_tools;
 mod doctor;
+mod edit_tools;
 mod git;
 mod hooks;
 mod ids;

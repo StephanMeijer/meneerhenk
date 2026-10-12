@@ -1,22 +1,22 @@
-//! What an address run (§3.5) needs from GitLab beyond the review writer.
+//! What pushing to a merge request needs from GitLab beyond the review writer.
 //! The merge request's projects, the branch's protection and the bot's
 //! account come from REST, because the MCP server's merge request leaves
 //! out the project ids; discussions, replies and resolving go through the
 //! write-mode MCP session as review findings do.
 
-use henk_domain::address::PushFacts;
 use henk_domain::commit::noreply;
+use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::{Value, json};
 
 use henk_domain::allowlist::RepoRef;
 
-use crate::address::{
-    AddressWriter, CommitIdentity, GitCredential, OpenThread, PullFacts, RepoHead, ThreadNote,
-};
 use crate::error::PlatformError;
 use crate::gitlab::rest::path_segment;
 use crate::gitlab::writer::{GitLabWriter, is_system, note_body, note_id};
+use crate::push::{
+    CommitIdentity, GitCredential, OpenThread, PullFacts, PushWriter, RepoHead, ThreadNote,
+};
 use crate::writer::{PlatformWriter as _, PostedComment, ReviewTarget};
 
 fn text(value: &Value, key: &str) -> String {
@@ -94,7 +94,7 @@ fn open_thread(discussion: &Value, head: Option<&str>, bot_id: u64) -> Option<Op
 }
 
 #[async_trait::async_trait]
-impl AddressWriter for GitLabWriter {
+impl PushWriter for GitLabWriter {
     async fn open_threads(&self, target: &ReviewTarget) -> Result<Vec<OpenThread>, PlatformError> {
         let bot_id = self.bot_user().await?.id;
         let merge_request = self.merge_request(target).await?;

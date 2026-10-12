@@ -1,4 +1,4 @@
-//! The few GitLab REST reads an address run (§3.5) needs that the MCP
+//! The few GitLab REST reads pushing to a merge request needs that the MCP
 //! server does not give: the merge request's source and target project, a
 //! branch's protection, and who the token belongs to. Read-only; every
 //! write still goes through the write-mode MCP session.
@@ -14,8 +14,8 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use tracing::instrument;
 
-use crate::address::GitCredential;
 use crate::error::{PlatformError, truncate};
+use crate::push::GitCredential;
 
 const USER_AGENT: &str = "meneer-henk (https://github.com/StephanMeijer/meneerhenk)";
 

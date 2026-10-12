@@ -3,9 +3,9 @@
 /// Henk's persona (spec §7). Prepended to every system prompt.
 pub const PERSONA: &str = include_str!("../prompts/persona.md");
 
-/// Appended to an address run's instructions when its workspace lets the
+/// Appended to the executor's instructions when its workspace lets the
 /// model run commands of its own (#172).
-pub const ADDRESS_BASH: &str = include_str!("../prompts/address_bash.md");
+pub const EXECUTOR_BASH: &str = include_str!("../prompts/executor_bash.md");
 
 /// Appended to the planner's instructions when it has a workspace at the
 /// default branch (#172). `{{branch}}` and `{{commit}}` say which.
@@ -71,7 +71,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLANNER));
         assert!(henk_domain::text::is_in_style(ADDRESS));
         assert!(henk_domain::text::is_in_style(SKILLS));
-        assert!(henk_domain::text::is_in_style(ADDRESS_BASH));
+        assert!(henk_domain::text::is_in_style(EXECUTOR_BASH));
         assert!(henk_domain::text::is_in_style(PLAN_WORKSPACE));
         assert!(henk_domain::text::is_in_style(LOOP_REVIEWER));
         assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
@@ -81,7 +81,7 @@ mod tests {
         for tool in ["list_findings", "give_verdict", "run_checks"] {
             assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
-        assert!(ADDRESS_BASH.contains("`bash`") && ADDRESS_BASH.contains("`mktemp`"));
+        assert!(EXECUTOR_BASH.contains("`bash`") && EXECUTOR_BASH.contains("`mktemp`"));
         for tool in ["list_files", "search", "read_file", "bash", "list_commits"] {
             assert!(PLAN_WORKSPACE.contains(&format!("`{tool}`")), "{tool}");
         }

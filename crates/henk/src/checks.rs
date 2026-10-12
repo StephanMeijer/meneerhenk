@@ -1,4 +1,4 @@
-//! The project's own checks, run in an address run's workspace (§3.5).
+//! The project's own checks, run in the workspace Henk pushes from.
 //!
 //! They run the pull request's code. The workspace backend decides how far
 //! that is kept from Henk: every backend empties the environment, so no
@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use henk_domain::address::WorkspacePath;
+use henk_domain::path::WorkspacePath;
 
 use crate::workspace::Workspace;
 

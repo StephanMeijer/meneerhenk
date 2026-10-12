@@ -1,5 +1,5 @@
-//! Workspaces (§3.5): the one place an address run's model reads, edits and
-//! runs the project's checks. The tools talk only to a [`Workspace`]; which
+//! Workspaces: the one place a model reads, edits and runs the project's
+//! checks. The tools talk only to a [`Workspace`]; which
 //! backend serves it, the host today and a container or microVM later, is a
 //! configuration choice (`[workspace]`).
 //!
@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use henk_domain::address::{PathError, WorkspacePath};
 use henk_domain::ignore::PathFilter;
+use henk_domain::path::{PathError, WorkspacePath};
 use henk_domain::workspace::{
     BackendKind, Change, ChangeKind, EnvLane, FileMode, Limits, Profile, RawChange,
     changeset_refusal,
