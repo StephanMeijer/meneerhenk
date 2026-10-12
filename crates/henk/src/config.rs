@@ -1221,15 +1221,14 @@ struct WorkspaceParts {
 }
 
 impl WorkspaceConfig {
-    /// The policy, with `check_timeout_secs` from `[address]` as the default
-    /// profile's command limit when it is set.
+    /// The policy, the sandbox host and the cluster, checked together: a
+    /// profile on the ssh backend needs `[workspace.ssh]`, one on the
+    /// kubernetes backend `[workspace.kubernetes]`. The default profile's
+    /// command limit is `[workspace].command_secs`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::Workspace`] when the policy is unusable.
-    /// The policy, the sandbox host and the cluster, checked together: a
-    /// profile on the ssh backend needs `[workspace.ssh]`, one on the
-    /// kubernetes backend `[workspace.kubernetes]`.
     fn into_parts(mut self) -> Result<WorkspaceParts, ConfigError> {
         let ssh = self.ssh.take();
         let kubernetes = self.kubernetes.take();
