@@ -1,6 +1,6 @@
 //! Henk's own MCP server at `/mcp` (#247, #248, #249): an agent can start
-//! a review, plan or address run, follow it, cancel it, and read review
-//! quality and health, over the Model Context Protocol's Streamable HTTP
+//! a review, plan or address run, follow it, cancel it, and read its
+//! health, over the Model Context Protocol's Streamable HTTP
 //! transport. Every tool is a thin call into what the dashboard's API does
 //! ([`crate::dashboard::api`]); starting goes through the event bus like
 //! any webhook, so the allowlist and every refusal apply.

@@ -253,7 +253,7 @@ pub enum DraftVerdict {
 }
 
 /// The `kind` of a review loop's findings in the drafts table (#285). The
-/// fact-check's quality figures leave them out.
+/// overview's drafts per day leaves them out.
 pub const LOOP_FINDING_KIND: &str = "loop_finding";
 
 /// A stored verdict, refused when it is not one.
@@ -368,18 +368,18 @@ pub struct ToolCallRecord {
     pub elapsed_ms: u64,
 }
 
-/// What kind of session a session name is: `check` for a fact-check,
-/// `planner`, `address`, and `lane` for a review lane.
+/// What kind of session a session name is: a review loop's `reviewer`
+/// and `fixer`, `planner`, `address`, and, in reviews from before the
+/// loop, `check` for a fact-check and `lane` for a review lane.
 #[must_use]
 pub fn session_kind(session: &str) -> &'static str {
-    if session.starts_with("check-") {
-        "check"
-    } else if session == "planner" {
-        "planner"
-    } else if session == "address" {
-        "address"
-    } else {
-        "lane"
+    match session {
+        "reviewer" => "reviewer",
+        "fixer" => "fixer",
+        "planner" => "planner",
+        "address" => "address",
+        _ if session.starts_with("check-") => "check",
+        _ => "lane",
     }
 }
 
@@ -1035,132 +1035,6 @@ pub struct EventFilter {
     pub before: Option<EventKey>,
 }
 
-/// Which drafts a listing or a count covers (#205). `None` matches
-/// anything.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DraftFilter {
-    /// What became of them; listings only.
-    pub verdict: Option<VerdictFilter>,
-    /// The lane's model.
-    pub model: Option<String>,
-    /// The lane.
-    pub lane: Option<String>,
-    /// The run's `owner/name`, exactly.
-    pub repo: Option<String>,
-    /// Queued at or after this RFC 3339 time.
-    pub since: Option<String>,
-    /// Queued before this RFC 3339 time.
-    pub until: Option<String>,
-    /// Only drafts listed after this one: for keyset paging, newest first.
-    pub before: Option<DraftKey>,
-}
-
-/// A verdict to list drafts by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerdictFilter {
-    /// Decided this way.
-    Is(DraftVerdict),
-    /// Not decided yet.
-    Waiting,
-}
-
-impl VerdictFilter {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Is(verdict) => verdict.as_str(),
-            Self::Waiting => "waiting",
-        }
-    }
-
-    /// The text a query parameter takes.
-    pub(crate) fn param(filter: Option<Self>) -> Option<&'static str> {
-        filter.map(Self::as_str)
-    }
-}
-
-/// Where a draft sits in a newest-first listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DraftKey {
-    /// When it was queued, as the store returned it.
-    pub created_at: String,
-    /// Its row id, which breaks a tie on the time.
-    pub id: i64,
-}
-
-/// What drafts are counted by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DraftGroup {
-    /// The lane's model.
-    Model,
-    /// The lane.
-    Lane,
-    /// The run's repository.
-    Repo,
-    /// The run's pull request, merge request or issue.
-    Target,
-}
-
-/// What became of the drafts of one group.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DraftRates {
-    /// The model, lane or repository; `owner/name #7` for a target.
-    pub key: String,
-    /// The repository, when grouped by target.
-    pub repo: Option<String>,
-    /// The number, when grouped by target.
-    pub target: Option<u64>,
-    /// The platform, when grouped by target.
-    pub platform: Option<Platform>,
-    /// Every draft.
-    pub drafts: u64,
-    /// Confirmed and written.
-    pub confirmed: u64,
-    /// Rejected by the check.
-    pub rejected: u64,
-    /// A repeat, merged into another.
-    pub same_as: u64,
-    /// No model could check it.
-    pub unchecked: u64,
-    /// No check configured.
-    pub not_checked: u64,
-    /// The review ended first.
-    pub cancelled: u64,
-    /// The write failed.
-    pub failed: u64,
-    /// Not decided yet.
-    pub waiting: u64,
-}
-
-/// What the check made of one group's drafts on one UTC day (#228).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DayRates {
-    /// The model, lane or repository; `owner/name #7` for a target.
-    pub key: String,
-    /// `YYYY-MM-DD`, UTC.
-    pub day: String,
-    /// Drafts a checker decided: confirmed, rejected or a repeat.
-    pub judged: u64,
-    /// Of those, the rejected ones.
-    pub rejected: u64,
-}
-
-/// A draft in a listing across runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DraftListing {
-    /// Its row id, for the keyset.
-    pub id: i64,
-    /// The run.
-    pub run_id: String,
-    /// The run's repository.
-    pub repo: String,
-    /// The run's pull request, merge request or issue.
-    pub target: u64,
-    /// The run's platform.
-    pub platform: Platform,
-    /// The draft and what became of it.
-    pub draft: DraftRecord,
-}
-
 /// Which tool calls a listing or a tally covers (#203). `None` matches
 /// anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1171,8 +1045,8 @@ pub struct ToolCallFilter {
     pub tool: Option<String>,
     /// The session's model.
     pub model: Option<String>,
-    /// The kind of session ([`session_kind`]): `lane`, `check`, `planner`
-    /// or `address`.
+    /// The kind of session ([`session_kind`]): `reviewer`, `fixer`,
+    /// `planner`, `address`, `lane` or `check`.
     pub session_kind: Option<String>,
     /// Made at or after this RFC 3339 time.
     pub since: Option<String>,
@@ -1525,6 +1399,8 @@ mod tests {
         assert_eq!(session_kind("check-lane-b-3"), "check");
         assert_eq!(session_kind("planner"), "planner");
         assert_eq!(session_kind("address"), "address");
+        assert_eq!(session_kind("reviewer"), "reviewer");
+        assert_eq!(session_kind("fixer"), "fixer");
         assert_eq!(session_kind("lane-a"), "lane");
         assert_eq!(session_kind("security"), "lane");
     }

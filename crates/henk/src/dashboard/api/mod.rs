@@ -8,7 +8,6 @@
 pub(crate) mod events;
 pub(crate) mod health;
 mod lanes;
-pub(crate) mod quality;
 pub(crate) mod runs;
 mod session_stream;
 mod stats;
@@ -172,10 +171,6 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
             "/runs/{id}/sessions/{session}/stream",
             get(session_stream::session_stream),
         )
-        .route("/quality", get(quality::rates))
-        .route("/quality/daily", get(quality::daily))
-        .route("/drafts", get(quality::drafts))
-        .route("/drafts/count", get(quality::count))
         .route("/tool-calls/summary", get(tools::summary))
         .route("/tool-calls", get(tools::list))
         .route("/events", get(events::list))

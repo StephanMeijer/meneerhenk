@@ -62,7 +62,7 @@ describe('Overview', () => {
     expect(load.loadCount).toHaveBeenCalledWith('kind=review&repo=docspec%2Fapp');
     expect(sources.map((s) => s.url)).toEqual(['/dashboard/api/v1/runs/stream']);
     expect(load.loadLanes).toHaveBeenCalledWith('last=30');
-    expect(document.querySelector('#lanes-title')?.textContent).toBe('Lane reliability');
+    expect(document.querySelector('#lanes-title')?.textContent).toBe('Session reliability');
     firstOf(sources).push('snapshot', {
       runs: [runSummary('r-9', 'running')],
       count: 3,

@@ -8,10 +8,10 @@
   import Loading from '$lib/ui/Loading.svelte';
   import Problem from '$lib/ui/Problem.svelte';
 
-  /** How each lane and fact-check session ended over the last reviews
-   * (#229): a square per review, oldest left. A review stands on the
-   * lanes that finished (§3.2), so a row with many gaps in green is a
-   * lane that makes reviews thinner. */
+  /** How each session ended over the last reviews (#229): the review
+   * loop's reviewer and fixer, and the lanes and fact-checks of reviews
+   * from before the loop. A square per review, oldest left; a row with
+   * many gaps in green is a session that makes reviews thinner. */
   let { load = laneStats }: { load?: (query: string) => Promise<LaneStats> } = $props();
 
   const LAST = 30;
@@ -46,8 +46,8 @@
 
 <section class="panel" aria-labelledby="lanes-title">
   <div class="panel-head">
-    <h2 id="lanes-title">Lane reliability</h2>
-    <span class="note">Last {LAST} reviews, oldest left · <a href={href('/lanes')} use:link>Compare lanes</a></span>
+    <h2 id="lanes-title">Session reliability</h2>
+    <span class="note">Last {LAST} reviews, oldest left · <a href={href('/lanes')} use:link>Compare sessions</a></span>
   </div>
   {#await stats}
     <Loading />

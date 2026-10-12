@@ -19,7 +19,7 @@ use crate::app::App;
 use crate::config::McpScope;
 use crate::coordinator::Coordinator;
 use crate::dashboard::api::types::{StartRequest, ToolCall, Transcript};
-use crate::dashboard::api::{ApiError, events, health, quality, runs};
+use crate::dashboard::api::{ApiError, events, health, runs};
 
 /// How long a start tool waits for the listeners to say what came of it.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -139,15 +139,6 @@ pub(crate) struct TranscriptRef {
 pub(crate) struct EventRef {
     /// The event id, as a start tool returns it.
     event_id: String,
-}
-
-/// What `review_quality` takes.
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub(crate) struct Quality {
-    /// `model`, `lane`, `repo` or `target`; `model` when left out.
-    group: Option<String>,
-    /// Drafts written at or after this time, RFC 3339.
-    since: Option<String>,
 }
 
 /// What a start tool answers: the event, and the run once a listener
@@ -408,21 +399,6 @@ impl HenkMcp {
         Parameters(input): Parameters<EventRef>,
     ) -> Result<CallToolResult, ErrorData> {
         api(events::event_detail(&self.app, input.event_id).await)
-    }
-
-    #[tool(
-        description = "What the fact-check made of the lanes' drafts, per model, lane, repository or pull request: confirmed, rejected, repeats, and the rejection rate."
-    )]
-    async fn review_quality(
-        &self,
-        Parameters(input): Parameters<Quality>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let query = quality::QualityQuery {
-            group: input.group,
-            since: input.since,
-            ..quality::QualityQuery::default()
-        };
-        api(quality::quality_rates(&self.app, &query).await)
     }
 
     #[tool(

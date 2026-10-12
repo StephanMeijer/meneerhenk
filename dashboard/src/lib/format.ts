@@ -49,7 +49,7 @@ export const LANE_REASONS: Record<string, string> = {
   stuck: 'stuck in a loop',
 };
 
-/** The periods the quality page offers, by query value. */
+/** The periods the sessions page offers, by query value. */
 export const PERIODS: Record<string, { label: string; days: number | null }> = {
   '7d': { label: 'last 7 days', days: 7 },
   '30d': { label: 'last 30 days', days: 30 },

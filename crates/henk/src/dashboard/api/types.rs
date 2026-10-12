@@ -498,38 +498,6 @@ pub enum RunningMessage {
     Slots(Slots),
 }
 
-/// One group's rejection rate per UTC day (#228): `GET /quality/daily`.
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct QualitySeries {
-    /// The model, lane or repository; `owner/name #7` for a pull request.
-    pub key: String,
-    /// Every day of the period, oldest first.
-    pub days: Vec<DayRate>,
-}
-
-/// What the check made of one group's drafts on one day.
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct DayRate {
-    /// `YYYY-MM-DD`, UTC.
-    pub day: String,
-    /// Drafts the check judged: confirmed, rejected and repeats.
-    pub judged: u64,
-    /// Of those, rejected.
-    pub rejected: u64,
-    /// Rejected of judged, from 0 to 1; `null` on a day it judged none.
-    pub rate: Option<f64>,
-}
-
-/// How many drafts a filter matches, over every page.
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct DraftCount {
-    /// The number.
-    pub count: u64,
-}
-
 /// The sources and kinds Henk has recorded, for the events page's filters
 /// (#227): `GET /events/facets`.
 #[derive(Debug, Serialize)]
@@ -539,59 +507,6 @@ pub struct EventFacets {
     pub sources: Vec<String>,
     /// `pull_request`, `review_requested`, and so on, sorted.
     pub kinds: Vec<String>,
-}
-
-/// What became of the drafts of one group: a model, a lane, a repository
-/// or a pull request (#205).
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct QualityRow {
-    /// The model, lane or repository; `owner/name #7` for a pull request.
-    pub key: String,
-    /// The repository, when grouped by pull request.
-    pub repo: Option<String>,
-    /// The number, when grouped by pull request.
-    pub target: Option<u64>,
-    /// A link to that pull request, merge request or issue.
-    pub target_url: Option<String>,
-    /// Every draft.
-    pub drafts: u64,
-    /// Confirmed and written.
-    pub confirmed: u64,
-    /// Rejected by the check.
-    pub rejected: u64,
-    /// Repeats, merged into another draft or finding.
-    pub same_as: u64,
-    /// No model could check them.
-    pub unchecked: u64,
-    /// No check was configured.
-    pub not_checked: u64,
-    /// The review ended first.
-    pub cancelled: u64,
-    /// The write failed.
-    pub failed: u64,
-    /// Not decided yet.
-    pub waiting: u64,
-    /// Drafts a checker decided: confirmed, rejected and repeats.
-    pub judged: u64,
-    /// Rejected of judged, from 0 to 1; none when nothing was judged.
-    pub rejection_rate: Option<f64>,
-}
-
-/// A draft across runs, with the run it belongs to (#205).
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-pub struct DraftItem {
-    /// The run.
-    pub run_id: String,
-    /// The run's repository.
-    pub repo: String,
-    /// The run's pull request, merge request or issue.
-    pub target: u64,
-    /// A link to it.
-    pub target_url: Option<String>,
-    /// The draft and what became of it.
-    pub draft: Draft,
 }
 
 /// One tool of one model in one kind of session, across runs (#203).

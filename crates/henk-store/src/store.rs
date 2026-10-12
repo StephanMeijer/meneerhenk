@@ -5,12 +5,11 @@ use henk_domain::run::{EventId, RunId};
 use time::OffsetDateTime;
 
 use crate::types::{
-    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, NewRun, OutcomeRecord, Page,
-    PruneCounts, RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite,
-    StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary,
+    DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
+    LaneStatus, NewRun, OutcomeRecord, Page, PruneCounts, RunFilter, RunRecord, RunStatus, Stage,
+    StageRecord, StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary,
 };
 
 /// Run records (spec §1.1, §8.6): runs, lanes, findings, timelines, and
@@ -224,52 +223,6 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     ///
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError>;
-
-    /// What became of the drafts `filter` matches, per `group`, the
-    /// largest group first (#205). The filter's verdict and keyset do not
-    /// apply.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure or a bad time.
-    async fn draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DraftRates>, StoreError>;
-
-    /// What the check made of each group's drafts per UTC day (#228): how
-    /// many it judged and how many of those it rejected, for drafts that
-    /// match `filter` (its verdict and keyset are not used).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure.
-    async fn daily_draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DayRates>, StoreError>;
-
-    /// How many drafts the listing's `filter` matches, over every page
-    /// (its keyset is not used).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure.
-    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError>;
-
-    /// Drafts across runs, newest first, by filter and page (#205).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] on a database failure, a bad time or a
-    /// corrupt row.
-    async fn list_drafts(
-        &self,
-        filter: &DraftFilter,
-        page: Page,
-    ) -> Result<Vec<DraftListing>, StoreError>;
 
     /// Records one tool call of a session (#190). An empty `at` means now.
     ///

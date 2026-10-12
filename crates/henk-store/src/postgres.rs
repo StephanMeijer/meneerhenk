@@ -16,13 +16,12 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::RunStore;
 use crate::types::{
-    DayCounts, DayRates, DraftDecision, DraftFilter, DraftGroup, DraftListing, DraftRates,
-    DraftRecord, EventFacets, EventFilter, EventRecord, EventWithOutcomes, FindingAction,
-    FindingRecord, InboundEvent, LaneEnding, LaneRecord, LaneStatus, MAX_PAYLOAD_BYTES,
-    MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RawRun,
-    RunFilter, RunRecord, RunStatus, Stage, StageRecord, StageState, StageWrite, StoreError,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, VerdictFilter, attach_outcomes, draft_verdict, kind_parse, kind_str,
+    DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
+    LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
+    OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
+    TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str,
     lane_dots, lane_endings, merge_days, platform_parse, platform_str, stage_dots, stage_records,
     status_str, to_i64, to_u64,
 };
@@ -209,27 +208,7 @@ fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, Store
     })
 }
 
-/// The columns [`raw_run`] reads, in order.
-/// The `WHERE` of a draft count or listing over `drafts d JOIN runs r`,
-/// over parameters 1 to 5: model, lane, repo, since and until.
-const DRAFT_FILTER: &str =
-    "($1::text IS NULL OR d.model = $1) AND ($2::text IS NULL OR d.lane = $2)
-     AND ($3::text IS NULL OR r.repo = $3)
-     AND ($4::timestamptz IS NULL OR d.created_at >= $4)
-     AND ($5::timestamptz IS NULL OR d.created_at < $5)
-     AND d.kind <> 'loop_finding'";
-
-/// One count per verdict, and the waiting ones, in [`DraftRates`] order.
-const VERDICT_SUMS: &str = "COUNT(*) FILTER (WHERE d.verdict = 'confirmed'),
-     COUNT(*) FILTER (WHERE d.verdict = 'rejected'),
-     COUNT(*) FILTER (WHERE d.verdict = 'same_as'),
-     COUNT(*) FILTER (WHERE d.verdict = 'unchecked'),
-     COUNT(*) FILTER (WHERE d.verdict = 'not_checked'),
-     COUNT(*) FILTER (WHERE d.verdict = 'cancelled'),
-     COUNT(*) FILTER (WHERE d.verdict = 'failed'),
-     COUNT(*) FILTER (WHERE d.verdict IS NULL)";
-
-/// The time bounds of a draft or tool call count or listing.
+/// The time bounds of a tool call count or listing.
 fn window(
     since: Option<&String>,
     until: Option<&String>,
@@ -243,8 +222,8 @@ fn window(
 /// kind is the session name's, as [`crate::session_kind`] reads it.
 const CALL_FILTER: &str = "($1::text IS NULL OR c.tool = $1) AND ($2::text IS NULL OR c.model = $2)
      AND ($3::text IS NULL OR ($3 = 'check' AND c.session LIKE 'check-%')
-          OR ($3 = c.session AND c.session IN ('planner', 'address'))
-          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address')))
+          OR ($3 = c.session AND c.session IN ('planner', 'address', 'reviewer', 'fixer'))
+          OR ($3 = 'lane' AND c.session NOT LIKE 'check-%' AND c.session NOT IN ('planner', 'address', 'reviewer', 'fixer')))
      AND ($4::timestamptz IS NULL OR c.at >= $4)
      AND ($5::timestamptz IS NULL OR c.at < $5)";
 
@@ -928,217 +907,6 @@ impl RunStore for PgStore {
             .collect()
     }
 
-    async fn draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DraftRates>, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let (key, columns, by) = match group {
-            DraftGroup::Model => ("d.model", "NULL::text, NULL::bigint, NULL::text", "d.model"),
-            DraftGroup::Lane => ("d.lane", "NULL::text, NULL::bigint, NULL::text", "d.lane"),
-            DraftGroup::Repo => ("r.repo", "NULL::text, NULL::bigint, NULL::text", "r.repo"),
-            DraftGroup::Target => (
-                "r.repo || ' #' || r.target::text",
-                "r.repo, r.target, r.platform",
-                "r.repo, r.target, r.platform",
-            ),
-        };
-        let rows = self
-            .client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT {key}, {columns}, COUNT(*), {VERDICT_SUMS}
-                     FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE {DRAFT_FILTER}
-                     GROUP BY {by} ORDER BY COUNT(*) DESC, 1"
-                ),
-                &[&filter.model, &filter.lane, &filter.repo, &since, &until],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                let count = |i: usize| -> Result<u64, StoreError> {
-                    let n: i64 = row.try_get(i)?;
-                    Ok(u64::try_from(n).unwrap_or_default())
-                };
-                let target: Option<i64> = row.try_get(2)?;
-                Ok(DraftRates {
-                    key: row.try_get(0)?,
-                    repo: row.try_get(1)?,
-                    target: target.and_then(|t| u64::try_from(t).ok()),
-                    platform: row
-                        .try_get::<_, Option<String>>(3)?
-                        .as_deref()
-                        .and_then(platform_parse),
-
-                    drafts: count(4)?,
-                    confirmed: count(5)?,
-                    rejected: count(6)?,
-                    same_as: count(7)?,
-                    unchecked: count(8)?,
-                    not_checked: count(9)?,
-                    cancelled: count(10)?,
-                    failed: count(11)?,
-                    waiting: count(12)?,
-                })
-            })
-            .collect()
-    }
-
-    async fn daily_draft_rates(
-        &self,
-        group: DraftGroup,
-        filter: &DraftFilter,
-    ) -> Result<Vec<DayRates>, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let key = match group {
-            DraftGroup::Model => "d.model",
-            DraftGroup::Lane => "d.lane",
-            DraftGroup::Repo => "r.repo",
-            DraftGroup::Target => "r.repo || ' #' || r.target::text",
-        };
-        let rows = self
-            .client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT {key}, to_char(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'),
-                            COUNT(*) FILTER (WHERE d.verdict IN ('confirmed', 'rejected', 'same_as')),
-                            COUNT(*) FILTER (WHERE d.verdict = 'rejected')
-                     FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE {DRAFT_FILTER}
-                     GROUP BY 1, 2 ORDER BY 1, 2"
-                ),
-                &[&filter.model, &filter.lane, &filter.repo, &since, &until],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                let count = |i: usize| -> Result<u64, StoreError> {
-                    let n: i64 = row.try_get(i)?;
-                    Ok(u64::try_from(n).unwrap_or_default())
-                };
-                Ok(DayRates {
-                    key: row.try_get(0)?,
-                    day: row.try_get(1)?,
-                    judged: count(2)?,
-                    rejected: count(3)?,
-                })
-            })
-            .collect()
-    }
-
-    async fn count_drafts(&self, filter: &DraftFilter) -> Result<u64, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let verdict = VerdictFilter::param(filter.verdict);
-        let count: i64 = self
-            .client()
-            .await?
-            .query_one(
-                &format!(
-                    "SELECT COUNT(*) FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE {DRAFT_FILTER}
-                       AND ($6::text IS NULL OR ($6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = $6)"
-                ),
-                &[&filter.model, &filter.lane, &filter.repo, &since, &until, &verdict],
-            )
-            .await?
-            .try_get(0)?;
-        Ok(u64::try_from(count).unwrap_or_default())
-    }
-
-    async fn list_drafts(
-        &self,
-        filter: &DraftFilter,
-        page: Page,
-    ) -> Result<Vec<DraftListing>, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let verdict = VerdictFilter::param(filter.verdict);
-        let before_at = filter
-            .before
-            .as_ref()
-            .map(|k| parse_time("created_at", &k.created_at))
-            .transpose()?;
-        let before_id = filter.before.as_ref().map(|k| k.id);
-        let rows = self
-            .client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT d.id, d.run_id, r.repo, r.target, d.created_at, d.draft, d.lane, d.model,
-                            d.kind, d.path, d.line, d.target, d.body, d.verdict, d.checker, d.reason,
-                            d.same_as, d.comment_id, d.decided_at, r.platform
-                     FROM drafts d JOIN runs r ON r.id = d.run_id
-                     WHERE {DRAFT_FILTER}
-                       AND ($6::text IS NULL OR ($6 = 'waiting' AND d.verdict IS NULL) OR d.verdict = $6)
-                       AND ($7::timestamptz IS NULL OR d.created_at < $7
-                            OR (d.created_at = $7 AND d.id < $8::bigint))
-                     ORDER BY d.created_at DESC, d.id DESC LIMIT $9 OFFSET $10"
-                ),
-                &[
-                    &filter.model,
-                    &filter.lane,
-                    &filter.repo,
-                    &since,
-                    &until,
-                    &verdict,
-                    &before_at,
-                    &before_id,
-                    &i64::from(page.limit()),
-                    &i64::from(page.offset()),
-                ],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                let line: i64 = row.try_get(10)?;
-                let verdict: Option<String> = row.try_get(13)?;
-                let decision = match verdict {
-                    Some(verdict) => Some(DraftDecision {
-                        at: row
-                            .try_get::<_, Option<OffsetDateTime>>(18)?
-                            .map(text)
-                            .unwrap_or_default(),
-                        verdict: draft_verdict(&verdict)?,
-                        checker: row.try_get(14)?,
-                        reason: row.try_get(15)?,
-                        same_as: row.try_get(16)?,
-                        comment_id: row.try_get(17)?,
-                    }),
-                    None => None,
-                };
-                let target: i64 = row.try_get(3)?;
-                let platform: String = row.try_get(19)?;
-                Ok(DraftListing {
-                    id: row.try_get(0)?,
-                    run_id: row.try_get(1)?,
-                    repo: row.try_get(2)?,
-                    target: to_u64("runs.target", target)?,
-                    platform: platform_parse(&platform).ok_or_else(|| StoreError::Corrupt {
-                        column: "runs.platform",
-                        value: platform.clone(),
-                    })?,
-                    draft: DraftRecord {
-                        at: text(row.try_get(4)?),
-                        draft: row.try_get(5)?,
-                        lane: row.try_get(6)?,
-                        model: row.try_get(7)?,
-                        kind: row.try_get(8)?,
-                        path: row.try_get(9)?,
-                        line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
-                            column: "drafts.line",
-                            value: line.to_string(),
-                        })?,
-                        target: row.try_get(11)?,
-                        body: row.try_get(12)?,
-                        decision,
-                    },
-                })
-            })
-            .collect()
-    }
     async fn record_transcript(
         &self,
         run: &RunId,

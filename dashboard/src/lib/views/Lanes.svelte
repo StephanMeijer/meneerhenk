@@ -9,7 +9,7 @@
   import Problem from '$lib/ui/Problem.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
 
-  /** The lanes compared over a period (#229): how often each finished,
+  /** The sessions compared over a period (#229): how often each finished,
    * timed out or did not, and why. `load` and `now` are replaced in the
    * tests. */
   let {
@@ -40,11 +40,11 @@
 </script>
 
 <div class="page-head">
-  <h1>Lanes</h1>
+  <h1>Sessions</h1>
   <p class="intro">
-    How each review lane and fact-check session ended. A review stands on the lanes that finished;
-    a lane that times out keeps what it drafted until then. Cancelled and superseded reviews are left
-    out: their lanes were stopped for them, by a person or for a newer commit.
+    How each review session ended: the loop's reviewer and fixer, and the lanes and fact-checks of
+    reviews from before the loop. Cancelled and superseded reviews are left out: their sessions were
+    stopped for them, by a person or for a newer commit.
   </p>
 </div>
 

@@ -126,102 +126,6 @@ error: string | null,
  */
 check_id: string | null, };
 
-export type QualityRow = { 
-/**
- * The model, lane or repository; `owner/name #7` for a pull request.
- */
-key: string, 
-/**
- * The repository, when grouped by pull request.
- */
-repo: string | null, 
-/**
- * The number, when grouped by pull request.
- */
-target: number | null, 
-/**
- * A link to that pull request, merge request or issue.
- */
-target_url: string | null, 
-/**
- * Every draft.
- */
-drafts: number, 
-/**
- * Confirmed and written.
- */
-confirmed: number, 
-/**
- * Rejected by the check.
- */
-rejected: number, 
-/**
- * Repeats, merged into another draft or finding.
- */
-same_as: number, 
-/**
- * No model could check them.
- */
-unchecked: number, 
-/**
- * No check was configured.
- */
-not_checked: number, 
-/**
- * The review ended first.
- */
-cancelled: number, 
-/**
- * The write failed.
- */
-failed: number, 
-/**
- * Not decided yet.
- */
-waiting: number, 
-/**
- * Drafts a checker decided: confirmed, rejected and repeats.
- */
-judged: number, 
-/**
- * Rejected of judged, from 0 to 1; none when nothing was judged.
- */
-rejection_rate: number | null, };
-
-export type QualitySeries = { 
-/**
- * The model, lane or repository; `owner/name #7` for a pull request.
- */
-key: string, 
-/**
- * Every day of the period, oldest first.
- */
-days: Array<DayRate>, };
-
-export type DayRate = { 
-/**
- * `YYYY-MM-DD`, UTC.
- */
-day: string, 
-/**
- * Drafts the check judged: confirmed, rejected and repeats.
- */
-judged: number, 
-/**
- * Of those, rejected.
- */
-rejected: number, 
-/**
- * Rejected of judged, from 0 to 1; `null` on a day it judged none.
- */
-rate: number | null, };
-
-export type DraftCount = { 
-/**
- * The number.
- */
-count: number, };
-
 export type ToolSummaryRow = { 
 /**
  * The tool, as the model named it.
@@ -290,28 +194,6 @@ call: ToolCall,
  * so whether a link to its turn leads anywhere.
  */
 transcript_kept: boolean, };
-
-export type DraftItem = { 
-/**
- * The run.
- */
-run_id: string, 
-/**
- * The run's repository.
- */
-repo: string, 
-/**
- * The run's pull request, merge request or issue.
- */
-target: number, 
-/**
- * A link to it.
- */
-target_url: string | null, 
-/**
- * The draft and what became of it.
- */
-draft: Draft, };
 
 export type RunningSnapshot = { 
 /**
