@@ -177,7 +177,9 @@ requester_id = 523456789012345678
 # round of the review loop, or the planner's whole run. `tools` narrows a
 # role's tools within what the role may ever have; left out, the role gets
 # its defaults. Only the planner may have web_fetch, and a role that lists
-# skills keeps load_skill. `henk config check` lists each role's tools when
+# skills keeps load_skill. With [review.loop], the reviewer keeps
+# report_finding and finish_round, and the executor list_findings and
+# give_verdict. `henk config check` lists each role's tools when
 # they differ, and refuses a tool the role may not have. Moving from [address] and the old [review.loop] and [planning]
 # keys: README, "Migrating to roles".
 [roles.reviewer]
