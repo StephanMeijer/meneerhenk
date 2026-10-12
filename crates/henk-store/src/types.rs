@@ -533,6 +533,11 @@ pub struct RunRecord {
     pub check_id: Option<String>,
     /// The run that replaced it, when it was superseded (#231).
     pub superseded_by: Option<RunId>,
+    /// Why a review loop stopped (#286): `converged`, `max_rounds`,
+    /// `repeating_finding`, `build_failing`, `timeout` and the like.
+    pub loop_stop: Option<String>,
+    /// How many rounds a review loop ran (#286).
+    pub loop_rounds: Option<u32>,
 }
 
 /// A stored lane.
@@ -1395,6 +1400,8 @@ pub(crate) struct RawRun {
     pub(crate) heartbeat_at: Option<String>,
     pub(crate) check_id: Option<String>,
     pub(crate) superseded_by: Option<String>,
+    pub(crate) loop_stop: Option<String>,
+    pub(crate) loop_rounds: Option<i64>,
 }
 
 impl RawRun {
@@ -1443,6 +1450,16 @@ impl RawRun {
             heartbeat_at: self.heartbeat_at,
             check_id: self.check_id,
             superseded_by,
+            loop_stop: self.loop_stop,
+            loop_rounds: self
+                .loop_rounds
+                .map(|n| {
+                    u32::try_from(n).map_err(|_| StoreError::Corrupt {
+                        column: "runs.loop_rounds",
+                        value: n.to_string(),
+                    })
+                })
+                .transpose()?,
         })
     }
 }

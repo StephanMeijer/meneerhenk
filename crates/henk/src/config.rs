@@ -585,10 +585,18 @@ pub struct LoopConfig {
     /// Model calls per session per round.
     #[serde(default = "default_lane_max_turns")]
     pub round_max_turns: u32,
+    /// Wall-clock limit for the whole loop, in seconds (#286): no round
+    /// starts after it, and a round under way gets only what is left.
+    #[serde(default = "default_loop_run_timeout_secs")]
+    pub run_timeout_secs: u64,
 }
 
 fn default_loop_max_rounds() -> u32 {
-    10
+    50
+}
+
+fn default_loop_run_timeout_secs() -> u64 {
+    3600
 }
 
 fn default_fact_check_timeout_secs() -> u64 {
@@ -2689,8 +2697,12 @@ github_owners = ["docspec"]
         let settings = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\n").unwrap();
         let review_loop = settings.review.r#loop.as_ref().unwrap();
         assert_eq!(
-            (review_loop.max_rounds, review_loop.round_max_turns),
-            (10, 40)
+            (
+                review_loop.max_rounds,
+                review_loop.round_max_turns,
+                review_loop.run_timeout_secs
+            ),
+            (50, 40, 3600)
         );
         let unknown = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"x\"\n").unwrap_err();
         assert!(

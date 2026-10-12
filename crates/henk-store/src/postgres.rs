@@ -38,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/007_superseded_by.sql"),
     include_str!("../migrations/postgres/008_stages.sql"),
     include_str!("../migrations/postgres/009_stats.sql"),
+    include_str!("../migrations/postgres/010_loop.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -285,7 +286,7 @@ impl<'a> RunParams<'a> {
     }
 }
 
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by";
+const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by, loop_stop, loop_rounds";
 
 fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
     let at = |i: usize| -> Result<String, StoreError> { Ok(text(row.try_get(i)?)) };
@@ -310,6 +311,8 @@ fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
         heartbeat_at: maybe_at(14)?,
         check_id: row.try_get(15)?,
         superseded_by: row.try_get(16)?,
+        loop_stop: row.try_get(17)?,
+        loop_rounds: row.try_get::<_, Option<i32>>(18)?.map(i64::from),
     })
 }
 
@@ -413,6 +416,18 @@ impl RunStore for PgStore {
             .execute(
                 "UPDATE runs SET heartbeat_at = $2 WHERE id = $1",
                 &[&id.as_str(), &now()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
+        let rounds = i32::try_from(rounds).unwrap_or(i32::MAX);
+        self.client()
+            .await?
+            .execute(
+                "UPDATE runs SET loop_stop = $2, loop_rounds = $3 WHERE id = $1",
+                &[&id.as_str(), &stop, &rounds],
             )
             .await?;
         Ok(())

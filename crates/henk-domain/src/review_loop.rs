@@ -6,6 +6,7 @@
 //! verdict holds once Henk pushed the commit; when nothing was pushed it
 //! becomes `unsettled`, as does every finding still open when the run ends.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// A finding's number within one run: `f1`, `f2`, ...
@@ -106,6 +107,136 @@ pub struct LoopFinding {
     pub reopens: Option<FindingId>,
     /// Its verdict, once it has one.
     pub verdict: Option<LoopVerdict>,
+}
+
+impl LoopFinding {
+    /// The finding and its verdict, in one line for the reviewer: `f1 at
+    /// src/a.rs:2 (x must be 3): fixed in 4e735d378f06: x is 3 now.`
+    #[must_use]
+    pub fn verdict_line(&self) -> String {
+        let report = &self.report;
+        let fate = match &self.verdict {
+            None => "no verdict".to_owned(),
+            Some(LoopVerdict::Fixed { what, commit }) => match commit {
+                Some(sha) => format!("fixed in {}: {what}", sha.get(..12).unwrap_or(sha)),
+                None => format!("fixed: {what}"),
+            },
+            Some(verdict) => format!("{}: {}", verdict.as_str().replace('_', " "), verdict.text()),
+        };
+        format!(
+            "{} at {}:{} ({}): {fate}",
+            self.id, report.path, report.line, report.claim
+        )
+    }
+}
+
+/// Lines apart a repeat may be: a fix moves the code around it.
+const REPEAT_LINES: u32 = 3;
+
+/// The share of claim words, in percent, a repeat has in common with what
+/// it repeats.
+const REPEAT_OVERLAP_PERCENT: usize = 60;
+
+/// A claim's words, lowercased, without the short ones.
+fn claim_words(claim: &str) -> BTreeSet<String> {
+    claim
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether two claims share most of their words (Jaccard).
+fn similar_claims(a: &str, b: &str) -> bool {
+    let (a, b) = (claim_words(a), claim_words(b));
+    let union = a.union(&b).count();
+    union > 0 && a.intersection(&b).count() * 100 >= union * REPEAT_OVERLAP_PERCENT
+}
+
+/// Why a loop stopped (#286), as the run records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopStop {
+    /// The reviewer found nothing new.
+    Converged,
+    /// The rounds ran out.
+    MaxRounds(u32),
+    /// The reviewer reported again what the fixer fixed: they are going in
+    /// circles.
+    RepeatingFinding {
+        /// The new report.
+        finding: FindingId,
+        /// The fixed finding it repeats.
+        of: FindingId,
+    },
+    /// The checks fail after the fixer's changes; nothing was pushed.
+    BuildFailing(String),
+    /// The run's time limit, or a session's in a round.
+    Timeout(String),
+    /// A session broke off: a model error, a refusal, a turn limit.
+    SessionFailed(String),
+    /// The reviewer changed files in the workspace.
+    WorkspaceChanged,
+    /// The fixer's changes could not be pushed.
+    PushRefused(String),
+    /// Someone or something cancelled the run.
+    Cancelled,
+}
+
+impl LoopStop {
+    /// The stored word.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Converged => "converged",
+            Self::MaxRounds(_) => "max_rounds",
+            Self::RepeatingFinding { .. } => "repeating_finding",
+            Self::BuildFailing(_) => "build_failing",
+            Self::Timeout(_) => "timeout",
+            Self::SessionFailed(_) => "session_failed",
+            Self::WorkspaceChanged => "workspace_changed",
+            Self::PushRefused(_) => "push_refused",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether the loop ended as it should: it converged, or a limit set
+    /// for it ended it. Anything else is a failure of the loop.
+    #[must_use]
+    pub fn ended_well(&self) -> bool {
+        matches!(
+            self,
+            Self::Converged | Self::MaxRounds(_) | Self::RepeatingFinding { .. }
+        )
+    }
+
+    /// Whether the loop stopped with the reviewer's last findings open: at
+    /// `max_rounds` the fixer's answer to them was never reviewed, so the
+    /// review is no pass even with no finding left unsettled.
+    #[must_use]
+    pub fn left_findings_open(&self) -> bool {
+        matches!(self, Self::MaxRounds(_))
+    }
+}
+
+impl fmt::Display for LoopStop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Converged => f.write_str("converged, the reviewer found nothing more"),
+            Self::MaxRounds(rounds) => write!(f, "it reached max_rounds ({rounds})"),
+            Self::RepeatingFinding { finding, of } => write!(
+                f,
+                "the reviewer reported {of} again as {finding} after it was fixed"
+            ),
+            Self::BuildFailing(why)
+            | Self::Timeout(why)
+            | Self::SessionFailed(why)
+            | Self::PushRefused(why) => f.write_str(why),
+            Self::WorkspaceChanged => {
+                f.write_str("the reviewer changed the workspace; nothing was pushed")
+            }
+            Self::Cancelled => f.write_str("cancelled"),
+        }
+    }
 }
 
 /// Why a report is refused.
@@ -319,6 +450,46 @@ impl Ledger {
         settled
     }
 
+    /// The fixed and pushed finding `report` repeats, if any: the same file,
+    /// a line at most three apart and most claim words in common.
+    #[must_use]
+    pub fn repeat_of(&self, report: &Report) -> Option<FindingId> {
+        self.findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.verdict,
+                    Some(LoopVerdict::Fixed {
+                        commit: Some(_),
+                        ..
+                    })
+                )
+            })
+            .find(|f| {
+                f.report.path == report.path
+                    && f.report.line.abs_diff(report.line) <= REPEAT_LINES
+                    && similar_claims(&f.report.claim, &report.claim)
+            })
+            .map(|f| f.id)
+    }
+
+    /// The findings of the rounds before `round`, one line each with its
+    /// verdict: what a conversation keeps of the rounds it no longer holds.
+    #[must_use]
+    pub fn summary(&self, round: u32) -> String {
+        let lines: Vec<String> = self
+            .findings
+            .iter()
+            .filter(|f| f.round < round)
+            .map(LoopFinding::verdict_line)
+            .collect();
+        if lines.is_empty() {
+            "No findings so far.".to_owned()
+        } else {
+            lines.join("\n")
+        }
+    }
+
     /// Every finding without a verdict becomes unsettled with `reason`;
     /// returns them. After [`Ledger::unpushed`] at the end of a run, every
     /// finding has its one final verdict.
@@ -356,6 +527,94 @@ mod tests {
         LoopVerdict::Rejected {
             reason: "the caller checks for 0 at src/b.rs:9".into(),
         }
+    }
+
+    fn pushed_fix(ledger: &mut Ledger, line: u32, claim: &str) -> FindingId {
+        let id = ledger
+            .report(
+                Report {
+                    claim: claim.into(),
+                    ..report(line)
+                },
+                None,
+            )
+            .unwrap();
+        let fixed = LoopVerdict::Fixed {
+            what: "done".into(),
+            commit: None,
+        };
+        ledger.give(id, fixed).unwrap();
+        ledger.pushed("abc123");
+        id
+    }
+
+    #[test]
+    fn a_repeat_is_a_fixed_finding_reported_again_nearby() {
+        let mut ledger = Ledger::new();
+        ledger.start_round(1);
+        let fixed = pushed_fix(&mut ledger, 10, "x must be 3, the caller divides by it");
+        let again = |line: u32, path: &str, claim: &str| Report {
+            path: path.into(),
+            claim: claim.into(),
+            ..report(line)
+        };
+        let reworded = again(12, "src/a.rs", "X must be 3: the caller divides by it!");
+        assert_eq!(ledger.repeat_of(&reworded), Some(fixed));
+        assert_eq!(
+            ledger.repeat_of(&again(
+                14,
+                "src/a.rs",
+                "x must be 3, the caller divides by it"
+            )),
+            None,
+            "too far"
+        );
+        assert_eq!(
+            ledger.repeat_of(&again(
+                10,
+                "src/b.rs",
+                "x must be 3, the caller divides by it"
+            )),
+            None,
+            "another file"
+        );
+        assert_eq!(
+            ledger.repeat_of(&again(
+                10,
+                "src/a.rs",
+                "the loop never ends on an empty list"
+            )),
+            None,
+            "another claim"
+        );
+
+        // Only a fix that was pushed counts.
+        let unpushed = ledger.report(report(30), None).unwrap();
+        ledger.give(unpushed, rejected()).unwrap();
+        assert_eq!(ledger.repeat_of(&report(30)), None);
+        assert!(ledger.summary(2).contains("f1 at src/a.rs:10"));
+        assert_eq!(Ledger::new().summary(1), "No findings so far.");
+    }
+
+    #[test]
+    fn stops_have_their_words_and_say_whether_the_loop_ended_well() {
+        let id = FindingId::parse("f2").unwrap();
+        let of = FindingId::parse("f1").unwrap();
+        let repeat = LoopStop::RepeatingFinding { finding: id, of };
+        assert_eq!(repeat.as_str(), "repeating_finding");
+        assert_eq!(
+            repeat.to_string(),
+            "the reviewer reported f1 again as f2 after it was fixed"
+        );
+        assert!(repeat.ended_well() && LoopStop::Converged.ended_well());
+        assert!(!LoopStop::Timeout("time".into()).ended_well());
+        assert!(LoopStop::MaxRounds(3).left_findings_open());
+        assert!(!LoopStop::Converged.left_findings_open());
+        assert!(!repeat.left_findings_open(), "the repeat is unsettled");
+        assert_eq!(
+            LoopStop::MaxRounds(50).to_string(),
+            "it reached max_rounds (50)"
+        );
     }
 
     #[test]

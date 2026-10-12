@@ -85,6 +85,14 @@ finished_at: string | null,
  */
 superseded_by: string | null, 
 /**
+ * Why a review loop stopped, such as `converged` (#286).
+ */
+loop_stop: string | null, 
+/**
+ * How many rounds a review loop ran (#286).
+ */
+loop_rounds: number | null, 
+/**
  * Where each of its lanes stands, for lists (#225). Empty where the
  * whole run is sent with its lanes, and on a `run` stream message.
  */

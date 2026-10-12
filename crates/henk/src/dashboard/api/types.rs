@@ -73,6 +73,10 @@ pub struct RunSummary {
     pub finished_at: Option<String>,
     /// The run that replaced it, when it was superseded.
     pub superseded_by: Option<String>,
+    /// Why a review loop stopped, such as `converged` (#286).
+    pub loop_stop: Option<String>,
+    /// How many rounds a review loop ran (#286).
+    pub loop_rounds: Option<u32>,
     /// Where each of its lanes stands, for lists (#225). Empty where the
     /// whole run is sent with its lanes, and on a `run` stream message.
     pub lanes: Vec<LaneDot>,
@@ -1030,6 +1034,8 @@ impl RunSummary {
             started_at: run.started_at.clone(),
             finished_at: run.finished_at.clone(),
             superseded_by: run.superseded_by.as_ref().map(|by| by.as_str().to_owned()),
+            loop_stop: run.loop_stop.clone(),
+            loop_rounds: run.loop_rounds,
             lanes: Vec::new(),
             stages: Vec::new(),
         }
