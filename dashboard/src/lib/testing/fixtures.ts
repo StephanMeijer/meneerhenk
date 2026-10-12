@@ -1,5 +1,5 @@
 // Shapes the API returns, for the view tests.
-import type { Draft, Me, RunDetail, RunSummary, Stage, WaitingReview } from '$lib/api/types';
+import type { Draft, Me, RunDetail, RunSummary, Session, Stage, WaitingReview } from '$lib/api/types';
 
 export const me: Me = { github_id: 1234, login: 'alice', csrf: 'tok', startable: ['review', 'plan'] };
 
@@ -68,6 +68,74 @@ export function runDetail(status = 'finished'): RunDetail {
     events: [{ at: '2026-10-07T10:03:00Z', level: 'info', message: '<script>alert(1)</script>' }],
     stages: [],
     requests: [{ id: 'e-1', received_at: '', source: 'github_webhook', kind: 'pull_request', repo: 'docspec/app', target: 7, requester: null }],
+  };
+}
+
+/** A session of a run, as the API sends it. */
+function session(name: string, role: string, overrides: Partial<Session> = {}): Session {
+  return {
+    name,
+    role,
+    model: `model-${name}`,
+    status: 'finished',
+    turns: 4,
+    input_tokens: 1000,
+    output_tokens: 100,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    error: null,
+    last_call_turn: null,
+    started_at: '2026-10-07T10:01:00Z',
+    finished_at: '2026-10-07T10:04:00Z',
+    ...overrides,
+  };
+}
+
+/** A review the loop made (#283): the reviewer and the executor, in rounds. */
+export function loopDetail(): RunDetail {
+  const at = (s: number): string => `2026-10-07T10:0${s}:00Z`;
+  const stage = (name: string, state: string, detail: string, from: number, to: number): Stage => ({
+    name, state, detail, started_at: at(from), ended_at: at(to),
+  });
+  return {
+    ...runDetail(),
+    sessions: [session('executor', 'executor'), session('reviewer', 'reviewer')],
+    findings: [],
+    drafts: [draft('f1', { session: 'reviewer', kind: 'loop_finding' })],
+    transcripts: [],
+    tool_usage: [],
+    stages: [
+      stage('requested', 'done', '', 0, 0),
+      stage('started', 'done', 'check 4711 opened', 0, 0),
+      stage('diff', 'done', '2 files', 0, 1),
+      stage('checkout', 'done', '', 1, 1),
+      stage('rounds', 'done', 'The review loop ran 2 rounds', 1, 4),
+      stage('push', 'done', '1 commit', 4, 4),
+      stage('publish', 'skipped', 'a review posts nothing', 4, 4),
+      stage('done', 'done', '', 4, 4),
+    ],
+  };
+}
+
+/** A plan (#328): the planner and the reviewer, with no rounds stage. */
+export function planDetail(): RunDetail {
+  const detail = runDetail();
+  const at = (s: number): string => `2026-10-07T10:0${s}:00Z`;
+  return {
+    ...detail,
+    run: { ...detail.run, kind: 'plan', loop_stop: 'converged', loop_rounds: 2 },
+    sessions: [session('planner', 'planner'), session('reviewer', 'reviewer')],
+    findings: [],
+    drafts: [],
+    transcripts: [],
+    tool_usage: [],
+    stages: [
+      { name: 'requested', state: 'done', detail: '', started_at: at(0), ended_at: at(0) },
+      { name: 'started', state: 'done', detail: '', started_at: at(0), ended_at: at(0) },
+      { name: 'session', state: 'done', detail: 'planner, model-planner', started_at: at(0), ended_at: at(4) },
+      { name: 'publish', state: 'done', detail: 'the plan on #7', started_at: at(4), ended_at: at(4) },
+      { name: 'done', state: 'done', detail: '', started_at: at(4), ended_at: at(4) },
+    ],
   };
 }
 

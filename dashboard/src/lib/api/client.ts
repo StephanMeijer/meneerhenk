@@ -120,9 +120,9 @@ export function overviewStats(days = 14): Promise<OverviewStats> {
   return getJson<OverviewStats>(`/stats/overview?days=${days}`);
 }
 
-/** How the lanes of the recent reviews ended (#229); `query` is
+/** How the sessions of the recent reviews ended (#229); `query` is
  * `last=30` or `since=...`. */
-export function laneStats(query = ''): Promise<SessionStats> {
+export function sessionStats(query = ''): Promise<SessionStats> {
   return getJson<SessionStats>(`/stats/sessions${query === '' ? '' : `?${query}`}`);
 }
 

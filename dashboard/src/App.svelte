@@ -10,7 +10,7 @@
   import Health from '$lib/views/Health.svelte';
   import NotFound from '$lib/views/NotFound.svelte';
   import Overview from '$lib/views/Overview.svelte';
-  import Lanes from '$lib/views/Lanes.svelte';
+  import Sessions from '$lib/views/Sessions.svelte';
   import Tools from '$lib/views/Tools.svelte';
   import Run from '$lib/views/Run.svelte';
   import StartForm from '$lib/views/StartForm.svelte';
@@ -33,7 +33,7 @@
       { path: '/events', label: 'Events', routes: ['events', 'event'] },
     ],
     [
-      { path: '/lanes', label: 'Sessions', routes: ['lanes'] },
+      { path: '/sessions', label: 'Sessions', routes: ['sessions'] },
       { path: '/tools', label: 'Tools', routes: ['tools'] },
     ],
     [{ path: '/health', label: 'Health', routes: ['health'] }],
@@ -119,8 +119,8 @@
       <Events query={$route.query} selected={$route.name === 'event' ? $route.id : null} />
     {:else if $route.name === 'tools'}
       <Tools query={$route.query} />
-    {:else if $route.name === 'lanes'}
-      <Lanes query={$route.query} />
+    {:else if $route.name === 'sessions'}
+      <Sessions query={$route.query} />
     {:else if $route.name === 'health'}
       <Health />
     {:else}

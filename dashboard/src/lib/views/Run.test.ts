@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
-import { draft, reviewStages, runDetail } from '$lib/testing/fixtures';
+import { draft, loopDetail, planDetail, reviewStages, runDetail } from '$lib/testing/fixtures';
 import type { ToolCall } from '$lib/api/types';
 import { fakeConnect, firstOf } from '$lib/testing/source';
 import Run from './Run.svelte';
@@ -52,10 +52,13 @@ describe('Run', () => {
     );
     expect(card?.querySelector('.text')?.textContent).toBe('The loop never ends.');
     expect(card?.querySelector('.reason')?.textContent).toBe('confirmed by opus: src/a.rs:4 loops.');
-    const lanes = section('Lanes');
-    expect(lanes.map((row) => row[0])).toEqual(['lane-a', 'lane-b']);
+    const sessions = section('Sessions');
+    expect(sessions.map((row) => row.slice(0, 2))).toEqual([
+      ['lane-a', 'Review lane'],
+      ['lane-b', 'Review lane'],
+    ]);
     // #330: what the prompt cache served each session, and its share.
-    expect(lanes.map((row) => row[5])).toEqual(['80 (80%)', '']);
+    expect(sessions.map((row) => row[6])).toEqual(['80 (80%)', '']);
     const transcriptLink = document.querySelector<HTMLAnchorElement>('a[title="The whole conversation"]');
     expect(transcriptLink?.getAttribute('href')).toBe('/dashboard/runs/r-1/transcripts/lane-a');
     expect(document.querySelectorAll('a[title="The whole conversation"]')).toHaveLength(1);
@@ -138,7 +141,7 @@ describe('Run', () => {
     source.push('sessions', lanes);
     source.push('draft', draft('d4', { body: 'A new one.' }));
     await settle(1);
-    expect(section('Lanes')[0]?.[3]).toBe('turn 9');
+    expect(section('Sessions')[0]?.[4]).toBe('turn 9');
     expect(section('Drafts').at(-1)?.slice(0, 5)).toEqual(['d4', 'lane-a', 'src/a.rs:4', 'A new one.', 'waiting']);
 
     source.push('run', { run: { ...runDetail().run }, summary: 'Not bad.', error: null, check_id: '4711' });
@@ -151,7 +154,7 @@ describe('Run', () => {
     expect(sources).toHaveLength(1);
   });
 
-  it('shows the conversation of a running lane as it happens when it is selected', async () => {
+  it('shows the conversation of a running session as it happens when it is selected', async () => {
     const { connect, sources } = fakeConnect();
     const detail = {
       ...runDetail('running'),
@@ -161,7 +164,7 @@ describe('Run', () => {
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn(), connect, loadCalls: () => Promise.resolve([]) });
     await settle();
     expect(document.querySelector('.live-session')).toBeNull();
-    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-a'))?.click();
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.session')].find((b) => b.textContent?.includes('lane-a'))?.click();
     await settle();
     expect(sources.map((s) => s.url)).toEqual([
       '/dashboard/api/v1/runs/r-1/stream',
@@ -169,7 +172,7 @@ describe('Run', () => {
     ]);
     expect(document.querySelector('#live-title')?.textContent).toBe('Conversation of lane-a');
 
-    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-b'))?.click();
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.session')].find((b) => b.textContent?.includes('lane-b'))?.click();
     await settle();
     expect(document.querySelector('.live-session'), 'lane-b has ended: its transcript tells it').toBeNull();
     expect(sources[1]?.closed).toBe(true);
@@ -255,7 +258,7 @@ describe('Run', () => {
     expect(replaced?.querySelector('a')?.getAttribute('href')).toBe('/dashboard/runs/r-2');
   });
 
-  it('shows the review as its stages, the lanes inside theirs', async () => {
+  it('shows a review from before the loop as its stages, its lanes inside theirs with their history role', async () => {
     const detail = { ...runDetail(), stages: reviewStages() };
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
     await settle();
@@ -268,11 +271,48 @@ describe('Run', () => {
     expect(diff?.querySelector('.time')?.textContent).toBe('10:01:00');
     expect(boxes[5]?.querySelector('.time')?.textContent).toBe('3m 00s');
     expect(boxes[4]?.classList.contains('skipped')).toBe(true);
-    const lanes = [...(boxes[5]?.querySelectorAll('.lanes li') ?? [])].map((l) => l.textContent?.replace(/\s+/g, ' ').trim());
-    expect(lanes).toEqual(['lane-a model-x finished 3m 55s', 'lane-b model-y did not finish 0m 55s']);
+    const lanes = [...(boxes[5]?.querySelectorAll('.sessions li') ?? [])].map((l) => l.textContent?.replace(/\s+/g, ' ').trim());
+    expect(lanes).toEqual([
+      'lane-a Review lane model-x finished 3m 55s',
+      'lane-b Review lane model-y did not finish 0m 55s',
+    ]);
     const fold = (title: string) =>
       [...document.querySelectorAll('details')].find((x) => x.querySelector('h2')?.textContent === title);
-    expect(fold('Lanes')?.open, 'with a pipeline the tables are folded').toBe(false);
+    expect(fold('Sessions')?.open, 'with a pipeline the tables are folded').toBe(false);
+  });
+
+  it("shows a review loop's reviewer and executor in its rounds, each with its role (#326)", async () => {
+    render(Run, { id: 'r-1', load: () => Promise.resolve(loopDetail()), cancel: vi.fn() });
+    await settle();
+    const boxes = [...document.querySelectorAll('ol.pipeline > li')];
+    expect(boxes.map((b) => b.querySelector('.name')?.textContent)).toEqual([
+      'Requested', 'Started', 'Diff', 'Checkout', 'Rounds', 'Push', 'Publish', 'Done',
+    ]);
+    const rounds = [...(boxes[4]?.querySelectorAll('.sessions li') ?? [])].map((l) => l.textContent?.replace(/\s+/g, ' ').trim());
+    expect(rounds).toEqual([
+      'executor Executor model-executor finished 3m 00s',
+      'reviewer Reviewer model-reviewer finished 3m 00s',
+    ]);
+    expect(section('Sessions').map((row) => row.slice(0, 2))).toEqual([
+      ['executor', 'Executor'],
+      ['reviewer', 'Reviewer'],
+    ]);
+    expect(document.querySelector('.role.role-reviewer')?.classList.contains('tone-accent')).toBe(true);
+  });
+
+  it("shows a plan's planner and reviewer with their roles, and no rounds (#326)", async () => {
+    render(Run, { id: 'r-1', load: () => Promise.resolve(planDetail()), cancel: vi.fn() });
+    await settle();
+    const boxes = [...document.querySelectorAll('ol.pipeline > li')];
+    expect(boxes.map((b) => b.querySelector('.name')?.textContent)).toEqual([
+      'Requested', 'Started', 'Session', 'Publish', 'Done',
+    ]);
+    expect(document.querySelector('ol.pipeline .sessions')).toBeNull();
+    expect(section('Sessions').map((row) => row.slice(0, 2))).toEqual([
+      ['planner', 'Planner'],
+      ['reviewer', 'Reviewer'],
+    ]);
+    expect(document.body.textContent).not.toMatch(/\blanes?\b/i);
   });
 
   it('opens the log of the box selected, and lets go when it is selected again', async () => {
@@ -292,7 +332,7 @@ describe('Run', () => {
       [...document.querySelectorAll('details')].find((x) => x.querySelector('h2')?.textContent === 'Timeline')?.open;
     expect(timelineOpen()).toBe(false);
 
-    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.lane')].find((b) => b.textContent?.includes('lane-b'))?.click();
+    [...document.querySelectorAll<HTMLButtonElement>('ol.pipeline button.session')].find((b) => b.textContent?.includes('lane-b'))?.click();
     await settle(1);
     expect(timeline()).toEqual(['lane-b: rate limited']);
     expect(timelineOpen()).toBe(true);

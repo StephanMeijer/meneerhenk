@@ -3,11 +3,13 @@
   import type { Page, ToolCallItem, ToolSummaryRow } from '$lib/api/types';
   import { serverNow } from '$lib/clock';
   import { PERIODS, about, average, count, outcomeClass, periodSince, ratePercent } from '$lib/format';
+  import { ROLE_ORDER, isHistory, roleLabel } from '$lib/roles';
   import { href, link, navigate, runPath, transcriptPath, withQuery } from '$lib/router';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Pager from '$lib/ui/Pager.svelte';
   import Problem from '$lib/ui/Problem.svelte';
+  import Role from '$lib/ui/Role.svelte';
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
 
@@ -24,14 +26,12 @@
     now?: () => Date;
   } = $props();
 
-  const KINDS: Record<string, string> = {
-    all: 'every kind',
-    reviewer: 'reviewers',
-    executor: 'executors',
-    planner: 'planner',
-    address: 'address runs',
-    lane: 'review lanes (before the loop)',
-    check: 'fact-checks (before the loop)',
+  /** The roles to filter by (#326), older runs' roles marked so. */
+  const ROLES: Record<string, string> = {
+    all: 'every role',
+    ...Object.fromEntries(
+      ROLE_ORDER.map((role) => [role, isHistory(role) ? `${roleLabel(role)} (older runs)` : roleLabel(role)]),
+    ),
   };
   const OUTCOMES = [
     'problems',
@@ -47,8 +47,8 @@
   ];
 
   let period = $derived(PERIODS[query.get('period') ?? ''] === undefined ? '30d' : (query.get('period') as string));
-  let kind = $derived(
-    KINDS[query.get('role') ?? ''] === undefined || query.get('role') === 'all'
+  let role = $derived(
+    ROLES[query.get('role') ?? ''] === undefined || query.get('role') === 'all'
       ? 'all'
       : (query.get('role') as string),
   );
@@ -63,14 +63,14 @@
       ),
     ).toString();
 
-  let kindParam = $derived(kind === 'all' ? null : kind);
-  let summaryQuery = $derived(encode({ model: query.get('model'), role: kindParam, since }));
+  let roleParam = $derived(role === 'all' ? null : role);
+  let summaryQuery = $derived(encode({ model: query.get('model'), role: roleParam, since }));
   let callsQuery = $derived(
     encode({
       outcome: outcome === 'all' ? null : outcome,
       tool: query.get('tool'),
       model: query.get('model'),
-      role: kindParam,
+      role: roleParam,
       since,
       cursor: query.get('cursor'),
     }),
@@ -101,7 +101,7 @@
 <div class="page-head">
   <h1>Tool calls</h1>
   <p class="intro">
-    How each tool fared, per model and kind of session. An error is a call the tool itself failed;
+    How each tool fared, per model and session role. An error is a call the tool itself failed;
     a refusal is one the scope guard or the repeat guard stopped; "not run" covers unknown tools,
     malformed arguments and calls cut off by a cancel.
   </p>
@@ -109,7 +109,7 @@
 
 <section class="panel">
   <div class="panel-head">
-    <h2>Per tool, model and session kind</h2>
+    <h2>Per tool, model and role</h2>
     <form class="filters" onsubmit={choose}>
       <label>
         period
@@ -120,9 +120,9 @@
         </select>
       </label>
       <label>
-        sessions
-        <select name="role" value={kind}>
-          {#each Object.entries(KINDS) as [value, label] (value)}
+        role
+        <select name="role" value={role}>
+          {#each Object.entries(ROLES) as [value, label] (value)}
             <option {value}>{label}</option>
           {/each}
         </select>
@@ -141,7 +141,7 @@
         <table class="rates">
           <thead>
             <tr>
-              <th>Tool</th><th>Model</th><th>Sessions</th><th class="num">Calls</th><th class="num">Errors</th>
+              <th>Tool</th><th>Model</th><th>Role</th><th class="num">Calls</th><th class="num">Errors</th>
               <th class="num">Refused</th><th class="num">Not run</th><th class="num">Average</th><th>Error rate</th>
               <th>Refusal rate</th>
             </tr>
@@ -155,7 +155,7 @@
                   </a>
                 </td>
                 <td class="mono">{row.model}</td>
-                <td>{row.role}</td>
+                <td><Role role={row.role} /></td>
                 <td class="num">{count(row.calls)}</td>
                 <td class="num">{count(row.errors)}</td>
                 <td class="num">{count(row.refusals)}</td>

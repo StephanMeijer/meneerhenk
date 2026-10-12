@@ -54,8 +54,8 @@ export function ratePercent(rate: number | null): string {
   return rate === null ? '-' : `${Math.round(rate * 100)}%`;
 }
 
-/** Why a lane did not finish (#229), as people say it. */
-export const LANE_REASONS: Record<string, string> = {
+/** Why a session did not finish (#229), as people say it. */
+export const SESSION_REASONS: Record<string, string> = {
   time_limit: 'time limit',
   rate_limit: 'rate limit',
   provider_error: 'provider error',
@@ -158,10 +158,10 @@ export function count(n: number): string {
  * What the prompt cache served a session (#330): its reads and the share of
  * its prompt they were, `8,150 (81%)`; empty when it used no cache.
  */
-export function cacheRead(lane: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number }): string {
-  if (lane.cache_read_tokens === 0 && lane.cache_write_tokens === 0) return '';
-  const hit = lane.input_tokens === 0 ? 0 : Math.floor((lane.cache_read_tokens * 100) / lane.input_tokens);
-  return `${count(lane.cache_read_tokens)} (${hit}%)`;
+export function cacheRead(session: { input_tokens: number; cache_read_tokens: number; cache_write_tokens: number }): string {
+  if (session.cache_read_tokens === 0 && session.cache_write_tokens === 0) return '';
+  const hit = session.input_tokens === 0 ? 0 : Math.floor((session.cache_read_tokens * 100) / session.input_tokens);
+  return `${count(session.cache_read_tokens)} (${hit}%)`;
 }
 
 /** A share with its base: `96% of 75`; a dash of nothing. */

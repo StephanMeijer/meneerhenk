@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { health as loadHealth, laneStats, overviewStats, runCount, runs as listRuns } from '$lib/api/client';
+  import { health as loadHealth, overviewStats, runCount, runs as listRuns, sessionStats } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import { serverNow } from '$lib/clock';
-  import type { Health, SessionStats, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary } from '$lib/api/types';
+  import type { Health, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary, SessionStats } from '$lib/api/types';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
   import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
+  import { shownInRounds } from '$lib/roles';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Commit from '$lib/ui/Commit.svelte';
@@ -17,7 +18,7 @@
   import Problem from '$lib/ui/Problem.svelte';
   import Status from '$lib/ui/Status.svelte';
   import HealthTiles from './HealthTiles.svelte';
-  import LaneReliability from './LaneReliability.svelte';
+  import SessionReliability from './SessionReliability.svelte';
   import Queued from './Queued.svelte';
   import RunsTable from './RunsTable.svelte';
   import StageStepper from './StageStepper.svelte';
@@ -33,7 +34,7 @@
     loadCount = runCount,
     loadHealth: health = loadHealth,
     loadStats = overviewStats,
-    loadLanes = laneStats,
+    loadSessions = sessionStats,
     connect = connectEventSource,
     now = serverNow,
   }: {
@@ -43,7 +44,7 @@
     loadCount?: (query: string) => Promise<RunCount>;
     loadHealth?: () => Promise<Health>;
     loadStats?: () => Promise<OverviewStats>;
-    loadLanes?: (query: string) => Promise<SessionStats>;
+    loadSessions?: (query: string) => Promise<SessionStats>;
     connect?: Connect;
     now?: () => Date;
   } = $props();
@@ -111,17 +112,17 @@
     );
   }
 
-  /** Where a running run's lanes are, in a line: `lanes: 1 running, 1 did
-   * not finish`, or `planner: running`. */
-  function lanesLine(run: RunSummary): string {
-    const sessions = run.sessions.filter((lane) => !lane.name.startsWith('check-'));
+  /** Where a running run's sessions are, in a line: `sessions: 1 running,
+   * 1 did not finish`, or `planner: running`. */
+  function sessionsLine(run: RunSummary): string {
+    const sessions = run.sessions.filter(shownInRounds);
     if (sessions.length === 0) return '';
     if (run.kind !== 'review') {
-      return sessions.map((lane) => `${lane.name}: ${lookOf(lane.status).label}`).join(', ');
+      return sessions.map((session) => `${session.name}: ${lookOf(session.status).label}`).join(', ');
     }
     const counts: Record<string, number> = {};
-    for (const lane of sessions) counts[lane.status] = (counts[lane.status] ?? 0) + 1;
-    return `lanes: ${Object.entries(counts).map(([status, n]) => `${n} ${lookOf(status).label}`).join(', ')}`;
+    for (const session of sessions) counts[session.status] = (counts[session.status] ?? 0) + 1;
+    return `sessions: ${Object.entries(counts).map(([status, n]) => `${n} ${lookOf(status).label}`).join(', ')}`;
   }
 </script>
 
@@ -166,8 +167,8 @@
           </span>
           <span class="trigger">{run.trigger}{#if run.requester}<span class="sub who">{run.requester}</span>{/if}</span>
           <span class="progress">
-            <StageStepper stages={run.stages} lanes={run.sessions} />
-            <span class="muted">{lanesLine(run)}</span>
+            <StageStepper stages={run.stages} sessions={run.sessions} />
+            <span class="muted">{sessionsLine(run)}</span>
           </span>
           <span class="num duration">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</span>
         </li>
@@ -181,7 +182,7 @@
 
 <Queued slots={running.slots} shown={shownIds} {now} />
 
-<LaneReliability load={loadLanes} />
+<SessionReliability load={loadSessions} />
 
 <section class="panel" aria-labelledby="runs-title">
   <div class="panel-head">
@@ -213,7 +214,7 @@
   {#await page}
     <Loading />
   {:then result}
-    <RunsTable runs={result.items} why="No runs match these filters." lanes />
+    <RunsTable runs={result.items} why="No runs match these filters." sessions />
     <div class="panel-foot">
       <span>
         Newest first.

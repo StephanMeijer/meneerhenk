@@ -38,7 +38,7 @@ function loaders(items: RunSummary[] = [], next: string | null = null) {
     loadCount: vi.fn(() => Promise.resolve({ count: 1284 })),
     loadHealth: vi.fn(() => Promise.resolve(health)),
     loadStats: vi.fn(() => Promise.resolve(stats)),
-    loadLanes: vi.fn(() => Promise.resolve({ reviews: [], sessions: [] })),
+    loadSessions: vi.fn(() => Promise.resolve({ reviews: [], sessions: [] })),
     now: () => NOW,
   };
 }
@@ -61,8 +61,8 @@ describe('Overview', () => {
     expect(load.loadRuns).toHaveBeenCalledWith('kind=review&repo=docspec%2Fapp&cursor=OLD');
     expect(load.loadCount).toHaveBeenCalledWith('kind=review&repo=docspec%2Fapp');
     expect(sources.map((s) => s.url)).toEqual(['/dashboard/api/v1/runs/stream']);
-    expect(load.loadLanes).toHaveBeenCalledWith('last=30');
-    expect(document.querySelector('#lanes-title')?.textContent).toBe('Session reliability');
+    expect(load.loadSessions).toHaveBeenCalledWith('last=30');
+    expect(document.querySelector('#sessions-title')?.textContent).toBe('Session reliability');
     firstOf(sources).push('snapshot', {
       runs: [runSummary('r-9', 'running')],
       count: 3,
@@ -213,7 +213,7 @@ describe('Running now', () => {
     const row = document.querySelector('ul.running > li');
     const dots = [...(row?.querySelectorAll('.stepper .visually-hidden') ?? [])].map((d) => d.textContent);
     expect(dots).toEqual(['diff: done', 'lane-a: running', 'lane-b: did not finish']);
-    expect(row?.querySelector('.progress .muted')?.textContent).toBe('lanes: 1 running, 1 did not finish');
+    expect(row?.querySelector('.progress .muted')?.textContent).toBe('sessions: 1 running, 1 did not finish');
 
     source.push('run', runSummary('r-5', 'finished'));
     await settle(1);

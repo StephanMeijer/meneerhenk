@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RunSummary } from '$lib/api/types';
   import { about, kindText, runDuration } from '$lib/format';
+  import { shownInRounds } from '$lib/roles';
   import { href, link, runPath } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Commit from '$lib/ui/Commit.svelte';
@@ -10,8 +11,8 @@
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
 
-  /** `lanes` adds a column with one status icon per lane (#225). */
-  let { runs, why = '', lanes = false }: { runs: RunSummary[]; why?: string; lanes?: boolean } = $props();
+  /** `sessions` adds a column with one status icon per session (#225). */
+  let { runs, why = '', sessions = false }: { runs: RunSummary[]; why?: string; sessions?: boolean } = $props();
 </script>
 
 {#if runs.length === 0}
@@ -23,7 +24,7 @@
         <tr>
           <th>Status</th><th>Run</th><th>Kind</th><th>About</th><th>Commit</th><th>Trigger</th><th>Started</th>
           <th class="num">Duration</th>
-          {#if lanes}<th>Lanes</th>{/if}
+          {#if sessions}<th>Sessions</th>{/if}
         </tr>
       </thead>
       <tbody>
@@ -45,12 +46,12 @@
             <td>{run.trigger} {#if run.requester}<span class="who">{run.requester}</span>{/if}</td>
             <td class="nowrap"><Time iso={run.started_at} /></td>
             <td class="num">{#if run.finished_at === null}<Elapsed since={run.started_at} />{:else}{runDuration(run)}{/if}</td>
-            {#if lanes}
-              <td class="lane-icons">
-                {#each run.sessions.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}
-                  {@const look = lookOf(lane.status)}
-                  <span class="tone-{look.tone} lane-icon" title="{lane.name}: {look.label}">
-                    <Icon name={look.icon} size={13} /><span class="visually-hidden">{lane.name}: {look.label}</span>
+            {#if sessions}
+              <td class="session-icons">
+                {#each run.sessions.filter(shownInRounds) as session (session.name)}
+                  {@const look = lookOf(session.status)}
+                  <span class="tone-{look.tone} session-icon" title="{session.name}: {look.label}">
+                    <Icon name={look.icon} size={13} /><span class="visually-hidden">{session.name}: {look.label}</span>
                   </span>
                 {/each}
               </td>
@@ -63,6 +64,6 @@
 {/if}
 
 <style>
-  .lane-icons { white-space: nowrap; }
-  .lane-icon { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; margin-right: 2px; }
+  .session-icons { white-space: nowrap; }
+  .session-icon { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; margin-right: 2px; }
 </style>

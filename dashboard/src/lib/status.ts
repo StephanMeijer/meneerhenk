@@ -35,7 +35,7 @@ export interface Look {
 
 const look = (tone: Tone, icon: IconName): Omit<Look, 'label'> => ({ tone, icon });
 
-/** Runs, lanes, stages, health checks and timeline levels. */
+/** Runs, sessions, stages, health checks and timeline levels. */
 const STATES: Record<string, Omit<Look, 'label'>> = {
   running: look('accent', 'spinner'),
   pending: look('pending', 'circle'),

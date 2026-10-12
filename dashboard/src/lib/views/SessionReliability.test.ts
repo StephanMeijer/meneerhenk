@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionOutcome, SessionRow, SessionStats } from '$lib/api/types';
 import { cleanup, render, settle } from '$lib/testing/render';
-import LaneReliability from './LaneReliability.svelte';
+import SessionReliability from './SessionReliability.svelte';
 
 afterEach(cleanup);
 
@@ -44,14 +44,15 @@ function fixture(): SessionStats {
   return { reviews, sessions: [laneA, laneB] };
 }
 
-describe('LaneReliability', () => {
-  it('shows a square per review by how the lane ended, linking to its run, with a text equivalent', async () => {
+describe('SessionReliability', () => {
+  it('shows a square per review by how the session ended, linking to its run, with a text equivalent', async () => {
     const load = vi.fn(() => Promise.resolve(fixture()));
-    render(LaneReliability, { load });
+    render(SessionReliability, { load });
     await settle();
     expect(load).toHaveBeenCalledWith('last=30');
 
-    const [a, b] = [...document.querySelectorAll('ul.lanes > li')];
+    const [a, b] = [...document.querySelectorAll('ul.sessions > li')];
+    expect(a?.querySelector('.role')?.textContent).toBe('Review lane');
     const squares = [...(a?.querySelectorAll('.squares .square') ?? [])];
     expect(squares).toHaveLength(30);
     expect(squares[0]?.className).toContain('sq-drop');
@@ -62,7 +63,7 @@ describe('LaneReliability', () => {
     expect(a?.querySelector('.share')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('33% 10 of 30 reviews');
     expect(a?.querySelector('.squares')?.getAttribute('aria-hidden')).toBe('true');
     expect(a?.querySelector('.visually-hidden')?.textContent).toBe(
-      'lane-a: 10 of 30 did not finish, 1 timed out; last 5, newest last: finished, finished, did not finish, finished, timed out.',
+      'lane-a (Review lane): 10 of 30 did not finish, 1 timed out; last 5, newest last: finished, finished, did not finish, finished, timed out.',
     );
 
     const gaps = b?.querySelectorAll('.squares .gap') ?? [];
@@ -72,11 +73,11 @@ describe('LaneReliability', () => {
     expect(b?.querySelector('.share strong')?.textContent).toBe('0%');
 
     const compare = document.querySelector<HTMLAnchorElement>('.panel-head a');
-    expect(compare?.getAttribute('href')).toBe('/dashboard/lanes');
+    expect(compare?.getAttribute('href')).toBe('/dashboard/sessions');
   });
 
   it('says so when no review has ended', async () => {
-    render(LaneReliability, { load: () => Promise.resolve({ reviews: [], sessions: [] }) });
+    render(SessionReliability, { load: () => Promise.resolve({ reviews: [], sessions: [] }) });
     await settle();
     expect(document.body.textContent).toContain('No review has ended yet.');
   });
