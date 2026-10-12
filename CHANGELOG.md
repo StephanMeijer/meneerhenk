@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.29](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.28...v0.1.29) - 2026-10-12
+
+### Added
+
+- *(review)* a pull request the loop may not push to gets a reviewer-only review
+
+### Fixed
+
+- *(review)* a reviewer-only review on GitLab posts its summary note
+
+### Other
+
+- *(review)* ReviewRun::posts no longer describes the removed lane fallback
+
 ## [0.1.28](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.27...v0.1.28) - 2026-10-12
 
 ### Added
