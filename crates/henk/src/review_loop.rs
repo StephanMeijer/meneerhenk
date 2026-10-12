@@ -297,7 +297,9 @@ impl<'a> Rounds<'a> {
             check_commands: address.check_commands.clone(),
             check_timeout: command_limit,
             max_changed_files: address.max_changed_files,
-            bash,
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
+            bash: bash && Role::Executor.grants(&address.tools(), "bash"),
             state: Mutex::new(AddressState::default()),
         });
         let mut fixer_system = format!(
@@ -312,7 +314,7 @@ impl<'a> Rounds<'a> {
                 ],
             )
         );
-        if bash {
+        if fixing.bash {
             fixer_system = format!("{fixer_system}\n\n{}", prompts::ADDRESS_BASH);
         }
         let mut fixer_tools = edit_tools(&fixing);

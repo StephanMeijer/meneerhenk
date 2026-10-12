@@ -449,13 +449,16 @@ impl Session<'_> {
             check_commands: config.check_commands.clone(),
             check_timeout: self.command_limit(),
             max_changed_files: config.max_changed_files,
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
             bash: self
                 .app
                 .settings
                 .workspace
                 .profile_for(&self.request.target.repo.path())
                 .backend
-                .runs_model_commands(),
+                .runs_model_commands()
+                && Role::Executor.grants(&config.tools(), "bash"),
             state: Mutex::new(AddressState::default()),
         });
         self.session(&context, cancel).await?;
@@ -1473,6 +1476,43 @@ check_commands = [["true"]]
             system.contains("commands of your own in the checkout with `bash`"),
             "{system}"
         );
+    }
+
+    /// On a sandbox, an executor whose tools leave out bash gets neither
+    /// the tool nor the prompt that tells it to use one (#334).
+    #[tokio::test]
+    async fn on_a_sandbox_an_executor_without_bash_is_not_told_of_it() {
+        let platform = Platform::GitHub;
+        let (remote, head) = bare_remote("henk-address-nobash-granted").await;
+        let hub = hub(platform, remote.path(), &head, None);
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        );
+        let config = format!(
+            "{CONFIG}tools = [\"list_files\", \"read_file\", \"search\", \"edit_file\", \"write_file\", \"run_checks\"]\n{PEOPLE}[workspace]\nbackend = \"ssh\"\n[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
+            key.public_key().to_openssh().unwrap()
+        );
+        let model = Arc::new(ScriptedClient::new(
+            "scripted",
+            settling(fix_x()).into_iter().map(Ok),
+        ));
+        let app = app_with_model(
+            Arc::clone(&hub),
+            Arc::clone(&model) as Arc<dyn ModelClient>,
+            Arc::new(fake()),
+            &config,
+        );
+        run_address(
+            &app,
+            request(platform, "r-addr-nobash-granted"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (names, system) = offered(&model);
+        assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!system.contains("`bash`"), "{system}");
     }
 
     #[tokio::test]

@@ -33,7 +33,7 @@ pub struct AddressContext {
     /// Files one run may change.
     pub max_changed_files: usize,
     /// Whether the model may run commands of its own (`bash`, #172): only
-    /// on a backend apart from Henk.
+    /// on a backend apart from Henk, and when its role's tools grant it.
     pub bash: bool,
     /// What the model decided so far.
     pub state: Mutex<AddressState>,

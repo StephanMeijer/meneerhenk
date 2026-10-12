@@ -2549,6 +2549,61 @@ requester_id = 3
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
     }
 
+    /// The fixer is told of `bash` only when it has it (#334): on a
+    /// backend that runs model commands, and with `bash` in
+    /// `[roles.executor]` tools.
+    #[tokio::test]
+    async fn the_fixer_hears_of_bash_only_when_its_tools_grant_it() {
+        use crate::workspace::remote::tests::LocalRunner;
+        let without: Vec<String> = henk_domain::role::Role::Executor
+            .default_tools()
+            .into_iter()
+            .filter(|tool| tool != "bash")
+            .collect();
+        for (name, tools, granted) in [
+            ("ssh-fixer-bash", None, true),
+            ("ssh-fixer-nobash", Some(without), false),
+        ] {
+            let runner = LocalRunner::new(&format!("henk-review-{name}"));
+            let provider = crate::workspace::ssh::SshProvider::with_runner(
+                Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
+            );
+            let (mut f, _, fixer, _remote) = looping_with(
+                name,
+                &ssh_loop_settings("true"),
+                ScriptedClient::new(
+                    "r",
+                    [
+                        report(2, "x must be 3", None),
+                        finish_round(),
+                        say("Done for now."),
+                        finish_round(),
+                        say("Nothing more."),
+                    ],
+                ),
+                ScriptedClient::new("f", [say("Looked."), say("Still looking."), say("Done.")]),
+                Arc::new(provider),
+            )
+            .await;
+            f.app.settings.roles.executor.as_mut().unwrap().tools = tools;
+            let run = RunId::parse(format!("r-{name}")).unwrap();
+            run_review(&f.app, request(&run), CancellationToken::new())
+                .await
+                .unwrap();
+            let requests = fixer.requests();
+            let first = requests.first().unwrap();
+            let names: Vec<String> = first.tools.iter().map(|t| t.name.to_string()).collect();
+            let system = first.system.clone().unwrap_or_default();
+            assert_eq!(names.iter().any(|n| n == "bash"), granted, "{names:?}");
+            assert_eq!(
+                system.contains("commands of your own in the checkout with `bash`"),
+                granted,
+                "{system}"
+            );
+            assert!(names.iter().any(|n| n == "give_verdict"), "{names:?}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_reviewer_runs_bash_on_a_real_sandbox_host() {
