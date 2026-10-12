@@ -37,6 +37,7 @@ mod resume;
 mod review;
 mod review_loop;
 mod review_many;
+mod roles;
 mod runs;
 mod server;
 mod skill_tools;

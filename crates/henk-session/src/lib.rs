@@ -1051,6 +1051,46 @@ mod tests {
         assert_eq!(body["turns"], 2);
     }
 
+    /// A resumed round sends the same system prompt and tools, in the same
+    /// order, so the cached prompt prefix holds across a pairing (#171, #321).
+    #[tokio::test]
+    async fn a_resumed_session_keeps_its_system_prompt_and_tools() {
+        let store = store_with_run().await;
+        let scripted = Arc::new(ScriptedClient::new("m", [text("first"), text("second")]));
+        let model: Arc<dyn ModelClient> = scripted.clone();
+        let mut tools = ToolSet::new();
+        tools
+            .add(Answer {
+                name: "search",
+                fails: false,
+            })
+            .add(Answer {
+                name: "read_file",
+                fails: false,
+            });
+        let mut session =
+            ResumableSession::new("reviewer", model, "s", tools, AgentConfig::default());
+        for opening in ["go", "again"] {
+            session
+                .resume(
+                    &store,
+                    &run_id(),
+                    ChatMessage::user(opening),
+                    CancellationToken::new(),
+                )
+                .await;
+        }
+        let requests = scripted.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].system, requests[1].system);
+        assert_eq!(
+            serde_json::to_value(&requests[0].tools).unwrap(),
+            serde_json::to_value(&requests[1].tools).unwrap(),
+            "the same tools, in the same order"
+        );
+        assert_eq!(requests[1].tools.len(), 2);
+    }
+
     #[tokio::test]
     async fn rounds_past_the_budget_give_way_to_their_summary() {
         let store = store_with_run().await;

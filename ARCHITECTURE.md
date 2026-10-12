@@ -125,7 +125,7 @@ flowchart TB
 
 | Crate | Modules | Depends on |
 |---|---|---|
-| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
+| `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `run`, `text`, `skill`, `discord`, `mail` | serde, thiserror, serde_json |
 | `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
@@ -294,6 +294,15 @@ every call goes through Henk's dispatcher, and every MCP call through the
 guard. A review's sessions get no MCP tools: the reviewer reads the diff and
 its workspace, and the fixer edits the workspace, which only Henk's code turns
 into a commit (section 3).
+
+Each session's tools are built once, when the session starts, and cut to
+what its role grants (`crates/henk/src/roles.rs`, `grant`). The roles and
+their ceilings are a pure rule in `crates/henk-domain/src/role.rs`: only
+the executor (the fixer) edits, the handoff tools belong to their side of
+the pair, and the tracker and MCP tools are the planner's. A set built
+above its role's ceiling is a bug that tests stop on. The tool list never
+changes while a session runs, so a resumed round keeps the cached prompt
+prefix.
 
 ```mermaid
 flowchart TD
