@@ -1,5 +1,5 @@
 // Shapes the API returns, for the view tests.
-import type { Draft, Me, RunDetail, RunSummary, Session, Stage, WaitingReview } from '$lib/api/types';
+import type { Draft, Me, Round, RunDetail, RunSummary, Session, Stage, WaitingReview } from '$lib/api/types';
 
 export const me: Me = { github_id: 1234, login: 'alice', csrf: 'tok', startable: ['review', 'plan'] };
 
@@ -52,6 +52,7 @@ export function runDetail(status = 'finished'): RunDetail {
       { name: 'lane-a', role: 'lane', model: 'model-x', status: 'finished', turns: 3, input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 15, error: null, last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:04:00Z' },
       { name: 'lane-b', role: 'lane', model: 'model-y', status: 'did_not_finish', turns: 1, input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_write_tokens: 0, error: 'gave up', last_call_turn: null, started_at: '2026-10-07T10:00:05Z', finished_at: '2026-10-07T10:01:00Z' },
     ],
+    rounds: [],
     findings: [{ at: '2026-10-07T10:02:00Z', session: 'lane-a', path: 'src/a.rs', line: 4, comment_id: 'c-77', action: 'posted' }],
     drafts: [
       draft('d1', {
@@ -91,6 +92,30 @@ function session(name: string, role: string, overrides: Partial<Session> = {}): 
   };
 }
 
+/** A round of a pairing (#374), from minute `from` to `to`. */
+function round(
+  name: string,
+  n: number,
+  firstTurn: number,
+  handover: string,
+  from: number,
+  to: number,
+  turns: number,
+  cut = false,
+): Round {
+  return {
+    session: name,
+    role: name,
+    round: n,
+    started_at: `2026-10-07T10:0${from}:00Z`,
+    ended_at: `2026-10-07T10:0${to}:00Z`,
+    first_turn: firstTurn,
+    turns,
+    handover,
+    handover_cut: cut,
+  };
+}
+
 /** A review the loop made (#283): the reviewer and the executor, in rounds. */
 export function loopDetail(): RunDetail {
   const at = (s: number): string => `2026-10-07T10:0${s}:00Z`;
@@ -100,6 +125,11 @@ export function loopDetail(): RunDetail {
   return {
     ...runDetail(),
     sessions: [session('executor', 'executor'), session('reviewer', 'reviewer')],
+    rounds: [
+      round('reviewer', 1, 1, 'Review pull request #7 at abc.', 1, 2, 5),
+      round('executor', 1, 1, 'Round 1. The reviewer\'s findings, as data: f1.', 2, 3, 3),
+      round('reviewer', 2, 6, 'Round 2. The executor pushed commit 9f3 to the branch.', 3, 4, 2, true),
+    ],
     findings: [],
     drafts: [draft('f1', { session: 'reviewer', kind: 'loop_finding' })],
     transcripts: [],
@@ -125,6 +155,10 @@ export function planDetail(): RunDetail {
     ...detail,
     run: { ...detail.run, kind: 'plan', loop_stop: 'converged', loop_rounds: 2 },
     sessions: [session('planner', 'planner'), session('reviewer', 'reviewer')],
+    rounds: [
+      round('planner', 1, 1, 'Plan issue #7.', 0, 2, 4),
+      round('reviewer', 1, 1, 'Review this plan.', 2, 3, 2),
+    ],
     findings: [],
     drafts: [],
     transcripts: [],

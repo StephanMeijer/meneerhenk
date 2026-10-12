@@ -300,6 +300,36 @@ describe('Run', () => {
     expect(document.querySelector('.role.role-reviewer')?.classList.contains('tone-accent')).toBe(true);
   });
 
+  it("shows a pairing's turns in order, with what each role was handed (#374)", async () => {
+    const detail = loopDetail();
+    detail.transcripts = [{ at: '', session: 'reviewer', model: 'model-reviewer', stop: 'EndTurn', turns: 7, bytes: 10 }];
+    const last = detail.rounds[2];
+    if (last === undefined) throw new Error('fixture');
+    detail.rounds[2] = { ...last, ended_at: null, turns: 0 };
+    render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
+    await settle();
+    const turns = [...document.querySelectorAll('ol.turns > li')];
+    expect(turns.map((t) => t.querySelector('.turn-head')?.textContent?.replace(/\s+/g, ' ').trim().split(' ').slice(0, 4).join(' '))).toEqual([
+      'Round 1 Reviewer reviewer',
+      'Round 1 Executor executor',
+      'Round 2 Reviewer reviewer',
+    ]);
+    expect(turns[0]?.textContent).toContain('5 turns');
+    expect(turns[1]?.querySelector('pre')?.textContent).toBe("Round 1. The reviewer's findings, as data: f1.");
+    expect(turns[1]?.querySelector('.cut')).toBeNull();
+    expect(turns[2]?.querySelector('.cut')?.textContent).toBe('Cut here; the conversation holds all of it.');
+    expect(turns[2]?.classList.contains('running')).toBe(true);
+    expect(turns[2]?.textContent).not.toContain('turns');
+    expect(turns[2]?.querySelector('a')?.getAttribute('href')).toBe('/dashboard/runs/r-1/transcripts/reviewer#turn-6');
+    expect(turns[1]?.querySelector('a'), 'the executor kept no conversation').toBeNull();
+  });
+
+  it('shows no turns for a run without a pairing, such as a review from before the loop', async () => {
+    render(Run, { id: 'r-1', load: () => Promise.resolve(runDetail()), cancel: vi.fn() });
+    await settle();
+    expect(document.querySelector('#turns-title')).toBeNull();
+  });
+
   it("shows a plan's planner and reviewer with their roles, and no rounds (#326)", async () => {
     render(Run, { id: 'r-1', load: () => Promise.resolve(planDetail()), cancel: vi.fn() });
     await settle();
@@ -308,6 +338,10 @@ describe('Run', () => {
       'Requested', 'Started', 'Session', 'Publish', 'Done',
     ]);
     expect(document.querySelector('ol.pipeline .sessions')).toBeNull();
+    const turns = [...document.querySelectorAll('ol.turns > li .turn-head')].map((t) =>
+      t.textContent?.replace(/\s+/g, ' ').trim().split(' ').slice(0, 4).join(' '),
+    );
+    expect(turns).toEqual(['Round 1 Planner planner', 'Round 1 Reviewer reviewer']);
     expect(section('Sessions').map((row) => row.slice(0, 2))).toEqual([
       ['planner', 'Planner'],
       ['reviewer', 'Reviewer'],

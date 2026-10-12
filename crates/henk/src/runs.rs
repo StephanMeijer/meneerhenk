@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 
 use henk_domain::run::RunKind;
 use henk_store::{
-    DraftRecord, DraftVerdict, EventRecord, FindingRecord, RunRecord, SessionRecord, ToolTally,
-    ToolUsage, TranscriptSummary,
+    DraftRecord, DraftVerdict, EventRecord, FindingRecord, RoundRecord, RunRecord, SessionRecord,
+    ToolTally, ToolUsage, TranscriptSummary,
 };
 use serde_json::Value;
 
@@ -384,12 +384,17 @@ fn render_run(out: &mut String, run: &RunRecord) {
     }
 }
 
-/// Renders one run with its sessions, tool calls, transcripts, drafts,
-/// findings and timeline.
+/// Renders one run with its sessions, rounds, tool calls, transcripts,
+/// drafts, findings and timeline.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per part of the run record, as the store reads it"
+)]
 pub fn render(
     run: &RunRecord,
     sessions: &[SessionRecord],
+    rounds: &[RoundRecord],
     tools: &[ToolUsage],
     transcripts: &[TranscriptSummary],
     drafts: &[DraftRecord],
@@ -418,6 +423,18 @@ pub fn render(
                 let _ = writeln!(out, "  {error}");
             }
             None => out.push('\n'),
+        }
+    }
+
+    if !rounds.is_empty() {
+        let _ = writeln!(out, "\nrounds ({})", rounds.len());
+        for round in rounds {
+            let handed = round.handover.lines().next().unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "  {} round {:<2} {:<9} {:<12} turns {:>3}  handed: {handed}",
+                round.started_at, round.round, round.role, round.session, round.turns
+            );
         }
     }
 
@@ -539,6 +556,17 @@ mod tests {
             loop_stop: None,
             loop_rounds: None,
         };
+        let rounds = vec![RoundRecord {
+            session: "lane-a".into(),
+            role: SessionRole::Reviewer,
+            round: 2,
+            started_at: "t2".into(),
+            ended_at: Some("t3".into()),
+            first_turn: 4,
+            turns: 3,
+            handover: "Round 2. The executor pushed abc.\nMore.".into(),
+            handover_len: 40,
+        }];
         let sessions = vec![SessionRecord {
             name: "lane-a".into(),
             role: SessionRole::Lane,
@@ -624,6 +652,7 @@ mod tests {
         let text = render(
             &run,
             &sessions,
+            &rounds,
             &[],
             &transcripts,
             &drafts,
@@ -633,6 +662,12 @@ mod tests {
         assert!(text.starts_with("run r-1\n"));
         assert!(text.contains("commit     abc"));
         assert!(text.contains("sessions (1)"));
+        assert!(
+            text.contains(
+                "rounds (1)\n  t2 round 2  reviewer  lane-a       turns   3  handed: Round 2. The executor pushed abc.\n"
+            ),
+            "{text}"
+        );
         assert!(text.contains("(finished)"), "{text}");
         assert!(
             text.contains("lane-a       lane      did not finish m"),
@@ -740,7 +775,7 @@ mod tests {
             loop_stop: None,
             loop_rounds: None,
         };
-        let text = render(&run, &[], &[], &[], &[], &[], &events);
+        let text = render(&run, &[], &[], &[], &[], &[], &[], &events);
         assert!(
             !text.contains('\u{1b}') && !text.contains('\u{7}'),
             "{text:?}"
@@ -818,6 +853,7 @@ mod tests {
         let text = render(
             &store.run(&id).await.unwrap().unwrap(),
             &store.sessions(&id).await.unwrap(),
+            &store.rounds(&id).await.unwrap(),
             &ToolUsage::from_calls(&store.tool_calls(&id).await.unwrap()),
             &store.transcripts(&id).await.unwrap(),
             &store.drafts(&id).await.unwrap(),

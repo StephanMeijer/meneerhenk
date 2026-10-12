@@ -356,6 +356,7 @@ async fn cmd_runs_show(config: &Path, run: &str, transcript: Option<&str>) -> an
         runs::render(
             &record,
             &store.sessions(&id).await?,
+            &store.rounds(&id).await?,
             &henk_store::ToolUsage::from_calls(&store.tool_calls(&id).await?),
             &transcripts,
             &store.drafts(&id).await?,

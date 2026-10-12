@@ -19,12 +19,12 @@ use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
     MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RawRun, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
-    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    RawRun, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days,
-    platform_parse, platform_str, session_dots, session_endings, session_role, session_status,
-    stage_dots, stage_records, status_str, to_i64, to_u64,
+    platform_parse, platform_str, round_record, session_dots, session_endings, session_role,
+    session_status, stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/010_loop.sql"),
     include_str!("../migrations/postgres/011_lane_cache.sql"),
     include_str!("../migrations/postgres/012_sessions.sql"),
+    include_str!("../migrations/postgres/013_rounds.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -974,6 +975,80 @@ impl RunStore for PgStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
+        let at = parse_time("session_rounds.started_at", &round.started_at)?;
+        let handover_len = to_i64("session_rounds.handover_len", round.handover_len)?;
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO session_rounds (run_id, session, role, round, started_at, first_turn, handover, handover_len)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[
+                    &run.as_str(),
+                    &round.session,
+                    &round.role.as_str(),
+                    &i64::from(round.round),
+                    &at,
+                    &i64::from(round.first_turn),
+                    &round.handover,
+                    &handover_len,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn end_round(
+        &self,
+        run: &RunId,
+        session: &str,
+        round: u32,
+        turns: u32,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "UPDATE session_rounds SET ended_at = $4, turns = $5
+                 WHERE run_id = $1 AND session = $2 AND round = $3",
+                &[
+                    &run.as_str(),
+                    &session,
+                    &i64::from(round),
+                    &now(),
+                    &i64::from(turns),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len
+                 FROM session_rounds WHERE run_id = $1 ORDER BY started_at, session, round",
+                &[&run.as_str()],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                round_record((
+                    row.try_get(0)?,
+                    row.try_get(1)?,
+                    row.try_get(2)?,
+                    text(row.try_get(3)?),
+                    row.try_get::<_, Option<OffsetDateTime>>(4)?.map(text),
+                    row.try_get(5)?,
+                    row.try_get(6)?,
+                    row.try_get(7)?,
+                    row.try_get(8)?,
+                ))
+            })
+            .collect()
     }
 
     async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {

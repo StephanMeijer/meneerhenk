@@ -7,8 +7,8 @@ use time::OffsetDateTime;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
-    PruneCounts, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
-    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    PruneCounts, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
     TranscriptSummary,
 };
@@ -280,6 +280,34 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
         filter: &ToolCallFilter,
         page: Page,
     ) -> Result<Vec<ToolCallListing>, StoreError>;
+
+    /// Records that a round of a session in a pairing started (#374). An
+    /// empty `started_at` means now; `ended_at` and `turns` are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError>;
+
+    /// Records that a round ended now, after `turns` model turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure.
+    async fn end_round(
+        &self,
+        run: &RunId,
+        session: &str,
+        round: u32,
+        turns: u32,
+    ) -> Result<(), StoreError>;
+
+    /// The rounds of a run's pairings, in the order they started.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError>;
 
     /// Stores one session's whole conversation (#191). An empty `at` means
     /// now.

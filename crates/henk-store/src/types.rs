@@ -333,6 +333,67 @@ pub struct TranscriptRecord {
     pub body: String,
 }
 
+/// One round of a session in a pairing (#374): the role resumed with
+/// `handover`, and how many turns it took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundRecord {
+    /// The session.
+    pub session: String,
+    /// The role it runs in.
+    pub role: SessionRole,
+    /// This session's round, from 1.
+    pub round: u32,
+    /// RFC 3339; empty when recording means now.
+    pub started_at: String,
+    /// RFC 3339, once the round ended.
+    pub ended_at: Option<String>,
+    /// Its first model turn in the session's transcript.
+    pub first_turn: u32,
+    /// Model turns this round took; 0 until it ends.
+    pub turns: u32,
+    /// The message the role was resumed with, perhaps cut.
+    pub handover: String,
+    /// That message's length in bytes before any cut.
+    pub handover_len: u64,
+}
+
+/// A stored round: (session, role, round, started at, ended at, first
+/// turn, turns, handover, handover length).
+pub(crate) type RoundRow = (
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+    i64,
+    i64,
+    String,
+    i64,
+);
+
+/// A stored round, checked.
+pub(crate) fn round_record(row: RoundRow) -> Result<RoundRecord, StoreError> {
+    let (session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len) =
+        row;
+    let count = |column: &'static str, value: i64| {
+        u32::try_from(value).map_err(|_| StoreError::Corrupt {
+            column,
+            value: value.to_string(),
+        })
+    };
+    Ok(RoundRecord {
+        session,
+        role: session_role(role)?,
+        round: count("session_rounds.round", round)?,
+        started_at,
+        ended_at,
+        first_turn: count("session_rounds.first_turn", first_turn)?,
+        turns: count("session_rounds.turns", turns)?,
+        handover,
+        handover_len: to_u64("session_rounds.handover_len", handover_len)?,
+    })
+}
+
 /// A transcript without its body, for listing what a run has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptSummary {
