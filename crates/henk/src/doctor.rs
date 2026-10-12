@@ -801,11 +801,11 @@ async fn check_app_identity(api: &GitHubApi, bot_login: &str) -> Check {
 async fn list_installations(api: &GitHubApi) -> Result<Vec<Installation>, String> {
     match tokio::time::timeout(
         Duration::from_secs(30),
-        api.get_as_app("/app/installations?per_page=100"),
+        api.get_all_as_app("/app/installations"),
     )
     .await
     {
-        Ok(Ok(serde_json::Value::Array(installations))) => Ok(installations
+        Ok(Ok(installations)) => Ok(installations
             .iter()
             .filter_map(|i| {
                 Some(Installation {
@@ -818,7 +818,6 @@ async fn list_installations(api: &GitHubApi) -> Result<Vec<Installation>, String
                 })
             })
             .collect()),
-        Ok(Ok(_)) => Err("GET /app/installations did not answer a list".to_owned()),
         Ok(Err(error)) => Err(format!("could not list installations: {error}")),
         Err(_) => Err("could not list installations within 30s".to_owned()),
     }

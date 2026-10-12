@@ -177,6 +177,13 @@ impl Installations {
         }
     }
 
+    /// Drops every owner remembered for installation `id`.
+    fn forget(&self, id: u64) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.retain(|_, remembered| *remembered != id);
+        }
+    }
+
     fn known(&self, owner: &str) -> Option<u64> {
         self.owners
             .lock()
@@ -268,7 +275,25 @@ impl Installations {
         {
             return Ok(cached.token.clone());
         }
-        let fresh = mint_installation_token(http, api_base, &self.credentials, id, now).await?;
+        let fresh = match mint_installation_token(http, api_base, &self.credentials, id, now).await
+        {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                if matches!(
+                    error,
+                    PlatformError::Status {
+                        status: 401 | 403 | 404,
+                        ..
+                    }
+                ) {
+                    // The installation is gone or changed (uninstalled and
+                    // reinstalled gets a new id): forget the owners that
+                    // pointed at it, so the next call looks them up again.
+                    self.forget(id);
+                }
+                return Err(error);
+            }
+        };
         tokens.insert(id, fresh.clone());
         Ok(fresh.token)
     }

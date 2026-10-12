@@ -560,14 +560,12 @@ async fn cmd_llm_models(config: &Path, endpoint: &str) -> anyhow::Result<()> {
 /// the first of the App's installations Henk may act for.
 async fn probe_installation(github: &config::GitHubConfig) -> anyhow::Result<u64> {
     let api = app::github_api(github)?;
-    let listed = api.get_as_app("/app/installations?per_page=100").await?;
+    let listed = api.get_all_as_app("/app/installations").await?;
     let installations = api
         .installations()
         .ok_or_else(|| anyhow!("GitHub is not configured as an App"))?;
     listed
-        .as_array()
-        .into_iter()
-        .flatten()
+        .iter()
         .filter_map(|i| i.get("id").and_then(serde_json::Value::as_u64))
         .find(|id| installations.allows(*id))
         .ok_or_else(|| anyhow!("the App has no installation Henk may act for"))
