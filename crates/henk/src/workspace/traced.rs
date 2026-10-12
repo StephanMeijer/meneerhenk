@@ -43,6 +43,43 @@ impl Traced {
         self.label = Some(label);
         self
     }
+
+    /// `result`, with a failure of the workspace itself logged once and put
+    /// on the run's timeline, saying which run, session, workspace and
+    /// operation (#339). A model's own mistake, such as a path that is not
+    /// there, is an ordinary answer and goes by.
+    async fn noted<T>(
+        &self,
+        operation: &str,
+        result: Result<T, WorkspaceError>,
+    ) -> Result<T, WorkspaceError> {
+        if let Err(error) = &result
+            && matches!(
+                error,
+                WorkspaceError::Backend(_) | WorkspaceError::Unreachable(_)
+            )
+        {
+            let at = self.inner.location();
+            warn!(
+                run = %self.run,
+                session = self.label.as_deref().unwrap_or(""),
+                workspace = at.as_deref().unwrap_or(""),
+                operation,
+                %error,
+                "workspace operation failed"
+            );
+            let place = at.map_or_else(String::new, |at| format!(" on {at}"));
+            let text = format!("workspace {operation} failed{place}: {error}");
+            let text = match &self.label {
+                Some(label) => format!("{label}: {text}"),
+                None => text,
+            };
+            if let Err(store) = self.store.event(&self.run, "warn", &text).await {
+                warn!(error = %store, "could not record a workspace failure");
+            }
+        }
+        result
+    }
 }
 
 /// One timeline line: `exec <argv> exit <code> in <ms> ms`, then the kept
@@ -83,15 +120,34 @@ impl Workspace for Traced {
         if let Err(error) = self.store.event(&self.run, "info", &text).await {
             warn!(%error, "could not record a command");
         }
+        if let Err(error) = &result
+            && matches!(
+                error,
+                WorkspaceError::Backend(_) | WorkspaceError::Unreachable(_)
+            )
+        {
+            // On the timeline already, as the exec line; logged here.
+            let at = self.inner.location();
+            warn!(
+                run = %self.run,
+                session = self.label.as_deref().unwrap_or(""),
+                workspace = at.as_deref().unwrap_or(""),
+                operation = "exec",
+                %error,
+                "workspace operation failed"
+            );
+        }
         result
     }
 
     async fn read(&self, path: &WorkspacePath, max_bytes: u64) -> Result<Vec<u8>, WorkspaceError> {
-        self.inner.read(path, max_bytes).await
+        let result = self.inner.read(path, max_bytes).await;
+        self.noted("read", result).await
     }
 
     async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
-        self.inner.write(path, content).await
+        let result = self.inner.write(path, content).await;
+        self.noted("write", result).await
     }
 
     async fn list(
@@ -100,7 +156,8 @@ impl Workspace for Traced {
         only: Option<&PathFilter>,
         cap: usize,
     ) -> Result<Vec<String>, WorkspaceError> {
-        self.inner.list(dir, only, cap).await
+        let result = self.inner.list(dir, only, cap).await;
+        self.noted("list", result).await
     }
 
     async fn search(
@@ -112,17 +169,25 @@ impl Workspace for Traced {
         max_file_bytes: u64,
         cap: usize,
     ) -> Result<Vec<Hit>, WorkspaceError> {
-        self.inner
+        let result = self
+            .inner
             .search(dir, pattern, only, context, max_file_bytes, cap)
-            .await
+            .await;
+        self.noted("search", result).await
     }
 
     async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
-        self.inner.export().await
+        let result = self.inner.export().await;
+        self.noted("export", result).await
     }
 
     async fn baseline(&self) -> Result<(), WorkspaceError> {
-        self.inner.baseline().await
+        let result = self.inner.baseline().await;
+        self.noted("baseline", result).await
+    }
+
+    fn location(&self) -> Option<String> {
+        self.inner.location()
     }
 
     async fn close(&self) {
@@ -209,6 +274,115 @@ mod tests {
         assert_eq!(
             events[1].message, "lane-a: exec cargo test exit 101 in 1 ms\ntest failed",
             "a review's lanes say which ran what"
+        );
+    }
+
+    /// A workspace whose reads fail in the backend and whose listings find
+    /// nothing, on a named host.
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl Workspace for Failing {
+        async fn exec(
+            &self,
+            _: &[String],
+            _: &WorkspacePath,
+            _: Duration,
+        ) -> Result<ExecResult, WorkspaceError> {
+            Err(WorkspaceError::NotFound("bash".to_owned()))
+        }
+        async fn read(&self, _: &WorkspacePath, _: u64) -> Result<Vec<u8>, WorkspaceError> {
+            Err(WorkspaceError::Backend(
+                "reading src/a.rs failed: exit 1, nothing on stderr".to_owned(),
+            ))
+        }
+        async fn write(&self, _: &WorkspacePath, _: &[u8]) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        async fn list(
+            &self,
+            dir: &WorkspacePath,
+            _: Option<&PathFilter>,
+            _: usize,
+        ) -> Result<Vec<String>, WorkspaceError> {
+            Err(WorkspaceError::NotFound(dir.to_string()))
+        }
+        async fn search(
+            &self,
+            _: &WorkspacePath,
+            _: &Pattern,
+            _: Option<&PathFilter>,
+            _: usize,
+            _: u64,
+            _: usize,
+        ) -> Result<Vec<Hit>, WorkspaceError> {
+            Err(WorkspaceError::Unreachable(
+                "the sandbox host 10.0.0.9:22 did not answer within 30s".to_owned(),
+            ))
+        }
+        async fn export(&self) -> Result<Vec<Exported>, WorkspaceError> {
+            Ok(Vec::new())
+        }
+        async fn baseline(&self) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        fn location(&self) -> Option<String> {
+            Some("ssh goat (root@goat.example:22)".to_owned())
+        }
+        async fn close(&self) {}
+    }
+
+    #[tokio::test]
+    async fn a_failure_of_the_workspace_is_on_the_timeline_with_where_and_what() {
+        let store: Arc<dyn RunStore> = Arc::new(henk_store::SqliteStore::in_memory().unwrap());
+        let run = RunId::parse("r-trace-fail").unwrap();
+        store
+            .create_run(&henk_store::NewRun {
+                id: run.clone(),
+                kind: henk_domain::run::RunKind::Review,
+                platform: henk_domain::allowlist::Platform::GitHub,
+                repo: "o/r".to_owned(),
+                target: 7,
+                commit: None,
+                requester: None,
+                trigger: "test".to_owned(),
+                link: String::new(),
+            })
+            .await
+            .unwrap();
+        let ws = Traced::new(Arc::new(Failing), Arc::clone(&store), run.clone())
+            .labelled("reviewer".to_owned());
+        let path = WorkspacePath::parse("src/a.rs").unwrap();
+        assert!(ws.read(&path, 100).await.is_err());
+        assert!(
+            ws.list(&WorkspacePath::root(), None, 10).await.is_err(),
+            "a listing of nothing is the model's answer"
+        );
+        let pattern = Pattern::parse("x").unwrap();
+        assert!(
+            ws.search(&WorkspacePath::root(), &pattern, None, 0, 100, 10)
+                .await
+                .is_err()
+        );
+        let events: Vec<(String, String)> = store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.level, e.message))
+            .collect();
+        assert_eq!(
+            events,
+            [
+                (
+                    "warn".to_owned(),
+                    "reviewer: workspace read failed on ssh goat (root@goat.example:22): the workspace failed: reading src/a.rs failed: exit 1, nothing on stderr".to_owned()
+                ),
+                (
+                    "warn".to_owned(),
+                    "reviewer: workspace search failed on ssh goat (root@goat.example:22): the workspace failed: the sandbox host 10.0.0.9:22 did not answer within 30s".to_owned()
+                ),
+            ]
         );
     }
 }

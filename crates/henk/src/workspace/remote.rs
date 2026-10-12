@@ -50,7 +50,14 @@ pub(crate) struct Reply {
     pub(crate) stderr: Vec<u8>,
     /// Henk stopped waiting before the runner finished.
     pub(crate) gave_up: bool,
+    /// What the backend itself said about how the request ended, when that
+    /// is not on stderr: an exec's failure status, a signal, a stream that
+    /// broke (#339).
+    pub(crate) detail: Option<String>,
 }
+
+/// How much of stdout explains a failure that left stderr empty.
+const STDOUT_TAIL: usize = 300;
 
 impl Reply {
     pub(crate) fn ok(self, what: &str) -> Result<Self, WorkspaceError> {
@@ -59,9 +66,39 @@ impl Reply {
         } else {
             Err(WorkspaceError::Backend(format!(
                 "{what} failed: {}",
-                String::from_utf8_lossy(&self.stderr).trim()
+                self.why()
             )))
         }
+    }
+
+    /// Why the request did not succeed, never empty (#339): what it wrote
+    /// on stderr, else what the backend said, else how it ended, with the
+    /// end of stdout when stderr had nothing.
+    pub(crate) fn why(&self) -> String {
+        let stderr = String::from_utf8_lossy(&self.stderr).trim().to_owned();
+        if !stderr.is_empty() {
+            return stderr;
+        }
+        let ended = match (&self.detail, self.gave_up, self.code) {
+            (Some(detail), _, _) if !detail.trim().is_empty() => detail.trim().to_owned(),
+            (_, true, _) => "no answer in time".to_owned(),
+            (_, false, None) => {
+                "it ended without an exit status: killed, or the connection dropped".to_owned()
+            }
+            (_, false, Some(code)) => format!("exit {code}, nothing on stderr"),
+        };
+        let stdout = String::from_utf8_lossy(&self.stdout);
+        let stdout = stdout.trim();
+        if stdout.is_empty() {
+            return ended;
+        }
+        let mut start = stdout.len().saturating_sub(STDOUT_TAIL);
+        while !stdout.is_char_boundary(start) {
+            start += 1;
+        }
+        let tail = stdout.get(start..).unwrap_or_default();
+        let cut = if start > 0 { "…" } else { "" };
+        format!("{ended}; it printed: {cut}{tail}")
     }
 }
 
@@ -494,7 +531,7 @@ impl Workspace for RemoteWorkspace {
             ))),
             _ => Err(WorkspaceError::Backend(format!(
                 "reading {path} failed: {}",
-                String::from_utf8_lossy(&reply.stderr).trim()
+                reply.why()
             ))),
         }
     }
@@ -868,6 +905,7 @@ pub(crate) mod tests {
                         stdout: so.finish(),
                         stderr: se.finish(),
                         gave_up: false,
+                        detail: None,
                     })
                 }
                 Err(_) => Ok(Reply {
@@ -875,6 +913,74 @@ pub(crate) mod tests {
                     ..Reply::default()
                 }),
             }
+        }
+    }
+
+    fn reply(code: Option<i32>, stdout: &str, stderr: &str) -> Reply {
+        Reply {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            ..Reply::default()
+        }
+    }
+
+    #[test]
+    fn a_failure_always_says_why() {
+        let failed = |reply: Reply| reply.ok("listing files").unwrap_err().to_string();
+        assert_eq!(
+            failed(reply(Some(2), "", "grep: bad pattern\n")),
+            "the workspace failed: listing files failed: grep: bad pattern"
+        );
+        assert_eq!(
+            failed(reply(Some(1), "", "")),
+            "the workspace failed: listing files failed: exit 1, nothing on stderr"
+        );
+        assert_eq!(
+            failed(reply(None, "", "")),
+            "the workspace failed: listing files failed: it ended without an exit status: killed, or the connection dropped"
+        );
+        assert_eq!(
+            failed(Reply {
+                gave_up: true,
+                ..Reply::default()
+            }),
+            "the workspace failed: listing files failed: no answer in time"
+        );
+        assert_eq!(
+            failed(Reply {
+                detail: Some(
+                    "error executing command in container: container not found (InternalError)"
+                        .to_owned()
+                ),
+                ..Reply::default()
+            }),
+            "the workspace failed: listing files failed: error executing command in container: container not found (InternalError)"
+        );
+        assert_eq!(
+            failed(reply(Some(1), "partial output\nthen it stopped\n", "")),
+            "the workspace failed: listing files failed: exit 1, nothing on stderr; it printed: partial output\nthen it stopped"
+        );
+        let long = "x".repeat(1000);
+        let said = failed(reply(Some(1), &long, ""));
+        assert!(
+            said.ends_with(&format!("it printed: …{}", "x".repeat(300))),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn no_failure_ends_in_nothing() {
+        for reply in [
+            Reply::default(),
+            reply(Some(1), "", "   \n"),
+            Reply {
+                detail: Some(" ".to_owned()),
+                ..Reply::default()
+            },
+        ] {
+            let said = reply.ok("making the workspace").unwrap_err().to_string();
+            assert!(!said.trim_end().ends_with(':'), "{said}");
         }
     }
 }

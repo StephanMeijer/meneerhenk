@@ -212,8 +212,12 @@ impl From<PlatformArg> for Platform {
 }
 
 fn main() -> ExitCode {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,rmcp=warn,henk=debug"));
+    // kube-client logs every failed API request at ERROR without saying
+    // which; Henk logs a failed workspace request itself, with the run,
+    // session, Pod and operation (#339).
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,rmcp=warn,henk=debug,kube_client::client::builder=off")
+    });
     if std::env::var("HENK_LOG_JSON").is_ok_and(|v| v == "1") {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
