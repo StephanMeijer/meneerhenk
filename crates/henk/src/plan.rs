@@ -122,7 +122,7 @@ pub async fn run_plan(
         .await?;
     info!(run = %run, "planning started");
     let _alive = KeepAlive::start(Arc::clone(&app.store), &app.live_runs, run.clone());
-    let model = app.model(&planning.model)?;
+    let model = app.model(&planner(app)?.model)?;
     let context = Arc::new(PlanContext {
         run: run.clone(),
         model: model_id(model.as_ref()),
@@ -558,13 +558,14 @@ async fn plan_session(
         .planning
         .as_ref()
         .ok_or_else(|| anyhow!("planning is not configured"))?;
+    let planner = planner(app)?;
     let platform = request.target.repo.platform();
     let session = app.read_session(platform).await?;
     let scope = Scope::Plan {
         repo: request.target.repo.clone(),
         issue: request.target.number,
     };
-    let mut set = planner_tools(
+    let set = planner_tools(
         Arc::clone(&session),
         platform,
         &scope,
@@ -586,15 +587,16 @@ async fn plan_session(
         },
         body,
     );
-    crate::skill_tools::equip(
+    let set = crate::roles::equip_and_grant(
+        Role::Planner,
         &mut system,
-        &mut set,
-        app.settings.skills.select(&planning.skills),
+        set,
+        app.settings.skills.select(&planner.skills),
+        &planner.tools(Role::Planner),
     );
-    let set = crate::roles::grant(Role::Planner, set, &Role::Planner.default_tools());
     let limits = AgentConfig {
-        max_turns: planning.max_turns,
-        timeout: Duration::from_secs(planning.timeout_secs),
+        max_turns: planner.max_turns(Role::Planner),
+        timeout: Duration::from_secs(planner.timeout_secs(Role::Planner)),
         max_repeated_calls: app.settings.agent.max_repeated_calls,
         record_argument_bytes: app.settings.agent.record_argument_bytes,
         ..AgentConfig::default()
@@ -610,7 +612,16 @@ async fn plan_session(
         turn_warning: None,
     };
     let outcome = run_session(app.store.as_ref(), &context.run, spec, cancel).await;
-    session_result(outcome.stop, planning.timeout_secs)
+    session_result(outcome.stop, planner.timeout_secs(Role::Planner))
+}
+
+/// The planner's role: model, limits, tools and skills (#322).
+fn planner(app: &App) -> anyhow::Result<&crate::config::RoleConfig> {
+    app.settings
+        .roles
+        .planner
+        .as_ref()
+        .ok_or_else(|| anyhow!("planning needs [roles.planner]"))
 }
 
 /// Whether the planner's session ended in a way a plan can come from. A
@@ -675,8 +686,9 @@ base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"
 [planning]
-model = "m"
 requester_id = 3
+[roles.planner]
+model = "m"
 "#;
 
     fn done() -> Completion {

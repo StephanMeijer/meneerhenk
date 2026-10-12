@@ -6,6 +6,8 @@
 use henk_agent::ToolSet;
 use henk_domain::role::Role;
 
+use crate::skill_tools::{AgentSkills, equip};
+
 /// `set`, keeping only the tools `role` grants in `granted`. A tool above
 /// the role's ceiling is a bug in the code that built the set: tests and
 /// debug builds stop on it, release builds leave it out.
@@ -18,6 +20,19 @@ pub fn grant(role: Role, mut set: ToolSet, granted: &[String]) -> ToolSet {
     }
     set.retain(|name| role.allows(name) && role.grants(granted, name));
     set
+}
+
+/// `set` with the role's `skills` added (their catalogue goes in `system`),
+/// then cut to what `role` grants in `granted`.
+pub fn equip_and_grant(
+    role: Role,
+    system: &mut String,
+    mut set: ToolSet,
+    skills: AgentSkills,
+    granted: &[String],
+) -> ToolSet {
+    equip(system, &mut set, skills);
+    grant(role, set, granted)
 }
 
 #[cfg(test)]

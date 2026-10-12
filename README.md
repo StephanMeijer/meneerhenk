@@ -42,7 +42,7 @@ fixer reads them (`list_findings`), checks each against the code, fixes
 what holds with an address run's tools (`edit_file`, `write_file`,
 `run_checks`, and `bash` on a backend apart from Henk) and gives each its
 verdict with `give_verdict`: fixed, rejected (it does not hold) or won't
-fix. Henk runs `[address].check_commands`, checks the changeset as for an
+fix. Henk runs `[roles.executor].check_commands`, checks the changeset as for an
 address run and pushes it as one commit to the pull request's branch. The
 next round each resumes its own conversation: the reviewer sees the commit
 and the verdicts, may contest a rejection once with new evidence, and
@@ -161,27 +161,40 @@ Lockfiles and `CHANGELOG.md` are not reviewed; `[review].ignore` changes
 the list (see `henk.example.toml`), and a change made only of such files is
 reported as nothing to review.
 
-A review needs `[review.loop]`: `reviewer` and `fixer` name models from
-`[models]` (they may be the same), `max_rounds` (50 by default) caps the
-rounds, `round_timeout_secs` (600) and `round_max_turns` (40) limit each
-session in each round, and `run_timeout_secs` (3600) limits the whole loop:
-no round starts after it, and a round under way gets only what is left.
-The loop pushes like an address run, so it needs `[address]` too: its
-`check_commands`, `max_changed_files`, identity and trailers apply to every
-commit the loop pushes, and its `requester_id` is who those commits are
-requested by. Without `[review.loop]` reviews are off: `config check`
+Henk's agents are **roles** (#321), each configured once: `[roles.reviewer]`,
+`[roles.executor]` (the agent that changes the code) and `[roles.planner]`.
+A role names its `model` from `[models]` and has its own `max_turns` and
+`timeout_secs` per turn (a round of the review loop, or the planner's
+run; 40 turns and 600s by default, 80 and 1200s for the planner), its own
+`skills`, and optionally `tools`: a list that narrows the role's tools
+within what the role may ever have. Only the executor edits, the reviewer
+and the executor each have their side of the handoff, and only the
+planner has the tracker and MCP tools; left out, a role gets its defaults,
+and only the planner reaches the web. `henk config check` lists each
+role, refuses a tool the role may not have, and says which roles reach the
+web.
+
+A review needs `[review.loop]` with `[roles.reviewer]` and
+`[roles.executor]`; without either role the configuration is refused.
+`max_rounds` (50 by default) caps the rounds and `run_timeout_secs` (3600)
+limits the whole loop: no round starts after it, and a round under way
+gets only what is left. The executor's `check_commands`,
+`max_changed_files`, identity and trailers apply to every commit the loop
+pushes, and its `requester_id` is who those commits are requested by.
+Planning needs `[planning]` with `[roles.planner]`. Without `[review.loop]`
+reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
 `reviews` check. A configuration from before #309 that still has lanes or
 a fact-check is refused; see "Migrating from lanes" below. `effort` on an
 Anthropic model sets how much it thinks; it needs a `max_tokens` of 16384
 or so and a longer `timeout_secs`.
 
-Skills give the planner the team's own instructions for one kind of work,
+Skills give a role the team's own instructions for one kind of work,
 such as splitting a migration into steps. Each skill is a folder with a
 `SKILL.md` in the Agent Skills format: front matter with a `name` (the
 folder's name) and a one-line `description`, then Markdown. `[skills].dir`
-names the folder that holds them, and `skills = [...]` on `[planning]` says
-which it gets; the review loop takes none. The planner sees the names and
+names the folder that holds them, and `skills = [...]` on a `[roles.*]`
+section says which that role gets. A role sees the names and
 descriptions of its skills and loads one with `load_skill`; a prompt
 without skills is unchanged. Only `SKILL.md` is read, never scripts or
 other files, and the text follows the style rules (no emoji, no em-dash).
@@ -199,7 +212,7 @@ what it confirmed was posted on the pull request as comments. Lanes and
 the fact-check are gone. A configuration that still has `[review].lanes`,
 `[review].lane_timeout_secs`, `[review].lane_max_turns` or
 `[review.fact_check]` fails `henk config check` with `<key> was removed: a
-review is now the reviewer↔fixer loop`. Before:
+review is now the reviewer↔executor loop`. Before:
 
 ```toml
 [review]
@@ -225,27 +238,28 @@ After:
 max_concurrent = 3
 
 [review.loop]
-reviewer = "opus"
-fixer = "claude"
-round_timeout_secs = 900   # was lane_timeout_secs
-round_max_turns = 40       # was lane_max_turns
 # max_rounds = 50, run_timeout_secs = 3600
 
-[address]
+[roles.reviewer]
+model = "opus"
+timeout_secs = 900   # was lane_timeout_secs
+max_turns = 40       # was lane_max_turns
+
+[roles.executor]
 model = "claude"
 requester_id = 523456789012345678
 check_commands = [["cargo", "test", "--offline"]]
 ```
 
-- `lanes` becomes `reviewer` and `fixer`: one model reviews, one checks
-  and fixes; they may be the same model.
-- `lane_timeout_secs` becomes `round_timeout_secs` and `lane_max_turns`
-  becomes `round_max_turns`, now per session per round. Their defaults are
-  the old ones, 600 and 40.
+- `lanes` becomes `[roles.reviewer]` and `[roles.executor]`: one model
+  reviews, one checks and fixes; they may be the same model.
+- `lane_timeout_secs` becomes `timeout_secs` and `lane_max_turns` becomes
+  `max_turns` on each role, now per round. Their defaults are the old
+  ones, 600 and 40.
 - `[review.fact_check]` goes with nothing in its place: the fixer checks
   each finding against the code and rejects what does not hold. Skills on
-  a lane or the fact-check go too; only `[planning]` takes skills.
-- `[address]` is required, since the loop pushes like an address run: on
+  a lane or the fact-check go too; a role takes skills of its own.
+- `[roles.executor]` is required, since the loop pushes: on
   GitHub the App needs `Contents: write`, on GitLab Henk needs
   `[gitlab].token_env`. Its `check_commands` decide whether a round's fixes
   are pushed.
@@ -257,6 +271,84 @@ check_commands = [["cargo", "test", "--offline"]]
 Runs from before #309 stay readable: the run page and `henk runs show`
 still show their lanes, drafts, the fact-check's verdicts and the findings
 they posted. Markers on comments Henk already posted are still recognised.
+
+### Migrating to roles
+
+Since #322 each agent is configured once, as a role. `[address]`, the
+`reviewer`, `fixer`, `round_timeout_secs` and `round_max_turns` keys of
+`[review.loop]`, and the `model`, `timeout_secs`, `max_turns` and `skills`
+keys of `[planning]` are refused by `henk config check` with `<key> was
+removed: it is <new key> now`. Before:
+
+```toml
+[review.loop]
+reviewer = "opus"
+fixer = "claude"
+round_timeout_secs = 600
+round_max_turns = 40
+
+[planning]
+model = "claude"
+timeout_secs = 1200
+max_turns = 80
+requester_id = 523456789012345678
+skills = ["issue-sizing"]
+
+[address]
+model = "claude"
+timeout_secs = 1800
+max_turns = 80
+requester_id = 523456789012345678
+check_commands = [["cargo", "test", "--offline"]]
+[address.identity]
+name = "Meneer Henk"
+email = "henk@example.com"
+```
+
+After:
+
+```toml
+[review.loop]
+
+[planning]
+requester_id = 523456789012345678
+
+[roles.reviewer]
+model = "opus"
+timeout_secs = 600
+max_turns = 40
+
+[roles.planner]
+model = "claude"
+timeout_secs = 1200
+max_turns = 80
+skills = ["issue-sizing"]
+
+[roles.executor]
+model = "claude"
+timeout_secs = 600
+max_turns = 40
+requester_id = 523456789012345678
+check_commands = [["cargo", "test", "--offline"]]
+[roles.executor.identity]
+name = "Meneer Henk"
+email = "henk@example.com"
+```
+
+- `[review.loop]` keeps `max_rounds` and `run_timeout_secs`; `reviewer`
+  becomes `[roles.reviewer].model` and `fixer` becomes
+  `[roles.executor].model`. `round_timeout_secs` and `round_max_turns`
+  become `timeout_secs` and `max_turns` on both roles, so the reviewer and
+  the executor can now have different limits.
+- `[planning]` keeps `change_budget`, `sub_issue_cap` and `requester_id`;
+  its `model`, limits and `skills` move to `[roles.planner]`.
+- `[address]` becomes `[roles.executor]`, with its `identity`, `trailers`
+  and `repositories` tables. Address runs use the executor until they are
+  removed (#327), so their defaults are now 40 turns and 600s. The
+  deprecated `check_timeout_secs` is gone: `[workspace] command_secs` is
+  the limit for every check.
+- `[review.loop]` without `[roles.reviewer]` and `[roles.executor]`, or
+  `[planning]` without `[roles.planner]`, is refused.
 
 ## Check a deployment
 
@@ -278,8 +370,8 @@ on one machine, with one review loop:
 1. Install the external servers: the `github-mcp-server` release binary
    (the version the `Dockerfile` pins; verify the release checksum) on the
    `PATH`, and Node for `npx @zereight/mcp-gitlab` if GitLab is in play.
-2. Configure `[review.loop]` and `[address]` (see "Configure"); the loop
-   pushes its fixes, so on GitHub the App needs `Contents: write`.
+2. Configure `[review.loop]`, `[roles.reviewer]` and `[roles.executor]`
+   (see "Configure"); the loop pushes its fixes, so on GitHub the App needs `Contents: write`.
 3. Export the secrets named in `henk.toml` in the shell that runs Henk:
    at least the model key and `GITHUB_APP_PRIVATE_KEY_PATH`. Nothing else
    reads them; they are never written anywhere.
@@ -360,8 +452,8 @@ cargo run -q -- llm models --model proxy                                        
 ```
 
 Another model is a name from `llm models` in `[models.<id>].model`, or a
-second `[models.*]` block named as `reviewer` or `fixer` in
-`[review.loop]`. Another repository is one more entry in
+second `[models.*]` block named as the `model` of `[roles.reviewer]` or
+`[roles.executor]`. Another repository is one more entry in
 `[allowlist].github_repositories`.
 
 ## Container image
@@ -424,7 +516,7 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 Besides the review loop, `henk address` (spec §3.5) is what changes code.
 Asked by a colleague, Henk reads every unresolved review thread of a GitHub
 pull request or GitLab merge request, fixes what the feedback is right
-about in a workspace, runs the configured `[address].check_commands` there,
+about in a workspace, runs the configured `[roles.executor].check_commands` there,
 and pushes one commit to the pull request's branch. Only a changeset leaves
 the workspace: Henk refuses it whole when a path leads into `.git` or out
 of the repository, becomes a symbolic link or a submodule, or the run
@@ -454,15 +546,15 @@ The commit ends in a trailer block, in this order: `Henk-Run` (the run),
 `Co-authored-by` and `Signed-off-by`, and Henk's `Signed-off-by` last, as
 the committer's. By default Henk signs off, so DCO checks pass, and the
 requester is credited as co-author; the requester does not sign off.
-`[address.trailers]` changes the defaults and
-`[address.repositories."owner/name"]` changes them for one repository on
+`[roles.executor.trailers]` changes the defaults and
+`[roles.executor.repositories."owner/name"]` changes them for one repository on
 the allowlist. Turning on `requester_signoff` for a repository means the
 requester certifies the Developer Certificate of Origin for a change they
 asked for but did not type: enabling it is the operator's statement that
 requesters in that repository agree to that.
 
 Henk commits as the App, `meneer-henk[bot]` with its GitHub noreply
-address, unless `[address.identity]` sets a `name` and `email`; that
+address, unless `[roles.executor.identity]` sets a `name` and `email`; that
 identity is author, committer and Henk's sign-off alike. The requester is
 credited by the `github_id` or `gitlab_id` in their `[[people]]` entry,
 for the platform of the run: Henk reads that account's current login by id

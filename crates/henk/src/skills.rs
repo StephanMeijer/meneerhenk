@@ -57,10 +57,20 @@ pub fn attach(settings: &mut Settings, config_dir: &Path) -> Result<(), ConfigEr
     };
     let dir = config_dir.join(dir);
     let catalog = load(&dir)?;
-    let listed = settings
-        .planning
-        .iter()
-        .map(|p| ("planning".to_owned(), &p.skills));
+    let roles = &settings.roles;
+    let listed = [
+        roles.planner.as_ref().map(|r| ("roles.planner", &r.skills)),
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| ("roles.reviewer", &r.skills)),
+        roles
+            .executor
+            .as_ref()
+            .map(|r| ("roles.executor", &r.skills)),
+    ]
+    .into_iter()
+    .flatten();
     for (what, names) in listed {
         if let Some(missing) = names.iter().find(|n| !catalog.skills.contains_key(*n)) {
             return Err(ConfigError::Skill(format!(
@@ -194,7 +204,7 @@ mod tests {
     #[test]
     fn an_agent_may_list_only_skills_that_exist() {
         let mut s = with_skills();
-        s.planning.as_mut().unwrap().skills = vec![name("no-such-skill")];
+        s.roles.planner.as_mut().unwrap().skills = vec![name("no-such-skill")];
         let error = attach(&mut s, Path::new(FIXTURES)).unwrap_err().to_string();
         assert!(error.contains("no-such-skill"), "{error}");
         assert!(s.skills.skills.is_empty(), "nothing is attached on failure");

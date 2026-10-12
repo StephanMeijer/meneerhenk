@@ -14,6 +14,7 @@ use henk_domain::commit::{CommitPerson, Email, IdentityError, TrailerPolicy};
 use henk_domain::discord::HenkIdentity;
 use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person};
 use henk_domain::mail::EmailAddress;
+use henk_domain::role::Role;
 use henk_domain::skill::SkillName;
 use henk_domain::workspace::{BackendKind, Limits, Profile, Toolchain, WorkspacePolicy};
 use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
@@ -53,12 +54,16 @@ pub struct Config {
     /// Review settings.
     #[serde(default)]
     pub review: ReviewConfig,
+    /// The agents Henk runs (#322): planner, reviewer and executor.
+    #[serde(default)]
+    pub roles: RolesConfig,
     /// Planning settings.
     #[serde(default)]
     pub planning: Option<PlanningConfig>,
-    /// Addressing review feedback (§3.5).
+    /// The address run's section before roles (#322), read only to refuse
+    /// it with a message that says what replaced it.
     #[serde(default)]
-    pub address: Option<AddressConfig>,
+    address: Option<toml::Value>,
     /// Where an address run's tools and checks run (§3.5).
     #[serde(default)]
     pub workspace: WorkspaceConfig,
@@ -564,23 +569,58 @@ pub struct SkillsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopConfig {
-    /// Model id from `[models]` for the reviewer.
-    pub reviewer: String,
-    /// Model id from `[models]` for the fixer.
-    pub fixer: String,
     /// Rounds at most: one round is a reviewer turn and a fixer turn.
     #[serde(default = "default_loop_max_rounds")]
     pub max_rounds: u32,
-    /// Wall-clock limit per session per round, in seconds.
-    #[serde(default = "default_round_timeout_secs")]
-    pub round_timeout_secs: u64,
-    /// Model calls per session per round.
-    #[serde(default = "default_round_max_turns")]
-    pub round_max_turns: u32,
     /// Wall-clock limit for the whole loop, in seconds (#286): no round
     /// starts after it, and a round under way gets only what is left.
     #[serde(default = "default_loop_run_timeout_secs")]
     pub run_timeout_secs: u64,
+    /// The keys that moved to the roles (#322), read only to refuse them
+    /// with a message that says where they went.
+    #[serde(default)]
+    reviewer: Option<toml::Value>,
+    /// See `reviewer`.
+    #[serde(default)]
+    fixer: Option<toml::Value>,
+    /// See `reviewer`.
+    #[serde(default)]
+    round_timeout_secs: Option<toml::Value>,
+    /// See `reviewer`.
+    #[serde(default)]
+    round_max_turns: Option<toml::Value>,
+}
+
+impl LoopConfig {
+    /// The first key that moved to the roles (#322), and where it went.
+    fn moved_key(&self) -> Option<(&'static str, &'static str)> {
+        [
+            (
+                self.reviewer.is_some(),
+                ("[review.loop].reviewer", "[roles.reviewer].model"),
+            ),
+            (
+                self.fixer.is_some(),
+                ("[review.loop].fixer", "[roles.executor].model"),
+            ),
+            (
+                self.round_timeout_secs.is_some(),
+                (
+                    "[review.loop].round_timeout_secs",
+                    "timeout_secs on [roles.reviewer] and [roles.executor]",
+                ),
+            ),
+            (
+                self.round_max_turns.is_some(),
+                (
+                    "[review.loop].round_max_turns",
+                    "max_turns on [roles.reviewer] and [roles.executor]",
+                ),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(present, keys)| present.then_some(keys))
+    }
 }
 
 fn default_loop_max_rounds() -> u32 {
@@ -591,17 +631,11 @@ fn default_loop_run_timeout_secs() -> u64 {
     3600
 }
 
-fn default_round_timeout_secs() -> u64 {
-    600
-}
 fn default_max_conversation_chars() -> usize {
     160_000
 }
 fn default_keep_recent_turns() -> u32 {
     2
-}
-fn default_round_max_turns() -> u32 {
-    40
 }
 fn default_max_concurrent() -> usize {
     3
@@ -651,14 +685,6 @@ impl Default for AgentFileConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanningConfig {
-    /// Model id from `[models]`.
-    pub model: String,
-    /// Time limit in seconds (open question 6).
-    #[serde(default = "default_plan_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Model calls.
-    #[serde(default = "default_plan_max_turns")]
-    pub max_turns: u32,
     /// Tracker changes per plan.
     #[serde(default = "default_change_budget")]
     pub change_budget: u32,
@@ -667,34 +693,156 @@ pub struct PlanningConfig {
     pub sub_issue_cap: u32,
     /// The Team Lead on whose behalf CLI and API plans run.
     pub requester_id: DiscordUserId,
-    /// The skills the planner may load.
+    /// The keys that moved to `[roles.planner]` (#322), read only to refuse
+    /// them with a message that says where they went.
     #[serde(default)]
-    pub skills: Vec<SkillName>,
+    model: Option<toml::Value>,
+    /// See `model`.
+    #[serde(default)]
+    timeout_secs: Option<toml::Value>,
+    /// See `model`.
+    #[serde(default)]
+    max_turns: Option<toml::Value>,
+    /// See `model`.
+    #[serde(default)]
+    skills: Option<toml::Value>,
 }
 
-/// Addressing review feedback (§3.5).
+impl PlanningConfig {
+    /// The first key that moved to `[roles.planner]` (#322), and where.
+    fn moved_key(&self) -> Option<(&'static str, &'static str)> {
+        [
+            (
+                self.model.is_some(),
+                ("[planning].model", "[roles.planner].model"),
+            ),
+            (
+                self.timeout_secs.is_some(),
+                ("[planning].timeout_secs", "[roles.planner].timeout_secs"),
+            ),
+            (
+                self.max_turns.is_some(),
+                ("[planning].max_turns", "[roles.planner].max_turns"),
+            ),
+            (
+                self.skills.is_some(),
+                ("[planning].skills", "[roles.planner].skills"),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(present, keys)| present.then_some(keys))
+    }
+}
+
+/// The agents Henk runs (#322), one section each. The review loop needs
+/// the reviewer and the executor; planning needs the planner.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolesConfig {
+    /// `[roles.planner]`.
+    #[serde(default)]
+    pub planner: Option<RoleConfig>,
+    /// `[roles.reviewer]`.
+    #[serde(default)]
+    pub reviewer: Option<RoleConfig>,
+    /// `[roles.executor]`: the agent that changes the code and pushes.
+    #[serde(default)]
+    pub executor: Option<ExecutorConfig>,
+}
+
+/// One role's agent: its model, tools, skills and limits.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AddressConfig {
+pub struct RoleConfig {
     /// Model id from `[models]`.
     pub model: String,
-    /// Time limit in seconds.
-    #[serde(default = "default_address_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Model calls.
-    #[serde(default = "default_plan_max_turns")]
+    /// The tools it gets, within its ceiling (#171). Absent: the role's
+    /// defaults.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// The skills it may load.
+    #[serde(default)]
+    pub skills: Vec<SkillName>,
+    /// Model calls per turn: a planner's run, or a reviewer's round. Absent:
+    /// 80 for the planner, 40 for the reviewer.
+    #[serde(default)]
+    max_turns: Option<u32>,
+    /// Wall-clock limit per turn, in seconds. Absent: 1200 for the planner,
+    /// 600 for the reviewer.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+impl RoleConfig {
+    /// Model calls per turn for `role`.
+    #[must_use]
+    pub fn max_turns(&self, role: Role) -> u32 {
+        self.max_turns.unwrap_or(match role {
+            Role::Planner => 80,
+            Role::Reviewer | Role::Executor => default_role_max_turns(),
+        })
+    }
+
+    /// Wall-clock limit per turn for `role`, in seconds.
+    #[must_use]
+    pub fn timeout_secs(&self, role: Role) -> u64 {
+        self.timeout_secs.unwrap_or(match role {
+            Role::Planner => 1200,
+            Role::Reviewer | Role::Executor => default_role_timeout_secs(),
+        })
+    }
+
+    /// The tools `role` gets: the configured list, checked when the
+    /// configuration was loaded, or the role's defaults.
+    #[must_use]
+    pub fn tools(&self, role: Role) -> Vec<String> {
+        granted(role, self.tools.as_deref())
+    }
+}
+
+/// The tools a role gets from its configured list; the defaults for a
+/// list the load would have refused.
+fn granted(role: Role, configured: Option<&[String]>) -> Vec<String> {
+    role.narrow(configured)
+        .unwrap_or_else(|_| role.default_tools())
+}
+
+fn default_role_max_turns() -> u32 {
+    40
+}
+fn default_role_timeout_secs() -> u64 {
+    600
+}
+
+/// The executor (#322): the agent that changes the code, and how what it
+/// changes becomes a commit and a push. Address runs use it too until they
+/// are removed (#327).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutorConfig {
+    /// Model id from `[models]`.
+    pub model: String,
+    /// The tools it gets, within its ceiling (#171). Absent: the
+    /// executor's defaults.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// The skills it may load.
+    #[serde(default)]
+    pub skills: Vec<SkillName>,
+    /// Model calls per turn.
+    #[serde(default = "default_role_max_turns")]
     pub max_turns: u32,
-    /// Files one run may change.
+    /// Wall-clock limit per turn, in seconds.
+    #[serde(default = "default_role_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Files one push may change.
     #[serde(default = "default_max_changed_files")]
     pub max_changed_files: usize,
     /// The project's checks, each an argument list such as
-    /// `["cargo", "test"]`, run in the workspace with an empty environment.
+    /// `["cargo", "test"]`, run in the workspace with an empty environment
+    /// and `[workspace] command_secs` each.
     #[serde(default)]
     pub check_commands: Vec<Vec<String>>,
-    /// Deprecated: the time limit per check in seconds. Use
-    /// `[workspace] command_secs`, which this overrides when set.
-    #[serde(default)]
-    pub check_timeout_secs: Option<u64>,
     /// The Team Lead on whose behalf CLI and API runs push.
     pub requester_id: DiscordUserId,
     /// Who Henk commits as, author and committer alike. Absent: the App's
@@ -725,8 +873,8 @@ impl CommitIdentityConfig {
     }
 }
 
-/// Which trailers an address-run commit carries. A switch left out keeps
-/// the default, or for a repository the `[address.trailers]` value.
+/// Which trailers a commit of Henk's carries. A switch left out keeps the
+/// default, or for a repository the `[roles.executor.trailers]` value.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrailerConfig {
@@ -749,9 +897,16 @@ impl TrailerConfig {
     }
 }
 
-impl AddressConfig {
+impl ExecutorConfig {
+    /// The tools the executor gets: the configured list, checked when the
+    /// configuration was loaded, or its defaults.
+    #[must_use]
+    pub fn tools(&self) -> Vec<String> {
+        granted(Role::Executor, self.tools.as_deref())
+    }
+
     /// The trailers for a commit to `repo`: its override, over
-    /// `[address.trailers]`, over the defaults.
+    /// `[roles.executor.trailers]`, over the defaults.
     #[must_use]
     pub fn trailer_policy(&self, repo: &RepoRef) -> TrailerPolicy {
         let base = self.trailers.over(TrailerPolicy::default());
@@ -781,9 +936,6 @@ impl AddressConfig {
     }
 }
 
-fn default_address_timeout_secs() -> u64 {
-    30 * 60
-}
 fn default_max_changed_files() -> usize {
     20
 }
@@ -1079,13 +1231,10 @@ impl WorkspaceConfig {
     /// The policy, the sandbox host and the cluster, checked together: a
     /// profile on the ssh backend needs `[workspace.ssh]`, one on the
     /// kubernetes backend `[workspace.kubernetes]`.
-    fn into_parts(
-        mut self,
-        check_timeout_secs: Option<u64>,
-    ) -> Result<WorkspaceParts, ConfigError> {
+    fn into_parts(mut self) -> Result<WorkspaceParts, ConfigError> {
         let ssh = self.ssh.take();
         let kubernetes = self.kubernetes.take();
-        let policy = self.into_policy(check_timeout_secs)?;
+        let policy = self.into_policy()?;
         SshConfig::check(ssh.as_ref(), &policy)?;
         KubernetesConfig::check(kubernetes.as_ref(), &policy)?;
         Ok(WorkspaceParts {
@@ -1095,12 +1244,12 @@ impl WorkspaceConfig {
         })
     }
 
-    fn into_policy(self, check_timeout_secs: Option<u64>) -> Result<WorkspacePolicy, ConfigError> {
+    fn into_policy(self) -> Result<WorkspacePolicy, ConfigError> {
         let default = Profile {
             backend: self.backend,
             image: self.image,
             limits: Limits {
-                command_secs: check_timeout_secs.unwrap_or(self.command_secs),
+                command_secs: self.command_secs,
                 run_secs: self.run_secs,
                 output_bytes: self.output_bytes,
                 memory_mib: self.memory_mib,
@@ -1148,12 +1297,6 @@ impl WorkspaceConfig {
     }
 }
 
-fn default_plan_timeout_secs() -> u64 {
-    20 * 60
-}
-fn default_plan_max_turns() -> u32 {
-    80
-}
 fn default_change_budget() -> u32 {
     20
 }
@@ -1268,7 +1411,7 @@ pub enum ConfigError {
     Review(String),
     /// The address setting is unusable.
     #[error("{0}")]
-    Address(String),
+    Role(String),
     /// The dashboard setting is unusable.
     #[error("{0}")]
     Dashboard(String),
@@ -1318,19 +1461,16 @@ pub struct Settings {
     pub models: BTreeMap<String, ModelFileConfig>,
     /// Reviews: the loop, its limits and what it leaves out.
     pub review: ReviewConfig,
+    /// The agents Henk runs (#322).
+    pub roles: RolesConfig,
     /// Planning.
     pub planning: Option<PlanningConfig>,
-    /// Addressing review feedback.
-    pub address: Option<AddressConfig>,
     /// Where an address run's tools and checks run, per repository.
     pub workspace: WorkspacePolicy,
     /// The sandbox host of the `ssh` backend, when configured.
     pub workspace_ssh: Option<SshConfig>,
     /// The `kubernetes` backend's cluster settings, when configured.
     pub workspace_kubernetes: Option<KubernetesConfig>,
-    /// True when the command limit came from the deprecated
-    /// `address.check_timeout_secs`.
-    pub legacy_check_timeout: bool,
     /// What commit trailers credit each known person with, by Discord id.
     pub committers: BTreeMap<DiscordUserId, Committer>,
     /// MCP servers by alias.
@@ -1375,33 +1515,33 @@ impl Config {
         }
 
         validate_models(&self.models)?;
-        validate_review(&self.review, &self.models, self.address.is_some())?;
+        if self.address.is_some() {
+            return Err(moved("[address]", "[roles.executor]"));
+        }
+        validate_roles(
+            &self.roles,
+            &self.models,
+            &self.discord.team_lead_ids,
+            &allowlist,
+        )?;
+        validate_review(&self.review, &self.roles)?;
         if let Some(planning) = &self.planning {
-            validate_planning(planning, &self.models, &self.discord.team_lead_ids)?;
+            validate_planning(planning, &self.roles, &self.discord.team_lead_ids)?;
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
-        if let Some(address) = &self.address {
-            validate_address(
-                address,
-                &self.models,
-                &self.discord.team_lead_ids,
-                &allowlist,
-            )?;
-        }
         let skills_dir = self.skills.map(|s| s.dir);
-        validate_skill_references(skills_dir.as_deref(), self.planning.as_ref())?;
+        validate_skill_references(skills_dir.as_deref(), &self.roles)?;
         let committers = self
             .people
             .iter()
             .map(|person| Ok((person.discord_id, person.committer()?)))
             .collect::<Result<BTreeMap<_, _>, ConfigError>>()?;
         let legacy_database_path = self.server.database_path.is_some();
-        let check_timeout_secs = self.address.as_ref().and_then(|a| a.check_timeout_secs);
         let WorkspaceParts {
             policy: workspace,
             ssh: workspace_ssh,
             kubernetes: workspace_kubernetes,
-        } = self.workspace.into_parts(check_timeout_secs)?;
+        } = self.workspace.into_parts()?;
         let database = resolve_database(self.database, self.server.database_path.clone())?;
         validate_ways_in(self.dashboard.as_ref(), self.mcp_server.as_ref())?;
         if !(1..=3650).contains(&self.server.keep_events_days) {
@@ -1442,12 +1582,11 @@ impl Config {
             gitlab: self.gitlab,
             models: self.models,
             review: self.review,
+            roles: self.roles,
             planning: self.planning,
-            address: self.address,
             workspace,
             workspace_ssh,
             workspace_kubernetes,
-            legacy_check_timeout: check_timeout_secs.is_some(),
             committers,
             mcp: self.mcp,
             skills_dir,
@@ -1486,54 +1625,109 @@ fn resolve_database(
     Ok(database)
 }
 
-fn validate_address(
-    address: &AddressConfig,
+/// A key that moved (#322), refused with where it went.
+fn moved(old: &str, new: &str) -> ConfigError {
+    ConfigError::Role(format!(
+        "{old} was removed: it is {new} now. Roles are configured in [roles.planner], [roles.reviewer] and [roles.executor]; the README's \"Migrating to roles\" says how"
+    ))
+}
+
+/// Each configured role: its model exists, its tools are within its
+/// ceiling (#171) and its limits are above zero; the executor's push
+/// settings hold.
+fn validate_roles(
+    roles: &RolesConfig,
     models: &BTreeMap<String, ModelFileConfig>,
     team_leads: &[DiscordUserId],
     allowlist: &Allowlist,
 ) -> Result<(), ConfigError> {
-    if !models.contains_key(&address.model) {
-        return Err(ConfigError::UnknownModel {
-            what: "address".to_owned(),
-            model: address.model.clone(),
-        });
+    let agents = [
+        roles.planner.as_ref().map(|r| {
+            (
+                Role::Planner,
+                &r.model,
+                r.tools.as_deref(),
+                r.max_turns(Role::Planner),
+                r.timeout_secs(Role::Planner),
+            )
+        }),
+        roles.reviewer.as_ref().map(|r| {
+            (
+                Role::Reviewer,
+                &r.model,
+                r.tools.as_deref(),
+                r.max_turns(Role::Reviewer),
+                r.timeout_secs(Role::Reviewer),
+            )
+        }),
+        roles.executor.as_ref().map(|r| {
+            (
+                Role::Executor,
+                &r.model,
+                r.tools.as_deref(),
+                r.max_turns,
+                r.timeout_secs,
+            )
+        }),
+    ];
+    for (role, model, tools, max_turns, timeout_secs) in agents.into_iter().flatten() {
+        if !models.contains_key(model) {
+            return Err(ConfigError::UnknownModel {
+                what: format!("roles.{role}"),
+                model: model.clone(),
+            });
+        }
+        role.narrow(tools)
+            .map_err(|e| ConfigError::Role(e.to_string()))?;
+        if max_turns == 0 || timeout_secs == 0 {
+            return Err(ConfigError::Role(format!(
+                "roles.{role}: max_turns and timeout_secs must be above zero"
+            )));
+        }
     }
-    if !team_leads.contains(&address.requester_id) {
-        return Err(ConfigError::Address(format!(
-            "address.requester_id {} is not in discord.team_lead_ids",
-            address.requester_id
+    if let Some(executor) = &roles.executor {
+        validate_executor(executor, team_leads, allowlist)?;
+    }
+    Ok(())
+}
+
+fn validate_executor(
+    executor: &ExecutorConfig,
+    team_leads: &[DiscordUserId],
+    allowlist: &Allowlist,
+) -> Result<(), ConfigError> {
+    if !team_leads.contains(&executor.requester_id) {
+        return Err(ConfigError::Role(format!(
+            "roles.executor.requester_id {} is not in discord.team_lead_ids",
+            executor.requester_id
         )));
     }
-    if address.max_changed_files == 0
-        || address.timeout_secs == 0
-        || address.max_turns == 0
-        || address.check_timeout_secs == Some(0)
-    {
-        return Err(ConfigError::Address(
-            "address limits must be above zero".to_owned(),
+    if executor.max_changed_files == 0 {
+        return Err(ConfigError::Role(
+            "roles.executor.max_changed_files must be above zero".to_owned(),
         ));
     }
-    if address
+    if executor
         .check_commands
         .iter()
         .any(|argv| argv.first().is_none_or(|program| program.trim().is_empty()))
     {
-        return Err(ConfigError::Address(
-            "address.check_commands has an empty command".to_owned(),
+        return Err(ConfigError::Role(
+            "roles.executor.check_commands has an empty command".to_owned(),
         ));
     }
-    address
+    executor
         .henk_identity()
-        .map_err(|e| ConfigError::Address(format!("address.identity: {e}")))?;
-    for key in address.repositories.keys() {
+        .map_err(|e| ConfigError::Role(format!("roles.executor.identity: {e}")))?;
+    for key in executor.repositories.keys() {
         let allowed = [Platform::GitHub, Platform::GitLab]
             .into_iter()
             .any(|platform| {
                 RepoRef::parse(platform, key).is_ok_and(|repo| allowlist.allows(&repo))
             });
         if !allowed {
-            return Err(ConfigError::Address(format!(
-                "address.repositories.{key:?} is not an owner/name repository on the allowlist"
+            return Err(ConfigError::Role(format!(
+                "roles.executor.repositories.{key:?} is not an owner/name repository on the allowlist"
             )));
         }
     }
@@ -1614,14 +1808,16 @@ fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), Con
 /// The planner's model exists and its requester is a Team Lead.
 fn validate_planning(
     planning: &PlanningConfig,
-    models: &BTreeMap<String, ModelFileConfig>,
+    roles: &RolesConfig,
     team_lead_ids: &[DiscordUserId],
 ) -> Result<(), ConfigError> {
-    if !models.contains_key(&planning.model) {
-        return Err(ConfigError::UnknownModel {
-            what: "planning".to_owned(),
-            model: planning.model.clone(),
-        });
+    if let Some((old, new)) = planning.moved_key() {
+        return Err(moved(old, new));
+    }
+    if roles.planner.is_none() {
+        return Err(ConfigError::Role(
+            "[planning] needs [roles.planner]".to_owned(),
+        ));
     }
     if !team_lead_ids.contains(&planning.requester_id) {
         return Err(ConfigError::PlanningRequester(planning.requester_id));
@@ -1631,14 +1827,10 @@ fn validate_planning(
 
 /// The review's own settings: no key of the lanes or the fact-check
 /// (#309), its ignore patterns and its loop.
-fn validate_review(
-    review: &ReviewConfig,
-    models: &BTreeMap<String, ModelFileConfig>,
-    address: bool,
-) -> Result<(), ConfigError> {
+fn validate_review(review: &ReviewConfig, roles: &RolesConfig) -> Result<(), ConfigError> {
     if let Some(key) = review.removed_key() {
         return Err(ConfigError::Review(format!(
-            "{key} was removed: a review is now the reviewer↔fixer loop. Configure [review.loop] and [address] instead; the README's \"Migrating from lanes\" says how"
+            "{key} was removed: a review is now the reviewer↔executor loop. Configure [review.loop], [roles.reviewer] and [roles.executor] instead; the README's \"Migrating from lanes\" says how"
         )));
     }
     if review.ignore.iter().any(|p| p.trim().is_empty()) {
@@ -1646,35 +1838,28 @@ fn validate_review(
             "review.ignore has an empty pattern".to_owned(),
         ));
     }
-    validate_loop(review.r#loop.as_ref(), models, address)
+    validate_loop(review.r#loop.as_ref(), roles)
 }
 
-/// The loop's models must exist, and it pushes the way an address run
-/// does, so it needs `[address]` for the checks, identity and trailers.
-fn validate_loop(
-    review_loop: Option<&LoopConfig>,
-    models: &BTreeMap<String, ModelFileConfig>,
-    address: bool,
-) -> Result<(), ConfigError> {
+/// The loop pairs the reviewer with the executor, so it needs both roles.
+fn validate_loop(review_loop: Option<&LoopConfig>, roles: &RolesConfig) -> Result<(), ConfigError> {
     let Some(review_loop) = review_loop else {
         return Ok(());
     };
-    for model in [&review_loop.reviewer, &review_loop.fixer] {
-        if !models.contains_key(model) {
-            return Err(ConfigError::UnknownModel {
-                what: "review.loop".to_owned(),
-                model: model.clone(),
-            });
+    if let Some((old, new)) = review_loop.moved_key() {
+        return Err(moved(old, new));
+    }
+    for (missing, role) in [
+        (roles.reviewer.is_none(), "[roles.reviewer]"),
+        (roles.executor.is_none(), "[roles.executor]"),
+    ] {
+        if missing {
+            return Err(ConfigError::Role(format!("[review.loop] needs {role}")));
         }
     }
     if review_loop.max_rounds == 0 {
         return Err(ConfigError::Review(
             "review.loop.max_rounds must be at least 1".to_owned(),
-        ));
-    }
-    if !address {
-        return Err(ConfigError::Review(
-            "review.loop pushes like an address run and needs [address]".to_owned(),
         ));
     }
     Ok(())
@@ -1691,20 +1876,26 @@ fn skills_note(skills: &[SkillName]) -> String {
 
 /// Skills may be listed only with a `[skills]` folder to load them from.
 /// Whether each listed skill exists is checked when they are loaded.
-fn validate_skill_references(
-    dir: Option<&str>,
-    planning: Option<&PlanningConfig>,
-) -> Result<(), ConfigError> {
+fn validate_skill_references(dir: Option<&str>, roles: &RolesConfig) -> Result<(), ConfigError> {
     if dir.is_some_and(|d| d.trim().is_empty()) {
         return Err(ConfigError::Skill("skills.dir is empty".to_owned()));
     }
     if dir.is_some() {
         return Ok(());
     }
-    if planning.is_some_and(|p| !p.skills.is_empty()) {
-        return Err(ConfigError::Skill(
-            "planning lists skills, but there is no [skills] section to load them from".to_owned(),
-        ));
+    let listing = [
+        roles.planner.as_ref().map(|r| ("planner", &r.skills)),
+        roles.reviewer.as_ref().map(|r| ("reviewer", &r.skills)),
+        roles.executor.as_ref().map(|r| ("executor", &r.skills)),
+    ];
+    if let Some((role, _)) = listing
+        .into_iter()
+        .flatten()
+        .find(|(_, skills)| !skills.is_empty())
+    {
+        return Err(ConfigError::Skill(format!(
+            "roles.{role} lists skills, but there is no [skills] section to load them from"
+        )));
     }
     Ok(())
 }
@@ -1831,7 +2022,7 @@ impl Settings {
                 reasons.push(format!("the planner's copy (profile {name})"));
             }
         }
-        if self.address.is_some() {
+        if self.roles.executor.is_some() {
             reasons.push("address runs".to_owned());
         }
         reasons
@@ -1939,11 +2130,6 @@ impl Settings {
                     let _ = write!(out, ", {what} {value}{unit}");
                 }
             }
-            if name == "default" && self.legacy_check_timeout {
-                out.push_str(
-                    " (address.check_timeout_secs is deprecated; use [workspace] command_secs)",
-                );
-            }
             let users: Vec<&str> = self
                 .workspace
                 .repositories
@@ -2001,17 +2187,14 @@ impl Settings {
         }
     }
 
-    /// The review loop, planning, address runs and the skills.
+    /// The roles, the stages that use them, and the skills.
     fn describe_agents(&self, out: &mut String) {
+        self.describe_roles(out);
         if let Some(review_loop) = &self.review.r#loop {
             let _ = writeln!(
                 out,
-                "Review loop:     reviewer {}, fixer {}; up to {} rounds, {}s a round, {}s in all",
-                review_loop.reviewer,
-                review_loop.fixer,
-                review_loop.max_rounds,
-                review_loop.round_timeout_secs,
-                review_loop.run_timeout_secs
+                "Review loop:     reviewer and executor; up to {} rounds, {}s in all",
+                review_loop.max_rounds, review_loop.run_timeout_secs
             );
         } else {
             let _ = writeln!(out, "Reviews:         off (no [review.loop])");
@@ -2019,36 +2202,72 @@ impl Settings {
         if let Some(planning) = &self.planning {
             let _ = writeln!(
                 out,
-                "Planning:        model {} for Team Lead {}; {}s, {} turns, {} changes, {} sub-issues",
-                planning.model,
-                planning.requester_id,
-                planning.timeout_secs,
-                planning.max_turns,
-                planning.change_budget,
-                planning.sub_issue_cap
+                "Planning:        planner for Team Lead {}; {} changes, {} sub-issues",
+                planning.requester_id, planning.change_budget, planning.sub_issue_cap
             );
-            if !planning.skills.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "                 {}",
-                    skills_note(&planning.skills).trim_start_matches("; ")
-                );
-            }
         }
-        if let Some(address) = &self.address {
+        if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
                 out,
-                "Address runs:    model {} for Team Lead {}; {}s, {} turns, {} files, {} checks",
-                address.model,
-                address.requester_id,
-                address.timeout_secs,
-                address.max_turns,
-                address.max_changed_files,
-                address.check_commands.len()
+                "Pushes:          for Team Lead {}; {} files, {} checks; address runs use the executor until #327",
+                executor.requester_id,
+                executor.max_changed_files,
+                executor.check_commands.len()
             );
-            self.describe_commits(address, out);
+            self.describe_commits(executor, out);
         }
         self.describe_skills(out);
+    }
+
+    /// One line per configured role: its model, limits, tools when they
+    /// differ from the defaults, skills, and whether it reaches the web.
+    fn describe_roles(&self, out: &mut String) {
+        let roles = [
+            self.roles.planner.as_ref().map(|r| {
+                (
+                    Role::Planner,
+                    &r.model,
+                    r.max_turns(Role::Planner),
+                    r.timeout_secs(Role::Planner),
+                    r.tools(Role::Planner),
+                    &r.skills,
+                )
+            }),
+            self.roles.reviewer.as_ref().map(|r| {
+                (
+                    Role::Reviewer,
+                    &r.model,
+                    r.max_turns(Role::Reviewer),
+                    r.timeout_secs(Role::Reviewer),
+                    r.tools(Role::Reviewer),
+                    &r.skills,
+                )
+            }),
+            self.roles.executor.as_ref().map(|r| {
+                (
+                    Role::Executor,
+                    &r.model,
+                    r.max_turns,
+                    r.timeout_secs,
+                    r.tools(),
+                    &r.skills,
+                )
+            }),
+        ];
+        for (role, model, turns, secs, tools, skills) in roles.into_iter().flatten() {
+            let mut line = format!(
+                "{:<17}model {model}; {turns} turns, {secs}s a turn",
+                format!("Role {role}:")
+            );
+            if tools != role.default_tools() {
+                let _ = write!(line, "; tools: {}", tools.join(", "));
+            }
+            line.push_str(&skills_note(skills));
+            if Role::reaches_web(&tools) {
+                line.push_str("; reaches the web");
+            }
+            let _ = writeln!(out, "{line}");
+        }
     }
 
     fn describe_skills(&self, out: &mut String) {
@@ -2076,7 +2295,7 @@ impl Settings {
     /// Henk's commit identity and trailers, for [`Self::describe`], with a
     /// warning when a requester trailer is on but the requester has no
     /// account to credit.
-    fn describe_commits(&self, address: &AddressConfig, out: &mut String) {
+    fn describe_commits(&self, address: &ExecutorConfig, out: &mut String) {
         let identity = match address.henk_identity() {
             Ok(Some(person)) => person.to_string(),
             Ok(None) => "the GitHub App's noreply address".to_owned(),
@@ -2270,22 +2489,25 @@ github_owners = ["docspec"]
         let settings = Config::parse(EXAMPLE)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        let review_loop = settings.review.r#loop.as_ref().unwrap();
+        assert!(settings.review.r#loop.is_some());
+        let roles = &settings.roles;
         assert_eq!(
-            (review_loop.reviewer.as_str(), review_loop.fixer.as_str()),
-            ("opus", "claude")
-        );
-        assert!(
-            settings.address.is_some(),
-            "the loop pushes like an address run"
+            (
+                roles.reviewer.as_ref().unwrap().model.as_str(),
+                roles.executor.as_ref().unwrap().model.as_str(),
+                roles.planner.as_ref().unwrap().model.as_str(),
+            ),
+            ("opus", "claude", "claude")
         );
         let described = settings.describe();
-        assert!(
-            described.contains(
-                "Review loop:     reviewer opus, fixer claude; up to 50 rounds, 600s a round, 3600s in all"
-            ),
-            "{described}"
-        );
+        for line in [
+            "Review loop:     reviewer and executor; up to 50 rounds, 3600s in all",
+            "Role planner:    model claude; 80 turns, 1200s a turn; reaches the web",
+            "Role reviewer:   model opus; 40 turns, 600s a turn\n",
+            "Role executor:   model claude; 40 turns, 600s a turn\n",
+        ] {
+            assert!(described.contains(line), "{line}\n{described}");
+        }
         assert!(!described.contains("Review lanes:"), "{described}");
         assert!(settings.github.is_some());
         assert!(settings.gitlab.is_some());
@@ -2478,7 +2700,7 @@ github_owners = ["docspec"]
         );
 
         let address = Config::parse(&format!(
-            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n"
+            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
         ))
         .and_then(Config::into_settings)
         .unwrap();
@@ -2486,7 +2708,7 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn address_runs_are_configured_and_checked() {
+    fn the_executor_is_configured_and_checked() {
         let with_model = format!(
             "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
         );
@@ -2494,42 +2716,55 @@ github_owners = ["docspec"]
             Config::parse(&format!("{with_model}{extra}")).and_then(Config::into_settings)
         };
         let settings = parse(
-            "[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[\"cargo\", \"test\"]]\n",
+            "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[\"cargo\", \"test\"]]\n",
         )
         .unwrap();
-        let address = settings.address.as_ref().unwrap();
-        assert_eq!(address.timeout_secs, 1800);
-        assert_eq!(address.max_changed_files, 20);
-        assert_eq!(address.check_commands, [["cargo", "test"]]);
-        assert!(settings.describe().contains("Address runs:    model m"));
+        let executor = settings.roles.executor.as_ref().unwrap();
+        assert_eq!((executor.max_turns, executor.timeout_secs), (40, 600));
+        assert_eq!(executor.max_changed_files, 20);
+        assert_eq!(executor.check_commands, [["cargo", "test"]]);
+        assert_eq!(executor.tools(), Role::Executor.default_tools());
+        assert!(
+            settings
+                .describe()
+                .contains("Role executor:   model m; 40 turns, 600s a turn")
+        );
 
         for (bad, why) in [
             (
-                "[address]\nmodel = \"nope\"\nrequester_id = 3\n",
+                "[roles.executor]\nmodel = \"nope\"\nrequester_id = 3\n",
                 "unknown model",
             ),
             (
-                "[address]\nmodel = \"m\"\nrequester_id = 99\n",
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 99\n",
                 "not a Team Lead",
             ),
             (
-                "[address]\nmodel = \"m\"\nrequester_id = 3\nmax_changed_files = 0\n",
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\nmax_changed_files = 0\n",
                 "zero limit",
             ),
             (
-                "[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[]]\n",
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_commands = [[]]\n",
                 "empty command",
             ),
             (
-                "[address]\nmodel = \"m\"\nrequester_id = 3\npush_force = true\n",
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\npush_force = true\n",
                 "unknown field",
+            ),
+            (
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\nmax_turns = 0\n",
+                "zero turns",
+            ),
+            (
+                "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ncheck_timeout_secs = 60\n",
+                "the old check limit",
             ),
         ] {
             assert!(parse(bad).is_err(), "{why}");
         }
     }
 
-    /// The example with every commented setting after `[address]` switched
+    /// The example with every commented setting after `[roles.executor]` switched
     /// on: its identity, trailers and repositories, and the commented fields
     /// of `[[people]]`.
     fn example_with_address() -> String {
@@ -2537,7 +2772,7 @@ github_owners = ["docspec"]
         EXAMPLE
             .lines()
             .map(|line| {
-                in_address |= line == "[address]";
+                in_address |= line == "[roles.executor]";
                 let setting = line.strip_prefix("# ").filter(|rest| {
                     let header = rest.starts_with('[') && rest.trim_end().ends_with(']');
                     header || rest.contains(" = ")
@@ -2556,7 +2791,7 @@ github_owners = ["docspec"]
         let settings = Config::parse(&example_with_address())
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        let address = settings.address.as_ref().unwrap();
+        let address = settings.roles.executor.as_ref().unwrap();
         let henk = address.henk_identity().unwrap().unwrap();
         assert_eq!(henk.to_string(), "Meneer Henk <henk@example.com>");
         let scratch = RepoRef::parse(Platform::GitHub, "StephanMeijer/scratch-repo").unwrap();
@@ -2579,7 +2814,7 @@ github_owners = ["docspec"]
         assert!(!described.contains("no requester trailers"), "{described}");
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[address]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     fn address(person: &str, extra: &str) -> Result<Settings, ConfigError> {
         let text = format!("{MINIMAL}{}{extra}", ADDRESS.replace("PERSON", person));
@@ -2587,44 +2822,174 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn the_loop_names_known_models_and_needs_address() {
-        let settings = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\n").unwrap();
+    fn the_loop_needs_the_reviewer_and_the_executor() {
+        let reviewer = "[roles.reviewer]\nmodel = \"m\"\n";
+        let settings = address("", &format!("[review.loop]\n{reviewer}")).unwrap();
         let review_loop = settings.review.r#loop.as_ref().unwrap();
         assert_eq!(
-            (
-                review_loop.max_rounds,
-                review_loop.round_max_turns,
-                review_loop.run_timeout_secs
-            ),
-            (50, 40, 3600)
+            (review_loop.max_rounds, review_loop.run_timeout_secs),
+            (50, 3600)
         );
-        let unknown = address("", "[review.loop]\nreviewer = \"m\"\nfixer = \"x\"\n").unwrap_err();
+        let role = settings.roles.reviewer.as_ref().unwrap();
+        assert_eq!(
+            (
+                role.max_turns(Role::Reviewer),
+                role.timeout_secs(Role::Reviewer)
+            ),
+            (40, 600)
+        );
+        let unknown = address("", "[review.loop]\n[roles.reviewer]\nmodel = \"x\"\n").unwrap_err();
         assert!(
-            matches!(&unknown, ConfigError::UnknownModel { what, model } if what == "review.loop" && model == "x"),
+            matches!(&unknown, ConfigError::UnknownModel { what, model } if what == "roles.reviewer" && model == "x"),
             "{unknown}"
         );
-        let none = address(
-            "",
-            "[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\nmax_rounds = 0\n",
-        )
-        .unwrap_err();
+        let none = address("", &format!("[review.loop]\nmax_rounds = 0\n{reviewer}")).unwrap_err();
         assert!(matches!(none, ConfigError::Review(_)), "{none}");
+        let no_reviewer = address("", "[review.loop]\n").unwrap_err();
+        assert_eq!(
+            no_reviewer.to_string(),
+            "[review.loop] needs [roles.reviewer]"
+        );
         let models = ADDRESS.split("[[people]]").next().unwrap();
-        let text = format!("{MINIMAL}{models}[review.loop]\nreviewer = \"m\"\nfixer = \"m\"\n");
+        let text = format!("{MINIMAL}{models}[review.loop]\n{reviewer}");
         let alone = Config::parse(&text)
             .and_then(Config::into_settings)
             .unwrap_err();
-        assert!(alone.to_string().contains("needs [address]"), "{alone}");
+        assert_eq!(alone.to_string(), "[review.loop] needs [roles.executor]");
+    }
+
+    #[test]
+    fn a_role_may_only_narrow_its_tools() {
+        let reviewer = |tools: &str| {
+            address(
+                "",
+                &format!("[roles.reviewer]\nmodel = \"m\"\ntools = {tools}\n"),
+            )
+        };
+        let narrowed = reviewer(r#"["read_file", "report_finding", "finish_round"]"#).unwrap();
+        let role = narrowed.roles.reviewer.as_ref().unwrap();
+        assert_eq!(
+            role.tools(Role::Reviewer),
+            ["read_file", "report_finding", "finish_round"]
+        );
+        assert!(
+            narrowed
+                .describe()
+                .contains("tools: read_file, report_finding, finish_round"),
+            "{}",
+            narrowed.describe()
+        );
+        let above = reviewer(r#"["edit_file"]"#).unwrap_err().to_string();
+        assert_eq!(
+            above,
+            "[roles.reviewer] tools: the reviewer may not have edit_file"
+        );
+        let unknown = reviewer(r#"["teleport"]"#).unwrap_err().to_string();
+        assert_eq!(
+            unknown,
+            "[roles.reviewer] tools: teleport is not a tool Henk has"
+        );
+        let web = reviewer(r#"["read_file", "web_fetch"]"#).unwrap();
+        assert!(web.describe().contains("reaches the web"));
+        let role = address("", "[roles.auditor]\nmodel = \"m\"\n").unwrap_err();
+        assert!(matches!(role, ConfigError::Syntax(_)), "{role}");
+    }
+
+    /// The keys that moved to the roles (#322): a file that still has one
+    /// fails with where it went.
+    #[test]
+    fn moved_keys_name_their_role() {
+        for (extra, old, new) in [
+            (
+                "[address]\nmodel = \"m\"\n",
+                "[address]",
+                "[roles.executor]",
+            ),
+            (
+                "[review.loop]\nreviewer = \"m\"\n",
+                "[review.loop].reviewer",
+                "[roles.reviewer].model",
+            ),
+            (
+                "[review.loop]\nfixer = \"m\"\n",
+                "[review.loop].fixer",
+                "[roles.executor].model",
+            ),
+            (
+                "[review.loop]\nround_timeout_secs = 600\n",
+                "[review.loop].round_timeout_secs",
+                "timeout_secs on [roles.reviewer] and [roles.executor]",
+            ),
+            (
+                "[review.loop]\nround_max_turns = 40\n",
+                "[review.loop].round_max_turns",
+                "max_turns on [roles.reviewer] and [roles.executor]",
+            ),
+            (
+                "[planning]\nrequester_id = 3\nmodel = \"m\"\n",
+                "[planning].model",
+                "[roles.planner].model",
+            ),
+            (
+                "[planning]\nrequester_id = 3\ntimeout_secs = 600\n",
+                "[planning].timeout_secs",
+                "[roles.planner].timeout_secs",
+            ),
+            (
+                "[planning]\nrequester_id = 3\nmax_turns = 80\n",
+                "[planning].max_turns",
+                "[roles.planner].max_turns",
+            ),
+            (
+                "[planning]\nrequester_id = 3\nskills = []\n",
+                "[planning].skills",
+                "[roles.planner].skills",
+            ),
+        ] {
+            let models = ADDRESS.split("[[people]]").next().unwrap();
+            let error = Config::parse(&format!("{MINIMAL}{models}{extra}"))
+                .and_then(Config::into_settings)
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!("{old} was removed: it is {new} now.")),
+                "{message}"
+            );
+            assert!(message.contains("Migrating to roles"), "{message}");
+            assert!(henk_domain::text::is_in_style(&message), "{message}");
+        }
+    }
+
+    #[test]
+    fn planning_needs_the_planner() {
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let error = Config::parse(&format!("{MINIMAL}{models}[planning]\nrequester_id = 3\n"))
+            .and_then(Config::into_settings)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "[planning] needs [roles.planner]");
+        let settings = Config::parse(&format!(
+            "{MINIMAL}{models}[planning]\nrequester_id = 3\n[roles.planner]\nmodel = \"m\"\n"
+        ))
+        .and_then(Config::into_settings)
+        .unwrap();
+        let planner = settings.roles.planner.as_ref().unwrap();
+        assert_eq!(
+            (
+                planner.max_turns(Role::Planner),
+                planner.timeout_secs(Role::Planner)
+            ),
+            (80, 1200)
+        );
     }
 
     #[test]
     fn trailers_default_and_resolve_per_repository() {
         let settings = address(
             "github_id = 77\n",
-            "[address.trailers]\nhenk_signoff = false\n[address.repositories.\"docspec/dco\"]\nrequester_signoff = true\n",
+            "[roles.executor.trailers]\nhenk_signoff = false\n[roles.executor.repositories.\"docspec/dco\"]\nrequester_signoff = true\n",
         )
         .unwrap();
-        let config = settings.address.as_ref().unwrap();
+        let config = settings.roles.executor.as_ref().unwrap();
         assert_eq!(config.henk_identity().unwrap(), None);
         let other = RepoRef::parse(Platform::GitHub, "docspec/other").unwrap();
         assert_eq!(
@@ -2643,7 +3008,7 @@ github_owners = ["docspec"]
                 requester_coauthor: true,
                 requester_signoff: true,
             },
-            "the repository's switch over [address.trailers], case aside"
+            "the repository's switch over [roles.executor.trailers], case aside"
         );
         let described = settings.describe();
         assert!(
@@ -2653,7 +3018,12 @@ github_owners = ["docspec"]
 
         let plain = address("", "").unwrap();
         assert_eq!(
-            plain.address.as_ref().unwrap().trailer_policy(&other),
+            plain
+                .roles
+                .executor
+                .as_ref()
+                .unwrap()
+                .trailer_policy(&other),
             TrailerPolicy::default()
         );
     }
@@ -2663,13 +3033,16 @@ github_owners = ["docspec"]
         let warning = "Warning:         requester 3 has no github_id";
         let described = address("", "").unwrap().describe();
         assert!(described.contains(warning), "{described}");
-        let off = address("", "[address.trailers]\nrequester_coauthor = false\n")
-            .unwrap()
-            .describe();
+        let off = address(
+            "",
+            "[roles.executor.trailers]\nrequester_coauthor = false\n",
+        )
+        .unwrap()
+        .describe();
         assert!(!off.contains(warning), "nothing to credit: {off}");
         let on_somewhere = address(
             "",
-            "[address.trailers]\nrequester_coauthor = false\n[address.repositories.\"docspec/r\"]\nrequester_signoff = true\n",
+            "[roles.executor.trailers]\nrequester_coauthor = false\n[roles.executor.repositories.\"docspec/r\"]\nrequester_signoff = true\n",
         )
         .unwrap()
         .describe();
@@ -2689,17 +3062,17 @@ github_owners = ["docspec"]
         for (person, extra, why) in [
             (
                 "",
-                "[address.identity]\nname = \"Henk\"\nemail = \"not-an-address\"\n",
+                "[roles.executor.identity]\nname = \"Henk\"\nemail = \"not-an-address\"\n",
                 "bad identity email",
             ),
             (
                 "",
-                "[address.identity]\nname = \"Henk <h@x.nl>\"\nemail = \"h@x.nl\"\n",
+                "[roles.executor.identity]\nname = \"Henk <h@x.nl>\"\nemail = \"h@x.nl\"\n",
                 "bad identity name",
             ),
             (
                 "",
-                "[address.identity]\nname = \"Henk\"\n",
+                "[roles.executor.identity]\nname = \"Henk\"\n",
                 "identity without email",
             ),
             (
@@ -2724,17 +3097,17 @@ github_owners = ["docspec"]
             ),
             (
                 "",
-                "[address.repositories.\"elsewhere/r\"]\nrequester_signoff = true\n",
+                "[roles.executor.repositories.\"elsewhere/r\"]\nrequester_signoff = true\n",
                 "repository not on the allowlist",
             ),
             (
                 "",
-                "[address.repositories.\"docspec\"]\nrequester_signoff = true\n",
+                "[roles.executor.repositories.\"docspec\"]\nrequester_signoff = true\n",
                 "not owner/name",
             ),
             (
                 "",
-                "[address.repositories.\"docspec/r\"]\nrequester_sign_off = true\n",
+                "[roles.executor.repositories.\"docspec/r\"]\nrequester_sign_off = true\n",
                 "unknown switch",
             ),
         ] {
@@ -2750,7 +3123,6 @@ github_owners = ["docspec"]
     fn workspace_is_configured_and_checked() {
         let defaults = database("").unwrap();
         assert_eq!(defaults.workspace, WorkspacePolicy::default());
-        assert!(!defaults.legacy_check_timeout);
 
         let settings = database(
             "[workspace]\ncommand_secs = 300\noutput_bytes = 4096\n[workspace.profiles.slow]\ncommand_secs = 3600\n[workspace.repositories]\n\"docspec/big\" = \"slow\"\n",
@@ -2795,24 +3167,6 @@ github_owners = ["docspec"]
                 "{why}"
             );
         }
-
-        let with_model = format!(
-            "{MINIMAL}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
-        );
-        let legacy = Config::parse(&format!(
-            "{with_model}[address]\nmodel = \"m\"\nrequester_id = 3\ncheck_timeout_secs = 42\n"
-        ))
-        .and_then(Config::into_settings)
-        .unwrap();
-        assert!(legacy.legacy_check_timeout);
-        assert_eq!(legacy.workspace.default.limits.command_secs, 42);
-        assert!(
-            legacy
-                .describe()
-                .contains("address.check_timeout_secs is deprecated"),
-            "{}",
-            legacy.describe()
-        );
     }
 
     #[test]
@@ -3263,7 +3617,7 @@ github_owners = ["docspec"]
     #[test]
     fn planning_requester_must_be_a_team_lead() {
         let text = format!(
-            "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nmodel = \"m\"\nrequester_id = 99\n"
+            "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nrequester_id = 99\n[roles.planner]\nmodel = \"m\"\n"
         );
         assert!(matches!(
             Config::parse(&text).and_then(Config::into_settings),

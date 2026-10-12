@@ -114,22 +114,18 @@ ignore = [
   "**/go.sum", "**/poetry.lock", "**/uv.lock", "CHANGELOG.md",
 ]
 
-# The review is a reviewer-fixer loop (#283): a reviewer reviews, a fixer
-# fixes what holds in the same workspace and Henk pushes it to the pull
-# request's branch, and each resumes its own conversation the next round,
-# until the reviewer finds nothing more or max_rounds is reached. Nothing is
-# posted on the pull request; the check says what the loop did. It pushes
-# like an address run, so it needs [address] below. A pull request it may
+# The review is a reviewer-executor loop (#283): the reviewer reviews, the
+# executor fixes what holds in the same workspace and Henk pushes it to the
+# pull request's branch, and each resumes its own conversation the next
+# round, until the reviewer finds nothing more or max_rounds is reached.
+# Nothing is posted on the pull request; the check says what the loop did.
+# It needs [roles.reviewer] and [roles.executor] below. A pull request it may
 # not push to (a fork, the default or a protected branch, or a branch that
 # moved after the review was queued) is reviewed by the reviewer alone: one
 # round, nothing pushed, and its findings in the check.
 [review.loop]
-reviewer = "opus"
-fixer = "claude"
 max_rounds = 50
 run_timeout_secs = 3600
-round_timeout_secs = 600
-round_max_turns = 40
 
 # The web dashboard at /dashboard: sign in with GitHub. Only these GitHub
 # user ids (find yours at https://api.github.com/users/<login>) get in, and
@@ -144,8 +140,8 @@ round_max_turns = 40
 # session_hours = 12
 
 # Henk's own MCP server at /mcp: an agent (Claude Code, an editor) can start
-# reviews, plans and address runs, follow and cancel them, and read review
-# quality and health. Each client has a named token, kept in the variable
+# reviews, plans and address runs, follow and cancel them, and read their
+# health. Each client has a named token, kept in the variable
 # env names; a read token may only read. What a client starts is asked by
 # mcp:<name>. Off unless enabled; see README "MCP server".
 # [mcp_server]
@@ -159,36 +155,53 @@ round_max_turns = 40
 # env = "HENK_MCP_TOKEN_REPORTING"
 # scope = "read"
 
+# Planning an issue: the planner turns it into a plan and sub-issues. It
+# needs [roles.planner] below.
 [planning]
-model = "claude"
-timeout_secs = 1200
-max_turns = 80
 change_budget = 20
 sub_issue_cap = 5
 # CLI and API plans run on behalf of this Team Lead.
 requester_id = 523456789012345678
-# skills = ["issue-sizing"]
 
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then
-# Markdown). dir is relative to this file. An agent gets only the skills it
-# lists, as `skills = [...]` on [planning];
+# Markdown). dir is relative to this file. A role gets only the skills it
+# lists, as `skills = [...]` on its [roles.*] section;
 # it sees their names and descriptions and loads one with load_skill. Only
 # SKILL.md is read: scripts and other files in a skill folder are ignored.
 # [skills]
 # dir = "skills"
 
-# Addressing review feedback (spec §3.5): `henk address <pull request URL>`.
-# Henk fixes what he can in a throwaway checkout, pushes one fast-forward
-# commit to the pull request's branch (never a fork, the default branch or
-# a protected branch) and replies in every thread. GitHub only for now; the
-# App needs "Contents: write". The review loop pushes the same way, so a
-# configuration that reviews needs this table. Its limits and checks hold
-# for the loop's pushes too; requester_id is who those commits are for.
-[address]
+# The roles (#321): the agents Henk runs, each one model with its own
+# limits, tools and skills. max_turns and timeout_secs hold per turn: a
+# round of the review loop, or the planner's whole run. `tools` narrows a
+# role's tools within what the role may ever have; left out, the role gets
+# its defaults, and only the planner reaches the web. `henk config check`
+# lists each role's tools when they differ, and refuses a tool the role may
+# not have. Moving from [address] and the old [review.loop] and [planning]
+# keys: README, "Migrating to roles".
+[roles.reviewer]
+model = "opus"
+max_turns = 40
+timeout_secs = 600
+# tools = ["list_changed_files", "get_file_diff", "list_files", "read_file", "search", "report_finding", "finish_round"]
+
+[roles.planner]
 model = "claude"
-timeout_secs = 1800
 max_turns = 80
+timeout_secs = 1200
+# skills = ["issue-sizing"]
+
+# The executor changes the code: in the review loop it fixes what holds and
+# Henk pushes one fast-forward commit to the pull request's branch (never a
+# fork, the default branch or a protected branch). Address runs (`henk
+# address <pull request URL>`, spec §3.5) use it too until they are removed
+# (#327). GitHub only for now; the App needs "Contents: write". requester_id
+# is who those commits are for.
+[roles.executor]
+model = "claude"
+max_turns = 40
+timeout_secs = 600
 max_changed_files = 20
 # The project's checks, run in the workspace with an empty environment and
 # [workspace] command_secs each. They run the pull request's code.
@@ -198,14 +211,14 @@ requester_id = 523456789012345678
 # Who Henk commits as, author and committer alike; his Signed-off-by uses
 # the same. Left out, he commits as the App: meneer-henk[bot] with its
 # GitHub noreply address.
-# [address.identity]
+# [roles.executor.identity]
 # name = "Meneer Henk"
 # email = "henk@example.com"
 #
 # The trailers of the one commit, after Henk-Run and Requested-by. The
 # requester is credited by the platform id in their [[people]] entry, never
 # by a display name; without one they get no trailers of their own.
-# [address.trailers]
+# [roles.executor.trailers]
 # henk_signoff = true          # Signed-off-by: Henk, for DCO checks
 # requester_coauthor = true    # Co-authored-by: the colleague who asked
 # requester_signoff = false    # Signed-off-by: the colleague who asked
@@ -214,7 +227,7 @@ requester_id = 523456789012345678
 # the value above. A requester sign-off states that the requester certifies
 # the DCO for a change they asked for but did not type: turning it on is
 # the operator's statement that requesters in this repository agree to that.
-# [address.repositories."StephanMeijer/scratch-repo"]
+# [roles.executor.repositories."StephanMeijer/scratch-repo"]
 # requester_signoff = true
 
 # Where an address run's file tools and checks run. Henk copies the pull

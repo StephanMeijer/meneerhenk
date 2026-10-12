@@ -50,7 +50,7 @@ use crate::loop_tools::{
     fixer_continuation, reviewer_continuation, verdict_text,
 };
 use crate::push::{Pusher, stop_if_cancelled};
-use crate::roles::grant;
+use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::traced::Traced;
 use crate::workspace::{Workspace, checked_changeset, for_lane, setup};
@@ -241,6 +241,10 @@ struct Rounds<'a> {
     pushed: Vec<String>,
     /// When the whole run must have ended (#286).
     deadline: tokio::time::Instant,
+    /// The reviewer's limit per round, from `[roles.reviewer]`.
+    reviewer_round: Duration,
+    /// The fixer's limit per round, from `[roles.executor]`.
+    fixer_round: Duration,
 }
 
 impl<'a> Rounds<'a> {
@@ -254,44 +258,35 @@ impl<'a> Rounds<'a> {
         credential: Option<GitCredential>,
     ) -> anyhow::Result<Self> {
         let app = on.app;
-        let address = app
-            .settings
-            .address
-            .as_ref()
-            .ok_or_else(|| anyhow!("the review loop needs [address]"))?;
+        let (reviewer, address) = loop_roles(&app.settings)?;
         let command_limit = Duration::from_secs(profile.limits.command_secs);
         let bash = profile.backend.runs_model_commands();
         let reference = format!("#{}", on.target.number);
         let repo = on.target.repo.path();
-        let limits = AgentConfig {
-            max_turns: config.round_max_turns,
-            timeout: Duration::from_secs(config.round_timeout_secs),
-            max_conversation_chars: app.settings.review.max_conversation_chars,
-            keep_recent_turns: app.settings.review.keep_recent_turns,
-            max_repeated_calls: app.settings.agent.max_repeated_calls,
-            record_argument_bytes: app.settings.agent.record_argument_bytes,
-            ..AgentConfig::default()
-        };
+        let limits = |max_turns, timeout_secs| round_limits(&app.settings, max_turns, timeout_secs);
+        let reviewer_round = reviewer.timeout_secs(Role::Reviewer);
 
-        let reviewer_model = app.model(&config.reviewer)?;
+        let reviewer_model = app.model(&reviewer.model)?;
         let handoff = Arc::new(Handoff {
             run: on.run.clone(),
             store: Arc::clone(&app.store),
             reviewer_model: reviewer_model.model().to_owned(),
             state: Mutex::new(HandoffState::default()),
         });
-        let reviewer_tools = grant(
-            Role::Reviewer,
-            reviewer_tools(workspace, diff, &handoff, bash.then_some(command_limit)),
-            &Role::Reviewer.default_tools(),
-        );
-        let reviewer_system = format!(
+        let mut reviewer_system = format!(
             "{}\n\n{}",
             prompts::PERSONA,
             prompts::render(
                 prompts::LOOP_REVIEWER,
                 &[("ref", &reference), ("repo", &repo)]
             )
+        );
+        let reviewer_tools = equip_and_grant(
+            Role::Reviewer,
+            &mut reviewer_system,
+            reviewer_tools(workspace, diff, &handoff, bash.then_some(command_limit)),
+            app.settings.skills.select(&reviewer.skills),
+            &reviewer.tools(Role::Reviewer),
         );
 
         // The fixer edits and checks, as an address run does, without the
@@ -323,7 +318,13 @@ impl<'a> Rounds<'a> {
         let mut fixer_tools = edit_tools(&fixing);
         fixer_tools.add(ListFindings(Arc::clone(&handoff)));
         fixer_tools.add(GiveVerdict(Arc::clone(&handoff)));
-        let fixer_tools = grant(Role::Executor, fixer_tools, &Role::Executor.default_tools());
+        let fixer_tools = equip_and_grant(
+            Role::Executor,
+            &mut fixer_system,
+            fixer_tools,
+            app.settings.skills.select(&address.skills),
+            &address.tools(),
+        );
 
         Ok(Self {
             on,
@@ -334,16 +335,16 @@ impl<'a> Rounds<'a> {
                 reviewer_model,
                 reviewer_system,
                 reviewer_tools,
-                limits,
+                limits(reviewer.max_turns(Role::Reviewer), reviewer_round),
             )
             .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
             fixer: Some(
                 ResumableSession::new(
                     "fixer",
-                    app.model(&config.fixer)?,
+                    app.model(&address.model)?,
                     fixer_system,
                     fixer_tools,
-                    limits,
+                    limits(address.max_turns, address.timeout_secs),
                 )
                 .with_continuation(fixer_continuation(Arc::clone(&handoff))),
             ),
@@ -356,6 +357,8 @@ impl<'a> Rounds<'a> {
             round: 0,
             pushed: Vec::new(),
             deadline: tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs),
+            reviewer_round: Duration::from_secs(reviewer_round),
+            fixer_round: Duration::from_secs(address.timeout_secs),
         })
     }
 
@@ -612,12 +615,12 @@ impl<'a> Rounds<'a> {
                 self.config.run_timeout_secs
             )));
         }
-        let limit = left.min(Duration::from_secs(self.config.round_timeout_secs));
-        let session = if who == "reviewer" {
-            Some(&mut self.reviewer)
+        let (session, round_limit) = if who == "reviewer" {
+            (Some(&mut self.reviewer), self.reviewer_round)
         } else {
-            self.fixer.as_mut()
+            (self.fixer.as_mut(), self.fixer_round)
         };
+        let limit = left.min(round_limit);
         if let Some(session) = session {
             session.set_timeout(limit);
         }
@@ -705,8 +708,8 @@ impl<'a> Rounds<'a> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Pushed> {
         let app = self.on.app;
-        let Some(address) = app.settings.address.as_ref() else {
-            return Err(anyhow!("the review loop needs [address]"));
+        let Some(address) = app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("the review loop needs [roles.executor]"));
         };
         let workspace = self.workspace.as_ref();
         if workspace
@@ -823,6 +826,37 @@ fn reviewer_tools(
     tools.add(ReportFinding(Arc::clone(handoff)));
     tools.add(FinishRound(Arc::clone(handoff)));
     tools
+}
+
+/// The loop's two roles (#322): the reviewer and the executor.
+fn loop_roles(
+    settings: &crate::config::Settings,
+) -> anyhow::Result<(&crate::config::RoleConfig, &crate::config::ExecutorConfig)> {
+    let roles = &settings.roles;
+    match (roles.reviewer.as_ref(), roles.executor.as_ref()) {
+        (Some(reviewer), Some(executor)) => Ok((reviewer, executor)),
+        _ => Err(anyhow!(
+            "the review loop needs [roles.reviewer] and [roles.executor]"
+        )),
+    }
+}
+
+/// One session's limits per round: its role's turns and time, and the
+/// review's conversation budget.
+fn round_limits(
+    settings: &crate::config::Settings,
+    max_turns: u32,
+    timeout_secs: u64,
+) -> AgentConfig {
+    AgentConfig {
+        max_turns,
+        timeout: Duration::from_secs(timeout_secs),
+        max_conversation_chars: settings.review.max_conversation_chars,
+        keep_recent_turns: settings.review.keep_recent_turns,
+        max_repeated_calls: settings.agent.max_repeated_calls,
+        record_argument_bytes: settings.agent.record_argument_bytes,
+        ..AgentConfig::default()
+    }
 }
 
 /// What one round's push did.

@@ -85,9 +85,10 @@ pub async fn run_address(
 ) -> anyhow::Result<AddressReport> {
     let config = app
         .settings
-        .address
+        .roles
+        .executor
         .as_ref()
-        .ok_or_else(|| anyhow!("address runs are not configured"))?;
+        .ok_or_else(|| anyhow!("address runs need [roles.executor]"))?;
     if !app.settings.allowlist.allows(&request.target.repo) {
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
@@ -436,8 +437,8 @@ impl Session<'_> {
         Vec<Change>,
         String,
     )> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         let workspace = &self.set_up(workspace).await?;
         let context = Arc::new(AddressContext {
@@ -479,8 +480,8 @@ impl Session<'_> {
     /// in the workspace first, so what they leave behind is part of the
     /// changeset and its limits.
     async fn changeset(&self, workspace: &dyn Workspace) -> anyhow::Result<(Vec<Change>, String)> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         if workspace
             .export()
@@ -521,8 +522,8 @@ impl Session<'_> {
         context: &Arc<AddressContext>,
         cancel: CancellationToken,
     ) -> anyhow::Result<()> {
-        let Some(config) = self.app.settings.address.as_ref() else {
-            return Err(anyhow!("address runs are not configured"));
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("address runs need [roles.executor]"));
         };
         let target = &self.request.target;
         let note = self
@@ -730,7 +731,7 @@ provider = "open_ai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
 model = "scripted"
-[address]
+[roles.executor]
 model = "m"
 requester_id = 3
 check_commands = [["true"]]
@@ -917,7 +918,7 @@ check_commands = [["true"]]
     }
 
     /// An app on the host backend whose configuration has `extra` after
-    /// `[address]`.
+    /// `[roles.executor]`.
     fn app_with(hub: Arc<FakeHub>, script: Vec<Completion>, extra: &str) -> App {
         app_on(
             hub,
@@ -1179,7 +1180,7 @@ check_commands = [["true"]]
         let app = app_with(
             Arc::clone(&hub),
             fix("Set x to 2."),
-            &format!("{PEOPLE}[address.repositories.\"O/R\"]\nrequester_signoff = true\n"),
+            &format!("{PEOPLE}[roles.executor.repositories.\"O/R\"]\nrequester_signoff = true\n"),
         );
         run_address(
             &app,
@@ -1209,7 +1210,7 @@ check_commands = [["true"]]
             fix("Set x to 2."),
             &format!(
                 "{PEOPLE}commit_name = \"Lead Person\"\ncommit_email = \"lead@example.com\"\n\
-                 [address.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
+                 [roles.executor.identity]\nname = \"Meneer Henk\"\nemail = \"henk@example.com\"\n"
             ),
         );
         run_address(

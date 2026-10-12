@@ -59,16 +59,21 @@ effort = "high"
 max_tokens = 16384
 timeout_secs = 300
 
+# The review loop pairs the reviewer with the executor; planning needs the
+# planner.
 [review.loop]
-reviewer = "opus"
-fixer = "claude"
-
-# The review loop pushes like an address run, so it needs this table.
-[address]
-model = "claude"
-requester_id = 523456789012345678
 
 [planning]
+requester_id = 523456789012345678
+
+[roles.reviewer]
+model = "opus"
+
+[roles.planner]
+model = "claude"
+
+# The executor pushes, for this Team Lead.
+[roles.executor]
 model = "claude"
 requester_id = 523456789012345678
 

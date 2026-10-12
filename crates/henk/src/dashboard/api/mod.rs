@@ -202,7 +202,7 @@ pub async fn not_found() -> ApiError {
 /// Who is signed in, their CSRF token, and what they can start here.
 async fn me(State(dashboard): State<Arc<Dashboard>>, ApiViewer(viewer): ApiViewer) -> Json<Me> {
     let mut startable = vec!["review".to_owned(), "plan".to_owned()];
-    if dashboard.app.settings.address.is_some() {
+    if dashboard.app.settings.roles.executor.is_some() {
         startable.push("address".to_owned());
     }
     Json(Me {

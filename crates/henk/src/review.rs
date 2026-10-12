@@ -916,9 +916,9 @@ api_key_env = "UNUSED"
 model = "scripted"
 [review]
 [review.loop]
-reviewer = "m"
-fixer = "m"
-[address]
+[roles.reviewer]
+model = "m"
+[roles.executor]
 model = "m"
 requester_id = 3
 "#;
@@ -2884,14 +2884,19 @@ requester_id = 3
     }
 
     /// A review loop of reviewer `r` and fixer `f` (#284), each its own
-    /// scripted model, with no lanes and `settings` after `[review.loop]`.
+    /// scripted model, with `settings` in `[review.loop]`.
     fn loop_config_with(settings: &str) -> String {
         let models = "[models.r]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
         CONFIG
             .replace("[review]\n", &format!("{models}[review]\n"))
+            .replace("[review.loop]\n", &format!("[review.loop]\n{settings}"))
             .replace(
-                "reviewer = \"m\"\nfixer = \"m\"\n",
-                &format!("reviewer = \"r\"\nfixer = \"f\"\n{settings}"),
+                "[roles.reviewer]\nmodel = \"m\"\n",
+                "[roles.reviewer]\nmodel = \"r\"\n",
+            )
+            .replace(
+                "[roles.executor]\nmodel = \"m\"\n",
+                "[roles.executor]\nmodel = \"f\"\n",
             )
     }
 
@@ -3650,8 +3655,13 @@ requester_id = 3
             running.display(),
             go.display()
         );
-        f.app.settings.address.as_mut().unwrap().check_commands =
-            vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
+        f.app
+            .settings
+            .roles
+            .executor
+            .as_mut()
+            .unwrap()
+            .check_commands = vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
         let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
         let run = RunId::parse("r-loop-cancel-push").unwrap();
         let cancel = f.app.shutdown.child_token();

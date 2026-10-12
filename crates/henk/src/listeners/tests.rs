@@ -560,7 +560,7 @@ async fn an_address_request_needs_address_runs_configured() {
         })
         .await;
     assert!(
-        matches!(out.of("address"), Handled::Ignored(r) if r.contains("not configured")),
+        matches!(out.of("address"), Handled::Ignored(r) if r.contains("need [roles.executor]")),
         "{:?}",
         out.by_listener
     );
@@ -571,7 +571,7 @@ async fn an_address_request_needs_address_runs_configured() {
 #[tokio::test]
 async fn one_address_run_per_pull_request_at_a_time() {
     let text = format!(
-        "{CONFIG}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"x\"\n[address]\nmodel = \"m\"\nrequester_id = 3\n"
+        "{CONFIG}[models.m]\nprovider = \"open_ai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
     );
     let settings = Config::parse(&text).unwrap().into_settings().unwrap();
     let app = Arc::new(App {
