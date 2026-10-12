@@ -1038,6 +1038,10 @@ pub struct WorkspaceConfig {
     /// Whether the planner gets a workspace too (#172), at the default
     /// branch.
     pub plan: bool,
+    /// The sandbox hosts the default profile may use (ssh backend, #389);
+    /// empty: every host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     /// Named profiles; what they leave out comes from the default.
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
@@ -1149,17 +1153,23 @@ fn is_dns_label(name: &str) -> bool {
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
 }
 
-/// The sandbox host of the `ssh` backend: where it is, who Henk signs in
-/// as, where his key is and which host key to expect. No secret is in this
-/// file (§8.4): the key's path comes from the variable `key_path_env` names.
+/// The sandbox hosts of the `ssh` backend: where each is, who Henk signs
+/// in as, where his key is and which host key to expect. No secret is in
+/// this file (§8.4): a key's path comes from the variable `key_path_env`
+/// names.
+///
+/// One host is written as before (`host`, `host_key`, `port`); several
+/// (#389) as `[workspace.ssh.hosts.<id>]`, with `user`, `port` and
+/// `key_path_env` here as the defaults each host may override.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshConfig {
-    /// Host name or address.
-    pub host: String,
-    /// SSH port.
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
+    /// The one host's name or address.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// SSH port: the one host's, or every host's default.
+    #[serde(default)]
+    pub port: Option<u16>,
     /// The user Henk signs in as: root, which Henk's own requests need to
     /// make and remove each run's user, or one with passwordless sudo.
     #[serde(default = "default_ssh_user")]
@@ -1167,8 +1177,50 @@ pub struct SshConfig {
     /// The variable holding the path of Henk's private key.
     #[serde(default = "default_ssh_key_path_env")]
     pub key_path_env: String,
-    /// The host's public key as an OpenSSH line (`ssh-ed25519 AAAA...`),
+    /// The one host's public key as an OpenSSH line (`ssh-ed25519 AAAA...`),
     /// pinned: any other key is refused, and there is no trust on first use.
+    #[serde(default)]
+    pub host_key: Option<String>,
+    /// Several hosts, by id: a workspace opens on one of them.
+    #[serde(default)]
+    pub hosts: BTreeMap<String, SshHostConfig>,
+}
+
+/// One sandbox host of several (#389).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshHostConfig {
+    /// Host name or address.
+    pub host: String,
+    /// SSH port; `[workspace.ssh].port`, or 22.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The user Henk signs in as; `[workspace.ssh].user`.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// The variable holding the path of Henk's key for this host;
+    /// `[workspace.ssh].key_path_env`.
+    #[serde(default)]
+    pub key_path_env: Option<String>,
+    /// The host's public key as an OpenSSH line, pinned.
+    pub host_key: String,
+}
+
+/// One sandbox host with every default applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshHost {
+    /// Its id: from `[workspace.ssh.hosts.<id>]`, or `default` for the one
+    /// host written the old way.
+    pub id: String,
+    /// Host name or address.
+    pub host: String,
+    /// SSH port.
+    pub port: u16,
+    /// The user Henk signs in as.
+    pub user: String,
+    /// The variable holding the path of Henk's private key.
+    pub key_path_env: String,
+    /// The pinned host key line.
     pub host_key: String,
 }
 
@@ -1184,11 +1236,59 @@ fn default_ssh_key_path_env() -> String {
     "HENK_SANDBOX_KEY_PATH".to_owned()
 }
 
+/// The id of the one host written as `[workspace.ssh] host = ...`.
+pub const DEFAULT_SSH_HOST: &str = "default";
+
 impl SshConfig {
-    /// The sandbox host is usable, and present when a profile needs it.
+    /// Every host, defaults applied, in id order.
+    #[must_use]
+    pub fn hosts(&self) -> Vec<SshHost> {
+        let port = self.port.unwrap_or_else(default_ssh_port);
+        if let (Some(host), Some(host_key)) = (&self.host, &self.host_key) {
+            return vec![SshHost {
+                id: DEFAULT_SSH_HOST.to_owned(),
+                host: host.clone(),
+                port,
+                user: self.user.clone(),
+                key_path_env: self.key_path_env.clone(),
+                host_key: host_key.clone(),
+            }];
+        }
+        self.hosts
+            .iter()
+            .map(|(id, host)| SshHost {
+                id: id.clone(),
+                host: host.host.clone(),
+                port: host.port.unwrap_or(port),
+                user: host.user.clone().unwrap_or_else(|| self.user.clone()),
+                key_path_env: host
+                    .key_path_env
+                    .clone()
+                    .unwrap_or_else(|| self.key_path_env.clone()),
+                host_key: host.host_key.clone(),
+            })
+            .collect()
+    }
+
+    /// The sandbox hosts are usable, present when a profile needs one, and
+    /// every host a profile names is one of them.
     fn check(ssh: Option<&Self>, workspace: &WorkspacePolicy) -> Result<(), ConfigError> {
         match ssh {
-            Some(ssh) => ssh.validate(),
+            Some(ssh) => {
+                ssh.validate()?;
+                let ids: Vec<String> = ssh.hosts().into_iter().map(|h| h.id).collect();
+                let profiles =
+                    std::iter::once(("[workspace]", &workspace.default)).chain(workspace.named());
+                for (name, profile) in profiles {
+                    if let Some(unknown) = profile.hosts.iter().find(|h| !ids.contains(h)) {
+                        return Err(ConfigError::Workspace(format!(
+                            "workspace profile {name}: hosts names {unknown:?}, which is not a sandbox host ({})",
+                            ids.join(", ")
+                        )));
+                    }
+                }
+                Ok(())
+            }
             None if workspace
                 .named()
                 .any(|(_, profile)| profile.backend == BackendKind::Ssh) =>
@@ -1203,18 +1303,55 @@ impl SshConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        let refuse = |what: &str| Err(ConfigError::Workspace(format!("workspace.ssh: {what}")));
-        if self.host.trim().is_empty() {
-            return refuse("host is empty");
+        let refuse = |what: String| Err(ConfigError::Workspace(format!("workspace.ssh: {what}")));
+        let one = self.host.is_some() || self.host_key.is_some();
+        match (one, self.hosts.is_empty()) {
+            (true, false) => {
+                return refuse(
+                    "write one host (host, host_key) or several ([workspace.ssh.hosts.<id>]), not both"
+                        .to_owned(),
+                );
+            }
+            (false, true) => {
+                return refuse(
+                    "no host: set host and host_key, or [workspace.ssh.hosts.<id>]".to_owned(),
+                );
+            }
+            (true, true) if self.host.is_none() => return refuse("host is missing".to_owned()),
+            (true, true) if self.host_key.is_none() => {
+                return refuse("host_key is missing".to_owned());
+            }
+            _ => {}
         }
-        if self.user.trim().is_empty() {
-            return refuse("user is empty");
-        }
-        if self.key_path_env.trim().is_empty() {
-            return refuse("key_path_env names no variable");
-        }
-        if russh::keys::PublicKey::from_openssh(self.host_key.trim()).is_err() {
-            return refuse("host_key is not an OpenSSH public key line");
+        for host in self.hosts() {
+            let at = if one {
+                String::new()
+            } else {
+                format!("hosts.{}.", host.id)
+            };
+            if !host
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                || host.id.is_empty()
+            {
+                return refuse(format!(
+                    "host id {:?} must be lowercase letters, digits and -",
+                    host.id
+                ));
+            }
+            if host.host.trim().is_empty() {
+                return refuse(format!("{at}host is empty"));
+            }
+            if host.user.trim().is_empty() {
+                return refuse(format!("{at}user is empty"));
+            }
+            if host.key_path_env.trim().is_empty() {
+                return refuse(format!("{at}key_path_env names no variable"));
+            }
+            if russh::keys::PublicKey::from_openssh(host.host_key.trim()).is_err() {
+                return refuse(format!("{at}host_key is not an OpenSSH public key line"));
+            }
         }
         Ok(())
     }
@@ -1237,6 +1374,7 @@ impl Default for WorkspaceConfig {
             toolchain: profile.toolchain,
             review: profile.review,
             plan: profile.plan,
+            hosts: profile.hosts,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
@@ -1276,6 +1414,9 @@ pub struct ProfileConfig {
     pub review: Option<bool>,
     /// Whether the planner gets a workspace; the default's when not given.
     pub plan: Option<bool>,
+    /// The sandbox hosts it may use (ssh backend, #389); the default's when
+    /// not given.
+    pub hosts: Option<Vec<String>>,
 }
 
 /// The workspace settings, checked.
@@ -1324,6 +1465,7 @@ impl WorkspaceConfig {
             toolchain: self.toolchain,
             review: self.review,
             plan: self.plan,
+            hosts: self.hosts,
         };
         let profiles = self
             .profiles
@@ -1346,6 +1488,7 @@ impl WorkspaceConfig {
                     toolchain: p.toolchain.or(base.toolchain),
                     review: p.review.unwrap_or(base.review),
                     plan: p.plan.unwrap_or(base.plan),
+                    hosts: p.hosts.unwrap_or_else(|| base.hosts.clone()),
                 };
                 (name, profile)
             })
@@ -2375,6 +2518,37 @@ impl Settings {
         }
     }
 
+    /// The sandbox hosts of the ssh backend, and which profiles keep to
+    /// which (#389).
+    fn describe_sandbox_hosts(&self, out: &mut String) {
+        if let Some(ssh) = &self.workspace_ssh {
+            let hosts = ssh.hosts();
+            for host in &hosts {
+                let name = if hosts.len() == 1 && host.id == DEFAULT_SSH_HOST {
+                    String::new()
+                } else {
+                    format!(" {}", host.id)
+                };
+                let _ = writeln!(
+                    out,
+                    "  sandbox host{name}: {}@{}:{} (key from ${})",
+                    host.user, host.host, host.port, host.key_path_env
+                );
+            }
+            let profiles = std::iter::once(("[workspace]", &self.workspace.default))
+                .chain(self.workspace.named());
+            for (name, profile) in profiles {
+                if profile.backend == BackendKind::Ssh && !profile.hosts.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "  profile {name} uses sandbox hosts {}",
+                        profile.hosts.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
     /// The workspace profiles, for [`Self::describe`], with a warning for
     /// every backend that is not isolated.
     fn describe_workspace(&self, out: &mut String) {
@@ -2431,13 +2605,7 @@ impl Settings {
                 weak.push(profile.backend);
             }
         }
-        if let Some(ssh) = &self.workspace_ssh {
-            let _ = writeln!(
-                out,
-                "  sandbox host: {}@{}:{} (key from ${})",
-                ssh.user, ssh.host, ssh.port, ssh.key_path_env
-            );
-        }
+        self.describe_sandbox_hosts(out);
         if let Some(kube) = &self.workspace_kubernetes {
             let _ = writeln!(
                 out,
@@ -2464,9 +2632,15 @@ impl Settings {
                 BackendKind::Ssh => writeln!(
                     out,
                     "Warning: the ssh backend runs each run as its own user on {}; runs share its kernel, /tmp and network, and {unenforced} limits are not enforced.",
-                    self.workspace_ssh
-                        .as_ref()
-                        .map_or("the sandbox host", |s| s.host.as_str())
+                    self.workspace_ssh.as_ref().map_or_else(
+                        || "the sandbox host".to_owned(),
+                        |s| and_list(
+                            &s.hosts()
+                                .iter()
+                                .map(|h| h.host.as_str())
+                                .collect::<Vec<_>>()
+                        )
+                    )
                 ),
                 BackendKind::Kubernetes => Ok(()),
             };
@@ -3872,6 +4046,99 @@ github_owners = ["docspec"]
         key.public_key().to_openssh().unwrap()
     }
 
+    fn pool(hosts: &str, profiles: &str) -> Result<Settings, ConfigError> {
+        database(&format!(
+            "[workspace]\n{profiles}[workspace.ssh]\nuser = \"henk\"\n{hosts}"
+        ))
+    }
+
+    fn pooled(id: &str, extra: &str) -> String {
+        format!(
+            "[workspace.ssh.hosts.{id}]\nhost = \"{id}.example\"\nhost_key = \"{}\"\n{extra}",
+            host_key_line()
+        )
+    }
+
+    #[test]
+    fn several_sandbox_hosts_take_the_defaults_they_do_not_set() {
+        let hosts = format!(
+            "{}{}",
+            pooled("goat", "port = 2222\n"),
+            pooled("fox", "user = \"root\"\nkey_path_env = \"FOX_KEY\"\n")
+        );
+        let profiles = "[workspace.profiles.big]\nbackend = \"ssh\"\nhosts = [\"goat\"]\n[workspace.profiles.any]\nbackend = \"ssh\"\n";
+        let settings = pool(&hosts, profiles).unwrap();
+        let hosts = settings.workspace_ssh.as_ref().unwrap().hosts();
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|h| (
+                    h.id.as_str(),
+                    h.host.as_str(),
+                    h.port,
+                    h.user.as_str(),
+                    h.key_path_env.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("fox", "fox.example", 22, "root", "FOX_KEY"),
+                (
+                    "goat",
+                    "goat.example",
+                    2222,
+                    "henk",
+                    "HENK_SANDBOX_KEY_PATH"
+                ),
+            ]
+        );
+        assert_eq!(
+            settings
+                .workspace
+                .named()
+                .find(|(n, _)| *n == "big")
+                .unwrap()
+                .1
+                .hosts,
+            ["goat"]
+        );
+        let text = settings.describe();
+        for line in [
+            "  sandbox host fox: root@fox.example:22 (key from $FOX_KEY)",
+            "  sandbox host goat: henk@goat.example:2222 (key from $HENK_SANDBOX_KEY_PATH)",
+            "  profile big uses sandbox hosts goat",
+            "runs each run as its own user on fox.example and goat.example;",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_pool_is_written_one_way_and_names_only_its_hosts() {
+        let refused = |hosts: &str, profiles: &str, says: &str| {
+            let error = pool(hosts, profiles).unwrap_err().to_string();
+            assert!(error.contains(says), "{says}: {error}");
+        };
+        let one = format!("host = \"h\"\nhost_key = \"{}\"\n", host_key_line());
+        refused(&format!("{one}{}", pooled("goat", "")), "", "not both");
+        refused("", "", "no host");
+        refused(&pooled("Goat", ""), "", "lowercase letters, digits and -");
+        refused(
+            &pooled("goat", ""),
+            "[workspace.profiles.big]\nbackend = \"ssh\"\nhosts = [\"fox\"]\n",
+            "hosts names \"fox\", which is not a sandbox host (goat)",
+        );
+        refused(
+            &pooled("goat", ""),
+            "[workspace.profiles.pods]\nbackend = \"host\"\nhosts = [\"goat\"]\n",
+            "not the host backend",
+        );
+        refused(
+            "[workspace.ssh.hosts.goat]\nhost = \"g\"\nhost_key = \"nope\"\n",
+            "",
+            "hosts.goat.host_key is not an OpenSSH public key line",
+        );
+    }
+
     #[test]
     fn the_ssh_backend_needs_its_sandbox_host_and_says_what_it_shares() {
         let ssh = format!(
@@ -3879,14 +4146,19 @@ github_owners = ["docspec"]
             host_key_line()
         );
         let settings = database(&format!("[workspace]\n{ssh}")).unwrap();
-        let config = settings.workspace_ssh.as_ref().unwrap();
+        let hosts = settings.workspace_ssh.as_ref().unwrap().hosts();
         assert_eq!(
-            (
-                config.port,
-                config.user.as_str(),
-                config.key_path_env.as_str()
-            ),
-            (22, "root", "HENK_SANDBOX_KEY_PATH")
+            hosts
+                .iter()
+                .map(|h| (
+                    h.id.as_str(),
+                    h.port,
+                    h.user.as_str(),
+                    h.key_path_env.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("default", 22, "root", "HENK_SANDBOX_KEY_PATH")],
+            "one host written the old way is a pool of one"
         );
         let text = settings.describe();
         assert!(text.contains("  sandbox: ssh, 600s per command"), "{text}");
