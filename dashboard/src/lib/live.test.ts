@@ -27,13 +27,13 @@ describe('applyRun', () => {
       { session: 'lane-a', tool: 'read_file', calls: 4, errors: 0, refusals: 2, other: 0, total_ms: 19 },
       { session: 'lane-a', tool: 'bash', calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 5 },
     ]);
-    expect(d.lanes.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(6);
+    expect(d.sessions.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(6);
   });
 
   it('keeps the live turn when the lanes come again without one', () => {
     let d = applyRun(runDetail('running'), { kind: 'tool_call', data: call(7) });
-    d = applyRun(d, { kind: 'lanes', data: d.lanes.map((l) => ({ ...l, last_call_turn: null })) });
-    expect(d.lanes.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(7);
+    d = applyRun(d, { kind: 'sessions', data: d.sessions.map((l) => ({ ...l, last_call_turn: null })) });
+    expect(d.sessions.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(7);
   });
 
   it('puts a decided draft in place of the waiting one, and a new one at the end', () => {
@@ -64,7 +64,7 @@ describe('applyRun', () => {
     d = applyRun(d, { kind: 'event', data: { at: '', level: 'warn', message: 'late' } });
     d = applyRun(d, {
       kind: 'finding',
-      data: { at: '', lane: 'lane-a', path: 'a.rs', line: 1, comment_id: 'c-2', action: 'posted' },
+      data: { at: '', session: 'lane-a', path: 'a.rs', line: 1, comment_id: 'c-2', action: 'posted' },
     });
     const ref = { at: '', session: 'lane-b', model: 'm', stop: 'EndTurn', turns: 1, bytes: 1 };
     d = applyRun(d, { kind: 'transcript', data: ref });
@@ -80,7 +80,7 @@ describe('applyRun', () => {
 
 describe('running runs moving on', () => {
   it('takes a run\'s lanes and stages from progress, and keeps them through a run message', () => {
-    const run = { ...runSummary('r-1', 'running'), lanes: [{ name: 'lane-a', status: 'running' }] };
+    const run = { ...runSummary('r-1', 'running'), sessions: [{ name: 'lane-a', role: 'lane', status: 'running' }] };
     let state = applyRunning({ runs: [], count: 0, slots: null }, {
       kind: 'snapshot',
       data: { runs: [run], count: 1, slots: { limit: 2, in_use: 1, waiting: [] } },
@@ -88,14 +88,14 @@ describe('running runs moving on', () => {
     expect(state.slots?.limit).toBe(2);
     state = applyRunning(state, {
       kind: 'progress',
-      data: { run_id: 'r-1', lanes: null, stages: [{ name: 'diff', state: 'done' }] },
+      data: { run_id: 'r-1', sessions: null, stages: [{ name: 'diff', state: 'done' }] },
     });
     expect(state.runs[0]?.stages).toEqual([{ name: 'diff', state: 'done' }]);
-    expect(state.runs[0]?.lanes).toEqual([{ name: 'lane-a', status: 'running' }]);
+    expect(state.runs[0]?.sessions).toEqual([{ name: 'lane-a', role: 'lane', status: 'running' }]);
     state = applyRunning(state, { kind: 'run', data: { ...runSummary('r-1', 'running'), trigger: 'again' } });
     expect(state.runs[0]?.trigger).toBe('again');
     expect(state.runs[0]?.stages).toHaveLength(1);
-    expect(applyRunning(state, { kind: 'progress', data: { run_id: 'r-x', lanes: [], stages: null } })).toEqual(state);
+    expect(applyRunning(state, { kind: 'progress', data: { run_id: 'r-x', sessions: [], stages: null } })).toEqual(state);
   });
 
   it('takes the slots from a slots message between snapshots, keeping the runs', () => {

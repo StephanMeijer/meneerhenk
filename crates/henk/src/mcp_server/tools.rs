@@ -113,7 +113,8 @@ pub(crate) struct RunEvents {
 pub(crate) struct ToolCalls {
     /// The run id.
     run_id: String,
-    /// Only this session's calls: `lane-a`, `check-1`, `planner`.
+    /// Only this session's calls: `reviewer`, `executor`, `planner`;
+    /// `lane-a` or `check-1` in older runs.
     session: Option<String>,
     /// How many calls, 1 to 500; 100 when left out.
     limit: Option<u32>,
@@ -316,7 +317,7 @@ impl HenkMcp {
     }
 
     #[tool(
-        description = "One run in full: status, lanes, stages, findings, drafts and their verdicts, tool usage, timeline, the requests that started it, and its link."
+        description = "One run in full: status, sessions with their roles, stages, findings, drafts and their verdicts, tool usage, timeline, the requests that started it, and its link."
     )]
     async fn get_run(
         &self,

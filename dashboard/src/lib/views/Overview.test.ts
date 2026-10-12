@@ -38,7 +38,7 @@ function loaders(items: RunSummary[] = [], next: string | null = null) {
     loadCount: vi.fn(() => Promise.resolve({ count: 1284 })),
     loadHealth: vi.fn(() => Promise.resolve(health)),
     loadStats: vi.fn(() => Promise.resolve(stats)),
-    loadLanes: vi.fn(() => Promise.resolve({ reviews: [], lanes: [] })),
+    loadLanes: vi.fn(() => Promise.resolve({ reviews: [], sessions: [] })),
     now: () => NOW,
   };
 }
@@ -203,10 +203,10 @@ describe('Running now', () => {
         { name: 'diff', state: 'done' },
         { name: 'lanes', state: 'running' },
       ],
-      lanes: [
-        { name: 'lane-a', status: 'running' },
-        { name: 'lane-b', status: 'did_not_finish' },
-        { name: 'check-1', status: 'running' },
+      sessions: [
+        { name: 'lane-a', role: 'lane', status: 'running' },
+        { name: 'lane-b', role: 'lane', status: 'did_not_finish' },
+        { name: 'check-1', role: 'check', status: 'running' },
       ],
     });
     await settle(1);
@@ -226,10 +226,10 @@ describe('Recent runs', () => {
   it('shows how each run\'s lanes ended, leaving the checks out', async () => {
     const run = {
       ...runSummary('r-1'),
-      lanes: [
-        { name: 'lane-a', status: 'finished' },
-        { name: 'lane-b', status: 'timed_out' },
-        { name: 'check-1', status: 'finished' },
+      sessions: [
+        { name: 'lane-a', role: 'lane', status: 'finished' },
+        { name: 'lane-b', role: 'lane', status: 'timed_out' },
+        { name: 'check-1', role: 'check', status: 'finished' },
       ],
     };
     render(Overview, { me, query: new URLSearchParams(), connect: fakeConnect().connect, ...loaders([run]) });

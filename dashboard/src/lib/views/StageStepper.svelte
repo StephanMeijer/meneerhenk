@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { LaneDot, StageDot } from '$lib/api/types';
+  import type { SessionDot, StageDot } from '$lib/api/types';
   import { lookOf } from '$lib/status';
   import Icon from '$lib/ui/Icon.svelte';
 
   /** A run's stages as a row of dots (#225), the lanes stage as one dot
    * per lane. Each dot says its stage and state on hover and to screen
    * readers. */
-  let { stages, lanes }: { stages: StageDot[]; lanes: LaneDot[] } = $props();
+  let { stages, lanes }: { stages: StageDot[]; lanes: SessionDot[] } = $props();
 
   const LOOKS: Record<string, string> = { done: 'done', running: 'running', failed: 'failed', skipped: 'skipped' };
   let reviewLanes = $derived(lanes.filter((lane) => !lane.name.startsWith('check-')));

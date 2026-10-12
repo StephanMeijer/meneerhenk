@@ -236,7 +236,15 @@ async fn a_lane_era_database_reads_back_in_full(store: &dyn RunStore) {
     assert_eq!(stages, [Stage::Lanes, Stage::FactCheck]);
 
     let runs = [id("r-lanes"), id("r-address"), id("r-loop"), id("r-plan")];
-    assert_eq!(store.sessions_of(&runs).await.unwrap().len(), 7);
+    let dots = store.sessions_of(&runs).await.unwrap();
+    assert_eq!(dots.len(), 7);
+    assert!(
+        dots.iter()
+            .any(|(run, name, role, _)| run.as_str() == "r-loop"
+                && name == "fixer"
+                && *role == SessionRole::Executor),
+        "{dots:?}"
+    );
     let endings: Vec<_> = store
         .session_endings(None, 30)
         .await
@@ -1597,14 +1605,14 @@ async fn sessions_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore)
         .unwrap();
     let lanes: Vec<_> = lanes
         .iter()
-        .map(|(run, name, status)| (run.as_str(), name.as_str(), *status))
+        .map(|(run, name, role, status)| (run.as_str(), name.as_str(), *role, *status))
         .collect();
     assert_eq!(
         lanes,
         [
-            ("r-1", "a", SessionStatus::Running),
-            ("r-1", "b", SessionStatus::Running),
-            ("r-2", "a", SessionStatus::TimedOut),
+            ("r-1", "a", SessionRole::Lane, SessionStatus::Running),
+            ("r-1", "b", SessionRole::Lane, SessionStatus::Running),
+            ("r-2", "a", SessionRole::Lane, SessionStatus::TimedOut),
         ]
     );
     let stages = store.stages_of(&[id("r-1"), id("r-2")]).await.unwrap();

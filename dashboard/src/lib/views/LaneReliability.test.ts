@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LaneOutcome, LaneRow, LaneStats } from '$lib/api/types';
+import type { SessionOutcome, SessionRow, SessionStats } from '$lib/api/types';
 import { cleanup, render, settle } from '$lib/testing/render';
 import LaneReliability from './LaneReliability.svelte';
 
@@ -7,7 +7,7 @@ afterEach(cleanup);
 
 const reasons = { time_limit: 0, rate_limit: 0, provider_error: 0, cancelled: 0, declined: 0, stuck: 0 };
 
-const outcome = (i: number, status: string, model = 'mistral-medium-3-5'): LaneOutcome => ({
+const outcome = (i: number, status: string, model = 'mistral-medium-3-5'): SessionOutcome => ({
   run_id: `r-${i}`,
   model,
   status,
@@ -16,12 +16,12 @@ const outcome = (i: number, status: string, model = 'mistral-medium-3-5'): LaneO
 
 /** 30 reviews; lane-a did not finish in every third, timed out in the
  * last; lane-b ran only in the last two, on a new model in the last. */
-function fixture(): LaneStats {
+function fixture(): SessionStats {
   const reviews = Array.from({ length: 30 }, (_, i) => ({ run_id: `r-${i}`, started_at: `2026-10-07T${String(i % 24).padStart(2, '0')}:00:00Z` }));
   const a = reviews.map((_, i) => outcome(i, i === 29 ? 'timed_out' : i % 3 === 0 ? 'did_not_finish' : 'finished'));
-  const laneA: LaneRow = {
+  const laneA: SessionRow = {
     name: 'lane-a',
-    kind: 'lane',
+    role: 'lane',
     models: ['mistral-medium-3-5'],
     outcomes: a,
     ran: 30,
@@ -30,9 +30,9 @@ function fixture(): LaneStats {
     did_not_finish: 10,
     reasons: { ...reasons, rate_limit: 10, time_limit: 1 },
   };
-  const laneB: LaneRow = {
+  const laneB: SessionRow = {
     name: 'lane-b',
-    kind: 'lane',
+    role: 'lane',
     models: ['deepseek-v4', 'qwen-3'],
     outcomes: [...Array<null>(28).fill(null), outcome(28, 'finished', 'qwen-3'), outcome(29, 'finished', 'deepseek-v4')],
     ran: 2,
@@ -41,7 +41,7 @@ function fixture(): LaneStats {
     did_not_finish: 0,
     reasons,
   };
-  return { reviews, lanes: [laneA, laneB] };
+  return { reviews, sessions: [laneA, laneB] };
 }
 
 describe('LaneReliability', () => {
@@ -76,7 +76,7 @@ describe('LaneReliability', () => {
   });
 
   it('says so when no review has ended', async () => {
-    render(LaneReliability, { load: () => Promise.resolve({ reviews: [], lanes: [] }) });
+    render(LaneReliability, { load: () => Promise.resolve({ reviews: [], sessions: [] }) });
     await settle();
     expect(document.body.textContent).toContain('No review has ended yet.');
   });

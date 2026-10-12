@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { noteServerDate } from '$lib/clock';
-import type { LaneStats } from '$lib/api/types';
+import type { SessionStats } from '$lib/api/types';
 import { cleanup, render, rows, settle } from '$lib/testing/render';
 import Lanes from './Lanes.svelte';
 
@@ -8,12 +8,12 @@ afterEach(cleanup);
 
 const NOW = new Date('2026-10-07T12:00:00Z');
 
-const stats: LaneStats = {
+const stats: SessionStats = {
   reviews: [{ run_id: 'r-1', started_at: '2026-10-06T12:00:00Z' }],
-  lanes: [
+  sessions: [
     {
       name: 'lane-a',
-      kind: 'lane',
+      role: 'lane',
       models: ['m-new', 'm-old'],
       outcomes: [],
       ran: 20,

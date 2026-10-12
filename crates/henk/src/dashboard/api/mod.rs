@@ -7,9 +7,9 @@
 
 pub(crate) mod events;
 pub(crate) mod health;
-mod lanes;
 pub(crate) mod runs;
 mod session_stream;
+mod sessions;
 mod stats;
 mod stream;
 #[cfg(test)]
@@ -177,7 +177,7 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/events/facets", get(events::facets))
         .route("/events/{id}", get(events::detail))
         .route("/stats/overview", get(stats::overview))
-        .route("/stats/lanes", get(lanes::lanes))
+        .route("/stats/sessions", get(sessions::sessions))
         .fallback(not_found)
         .layer(middleware::map_response(no_store))
         .with_state(dashboard)

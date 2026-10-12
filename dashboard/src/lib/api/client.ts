@@ -9,7 +9,7 @@ import type {
   EventFacets,
   EventItem,
   Health,
-  LaneStats,
+  SessionStats,
   Me,
   OverviewStats,
   Page,
@@ -122,8 +122,8 @@ export function overviewStats(days = 14): Promise<OverviewStats> {
 
 /** How the lanes of the recent reviews ended (#229); `query` is
  * `last=30` or `since=...`. */
-export function laneStats(query = ''): Promise<LaneStats> {
-  return getJson<LaneStats>(`/stats/lanes${query === '' ? '' : `?${query}`}`);
+export function laneStats(query = ''): Promise<SessionStats> {
+  return getJson<SessionStats>(`/stats/sessions${query === '' ? '' : `?${query}`}`);
 }
 
 /** Runs, newest first; `query` is the `GET /runs` query. */

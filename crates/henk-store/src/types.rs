@@ -940,17 +940,17 @@ pub(crate) fn session_endings(
         .collect()
 }
 
-/// Stored (run, session, status) rows, checked.
+/// Stored (run, session, role, status) rows, checked.
 pub(crate) fn session_dots(
-    rows: Vec<(String, String, String)>,
-) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError> {
+    rows: Vec<(String, String, String, String)>,
+) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
     rows.into_iter()
-        .map(|(run, name, status)| {
+        .map(|(run, name, role, status)| {
             let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
                 column: "sessions.run_id",
                 value: run,
             })?;
-            Ok((run, name, session_status(status)?))
+            Ok((run, name, session_role(role)?, session_status(status)?))
         })
         .collect()
 }

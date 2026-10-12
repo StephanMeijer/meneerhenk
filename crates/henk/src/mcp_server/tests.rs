@@ -12,7 +12,7 @@ use std::sync::Arc;
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
 use henk_mcp::{McpServerConfig, McpSession as _, RmcpSession};
-use henk_store::{NewRun, TranscriptRecord};
+use henk_store::{DraftRecord, FindingAction, NewRun, SessionRole, TranscriptRecord};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 
@@ -220,6 +220,58 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
             .iter()
             .any(|c| c["name"] == "database")
     );
+}
+
+/// `get_run` speaks of sessions and their roles (#325), also for a review
+/// from before the loop: its lanes and fact-check are sessions with their
+/// history roles, and its drafts and findings name their session.
+#[tokio::test]
+async fn get_run_gives_a_lane_era_run_s_sessions_with_their_roles() {
+    let henk = start_henk(ON, both()).await;
+    let run = seed_run(&henk.app, "r-lanes").await;
+    let store = &henk.app.store;
+    for (name, role) in [
+        ("lane-a", SessionRole::Lane),
+        ("check-1", SessionRole::Check),
+    ] {
+        store.start_session(&run, name, role, "m").await.unwrap();
+    }
+    store
+        .record_draft(
+            &run,
+            &DraftRecord {
+                at: String::new(),
+                draft: "d1".into(),
+                session: "lane-a".into(),
+                model: "m".into(),
+                kind: "finding".into(),
+                path: "a.rs".into(),
+                line: 4,
+                target: String::new(),
+                body: "x is never set.".into(),
+                decision: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .record_finding(&run, "lane-a", "a.rs", 4, "c-1", FindingAction::Posted)
+        .await
+        .unwrap();
+    let session = client(&henk, READ).await;
+
+    let (error, detail, text) = call(&session, "get_run", json!({ "run_id": "r-lanes" })).await;
+    assert!(!error, "{text}");
+    let sessions: Vec<(&str, &str)> = detail["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["name"].as_str().unwrap(), s["role"].as_str().unwrap()))
+        .collect();
+    assert_eq!(sessions, [("check-1", "check"), ("lane-a", "lane")]);
+    assert!(detail.get("lanes").is_none(), "{detail}");
+    assert_eq!(detail["drafts"][0]["session"], "lane-a");
+    assert_eq!(detail["findings"][0]["session"], "lane-a");
 }
 
 #[tokio::test]

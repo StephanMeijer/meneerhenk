@@ -402,7 +402,7 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure.
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError>;
 
-    /// The sessions of each of `runs` as (run, session, status), for lists
+    /// The sessions of each of `runs` as (run, session, role, status), for lists
     /// that show where each run's sessions stand, in one read.
     ///
     /// # Errors
@@ -411,7 +411,7 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     async fn sessions_of(
         &self,
         runs: &[RunId],
-    ) -> Result<Vec<(RunId, String, SessionStatus)>, StoreError>;
+    ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError>;
 
     /// How the sessions of the newest `reviews` reviews that ended (#229)
     /// ended, the reviews started at or after `since` when given. Running,

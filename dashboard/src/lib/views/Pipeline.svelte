@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Lane, Stage } from '$lib/api/types';
+  import type { Session, Stage } from '$lib/api/types';
   import { clockTime, duration, utc } from '$lib/format';
   import Elapsed from '$lib/ui/Elapsed.svelte';
   import Status from '$lib/ui/Status.svelte';
@@ -13,7 +13,7 @@
     selected = $bindable(null),
   }: {
     stages: Stage[];
-    lanes: Lane[];
+    lanes: Session[];
     selected?: string | null;
   } = $props();
 
@@ -44,7 +44,7 @@
     return duration(end - start);
   }
 
-  function laneTime(lane: Lane): string {
+  function laneTime(lane: Session): string {
     const start = Date.parse(lane.started_at);
     const end = Date.parse(lane.finished_at ?? '');
     return Number.isNaN(start) || Number.isNaN(end) ? '' : duration(end - start);

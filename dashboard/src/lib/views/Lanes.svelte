@@ -1,6 +1,6 @@
 <script lang="ts">
   import { laneStats } from '$lib/api/client';
-  import type { LaneReasons, LaneRow, LaneStats } from '$lib/api/types';
+  import type { SessionReasons, SessionRow, SessionStats } from '$lib/api/types';
   import { serverNow } from '$lib/clock';
   import { LANE_REASONS, PERIODS, count, periodSince, ratePercent } from '$lib/format';
   import { withQuery } from '$lib/router';
@@ -18,11 +18,11 @@
     now = serverNow,
   }: {
     query: URLSearchParams;
-    load?: (query: string) => Promise<LaneStats>;
+    load?: (query: string) => Promise<SessionStats>;
     now?: () => Date;
   } = $props();
 
-  const REASONS = Object.keys(LANE_REASONS) as (keyof LaneReasons)[];
+  const REASONS = Object.keys(LANE_REASONS) as (keyof SessionReasons)[];
 
   let period = $derived(PERIODS[query.get('period') ?? ''] === undefined ? '30d' : (query.get('period') as string));
   let stats = $derived.by(() => {
@@ -31,12 +31,12 @@
   });
 
   /** The reasons that occurred, most first: `rate limit 3`. */
-  const why = (reasons: LaneReasons): string[] =>
+  const why = (reasons: SessionReasons): string[] =>
     REASONS.filter((reason) => reasons[reason] > 0)
       .sort((a, b) => reasons[b] - reasons[a])
       .map((reason) => `${LANE_REASONS[reason]} ${count(reasons[reason])}`);
 
-  const share = (row: LaneRow): number | null => (row.ran === 0 ? null : row.did_not_finish / row.ran);
+  const share = (row: SessionRow): number | null => (row.ran === 0 ? null : row.did_not_finish / row.ran);
 </script>
 
 <div class="page-head">
@@ -61,7 +61,7 @@
   {#await stats}
     <Loading />
   {:then result}
-    {#if result.lanes.length === 0}
+    {#if result.sessions.length === 0}
       <Empty why="No review ended in this period." />
     {:else}
       <div class="scroll">
@@ -73,7 +73,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each result.lanes as row (row.name)}
+            {#each result.sessions as row (row.name)}
               <tr>
                 <td class="mono">{row.name}</td>
                 <td class="mono models">{row.models.join(', ')}</td>

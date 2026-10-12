@@ -69,14 +69,14 @@ describe('Run', () => {
     detail.run = { ...detail.run, kind: 'plan', loop_stop: 'converged', loop_rounds: 2 };
     detail.drafts = [
       draft('p1', {
-        lane: 'reviewer',
+        session: 'reviewer',
         kind: 'plan_point',
         path: 'step 2',
         line: 0,
         body: 'Step 2 misses the export test.',
         decision: { at: '', verdict: 'taken', checker: 'planner', reason: 'Step 2 tests it now.', same_as: '', comment_id: '' },
       }),
-      draft('p2', { lane: 'reviewer', kind: 'plan_point', path: 'step 3', line: 0, target: 'p1', body: 'Still too big.' }),
+      draft('p2', { session: 'reviewer', kind: 'plan_point', path: 'step 3', line: 0, target: 'p1', body: 'Still too big.' }),
     ];
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });
     await settle();
@@ -92,7 +92,7 @@ describe('Run', () => {
     const cancel = vi.fn(() => Promise.resolve({ run_id: 'r-1' }));
     const { connect } = fakeConnect();
     const detail = runDetail('running');
-    detail.lanes = detail.lanes.map((lane) => (lane.name === 'lane-a' ? { ...lane, status: 'running' } : lane));
+    detail.sessions = detail.sessions.map((lane) => (lane.name === 'lane-a' ? { ...lane, status: 'running' } : lane));
     render(Run, { id: 'r-1', who: 'github:5821', load: () => Promise.resolve(detail), cancel, connect });
     await settle();
     expect(cancelButton()).toBeDefined();
@@ -134,8 +134,8 @@ describe('Run', () => {
       at: '', session: 'lane-a', model: 'model-x', turn: 9, tool: 'read_file', origin: 'henk',
       outcome: 'ok', arguments: '{}', arguments_len: 2, result_chars: 1, elapsed_ms: 1,
     });
-    const lanes = runDetail('running').lanes.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running' } : l));
-    source.push('lanes', lanes);
+    const lanes = runDetail('running').sessions.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running' } : l));
+    source.push('sessions', lanes);
     source.push('draft', draft('d4', { body: 'A new one.' }));
     await settle(1);
     expect(section('Lanes')[0]?.[3]).toBe('turn 9');
@@ -156,7 +156,7 @@ describe('Run', () => {
     const detail = {
       ...runDetail('running'),
       stages: reviewStages(),
-      lanes: runDetail('running').lanes.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running', finished_at: null } : l)),
+      sessions: runDetail('running').sessions.map((l) => (l.name === 'lane-a' ? { ...l, status: 'running', finished_at: null } : l)),
     };
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn(), connect, loadCalls: () => Promise.resolve([]) });
     await settle();

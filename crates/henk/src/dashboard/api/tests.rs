@@ -453,12 +453,12 @@ async fn a_superseded_run_says_so_and_names_its_replacement_and_lanes_say_how_th
         "3 files, +4 -1; 0 not reviewed"
     );
     assert!(detail["stages"][0]["ended_at"].is_string());
-    assert!(detail["lanes"][0]["started_at"].is_string());
-    assert!(detail["lanes"][0]["finished_at"].is_string());
-    assert_eq!(detail["lanes"][0]["status"], "timed_out");
-    assert_eq!(detail["lanes"][0]["error"], Value::Null);
-    assert_eq!(detail["lanes"][1]["status"], "did_not_finish");
-    assert_eq!(detail["lanes"][1]["error"], "cancelled");
+    assert!(detail["sessions"][0]["started_at"].is_string());
+    assert!(detail["sessions"][0]["finished_at"].is_string());
+    assert_eq!(detail["sessions"][0]["status"], "timed_out");
+    assert_eq!(detail["sessions"][0]["error"], Value::Null);
+    assert_eq!(detail["sessions"][1]["status"], "did_not_finish");
+    assert_eq!(detail["sessions"][1]["error"], "cancelled");
     let replacing = get(&f, "/dashboard/api/v1/runs/r-new", &cookie)
         .await
         .json();
@@ -498,9 +498,9 @@ async fn runs_list_and_one_run_in_full_with_text_as_stored() {
     assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
     let detail = detail.json();
     assert_eq!(detail["run"]["id"], "r-review");
-    assert_eq!(detail["lanes"][0]["name"], "lane-a");
-    assert_eq!(detail["lanes"][0]["turns"], 3);
-    assert_eq!(detail["lanes"][0]["status"], "finished");
+    assert_eq!(detail["sessions"][0]["name"], "lane-a");
+    assert_eq!(detail["sessions"][0]["turns"], 3);
+    assert_eq!(detail["sessions"][0]["status"], "finished");
     assert_eq!(detail["findings"][0]["comment_id"], "c-77");
     assert_eq!(detail["findings"][0]["action"], "posted");
     assert_eq!(detail["drafts"][0]["id"], "d1");
@@ -639,13 +639,25 @@ async fn a_review_from_before_the_loop_still_reads_in_full() {
     let detail = get(&f, "/dashboard/api/v1/runs/r-lanes", &cookie).await;
     assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
     let detail = detail.json();
-    let names: Vec<&str> = detail["lanes"]
+    let sessions: Vec<(&str, &str)> = detail["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|lane| lane["name"].as_str().unwrap())
+        .map(|session| {
+            (
+                session["name"].as_str().unwrap(),
+                session["role"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(names, ["check-1", "lane-a"], "by name");
+    assert_eq!(
+        sessions,
+        [("check-1", "check"), ("lane-a", "lane")],
+        "by name, each with its history role"
+    );
+    assert!(detail.get("lanes").is_none(), "no lane field is left");
+    assert_eq!(detail["drafts"][0]["session"], "lane-a");
+    assert_eq!(detail["findings"][0]["session"], "lane-a");
     let decided: Vec<(&str, &str)> = detail["drafts"]
         .as_array()
         .unwrap()
@@ -804,13 +816,22 @@ async fn a_loop_run_with_a_fixer_still_reads_in_full() {
     let detail = get(&f, "/dashboard/api/v1/runs/r-fixer", &cookie).await;
     assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
     let detail = detail.json();
-    let names: Vec<&str> = detail["lanes"]
+    let sessions: Vec<(&str, &str)> = detail["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|lane| lane["name"].as_str().unwrap())
+        .map(|session| {
+            (
+                session["name"].as_str().unwrap(),
+                session["role"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(names, ["fixer", "reviewer"]);
+    assert_eq!(
+        sessions,
+        [("fixer", "executor"), ("reviewer", "reviewer")],
+        "the fixer of a run before #323 is the executor"
+    );
     assert_eq!(detail["drafts"][0]["decision"]["verdict"], "fixed");
     assert_eq!(detail["drafts"][0]["decision"]["checker"], "fixer");
     let transcript = get(
@@ -910,7 +931,8 @@ async fn an_address_run_from_before_its_removal_still_reads_in_full() {
     assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
     let detail = detail.json();
     assert_eq!(detail["run"]["kind"], "address");
-    assert_eq!(detail["lanes"][0]["name"], "address");
+    assert_eq!(detail["sessions"][0]["name"], "address");
+    assert_eq!(detail["sessions"][0]["role"], "address");
     let stages: Vec<&str> = detail["stages"]
         .as_array()
         .unwrap()
@@ -1761,25 +1783,25 @@ fn api_types_are_current() {
         types::RunMessage::decl(&cfg),
         types::RunningMessage::decl(&cfg),
         types::RunDetail::decl(&cfg),
-        types::LaneDot::decl(&cfg),
+        types::SessionDot::decl(&cfg),
         types::StageDot::decl(&cfg),
         types::Progress::decl(&cfg),
         types::Slots::decl(&cfg),
         types::WaitingReview::decl(&cfg),
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),
-        types::LaneStats::decl(&cfg),
+        types::SessionStats::decl(&cfg),
         types::SessionMessage::decl(&cfg),
         types::LiveSnapshot::decl(&cfg),
         types::LiveMessage::decl(&cfg),
         types::SessionEnd::decl(&cfg),
         types::ReviewMark::decl(&cfg),
-        types::LaneRow::decl(&cfg),
-        types::LaneOutcome::decl(&cfg),
-        types::LaneReasons::decl(&cfg),
+        types::SessionRow::decl(&cfg),
+        types::SessionOutcome::decl(&cfg),
+        types::SessionReasons::decl(&cfg),
         types::Stage::decl(&cfg),
         types::Heartbeat::decl(&cfg),
-        types::Lane::decl(&cfg),
+        types::Session::decl(&cfg),
         types::Finding::decl(&cfg),
         types::Draft::decl(&cfg),
         types::DraftDecision::decl(&cfg),
@@ -2096,11 +2118,11 @@ async fn a_running_run_streams_what_happens_in_order_and_ends() {
     assert_eq!(
         names,
         [
-            "lanes",
+            "sessions",
             "tool_call",
             "draft",
             "draft",
-            "lanes",
+            "sessions",
             "event",
             "run",
             "end"
@@ -2144,7 +2166,7 @@ async fn a_reconnect_gets_exactly_what_it_missed_or_a_snapshot() {
         .await
         .unwrap();
     let seen = first.next().await.unwrap();
-    assert_eq!(seen.event, "lanes");
+    assert_eq!(seen.event, "sessions");
     drop(first);
 
     store.record_tool_call(&run, &tool_call(1)).await.unwrap();
@@ -2161,7 +2183,7 @@ async fn a_reconnect_gets_exactly_what_it_missed_or_a_snapshot() {
     let mut fresh = stream(&f, uri, &cookie, Some("0123456789ab-3")).await;
     let snapshot = fresh.next().await.unwrap();
     assert_eq!(snapshot.event, "snapshot", "another process's id");
-    assert_eq!(snapshot.data["lanes"][0]["last_call_turn"], 1);
+    assert_eq!(snapshot.data["sessions"][0]["last_call_turn"], 1);
     assert_eq!(snapshot.data["events"][0]["message"], "missed");
 }
 
@@ -2278,14 +2300,14 @@ async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on(
     assert_eq!(snapshot.event, "snapshot");
     assert!(snapshot.data["slots"]["limit"].as_u64().unwrap() >= 1);
     assert_eq!(snapshot.data["slots"]["waiting"], json!([]));
-    let lanes = &snapshot.data["runs"][0]["lanes"];
+    let sessions = &snapshot.data["runs"][0]["sessions"];
     assert!(
-        lanes
+        sessions
             .as_array()
             .unwrap()
             .iter()
-            .any(|l| l["name"] == "lane-x" && l["status"] == "running"),
-        "{lanes}"
+            .any(|s| s["name"] == "lane-x" && s["role"] == "lane" && s["status"] == "running"),
+        "{sessions}"
     );
 
     store
@@ -2305,7 +2327,7 @@ async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on(
     }
     assert_eq!(moved.event, "progress");
     assert_eq!(moved.data["run_id"], "r-review");
-    assert_eq!(moved.data["lanes"], Value::Null);
+    assert_eq!(moved.data["sessions"], Value::Null);
     assert_eq!(
         moved.data["stages"],
         json!([{"name": "diff", "state": "done"}])
@@ -2491,11 +2513,11 @@ async fn the_overview_counts_each_day_and_lists_runs_with_their_lanes() {
         .unwrap()
         .clone();
     assert!(
-        item["lanes"]
+        item["sessions"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|l| l["name"] == "lane-x"),
+            .any(|s| s["name"] == "lane-x" && s["role"] == "lane"),
         "{item}"
     );
     assert!(item["stages"].is_array());
@@ -2550,26 +2572,27 @@ async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let (cookie, _) = viewer(&f);
-    let answer = get(&f, "/dashboard/api/v1/stats/lanes", &cookie).await;
+    let answer = get(&f, "/dashboard/api/v1/stats/sessions", &cookie).await;
     assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
     let stats = answer.json();
     assert_eq!(stats["reviews"][0]["run_id"], "r-1", "oldest first");
-    let lane = &stats["lanes"][0];
+    let lane = &stats["sessions"][0];
     assert_eq!(lane["name"], "lane-a");
+    assert_eq!(lane["role"], "lane");
     assert_eq!(lane["did_not_finish"], 1);
     assert_eq!(lane["reasons"]["rate_limit"], 1);
     assert_eq!(lane["outcomes"][1]["status"], "did_not_finish");
     assert_eq!(lane["outcomes"][1]["reason"], "rate_limit");
     assert_eq!(lane["outcomes"][0]["reason"], Value::Null);
 
-    let newest = get(&f, "/dashboard/api/v1/stats/lanes?last=1", &cookie)
+    let newest = get(&f, "/dashboard/api/v1/stats/sessions?last=1", &cookie)
         .await
         .json();
     assert_eq!(newest["reviews"].as_array().unwrap().len(), 1);
     assert_eq!(newest["reviews"][0]["run_id"], "r-2");
     let since = get(
         &f,
-        "/dashboard/api/v1/stats/lanes?since=2000-01-01T00:00:00Z",
+        "/dashboard/api/v1/stats/sessions?since=2000-01-01T00:00:00Z",
         &cookie,
     )
     .await
@@ -2582,11 +2605,25 @@ async fn lane_reliability_shows_the_ended_reviews_lanes_and_their_limits() {
         "since=yesterday",
         "last=5&since=2000-01-01T00:00:00Z",
     ] {
-        let answer = get(&f, &format!("/dashboard/api/v1/stats/lanes?{bad}"), &cookie).await;
+        let answer = get(
+            &f,
+            &format!("/dashboard/api/v1/stats/sessions?{bad}"),
+            &cookie,
+        )
+        .await;
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
     }
-    let refused = call(&f, Method::GET, "/dashboard/api/v1/stats/lanes", &[], None).await;
+    let refused = call(
+        &f,
+        Method::GET,
+        "/dashboard/api/v1/stats/sessions",
+        &[],
+        None,
+    )
+    .await;
     assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+    let gone = get(&f, "/dashboard/api/v1/stats/lanes", &cookie).await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND, "no alias (#325)");
 }
 
 #[tokio::test]
@@ -2890,7 +2927,7 @@ async fn the_tool_summary_counts_per_tool_model_and_kind_with_rates() {
     let rows = rows.json();
     assert_eq!(rows[0]["tool"], "read_file");
     assert_eq!(rows[0]["model"], "mistral");
-    assert_eq!(rows[0]["session_kind"], "lane");
+    assert_eq!(rows[0]["role"], "lane");
     assert_eq!(rows[0]["calls"], 3);
     assert_eq!(rows[0]["errors"], 1);
     assert!((rows[0]["error_rate"].as_f64().unwrap() - 1.0 / 3.0).abs() < 1e-9);
@@ -2899,7 +2936,7 @@ async fn the_tool_summary_counts_per_tool_model_and_kind_with_rates() {
 
     let planner = get(
         &f,
-        "/dashboard/api/v1/tool-calls/summary?session_kind=planner",
+        "/dashboard/api/v1/tool-calls/summary?role=planner",
         &cookie,
     )
     .await
@@ -2916,7 +2953,19 @@ async fn the_tool_summary_counts_per_tool_model_and_kind_with_rates() {
     .json();
     assert_eq!(early[0]["calls"], 1, "until is not inclusive");
 
-    for query in ["session_kind=robot", "since=yesterday"] {
+    let old = get(
+        &f,
+        "/dashboard/api/v1/tool-calls/summary?session_kind=planner",
+        &cookie,
+    )
+    .await
+    .json();
+    assert_eq!(
+        old.as_array().unwrap().len(),
+        5,
+        "session_kind is no longer read (#325)"
+    );
+    for query in ["role=robot", "since=yesterday"] {
         let bad = get(
             &f,
             &format!("/dashboard/api/v1/tool-calls/summary?{query}"),
@@ -3012,13 +3061,9 @@ async fn the_calls_that_went_wrong_list_across_runs_a_page_at_a_time() {
     .await
     .json();
     assert_eq!(outcomes(&refused), ["refused_scope"]);
-    let checks = get(
-        &f,
-        "/dashboard/api/v1/tool-calls?session_kind=check",
-        &cookie,
-    )
-    .await
-    .json();
+    let checks = get(&f, "/dashboard/api/v1/tool-calls?role=check", &cookie)
+        .await
+        .json();
     assert_eq!(checks["items"][0]["call"]["session"], "check-1");
 
     let mut seen = 0;

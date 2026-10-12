@@ -1,6 +1,6 @@
 //! Session reliability (#229): how each session of the recent reviews
 //! ended, the review loop's reviewer and executor, and the lanes and
-//! fact-checks of reviews from before the loop (#310). A session that
+//! fact-checks of reviews from before the loop (#310), each with its role. A session that
 //! keeps dropping out makes reviews thinner; this shows it without opening
 //! runs one by one.
 
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use super::types::{LaneOutcome, LaneReasons, LaneRow, LaneStats, ReviewMark};
+use super::types::{ReviewMark, SessionOutcome, SessionReasons, SessionRow, SessionStats};
 use super::{ApiError, ApiQuery, ApiResult};
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -24,24 +24,24 @@ const DEFAULT_LAST: u32 = 30;
 /// The most reviews `last` may ask for.
 const MOST_LAST: u32 = 200;
 
-/// What a model endpoint's rate limit reads as in a lane's error, also
+/// What a model endpoint's rate limit reads as in a session's error, also
 /// when the retries ran out on it: `LlmError::RateLimited`'s text.
 const RATE_LIMITED: &str = "rate limited by the model endpoint";
 
-/// The query of `GET /stats/lanes`: the newest `last` reviews, or every
+/// The query of `GET /stats/sessions`: the newest `last` reviews, or every
 /// review since `since` (the newest [`MOST_SESSION_REVIEWS`] of them).
 #[derive(Debug, Deserialize)]
-pub struct LanesQuery {
+pub struct SessionsQuery {
     last: Option<u32>,
     since: Option<String>,
 }
 
-/// `GET /stats/lanes`.
-pub async fn lanes(
+/// `GET /stats/sessions`.
+pub async fn sessions(
     State(dashboard): State<Arc<Dashboard>>,
     _viewer: ApiViewer,
-    ApiQuery(query): ApiQuery<LanesQuery>,
-) -> ApiResult<LaneStats> {
+    ApiQuery(query): ApiQuery<SessionsQuery>,
+) -> ApiResult<SessionStats> {
     let (since, reviews) = match (query.last, query.since.as_deref()) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request("Ask for last or since, not both."));
@@ -56,7 +56,7 @@ pub async fn lanes(
         }
     };
     let endings = dashboard.app.store.session_endings(since, reviews).await?;
-    Ok(Json(lane_stats(&endings)))
+    Ok(Json(session_stats(&endings)))
 }
 
 fn read_since(value: &str) -> Result<OffsetDateTime, ApiError> {
@@ -65,9 +65,9 @@ fn read_since(value: &str) -> Result<OffsetDateTime, ApiError> {
     })
 }
 
-/// The grid: the reviews oldest first, and per lane its outcome in each,
+/// The grid: the reviews oldest first, and per session its outcome in each,
 /// `None` where it did not run. `endings` come newest review first.
-pub(super) fn lane_stats(endings: &[SessionEnding]) -> LaneStats {
+pub(super) fn session_stats(endings: &[SessionEnding]) -> SessionStats {
     let mut reviews: Vec<ReviewMark> = Vec::new();
     for ending in endings {
         if reviews
@@ -87,26 +87,26 @@ pub(super) fn lane_stats(endings: &[SessionEnding]) -> LaneStats {
         .map(|(i, r)| (r.run_id.as_str(), i))
         .collect();
 
-    let mut rows: BTreeMap<&str, LaneRow> = BTreeMap::new();
+    let mut rows: BTreeMap<&str, SessionRow> = BTreeMap::new();
     for ending in endings {
         let name = row_name(&ending.name);
-        let row = rows.entry(name).or_insert_with(|| LaneRow {
+        let row = rows.entry(name).or_insert_with(|| SessionRow {
             name: name.to_owned(),
-            kind: ending.role.as_str().to_owned(),
+            role: ending.role.as_str().to_owned(),
             models: Vec::new(),
             outcomes: vec![None; reviews.len()],
             ran: 0,
             finished: 0,
             timed_out: 0,
             did_not_finish: 0,
-            reasons: LaneReasons::default(),
+            reasons: SessionReasons::default(),
         });
         tally(row, ending);
         if let Some(slot) = column
             .get(ending.run_id.as_str())
             .and_then(|i| row.outcomes.get_mut(*i))
         {
-            *slot = Some(LaneOutcome {
+            *slot = Some(SessionOutcome {
                 run_id: ending.run_id.as_str().to_owned(),
                 model: ending.model.clone(),
                 status: ending.status.as_str().to_owned(),
@@ -114,13 +114,13 @@ pub(super) fn lane_stats(endings: &[SessionEnding]) -> LaneStats {
             });
         }
     }
-    let mut lanes: Vec<LaneRow> = rows.into_values().collect();
-    lanes.sort_by_key(|row| order(&row.name));
-    LaneStats { reviews, lanes }
+    let mut sessions: Vec<SessionRow> = rows.into_values().collect();
+    sessions.sort_by_key(|row| order(&row.name));
+    SessionStats { reviews, sessions }
 }
 
-/// Counts one ending into its lane's row; `models` stays newest first.
-fn tally(row: &mut LaneRow, ending: &SessionEnding) {
+/// Counts one ending into its session's row; `models` stays newest first.
+fn tally(row: &mut SessionRow, ending: &SessionEnding) {
     if !row.models.contains(&ending.model) {
         row.models.push(ending.model.clone());
     }
@@ -164,9 +164,9 @@ fn order(name: &str) -> (u8, u32, String) {
     }
 }
 
-/// Why a lane did not finish, from how it ended: `time_limit`,
+/// Why a session did not finish, from how it ended: `time_limit`,
 /// `cancelled`, `rate_limit`, `declined`, `stuck` or `provider_error`.
-/// `None` for a lane that finished or still runs. The texts are the ones
+/// `None` for a session that finished or still runs. The texts are the ones
 /// henk-session stores for each way a session stops.
 pub(super) fn reason_of(status: SessionStatus, error: Option<&str>) -> Option<&'static str> {
     match status {
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_lines_lanes_up_by_review_with_each_square_s_own_model() {
+    fn the_grid_lines_sessions_up_by_review_with_each_square_s_own_model() {
         // Newest review first, as the store gives them. lane-b was added
         // in r-2; lane-a moved from m-old to m-new; check-10 sorts after
         // check-2.
@@ -304,14 +304,14 @@ mod tests {
             ),
             ending("r-1", "lane-a", "m-old", SessionStatus::Finished, None),
         ];
-        let stats = lane_stats(&endings);
+        let stats = session_stats(&endings);
         let reviews: Vec<_> = stats.reviews.iter().map(|r| r.run_id.as_str()).collect();
         assert_eq!(reviews, ["r-1", "r-2", "r-3"], "oldest first");
-        let names: Vec<_> = stats.lanes.iter().map(|l| l.name.as_str()).collect();
+        let names: Vec<_> = stats.sessions.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["lane-a", "lane-b", "check-2", "check-10"]);
 
-        let a = &stats.lanes[0];
-        assert_eq!(a.kind, "lane");
+        let a = &stats.sessions[0];
+        assert_eq!(a.role, "lane");
         assert_eq!(a.models, ["m-new", "m-old"], "newest first");
         let models: Vec<_> = a
             .outcomes
@@ -328,18 +328,18 @@ mod tests {
             Some("cancelled")
         );
 
-        let b = &stats.lanes[1];
+        let b = &stats.sessions[1];
         assert!(b.outcomes[0].is_none(), "lane-b did not run in r-1");
         assert_eq!((b.ran, b.reasons.stuck), (2, 1));
 
-        let check = &stats.lanes[2];
-        assert_eq!(check.kind, "check");
+        let check = &stats.sessions[2];
+        assert_eq!(check.role, "check");
         assert_eq!((check.timed_out, check.reasons.time_limit), (1, 1));
         assert_eq!(check.outcomes.len(), 3);
     }
 
     #[test]
-    fn a_review_loops_reviewer_and_executor_come_first_as_their_own_kinds() {
+    fn a_review_loops_reviewer_and_executor_come_first_with_their_roles() {
         // r-3 ran the loop; r-2 too, before #323 named its executor fixer;
         // r-1 ran lanes before the loop (#310).
         let endings = [
@@ -350,11 +350,11 @@ mod tests {
             ending("r-1", "check-1", "c", SessionStatus::Finished, None),
             ending("r-1", "lane-a", "m-a", SessionStatus::Finished, None),
         ];
-        let stats = lane_stats(&endings);
+        let stats = session_stats(&endings);
         let rows: Vec<_> = stats
-            .lanes
+            .sessions
             .iter()
-            .map(|l| (l.name.as_str(), l.kind.as_str()))
+            .map(|l| (l.name.as_str(), l.role.as_str()))
             .collect();
         assert_eq!(
             rows,
@@ -365,8 +365,11 @@ mod tests {
                 ("check-1", "check"),
             ]
         );
-        assert!(stats.lanes[0].outcomes[0].is_none(), "no reviewer in r-1");
-        let executor = &stats.lanes[1];
+        assert!(
+            stats.sessions[0].outcomes[0].is_none(),
+            "no reviewer in r-1"
+        );
+        let executor = &stats.sessions[1];
         assert_eq!(executor.ran, 2, "the fixer of r-2 is in the executor's row");
         assert_eq!(executor.models, ["m-e", "m-f"]);
         assert_eq!(executor.reasons.time_limit, 1);
@@ -374,7 +377,7 @@ mod tests {
 
     #[test]
     fn no_reviews_is_an_empty_grid() {
-        let stats = lane_stats(&[]);
-        assert!(stats.reviews.is_empty() && stats.lanes.is_empty());
+        let stats = session_stats(&[]);
+        assert!(stats.reviews.is_empty() && stats.sessions.is_empty());
     }
 }

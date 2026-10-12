@@ -33,10 +33,12 @@ function addCall(detail: RunDetail, call: ToolCall): RunDetail {
           : row,
       )
     : [...detail.tool_usage, { session: call.session, tool: call.tool, calls: 1, ...tally, total_ms: call.elapsed_ms }];
-  const lanes = detail.lanes.map((lane) =>
-    lane.name === call.session ? { ...lane, last_call_turn: Math.max(lane.last_call_turn ?? 0, call.turn) } : lane,
+  const sessions = detail.sessions.map((session) =>
+    session.name === call.session
+      ? { ...session, last_call_turn: Math.max(session.last_call_turn ?? 0, call.turn) }
+      : session,
   );
-  return { ...detail, tool_usage, lanes };
+  return { ...detail, tool_usage, sessions };
 }
 
 /** A run's page after one message of its stream. */
@@ -48,13 +50,15 @@ export function applyRun(detail: RunDetail, message: RunMessage): RunDetail {
       const { run, summary, error, check_id } = message.data;
       return { ...detail, run, summary, error, check_id };
     }
-    case 'lanes':
+    case 'sessions':
       return {
         ...detail,
-        lanes: message.data.map((lane) => ({
-          ...lane,
+        sessions: message.data.map((session) => ({
+          ...session,
           last_call_turn:
-            lane.last_call_turn ?? detail.lanes.find((old) => old.name === lane.name)?.last_call_turn ?? null,
+            session.last_call_turn ??
+            detail.sessions.find((old) => old.name === session.name)?.last_call_turn ??
+            null,
         })),
       };
     case 'tool_call':
@@ -96,23 +100,23 @@ export function applyRunning(state: Running, message: RunningMessage): Running {
     return { ...state, slots: message.data };
   }
   if (message.kind === 'progress') {
-    const { run_id, lanes, stages } = message.data;
+    const { run_id, sessions, stages } = message.data;
     return {
       ...state,
       runs: state.runs.map((r) =>
-        r.id === run_id ? { ...r, lanes: lanes ?? r.lanes, stages: stages ?? r.stages } : r,
+        r.id === run_id ? { ...r, sessions: sessions ?? r.sessions, stages: stages ?? r.stages } : r,
       ),
     };
   }
   const run = message.data;
   const known = state.runs.find((r) => r.id === run.id);
   if (run.status === 'running') {
-    // A `run` message carries no lanes or stages: keep the ones known.
+    // A `run` message carries no sessions or stages: keep the ones known.
     return known
       ? {
           ...state,
           runs: state.runs.map((r) =>
-            r.id === run.id ? { ...run, lanes: r.lanes, stages: r.stages } : r,
+            r.id === run.id ? { ...run, sessions: r.sessions, stages: r.stages } : r,
           ),
         }
       : { ...state, runs: [run, ...state.runs], count: state.count + 1 };
