@@ -935,7 +935,7 @@ carries it, and the deployment fills those variables from OpenBao.
 
 | Variable | Read by | Reaches |
 |---|---|---|
-| `[models.*].api_key_env` | `App::build` | the model client, as a bearer token or `x-api-key` |
+| `[endpoints.*].api_key_env` | `App::build` | the clients of the endpoint's models, as a bearer token or `x-api-key` |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting |
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for the review loop's push | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
 | `HENK_GITHUB_WEBHOOK_SECRET`, `HENK_GITLAB_WEBHOOK_TOKEN` | `server::router` | signature and token checks |

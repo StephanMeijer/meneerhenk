@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use crate::client::{MaxTokensParam, ModelClient, ModelConfig};
 use crate::error::{LlmError, truncate_body};
-use crate::http::{build_client, post_json, with_retry};
+use crate::http::{build_endpoint_client, post_json, prepared, with_retry};
 use crate::schema;
 use crate::types::{
     Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
@@ -30,9 +30,15 @@ impl OpenAiClient {
     ///
     /// Returns [`LlmError::InvalidConfig`] when the HTTP client cannot be built.
     pub fn new(config: ModelConfig) -> Result<Self, LlmError> {
-        let http = build_client(config.timeout)?;
+        Ok(Self::with_http(config, build_endpoint_client()?))
+    }
+
+    /// The client over `http`, the HTTP client its endpoint's models share
+    /// (#368).
+    #[must_use]
+    pub fn with_http(config: ModelConfig, http: reqwest::Client) -> Self {
         let url = format!("{}/chat/completions", config.base_url());
-        Ok(Self { config, http, url })
+        Self { config, http, url }
     }
 
     /// The request body for `request`. Public for fixture tests.
@@ -272,9 +278,7 @@ impl ModelClient for OpenAiClient {
     async fn complete(&self, request: &CompletionRequest) -> Result<Completion, LlmError> {
         let body = self.body(request);
         with_retry(self.config.retry, |_| async {
-            let builder = self
-                .http
-                .post(&self.url)
+            let builder = prepared(self.http.post(&self.url), &self.config)
                 .bearer_auth(self.config.api_key.expose_secret());
             let response = post_json(builder, &body).await?;
             decode(&response)

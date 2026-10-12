@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow};
-use henk_llm::{ModelClient, client_for};
+use henk_llm::{ModelClient, client_with};
 use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
 use henk_platform::gitlab::{GitLabRest, GitLabWriter};
@@ -117,12 +117,25 @@ impl App {
         let feed = crate::live::Feed::default();
         let store: Arc<dyn RunStore> = Arc::new(crate::live::Announcing::new(store, feed.clone()));
 
+        // One HTTP client per endpoint, shared by its models (#368).
+        let mut endpoints: BTreeMap<&str, reqwest::Client> = BTreeMap::new();
+        for id in settings.endpoints.keys() {
+            let http =
+                henk_llm::build_endpoint_client().with_context(|| format!("endpoint {id}"))?;
+            endpoints.insert(id.as_str(), http);
+        }
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
         for (id, model) in &settings.models {
-            let config = model
-                .to_client_config(env_var)
-                .map_err(|var| anyhow!("model {id}: environment variable {var} is not set"))?;
-            let client = client_for(config).with_context(|| format!("model {id}"))?;
+            let config = settings
+                .client_config(id, env_var)
+                .map_err(|why| anyhow!("model {id} on endpoint {}: {why}", model.endpoint))?;
+            let http = endpoints
+                .get(model.endpoint.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!("model {id}: endpoint {} is not configured", model.endpoint)
+                })?;
+            let client = client_with(config, http).with_context(|| format!("model {id}"))?;
             models.insert(id.clone(), client);
         }
 

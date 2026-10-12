@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::client::{ModelConfig, Provider};
 use crate::error::{LlmError, truncate_body};
-use crate::http::{build_client, get_json, with_retry};
+use crate::http::{build_endpoint_client, get_json, prepared, with_retry};
 
 /// Lists the model ids the endpoint of `config` serves. The configured model
 /// name itself is ignored; only the base URL, provider and key are used.
@@ -16,16 +16,17 @@ use crate::http::{build_client, get_json, with_retry};
 /// usual HTTP errors from the endpoint, and [`LlmError::Decode`] when the
 /// answer has no `data` array of objects with an `id`.
 pub async fn list_models(config: &ModelConfig) -> Result<Vec<String>, LlmError> {
-    let http = build_client(config.timeout)?;
+    let http = build_endpoint_client()?;
     let url = match config.provider {
         Provider::OpenAi => format!("{}/models", config.base_url()),
         Provider::Anthropic => format!("{}/v1/models", config.base_url()),
     };
     with_retry(config.retry, |_| async {
         let builder = match config.provider {
-            Provider::OpenAi => http.get(&url).bearer_auth(config.api_key.expose_secret()),
-            Provider::Anthropic => http
-                .get(&url)
+            Provider::OpenAi => {
+                prepared(http.get(&url), config).bearer_auth(config.api_key.expose_secret())
+            }
+            Provider::Anthropic => prepared(http.get(&url), config)
                 .header("x-api-key", config.api_key.expose_secret())
                 .header("anthropic-version", crate::anthropic::API_VERSION),
         };

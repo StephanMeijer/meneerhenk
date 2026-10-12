@@ -935,10 +935,12 @@ installation_id = 2
 bot_login = "h[bot]"
 [mcp.github]
 command = "unused"
-[models.m]
+[endpoints.m]
 provider = "openai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
+[models.m]
+endpoint = "m"
 model = "scripted"
 [review]
 [review.loop]
@@ -2958,7 +2960,7 @@ requester_id = 3
     /// A review loop of reviewer `r` and executor `f` (#284), each its own
     /// scripted model, with `settings` in `[review.loop]`.
     fn loop_config_with(settings: &str) -> String {
-        let models = "[models.r]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"r\"\n[models.f]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\nmodel = \"f\"\n";
+        let models = "[endpoints.r]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\n[models.r]\nendpoint = \"r\"\nmodel = \"r\"\n[endpoints.f]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"UNUSED\"\n[models.f]\nendpoint = \"f\"\nmodel = \"f\"\n";
         CONFIG
             .replace("[review]\n", &format!("{models}[review]\n"))
             .replace("[review.loop]\n", &format!("[review.loop]\n{settings}"))

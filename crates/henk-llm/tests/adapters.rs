@@ -13,7 +13,7 @@ use std::time::Duration;
 use henk_llm::{
     Block, CacheTtl, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig,
     Provider, RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName,
-    ToolResult, anthropic, client_for, openai,
+    ToolResult, anthropic, build_endpoint_client, client_for, client_with, openai,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -41,6 +41,7 @@ fn config(provider: Provider, base_url: &str) -> ModelConfig {
         max_tokens_param: MaxTokensParam::MaxTokens,
         effort: None,
         prompt_cache: true,
+        headers: Vec::new(),
     }
 }
 
@@ -391,6 +392,108 @@ async fn openai_401_is_not_retried() {
         .await
         .unwrap_err();
     assert!(matches!(error, LlmError::Unauthorized { status: 401, .. }));
+}
+
+// ---- Endpoints (#368) -------------------------------------------------------
+
+/// A model on an endpoint that wants an extra header.
+fn on_endpoint(provider: Provider, base_url: &str, model: &str) -> ModelConfig {
+    let mut cfg = config(provider, base_url);
+    model.clone_into(&mut cfg.model);
+    cfg.headers = vec![("X-Org".to_owned(), "henk".to_owned())];
+    cfg
+}
+
+#[tokio::test]
+async fn the_models_of_one_endpoint_share_its_client_and_send_its_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("x-org", "henk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("openai/text.json")))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let base = format!("{}/v1", server.uri());
+    let http = build_endpoint_client().unwrap();
+    for model in ["gpt-a", "gpt-b"] {
+        let client =
+            client_with(on_endpoint(Provider::OpenAi, &base, model), http.clone()).unwrap();
+        let completion = client
+            .complete(&CompletionRequest {
+                messages: vec![ChatMessage::user("hi")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(completion.message.text(), "Not bad.");
+    }
+}
+
+#[tokio::test]
+async fn anthropic_sends_the_endpoint_s_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-org", "henk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("anthropic/text.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(on_endpoint(Provider::Anthropic, &server.uri(), "claude")).unwrap();
+    client
+        .complete(&CompletionRequest {
+            messages: vec![ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn listing_models_sends_the_endpoint_s_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("x-org", "henk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "gpt-a"}]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let ids = henk_llm::list_models(&on_endpoint(
+        Provider::OpenAi,
+        &format!("{}/v1", server.uri()),
+        "gpt-a",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(ids, ["gpt-a"]);
+}
+
+#[tokio::test]
+async fn a_model_s_timeout_holds_on_the_shared_client() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(fixture("openai/text.json"))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let mut cfg = config(Provider::OpenAi, &format!("{}/v1", server.uri()));
+    cfg.timeout = Duration::from_millis(100);
+    cfg.retry.max_attempts = 1;
+    let client = client_with(cfg, build_endpoint_client().unwrap()).unwrap();
+    let error = client
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, LlmError::RetriesExhausted { last, .. }
+            if matches!(last.as_ref(), LlmError::Transport(e) if e.is_timeout())),
+        "{error:?}"
+    );
 }
 
 // ---- Anthropic -------------------------------------------------------------

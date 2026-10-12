@@ -630,10 +630,12 @@ installation_id = 2
 bot_login = "h[bot]"
 [mcp.github]
 command = "unused"
-[models.m]
+[endpoints.m]
 provider = "openai"
 base_url = "https://x.test/v1"
 api_key_env = "UNUSED"
+[models.m]
+endpoint = "m"
 model = "scripted"
 [execution]
 [roles.executor]

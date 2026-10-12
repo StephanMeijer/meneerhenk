@@ -61,12 +61,24 @@ token_env = "GITLAB_PERSONAL_ACCESS_TOKEN"
 mcp_server = "gitlab"
 write_mcp_server = "gitlab-write"
 
-# Models. The roles (the reviewer, the executor and the planner) refer to
-# one of these by id.
-[models.proxy-fast]
+# Endpoints: where models are reached and how (#368). One per server or
+# account; any number of the same provider, each with its own id. headers
+# (optional) are sent with every request, for a gateway that wants them.
+[endpoints.proxy]
 provider = "openai"
 base_url = "https://llm3.9xx.nl/v1"
 api_key_env = "LLM3_API_KEY"
+# headers = { "X-Team" = "henk" }
+
+[endpoints.anthropic]
+provider = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Models: what each model is and on which endpoint. The roles (the
+# reviewer, the executor and the planner) refer to one of these by id.
+[models.proxy-fast]
+endpoint = "proxy"
 model = "fast-model"
 max_tokens = 4096
 
@@ -79,9 +91,7 @@ max_tokens = 4096
 # one wrote at a fraction of the price. Set it false for a proxy that
 # rejects cache_control.
 [models.claude]
-provider = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key_env = "ANTHROPIC_API_KEY"
+endpoint = "anthropic"
 model = "claude-sonnet-5-5"
 max_tokens = 16384
 
@@ -90,9 +100,7 @@ max_tokens = 16384
 # Opus 5.5 is medium. Calls are not streamed, so a higher effort needs a
 # longer timeout_secs.
 [models.opus]
-provider = "anthropic"
-base_url = "https://api.anthropic.com"
-api_key_env = "ANTHROPIC_API_KEY"
+endpoint = "anthropic"
 model = "claude-opus-5-5"
 effort = "high"
 max_tokens = 16384

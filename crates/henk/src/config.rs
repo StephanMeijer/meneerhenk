@@ -48,7 +48,10 @@ pub struct Config {
     /// GitLab identity.
     #[serde(default)]
     pub gitlab: Option<GitLabConfig>,
-    /// Models by id.
+    /// Endpoints by id (#368): where and how models are reached.
+    #[serde(default)]
+    pub endpoints: BTreeMap<String, EndpointFileConfig>,
+    /// Models by id, each on a declared endpoint.
     #[serde(default)]
     pub models: BTreeMap<String, ModelFileConfig>,
     /// Review settings.
@@ -437,16 +440,39 @@ fn default_gitlab_write_mcp() -> String {
     "gitlab-write".to_owned()
 }
 
-/// One model endpoint.
+/// One endpoint (#368): where its models are reached and how. One per
+/// server or account; any number of the same provider.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelFileConfig {
+pub struct EndpointFileConfig {
     /// Wire format.
     pub provider: Provider,
     /// Base URL.
     pub base_url: String,
     /// Env var with the API key.
     pub api_key_env: String,
+    /// Extra headers sent with every request, such as an organisation.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// One model: what it is, on which endpoint, called how.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFileConfig {
+    /// The endpoint id from `[endpoints]`.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Before #368 a model said where it was reached; these keys are refused
+    /// with where they went ([`ModelFileConfig::removed_key`]).
+    #[serde(default)]
+    provider: Option<toml::Value>,
+    /// See `provider`.
+    #[serde(default)]
+    base_url: Option<toml::Value>,
+    /// See `provider`.
+    #[serde(default)]
+    api_key_env: Option<toml::Value>,
     /// Model name sent to the endpoint.
     pub model: String,
     /// Default output cap.
@@ -471,6 +497,20 @@ pub struct ModelFileConfig {
 
 fn default_prompt_cache() -> bool {
     true
+}
+
+impl ModelFileConfig {
+    /// The first key the model still has that belongs to its endpoint now
+    /// (#368).
+    fn removed_key(&self) -> Option<&'static str> {
+        [
+            (self.provider.is_some(), "provider"),
+            (self.base_url.is_some(), "base_url"),
+            (self.api_key_env.is_some(), "api_key_env"),
+        ]
+        .into_iter()
+        .find_map(|(present, key)| present.then_some(key))
+    }
 }
 
 fn default_max_tokens() -> u32 {
@@ -1420,12 +1460,24 @@ pub enum ConfigError {
     #[error("Henk's own user id {0} appears in the roster")]
     HenkInRoster(DiscordUserId),
     /// Something refers to a model id that is not configured.
-    #[error("{what} refers to unknown model {model:?}")]
+    #[error("{what} refers to unknown model {model:?}; declared: {declared}")]
     UnknownModel {
         /// Where the reference is.
         what: String,
         /// The id.
         model: String,
+        /// The model ids that are declared.
+        declared: String,
+    },
+    /// A model refers to an endpoint id that is not configured (#368).
+    #[error("{what} refers to unknown endpoint {endpoint:?}; declared: {declared}")]
+    UnknownEndpoint {
+        /// Where the reference is.
+        what: String,
+        /// The id.
+        endpoint: String,
+        /// The endpoint ids that are declared.
+        declared: String,
     },
     /// A platform section refers to an MCP alias that is not configured.
     #[error("{what} refers to unknown MCP server {alias:?}")]
@@ -1441,6 +1493,9 @@ pub enum ConfigError {
     /// A model configuration is unusable.
     #[error("model {0:?}: {1}")]
     Model(String, String),
+    /// An endpoint entry is invalid (#368).
+    #[error("endpoint {0:?}: {1}")]
+    Endpoint(String, String),
     /// A review setting is unusable.
     #[error("{0}")]
     Review(String),
@@ -1492,7 +1547,9 @@ pub struct Settings {
     pub github: Option<GitHubConfig>,
     /// GitLab.
     pub gitlab: Option<GitLabConfig>,
-    /// Models by id, without their secrets.
+    /// Endpoints by id, without their secrets (#368).
+    pub endpoints: BTreeMap<String, EndpointFileConfig>,
+    /// Models by id, each on one of `endpoints`.
     pub models: BTreeMap<String, ModelFileConfig>,
     /// Reviews: the loop, its limits and what it leaves out.
     pub review: ReviewConfig,
@@ -1551,7 +1608,8 @@ impl Config {
             return Err(ConfigError::EmptyAllowlist);
         }
 
-        validate_models(&self.models)?;
+        validate_endpoints(&self.endpoints)?;
+        validate_models(&self.models, &self.endpoints)?;
         if self.address.is_some() {
             return Err(moved("[address]", "[roles.executor]"));
         }
@@ -1620,6 +1678,7 @@ impl Config {
             allowlist,
             github: self.github,
             gitlab: self.gitlab,
+            endpoints: self.endpoints,
             models: self.models,
             review: self.review,
             roles: self.roles,
@@ -1719,6 +1778,7 @@ fn validate_roles(
             return Err(ConfigError::UnknownModel {
                 what: format!("roles.{role}"),
                 model: model.clone(),
+                declared: declared(models.keys()),
             });
         }
         let granted = role
@@ -1831,21 +1891,85 @@ fn is_github_base(raw: &str) -> bool {
     }
 }
 
-fn validate_models(models: &BTreeMap<String, ModelFileConfig>) -> Result<(), ConfigError> {
+/// The declared ids, for a message: `a, b`, or `none`.
+fn declared<'a>(ids: impl Iterator<Item = &'a String>) -> String {
+    let ids: Vec<&str> = ids.map(String::as_str).collect();
+    if ids.is_empty() {
+        "none".to_owned()
+    } else {
+        ids.join(", ")
+    }
+}
+
+/// Each endpoint (#368): an `http(s)://` base URL, a key variable, and
+/// headers a request can carry.
+fn validate_endpoints(endpoints: &BTreeMap<String, EndpointFileConfig>) -> Result<(), ConfigError> {
+    for (id, endpoint) in endpoints {
+        let fail = |why: String| Err(ConfigError::Endpoint(id.clone(), why));
+        if !(endpoint.base_url.starts_with("https://") || endpoint.base_url.starts_with("http://"))
+        {
+            return fail("base_url must start with http(s)://".to_owned());
+        }
+        if endpoint.api_key_env.trim().is_empty() {
+            return fail("api_key_env is empty".to_owned());
+        }
+        for (name, value) in &endpoint.headers {
+            if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                return fail(format!("header name {name:?} is not a valid header name"));
+            }
+            if reqwest::header::HeaderValue::from_str(value).is_err() {
+                return fail(format!(
+                    "the value of header {name:?} is not a valid header value"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Each model: on a declared endpoint, with a name, and none of the keys
+/// that moved to its endpoint (#368).
+fn validate_models(
+    models: &BTreeMap<String, ModelFileConfig>,
+    endpoints: &BTreeMap<String, EndpointFileConfig>,
+) -> Result<(), ConfigError> {
     for (id, model) in models {
+        if let Some(key) = model.removed_key() {
+            let at = if model.endpoint.is_empty() {
+                "<id>"
+            } else {
+                &model.endpoint
+            };
+            return Err(ConfigError::Model(
+                id.clone(),
+                format!(
+                    "{key} was removed from [models.{id}]: it is [endpoints.{at}].{key} now. A model names its endpoint with endpoint = \"<id>\"; the README's \"Endpoints and models\" says how"
+                ),
+            ));
+        }
+        if model.endpoint.trim().is_empty() {
+            return Err(ConfigError::Model(
+                id.clone(),
+                format!(
+                    "endpoint is missing: name one of [endpoints] ({})",
+                    declared(endpoints.keys())
+                ),
+            ));
+        }
+        let Some(endpoint) = endpoints.get(&model.endpoint) else {
+            return Err(ConfigError::UnknownEndpoint {
+                what: format!("models.{id}"),
+                endpoint: model.endpoint.clone(),
+                declared: declared(endpoints.keys()),
+            });
+        };
         if model.model.trim().is_empty() {
             return Err(ConfigError::Model(
                 id.clone(),
                 "model name is empty".to_owned(),
             ));
         }
-        if !(model.base_url.starts_with("https://") || model.base_url.starts_with("http://")) {
-            return Err(ConfigError::Model(
-                id.clone(),
-                "base_url must start with http(s)://".to_owned(),
-            ));
-        }
-        if model.effort.is_some() && model.provider != Provider::Anthropic {
+        if model.effort.is_some() && endpoint.provider != Provider::Anthropic {
             return Err(ConfigError::Model(
                 id.clone(),
                 "effort applies to provider \"anthropic\" only".to_owned(),
@@ -2072,29 +2196,69 @@ fn build_allowlist(config: &AllowlistConfig) -> Result<Allowlist, ConfigError> {
     Ok(Allowlist::new(rules))
 }
 
-impl ModelFileConfig {
-    /// Turns the file entry into a client configuration, reading the key
-    /// from the environment.
+impl Settings {
+    /// The client configuration of endpoint `id` alone, with the key read
+    /// from the environment: for what is the endpoint's business, such as
+    /// listing the models it serves (#368). The model fields hold defaults.
     ///
     /// # Errors
     ///
-    /// Returns the name of the missing environment variable.
-    pub fn to_client_config(
+    /// Returns why: an unknown endpoint, or the missing environment
+    /// variable.
+    pub fn endpoint_config(
         &self,
+        id: &str,
         lookup_env: impl Fn(&str) -> Option<String>,
     ) -> Result<henk_llm::ModelConfig, String> {
-        let key = lookup_env(&self.api_key_env).ok_or_else(|| self.api_key_env.clone())?;
+        let endpoint = self
+            .endpoints
+            .get(id)
+            .ok_or_else(|| format!("endpoint {id:?} is not configured"))?;
+        let key = lookup_env(&endpoint.api_key_env)
+            .ok_or_else(|| format!("environment variable {} is not set", endpoint.api_key_env))?;
         Ok(henk_llm::ModelConfig {
-            provider: self.provider,
-            base_url: self.base_url.clone(),
+            provider: endpoint.provider,
+            base_url: endpoint.base_url.clone(),
             api_key: key.into(),
-            model: self.model.clone(),
-            max_tokens: self.max_tokens,
-            timeout: Duration::from_secs(self.timeout_secs),
+            model: String::new(),
+            max_tokens: default_max_tokens(),
+            timeout: Duration::from_secs(default_model_timeout_secs()),
             retry: RetryPolicy::default(),
-            max_tokens_param: self.max_tokens_param,
-            effort: self.effort,
-            prompt_cache: self.prompt_cache,
+            max_tokens_param: MaxTokensParam::default(),
+            effort: None,
+            prompt_cache: default_prompt_cache(),
+            headers: endpoint
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        })
+    }
+
+    /// The client configuration of model `id`: the model on its endpoint,
+    /// with the key read from the environment (#368).
+    ///
+    /// # Errors
+    ///
+    /// Returns why: an unknown model or endpoint, or the missing
+    /// environment variable.
+    pub fn client_config(
+        &self,
+        id: &str,
+        lookup_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<henk_llm::ModelConfig, String> {
+        let model = self
+            .models
+            .get(id)
+            .ok_or_else(|| format!("model {id:?} is not configured"))?;
+        Ok(henk_llm::ModelConfig {
+            model: model.model.clone(),
+            max_tokens: model.max_tokens,
+            timeout: Duration::from_secs(model.timeout_secs),
+            max_tokens_param: model.max_tokens_param,
+            effort: model.effort,
+            prompt_cache: model.prompt_cache,
+            ..self.endpoint_config(&model.endpoint, lookup_env)?
         })
     }
 }
@@ -2499,6 +2663,70 @@ impl Settings {
         );
     }
 
+    /// The endpoints, then the models on them (#368), with what no role
+    /// or model uses.
+    fn describe_models(&self, out: &mut String) {
+        let _ = writeln!(out, "Endpoints:");
+        for (id, endpoint) in &self.endpoints {
+            let headers = match endpoint.headers.len() {
+                0 => String::new(),
+                1 => ", 1 header".to_owned(),
+                n => format!(", {n} headers"),
+            };
+            let _ = writeln!(
+                out,
+                "  {id}: {} at {} (key from ${}{headers})",
+                endpoint.provider.as_str(),
+                endpoint.base_url,
+                endpoint.api_key_env
+            );
+        }
+        let _ = writeln!(out, "Models:");
+        for (id, model) in &self.models {
+            let effort = model
+                .effort
+                .map(|effort| format!(", effort {}", effort.as_str()))
+                .unwrap_or_default();
+            let _ = writeln!(out, "  {id}: {} on {}{effort}", model.model, model.endpoint);
+        }
+        let unused_models = self.unused_models();
+        if !unused_models.is_empty() {
+            let _ = writeln!(
+                out,
+                "  warning: used by no role: {}",
+                unused_models.join(", ")
+            );
+        }
+        let unused_endpoints: Vec<&str> = self
+            .endpoints
+            .keys()
+            .filter(|id| self.models.values().all(|m| &m.endpoint != *id))
+            .map(String::as_str)
+            .collect();
+        if !unused_endpoints.is_empty() {
+            let _ = writeln!(
+                out,
+                "  warning: endpoints no model uses: {}",
+                unused_endpoints.join(", ")
+            );
+        }
+    }
+
+    /// The declared models no role uses: allowed, but worth a word.
+    #[must_use]
+    pub fn unused_models(&self) -> Vec<&str> {
+        let roles = &self.roles;
+        self.models
+            .keys()
+            .filter(|id| {
+                roles.planner.as_ref().is_none_or(|r| &r.model != *id)
+                    && roles.reviewer.as_ref().is_none_or(|r| &r.model != *id)
+                    && roles.executor.as_ref().is_none_or(|r| &r.model != *id)
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
     /// A plain-text description of what Henk would work with.
     #[must_use]
     pub fn describe(&self) -> String {
@@ -2528,17 +2756,7 @@ impl Settings {
                 }
             }
         }
-        let _ = writeln!(out, "Models:");
-        for (id, model) in &self.models {
-            let _ = writeln!(
-                out,
-                "  {id}: {} {} at {} (key from ${})",
-                model.provider.as_str(),
-                model.model,
-                model.base_url,
-                model.api_key_env
-            );
-        }
+        self.describe_models(&mut out);
         self.describe_limits(&mut out);
         self.describe_agents(&mut out);
         self.describe_workspace(&mut out);
@@ -2836,7 +3054,7 @@ github_owners = ["docspec"]
         );
 
         let address = Config::parse(&format!(
-            "{MINIMAL}[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
+            "{MINIMAL}[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"x\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
         ))
         .and_then(Config::into_settings)
         .unwrap();
@@ -2846,7 +3064,7 @@ github_owners = ["docspec"]
     #[test]
     fn the_executor_is_configured_and_checked() {
         let with_model = format!(
-            "{MINIMAL}[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n"
+            "{MINIMAL}[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"x\"\n"
         );
         let parse = |extra: &str| {
             Config::parse(&format!("{with_model}{extra}")).and_then(Config::into_settings)
@@ -2950,7 +3168,7 @@ github_owners = ["docspec"]
         assert!(!described.contains("no requester trailers"), "{described}");
     }
 
-    const ADDRESS: &str = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    const ADDRESS: &str = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"x\"\n[[people]]\ndiscord_id = 3\nname = \"Lead\"\nrole = \"team lead\"\nPERSON[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
 
     fn address(person: &str, extra: &str) -> Result<Settings, ConfigError> {
         let text = format!("{MINIMAL}{}{extra}", ADDRESS.replace("PERSON", person));
@@ -2976,7 +3194,7 @@ github_owners = ["docspec"]
         );
         let unknown = address("", "[review.loop]\n[roles.reviewer]\nmodel = \"x\"\n").unwrap_err();
         assert!(
-            matches!(&unknown, ConfigError::UnknownModel { what, model } if what == "roles.reviewer" && model == "x"),
+            matches!(&unknown, ConfigError::UnknownModel { what, model, declared } if what == "roles.reviewer" && model == "x" && declared == "m"),
             "{unknown}"
         );
         let none = address("", &format!("[review.loop]\nmax_rounds = 0\n{reviewer}")).unwrap_err();
@@ -3828,7 +4046,7 @@ github_owners = ["docspec"]
     /// that still has one fails with what replaced them.
     #[test]
     fn lane_and_fact_check_keys_name_the_review_loop() {
-        let model = "[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n";
+        let model = "[endpoints.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"c\"\n";
         for (section, key) in [
             (
                 "[review]\nlanes = [{ name = \"a\", model = \"m\" }]\n",
@@ -3916,7 +4134,7 @@ github_owners = ["docspec"]
     #[test]
     fn planning_requester_must_be_a_team_lead() {
         let text = format!(
-            "{MINIMAL}\n[models.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"c\"\n[planning]\nrequester_id = 99\n[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n"
+            "{MINIMAL}\n[endpoints.m]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"c\"\n[planning]\nrequester_id = 99\n[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n"
         );
         assert!(matches!(
             Config::parse(&text).and_then(Config::into_settings),
@@ -3924,16 +4142,123 @@ github_owners = ["docspec"]
         ));
     }
 
+    /// Two endpoints of one provider, each with its own model (#368).
+    const TWO_ENDPOINTS: &str = "[endpoints.a]\nprovider = \"openai\"\nbase_url = \"https://a.test/v1\"\napi_key_env = \"KEY_A\"\nheaders = { \"X-Org\" = \"henk\" }\n[endpoints.b]\nprovider = \"openai\"\nbase_url = \"https://b.test/v1\"\napi_key_env = \"KEY_B\"\n[models.gpt-a]\nendpoint = \"a\"\nmodel = \"gpt-5.5\"\n[models.gpt-b]\nendpoint = \"b\"\nmodel = \"gpt-5.5\"\nmax_tokens = 8192\n";
+
+    #[test]
+    fn two_endpoints_of_one_provider_each_carry_their_models() {
+        let settings = Config::parse(&format!("{MINIMAL}{TWO_ENDPOINTS}"))
+            .and_then(Config::into_settings)
+            .unwrap();
+        let env = |name: &str| Some(format!("secret-{name}"));
+        let a = settings.client_config("gpt-a", env).unwrap();
+        let b = settings.client_config("gpt-b", env).unwrap();
+        assert_eq!(
+            (a.base_url.as_str(), a.headers.clone(), a.max_tokens),
+            (
+                "https://a.test/v1",
+                vec![("X-Org".to_owned(), "henk".to_owned())],
+                4096
+            )
+        );
+        assert_eq!(
+            (b.base_url.as_str(), b.headers.len(), b.max_tokens),
+            ("https://b.test/v1", 0, 8192)
+        );
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&a.api_key),
+            "secret-KEY_A"
+        );
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&b.api_key),
+            "secret-KEY_B"
+        );
+        assert_eq!(
+            settings.client_config("gpt-a", |_| None).unwrap_err(),
+            "environment variable KEY_A is not set"
+        );
+        let said = settings.describe();
+        for line in [
+            "Endpoints:\n  a: openai at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai at https://b.test/v1 (key from $KEY_B)\n",
+            "Models:\n  gpt-a: gpt-5.5 on a\n  gpt-b: gpt-5.5 on b\n",
+            "warning: used by no role: gpt-a, gpt-b",
+        ] {
+            assert!(said.contains(line), "{line}\n{said}");
+        }
+    }
+
+    #[test]
+    fn a_model_s_old_endpoint_keys_are_refused_naming_endpoints() {
+        for key in [
+            "provider = \"openai\"",
+            "base_url = \"https://a.test/v1\"",
+            "api_key_env = \"KEY_A\"",
+        ] {
+            let text = format!(
+                "{MINIMAL}{}",
+                TWO_ENDPOINTS.replace(
+                    "[models.gpt-b]\nendpoint = \"b\"\n",
+                    &format!("[models.gpt-b]\nendpoint = \"b\"\n{key}\n")
+                )
+            );
+            let error = Config::parse(&text)
+                .and_then(Config::into_settings)
+                .unwrap_err();
+            let said = error.to_string();
+            let name = key.split(' ').next().unwrap();
+            assert!(
+                matches!(error, ConfigError::Model(..))
+                    && said.contains(&format!("it is [endpoints.b].{name} now")),
+                "{said}"
+            );
+        }
+        // A model as it was before #368: the first old key says where it went.
+        let old = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"x\"\n";
+        let said = Config::parse(&format!("{MINIMAL}{old}"))
+            .and_then(Config::into_settings)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.contains(
+                "provider was removed from [models.m]: it is [endpoints.<id>].provider now"
+            ),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_model_on_an_unknown_endpoint_or_a_bad_header_is_refused() {
+        let unknown = TWO_ENDPOINTS.replace("endpoint = \"b\"", "endpoint = \"c\"");
+        let error = Config::parse(&format!("{MINIMAL}{unknown}"))
+            .and_then(Config::into_settings)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::UnknownEndpoint { what, endpoint, declared }
+                if what == "models.gpt-b" && endpoint == "c" && declared == "a, b"),
+            "{error}"
+        );
+        let bad = TWO_ENDPOINTS.replace("\"X-Org\"", "\"X Org\"");
+        let error = Config::parse(&format!("{MINIMAL}{bad}"))
+            .and_then(Config::into_settings)
+            .unwrap_err();
+        assert!(matches!(error, ConfigError::Endpoint(..)), "{error}");
+    }
+
     #[test]
     fn the_openai_provider_is_spelled_openai() {
-        let model = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\n";
+        let model = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"gpt\"\n";
         let text = format!("{MINIMAL}\n{model}");
         let settings = Config::parse(&text)
             .and_then(Config::into_settings)
             .unwrap();
-        assert_eq!(settings.models.get("m").unwrap().provider, Provider::OpenAi);
+        assert_eq!(
+            settings.endpoints.get("m").unwrap().provider,
+            Provider::OpenAi
+        );
         assert!(
-            settings.describe().contains("  m: openai gpt at https://x"),
+            settings
+                .describe()
+                .contains("  m: openai at https://x (key from $K)"),
             "config check names it as configured: {}",
             settings.describe()
         );
@@ -3949,7 +4274,7 @@ github_owners = ["docspec"]
 
     #[test]
     fn effort_is_for_anthropic_models_only() {
-        let model = "[models.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\nmodel = \"gpt\"\neffort = \"high\"\n";
+        let model = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"gpt\"\neffort = \"high\"\n";
         let text = format!("{MINIMAL}\n{model}");
         assert!(matches!(
             Config::parse(&text).and_then(Config::into_settings),

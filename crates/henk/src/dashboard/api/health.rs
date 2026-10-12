@@ -85,6 +85,16 @@ async fn health_rows(
         rows.push((check.name, verdict.to_owned(), text));
     }
     rows.push((
+        "endpoints".to_owned(),
+        "ok".to_owned(),
+        settings
+            .endpoints
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+    ));
+    rows.push((
         "models".to_owned(),
         "ok".to_owned(),
         settings
