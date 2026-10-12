@@ -6,6 +6,7 @@ use anyhow::{Context as _, anyhow};
 use henk_domain::allowlist::Platform;
 use henk_domain::diff::ReviewDiff;
 use henk_domain::ignore::PathFilter;
+use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::{RunId, RunKind};
 use henk_platform::{PlatformWriter, PullRequestState, ReviewHandle, ReviewTarget};
@@ -673,7 +674,10 @@ fn stop_if_ended(review: ReviewRun<'_>, cancel: &CancellationToken) -> anyhow::R
 /// loop did is on the run, and its report, with the findings that still
 /// stand, is the end of the check's summary. A pull request the loop may
 /// not push to (a fork, the default or a protected branch) or whose branch
-/// moved gets the reviewer alone (#307).
+/// moved gets the reviewer alone (#307). On GitLab, whose commit status
+/// carries only the count, the reviewer alone's summary is a summary note:
+/// its findings are not fixed, so they must be readable on the merge
+/// request.
 async fn loop_body(
     review: ReviewRun<'_>,
     base_ref: &str,
@@ -681,20 +685,22 @@ async fn loop_body(
 ) -> anyhow::Result<(ReviewOutcome, String)> {
     let ReviewRun {
         app,
+        writer,
         target,
         commit,
         run,
+        link,
         ..
     } = review;
     let store = &*app.store;
     stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
     let diff = fetch_diff(review, base_ref).await?;
     let nothing_to_review = diff.is_empty();
-    let (results, open_findings, report, findings_left) = if nothing_to_review {
+    let (results, open_findings, report, findings_left, review_only) = if nothing_to_review {
         for stage in [Stage::Checkout, Stage::Lanes] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
-        (Vec::new(), 0, None, false)
+        (Vec::new(), 0, None, false, false)
     } else {
         let on = crate::review_loop::LoopTarget {
             app,
@@ -717,6 +723,7 @@ async fn loop_body(
             report.open,
             Some(report.report),
             report.findings_left,
+            report.review_only,
         )
     };
     stop_if_ended(review, &cancel)?;
@@ -731,6 +738,25 @@ async fn loop_body(
         report,
     };
     let summary_text = outcome.summary();
+    if review_only && writer.platform() == Platform::GitLab {
+        let body = Marker {
+            run: run.clone(),
+            model: ModelId::parse("orchestrator").unwrap_or_else(|_| unreachable!("constant")),
+            requested_by: None,
+            kind: Some(MarkerKind::Summary),
+            checked_by: None,
+            withdrawn: None,
+        }
+        .attach(&format!("{summary_text}\n\nRun: {link}"));
+        stages::mark(store, run, Stage::Publish, StageState::Running, "").await;
+        writer
+            .post_comment(target, &body)
+            .await
+            .context("posting the summary")?;
+        let published = "the summary note: a commit status carries only the count";
+        stages::mark(store, run, Stage::Publish, StageState::Done, published).await;
+        return Ok((outcome, summary_text));
+    }
     let skipped = "a review loop posts nothing on the pull request";
     stages::mark(store, run, Stage::Publish, StageState::Skipped, skipped).await;
     Ok((outcome, summary_text))
@@ -2549,6 +2575,61 @@ requester_id = 3
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
     }
 
+    /// The executor is told of `bash` only when it has it (#334): on a
+    /// backend that runs model commands, and with `bash` in
+    /// `[roles.executor]` tools.
+    #[tokio::test]
+    async fn the_executor_hears_of_bash_only_when_its_tools_grant_it() {
+        use crate::workspace::remote::tests::LocalRunner;
+        let without: Vec<String> = henk_domain::role::Role::Executor
+            .default_tools()
+            .into_iter()
+            .filter(|tool| tool != "bash")
+            .collect();
+        for (name, tools, granted) in [
+            ("ssh-executor-bash", None, true),
+            ("ssh-executor-nobash", Some(without), false),
+        ] {
+            let runner = LocalRunner::new(&format!("henk-review-{name}"));
+            let provider = crate::workspace::ssh::SshProvider::with_runner(
+                Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>
+            );
+            let (mut f, _, executor, _remote) = looping_with(
+                name,
+                &ssh_loop_settings("true"),
+                ScriptedClient::new(
+                    "r",
+                    [
+                        report(2, "x must be 3", None),
+                        finish_round(),
+                        say("Done for now."),
+                        finish_round(),
+                        say("Nothing more."),
+                    ],
+                ),
+                ScriptedClient::new("f", [say("Looked."), say("Still looking."), say("Done.")]),
+                Arc::new(provider),
+            )
+            .await;
+            f.app.settings.roles.executor.as_mut().unwrap().tools = tools;
+            let run = RunId::parse(format!("r-{name}")).unwrap();
+            run_review(&f.app, request(&run), CancellationToken::new())
+                .await
+                .unwrap();
+            let requests = executor.requests();
+            let first = requests.first().unwrap();
+            let names: Vec<String> = first.tools.iter().map(|t| t.name.to_string()).collect();
+            let system = first.system.clone().unwrap_or_default();
+            assert_eq!(names.iter().any(|n| n == "bash"), granted, "{names:?}");
+            assert_eq!(
+                system.contains("commands of your own in the checkout with `bash`"),
+                granted,
+                "{system}"
+            );
+            assert!(names.iter().any(|n| n == "give_verdict"), "{names:?}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_reviewer_runs_bash_on_a_real_sandbox_host() {
@@ -3800,6 +3881,61 @@ requester_id = 3
             .find(|(stage, _, _)| *stage == henk_store::Stage::Push)
             .unwrap();
         assert_eq!(push.1, StageState::Skipped, "{stages:?}");
+    }
+
+    /// On GitLab the commit status carries only the count, so the reviewer
+    /// alone's summary, with the findings that stand, is the summary note:
+    /// the merge request shows them (#307).
+    #[tokio::test]
+    async fn a_merge_request_from_a_fork_on_gitlab_gets_the_findings_in_a_summary_note() {
+        let (mut f, _, executor, remote) = looping_from(
+            "review-loop-fork-gitlab",
+            "someone/r",
+            ScriptedClient::new("m", []),
+            ScriptedClient::new(
+                "r",
+                [report(2, "x must be 3", None), finish_round(), say("Done.")],
+            ),
+            ScriptedClient::new("f", []),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let gitlab = Arc::new(FakeWriter {
+            head: f.writer.head.clone(),
+            patches: f.writer.patches.clone(),
+            platform: Some(Platform::GitLab),
+            ..FakeWriter::default()
+        });
+        f.app.test_writer = Some(Arc::clone(&gitlab) as Arc<dyn PlatformWriter>);
+        f.writer = gitlab;
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-fork-gitlab").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let summary = report.summary.unwrap();
+        let replies = f.writer.replies.lock().unwrap().clone();
+        assert_eq!(replies.len(), 1, "one summary note: {replies:?}");
+        let note = &replies[0].body;
+        assert_eq!(Marker::parse(note).unwrap().kind, Some(MarkerKind::Summary));
+        assert!(note.contains(&summary), "{note}");
+        assert!(note.contains("x must be 3"), "{note}");
+        assert!(
+            note.contains("not fixed: its branch is in another repository"),
+            "{note}"
+        );
+        assert!(note.contains("Run: "), "{note}");
+        assert!(executor.requests().is_empty(), "no executor");
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        let stages = stage_list(&f.app, &run).await;
+        let publish = stages
+            .iter()
+            .find(|(stage, _, _)| *stage == henk_store::Stage::Publish)
+            .unwrap();
+        assert_eq!(publish.1, StageState::Done, "{stages:?}");
+        assert_no_stage_running(&f.app, &run).await;
     }
 
     /// A reviewer alone that finds nothing passes the check.

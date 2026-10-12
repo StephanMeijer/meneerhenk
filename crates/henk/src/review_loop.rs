@@ -84,6 +84,9 @@ pub(crate) struct LoopReport {
     pub(crate) open: usize,
     /// It ran out of rounds with the reviewer's last findings still open.
     pub(crate) findings_left: bool,
+    /// The reviewer reviewed alone, on a pull request the loop may not push
+    /// to (#307).
+    pub(crate) review_only: bool,
 }
 
 /// Runs the loop on `diff`. A pull request the loop may not push to, or
@@ -282,7 +285,9 @@ impl<'a> Rounds<'a> {
             check_commands: address.check_commands.clone(),
             check_timeout: command_limit,
             max_changed_files: address.max_changed_files,
-            bash,
+            // Told of bash only when it has it: the backend runs model
+            // commands and [roles.executor] tools grant it.
+            bash: bash && Role::Executor.grants(&address.tools(), "bash"),
             state: Mutex::new(EditState::default()),
         });
         let mut executor_system = format!(
@@ -297,7 +302,7 @@ impl<'a> Rounds<'a> {
                 ],
             )
         );
-        if bash {
+        if fixing.bash {
             executor_system = format!("{executor_system}\n\n{}", prompts::EXECUTOR_BASH);
         }
         let mut executor_tools = edit_tools(&fixing);
@@ -424,6 +429,7 @@ impl<'a> Rounds<'a> {
             report: ledger.check_report(&line),
             open,
             findings_left: stop.left_findings_open(),
+            review_only: self.alone.is_some(),
         })
     }
 

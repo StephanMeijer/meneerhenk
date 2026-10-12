@@ -38,7 +38,7 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
     CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
-COPY Cargo.toml Cargo.lock henk.example.toml ./
+COPY Cargo.toml Cargo.lock henk.example.toml llms.txt ./
 COPY crates ./crates
 COPY --from=spa /src/dashboard/dist ./dashboard/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
