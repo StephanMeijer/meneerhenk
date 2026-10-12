@@ -67,7 +67,7 @@ describe('LiveSession', () => {
     const log = document.querySelector('.log');
     expect(log?.textContent).toContain('<b>Review</b> this.');
     expect(log?.querySelector('b')).toBeNull();
-    expect(document.body.textContent).toContain('Earlier turns are in the transcript once the lane ends.');
+    expect(document.body.textContent).toContain('Earlier turns are in the transcript once the session ends.');
     const calls = [...document.querySelectorAll('.call')].map((c) => c.textContent?.replace(/\s+/g, ' ').trim());
     expect(calls).toEqual(['Call read_file refused scope 12 ms, 300 chars', 'Call search running']);
 
@@ -123,6 +123,6 @@ describe('LiveSession', () => {
     await settle();
     firstOf(other.sources).push('end', { elsewhere: true });
     await settle(1);
-    expect(document.body.textContent).toContain('This lane runs in another Henk process');
+    expect(document.body.textContent).toContain('This session runs in another Henk process');
   });
 });

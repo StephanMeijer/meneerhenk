@@ -1,19 +1,21 @@
 <script lang="ts">
   import type { Session, Stage } from '$lib/api/types';
   import { clockTime, duration, utc } from '$lib/format';
+  import { shownInRounds } from '$lib/roles';
   import Elapsed from '$lib/ui/Elapsed.svelte';
+  import Role from '$lib/ui/Role.svelte';
   import Status from '$lib/ui/Status.svelte';
 
-  /** A run's stages as boxes in the order they come (#226), the lanes
-   * inside theirs. Selecting a box (or a lane) selects its log below;
-   * selecting it again lets go. */
+  /** A run's stages as boxes in the order they come (#226), a review's
+   * sessions inside its rounds, each with its role (#326). Selecting a box
+   * (or a session) selects its log below; selecting it again lets go. */
   let {
     stages,
-    lanes,
+    sessions,
     selected = $bindable(null),
   }: {
     stages: Stage[];
-    lanes: Session[];
+    sessions: Session[];
     selected?: string | null;
   } = $props();
 
@@ -24,6 +26,7 @@
     diff: 'Diff',
     checkout: 'Checkout',
     workspace: 'Workspace',
+    // The stage of reviews from before #324, which ran review lanes.
     lanes: 'Lanes',
     rounds: 'Rounds',
     session: 'Session',
@@ -44,9 +47,9 @@
     return duration(end - start);
   }
 
-  function laneTime(lane: Session): string {
-    const start = Date.parse(lane.started_at);
-    const end = Date.parse(lane.finished_at ?? '');
+  function sessionTime(session: Session): string {
+    const start = Date.parse(session.started_at);
+    const end = Date.parse(session.finished_at ?? '');
     return Number.isNaN(start) || Number.isNaN(end) ? '' : duration(end - start);
   }
 
@@ -72,21 +75,22 @@
         <Status word={stage.state === 'done' ? 'done' : stage.state} kind="stage-state" />
         {#if stage.detail}<span class="detail">{stage.detail}</span>{/if}
       </button>
-      {#if (stage.name === 'rounds' || stage.name === 'lanes') && lanes.length > 0}
-        <ul class="lanes">
-          {#each lanes.filter((lane) => !lane.name.startsWith('check-')) as lane (lane.name)}
+      {#if (stage.name === 'rounds' || stage.name === 'lanes') && sessions.some(shownInRounds)}
+        <ul class="sessions">
+          {#each sessions.filter(shownInRounds) as session (session.name)}
             <li>
               <button
                 type="button"
-                class="lane"
-                class:chosen={selected === `lane:${lane.name}`}
-                aria-pressed={selected === `lane:${lane.name}`}
-                onclick={() => choose(`lane:${lane.name}`)}
+                class="session"
+                class:chosen={selected === `session:${session.name}`}
+                aria-pressed={selected === `session:${session.name}`}
+                onclick={() => choose(`session:${session.name}`)}
               >
-                <span class="mono">{lane.name}</span>
-                <span class="muted mono model">{lane.model}</span>
-                <Status word={lane.status} kind="lane-status" />
-                <span class="muted">{#if lane.finished_at === null}<Elapsed since={lane.started_at} />{:else}{laneTime(lane)}{/if}</span>
+                <span class="mono">{session.name}</span>
+                <Role role={session.role} />
+                <span class="muted mono model">{session.model}</span>
+                <Status word={session.status} kind="session-status" />
+                <span class="muted">{#if session.finished_at === null}<Elapsed since={session.started_at} />{:else}{sessionTime(session)}{/if}</span>
               </button>
             </li>
           {/each}
@@ -106,8 +110,8 @@
     gap: var(--space-2);
   }
   .stage { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .stage:has(.lanes) { grid-column: span 2; }
-  .box, .lane {
+  .stage:has(.sessions) { grid-column: span 2; }
+  .box, .session {
     width: 100%;
     min-height: 0;
     text-align: left;
@@ -124,8 +128,8 @@
     padding: var(--space-2) var(--space-3);
     height: 100%;
   }
-  .box:hover, .lane:hover { background: var(--sunk); }
-  .chosen > .box, .lane.chosen { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .box:hover, .session:hover { background: var(--sunk); }
+  .chosen > .box, .session.chosen { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .stage.running > .box { border-color: var(--accent); }
   .stage.failed > .box { border-color: var(--fail); }
   .stage.skipped > .box { background: var(--sunk); }
@@ -133,8 +137,8 @@
   .name { font-weight: 600; }
   .time { color: var(--muted); font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
   .detail { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-  .lanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  .lane {
+  .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .session {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -146,6 +150,6 @@
 
   @media (max-width: 720px) {
     .pipeline { grid-template-columns: 1fr; }
-    .stage:has(.lanes) { grid-column: auto; }
+    .stage:has(.sessions) { grid-column: auto; }
   }
 </style>

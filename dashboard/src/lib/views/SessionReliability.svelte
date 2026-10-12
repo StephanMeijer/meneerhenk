@@ -1,18 +1,20 @@
 <script lang="ts">
-  import { laneStats } from '$lib/api/client';
+  import { sessionStats } from '$lib/api/client';
   import type { SessionOutcome, SessionRow, SessionStats } from '$lib/api/types';
-  import { LANE_REASONS, ratePercent } from '$lib/format';
+  import { SESSION_REASONS, ratePercent } from '$lib/format';
+  import { roleLabel } from '$lib/roles';
   import { href, link, runPath } from '$lib/router';
   import { lookOf } from '$lib/status';
   import Empty from '$lib/ui/Empty.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Problem from '$lib/ui/Problem.svelte';
+  import Role from '$lib/ui/Role.svelte';
 
   /** How each session ended over the last reviews (#229): the review
-   * loop's reviewer and executor, and the lanes and fact-checks of reviews
-   * from before the loop. A square per review, oldest left; a row with
+   * loop's reviewer and executor, and the review lanes and fact-checks of
+   * reviews from before the loop, each with its role (#326). A square per review, oldest left; a row with
    * many gaps in green is a session that makes reviews thinner. */
-  let { load = laneStats }: { load?: (query: string) => Promise<SessionStats> } = $props();
+  let { load = sessionStats }: { load?: (query: string) => Promise<SessionStats> } = $props();
 
   const LAST = 30;
   /** How many of the newest outcomes the text equivalent reads out. */
@@ -23,7 +25,7 @@
   const day = (iso: string): string => iso.slice(0, 10);
 
   function says(outcome: SessionOutcome, at: string): string {
-    const why = outcome.reason === null ? '' : `, ${LANE_REASONS[outcome.reason] ?? outcome.reason}`;
+    const why = outcome.reason === null ? '' : `, ${SESSION_REASONS[outcome.reason] ?? outcome.reason}`;
     return `${day(at)} ${outcome.model}: ${lookOf(outcome.status).label}${why}`;
   }
 
@@ -34,20 +36,20 @@
       .slice(-SAID)
       .map((o) => lookOf(o.status).label);
     const timed = row.timed_out > 0 ? `, ${row.timed_out} timed out` : '';
-    return `${row.name}: ${row.did_not_finish} of ${row.ran} did not finish${timed}; last ${last.length}, newest last: ${last.join(', ')}.`;
+    return `${row.name} (${roleLabel(row.role)}): ${row.did_not_finish} of ${row.ran} did not finish${timed}; last ${last.length}, newest last: ${last.join(', ')}.`;
   }
 
-  /** The newest model, and how many others the lane ran. */
+  /** The newest model, and how many others the session ran. */
   const modelsText = (models: string[]): string =>
     models.length > 1 ? `${models[0] ?? ''} and ${models.length - 1} more` : (models[0] ?? '');
 
   const share = (row: SessionRow): number | null => (row.ran === 0 ? null : row.did_not_finish / row.ran);
 </script>
 
-<section class="panel" aria-labelledby="lanes-title">
+<section class="panel" aria-labelledby="sessions-title">
   <div class="panel-head">
-    <h2 id="lanes-title">Session reliability</h2>
-    <span class="note">Last {LAST} reviews, oldest left · <a href={href('/lanes')} use:link>Compare sessions</a></span>
+    <h2 id="sessions-title">Session reliability</h2>
+    <span class="note">Last {LAST} reviews, oldest left · <a href={href('/sessions')} use:link>Compare sessions</a></span>
   </div>
   {#await stats}
     <Loading />
@@ -55,11 +57,12 @@
     {#if result.sessions.length === 0}
       <Empty why="No review has ended yet." />
     {:else}
-      <ul class="lanes">
+      <ul class="sessions">
         {#each result.sessions as row (row.name)}
           <li>
             <span class="name">
               <span class="mono">{row.name}</span>
+              <Role role={row.role} />
               <span class="muted model">{modelsText(row.models)}</span>
             </span>
             <span class="squares" aria-hidden="true">
@@ -98,8 +101,8 @@
 </section>
 
 <style>
-  .lanes { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line-soft); }
-  .lanes > li {
+  .sessions { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line-soft); }
+  .sessions > li {
     display: grid;
     grid-template-columns: minmax(9rem, 14rem) 1fr 9rem;
     gap: var(--space-2) var(--space-3);
@@ -108,6 +111,7 @@
     border-bottom: 1px solid var(--line-soft);
   }
   .name { display: flex; flex-direction: column; min-width: 0; }
+  .name :global(.role) { align-self: flex-start; }
   .model { font-size: 0.8125rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .squares { display: flex; flex-wrap: wrap; gap: 3px; }
   .square {
@@ -129,7 +133,7 @@
   .legend { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: var(--space-2) var(--space-4); }
   .legend > span { display: inline-flex; align-items: center; gap: 6px; }
   @media (max-width: 720px) {
-    .lanes > li { grid-template-columns: 1fr auto; }
+    .sessions > li { grid-template-columns: 1fr auto; }
     .squares { grid-column: 1 / -1; grid-row: 2; }
   }
 </style>

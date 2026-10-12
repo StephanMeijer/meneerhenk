@@ -52,9 +52,14 @@ describe('Tools', () => {
     expect(loadSummary).toHaveBeenCalledWith('since=2026-09-07T12%3A00%3A00.000Z');
     expect(loadCalls).toHaveBeenCalledWith('outcome=problems&since=2026-09-07T12%3A00%3A00.000Z');
     expect(rows('table.rates tbody tr')[0]).toEqual([
-      'read_file', 'mistral-medium-3-5', 'lane', '40', '4', '0', '0', '40 ms', '10%', '0%',
+      'read_file', 'mistral-medium-3-5', 'Review lane', '40', '4', '0', '0', '40 ms', '10%', '0%',
     ]);
     expect(rows('table.rates tbody tr')[1]?.[9]).toBe('60%');
+    const roles = [...document.querySelectorAll('select[name="role"] option')].map((o) => o.textContent);
+    expect(roles).toEqual([
+      'every role', 'Planner', 'Reviewer', 'Executor',
+      'Review lane (older runs)', 'Fact-check (older runs)', 'Address (older runs)',
+    ]);
     expect(document.querySelectorAll('table.rates meter')[3]?.getAttribute('title')).toBe('6 of 10 calls');
     const toolLink = document.querySelector<HTMLAnchorElement>('table.rates a');
     expect(toolLink?.getAttribute('href')).toBe(

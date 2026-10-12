@@ -12,6 +12,7 @@
   import Live from '$lib/ui/Live.svelte';
   import Loading from '$lib/ui/Loading.svelte';
   import Problem from '$lib/ui/Problem.svelte';
+  import Role from '$lib/ui/Role.svelte';
   import Status from '$lib/ui/Status.svelte';
   import Time from '$lib/ui/Time.svelte';
   import CallTimeline from './CallTimeline.svelte';
@@ -60,7 +61,7 @@
 
   let d: RunDetail | null = $state(null);
   /** The calls the stream brought since the page opened, for the live
-   * conversation of a lane (#238); the newest few thousand. */
+   * conversation of a session (#238); the newest few thousand. */
   let streamedCalls: ToolCall[] = $state([]);
   const MOST_STREAMED_CALLS = 2000;
   let problem: unknown = $state(null);
@@ -109,26 +110,26 @@
     };
   });
 
-  /** The box selected in the pipeline: a stage, or `lane:<name>`. */
+  /** The box selected in the pipeline: a stage, or `session:<name>`. */
   let selected: string | null = $state(null);
 
-  /** The lane selected in the pipeline, if a lane is. */
-  let selectedLane = $derived.by(() => {
+  /** The session selected in the pipeline, if a session is. */
+  let selectedSession = $derived.by(() => {
     const detail: RunDetail | null = d;
     const key: string | null = selected;
-    if (detail === null || key === null || !key.startsWith('lane:')) return null;
-    const name = key.slice('lane:'.length);
-    return detail.sessions.find((lane) => lane.name === name) ?? null;
+    if (detail === null || key === null || !key.startsWith('session:')) return null;
+    const name = key.slice('session:'.length);
+    return detail.sessions.find((session) => session.name === name) ?? null;
   });
 
-  /** The timeline lines of what is selected: a lane's own lines, or the
+  /** The timeline lines of what is selected: a session's own lines, or the
    * lines written while a stage was going. */
   let shownEvents = $derived.by(() => {
     if (d === null || selected === null) return d?.events ?? [];
     const detail = d;
-    if (selected.startsWith('lane:')) {
-      const lane = selected.slice('lane:'.length);
-      return detail.events.filter((line) => line.message.startsWith(`${lane}:`));
+    if (selected.startsWith('session:')) {
+      const session = selected.slice('session:'.length);
+      return detail.events.filter((line) => line.message.startsWith(`${session}:`));
     }
     const stage = detail.stages.find((s) => s.name === selected);
     if (stage === undefined) return detail.events;
@@ -141,7 +142,7 @@
   });
 
   function selectedName(key: string): string {
-    return key.startsWith('lane:') ? key.slice('lane:'.length) : key.replaceAll('_', ' ');
+    return key.startsWith('session:') ? key.slice('session:'.length) : key.replaceAll('_', ' ');
   }
 
   /** How the run's stages go, in a line, by kind. */
@@ -182,7 +183,7 @@
 
   /** The sessions still going, for the confirmation. */
   function stillWorking(detail: RunDetail): string {
-    const names = detail.sessions.filter((lane) => lane.status === 'running').map((lane) => lane.name);
+    const names = detail.sessions.filter((session) => session.status === 'running').map((session) => session.name);
     if (names.length === 0) return '';
     return `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} still working.`;
   }
@@ -371,13 +372,13 @@
         <h2>Pipeline</h2>
         <span class="note">{pipelineNote(d)} Select a box to open its log.</span>
       </div>
-      <div class="panel-body"><Pipeline stages={d.stages} lanes={d.sessions} bind:selected /></div>
+      <div class="panel-body"><Pipeline stages={d.stages} sessions={d.sessions} bind:selected /></div>
     </section>
   {/if}
 
-  {#if selectedLane !== null && selectedLane.status === 'running'}
-    {#key selectedLane.name}
-      <LiveSession runId={d.run.id} session={selectedLane.name} streamed={streamedCalls} {connect} {loadCalls} />
+  {#if selectedSession !== null && selectedSession.status === 'running'}
+    {#key selectedSession.name}
+      <LiveSession runId={d.run.id} session={selectedSession.name} streamed={streamedCalls} {connect} {loadCalls} />
     {/key}
   {/if}
 
@@ -410,39 +411,40 @@
   {#if d.sessions.length > 0}
     <section class="panel fold">
       <details open={d.stages.length === 0}>
-        <summary class="panel-head"><h2>Lanes</h2><span class="count-badge">{d.sessions.length}</span></summary>
+        <summary class="panel-head"><h2>Sessions</h2><span class="count-badge">{d.sessions.length}</span></summary>
       <div class="scroll">
         <table>
           <thead>
             <tr>
-              <th>Lane</th><th>Model</th><th>Status</th><th class="num">Turns</th><th class="num">Tokens in</th>
+              <th>Session</th><th>Role</th><th>Model</th><th>Status</th><th class="num">Turns</th><th class="num">Tokens in</th>
               <th class="num" title="Read from the prompt cache, and the share of tokens in">Cached</th>
               <th class="num">Tokens out</th><th>Error</th>
             </tr>
           </thead>
           <tbody>
-            {#each d.sessions as lane (lane.name)}
+            {#each d.sessions as session (session.name)}
               <tr>
                 <td class="mono">
-                  {#if d.transcripts.some((t) => t.session === lane.name)}
-                    <a href={href(transcriptPath(d.run.id, lane.name))} use:link title="The whole conversation">{lane.name}</a>
+                  {#if d.transcripts.some((t) => t.session === session.name)}
+                    <a href={href(transcriptPath(d.run.id, session.name))} use:link title="The whole conversation">{session.name}</a>
                   {:else}
-                    {lane.name}
+                    {session.name}
                   {/if}
                 </td>
-                <td class="mono">{lane.model}</td>
-                <td><Status word={lane.status} kind="lane-status" /></td>
+                <td><Role role={session.role} /></td>
+                <td class="mono">{session.model}</td>
+                <td><Status word={session.status} kind="session-status" /></td>
                 <td class="num">
-                  {#if lane.status === 'running' && lane.last_call_turn !== null}
-                    turn {lane.last_call_turn}
+                  {#if session.status === 'running' && session.last_call_turn !== null}
+                    turn {session.last_call_turn}
                   {:else}
-                    {lane.turns}
+                    {session.turns}
                   {/if}
                 </td>
-                <td class="num">{count(lane.input_tokens)}</td>
-                <td class="num" title={lane.cache_write_tokens > 0 ? `${count(lane.cache_write_tokens)} written into the cache` : undefined}>{cacheRead(lane)}</td>
-                <td class="num">{count(lane.output_tokens)}</td>
-                <td class="text">{lane.error ?? ''}</td>
+                <td class="num">{count(session.input_tokens)}</td>
+                <td class="num" title={session.cache_write_tokens > 0 ? `${count(session.cache_write_tokens)} written into the cache` : undefined}>{cacheRead(session)}</td>
+                <td class="num">{count(session.output_tokens)}</td>
+                <td class="text">{session.error ?? ''}</td>
               </tr>
             {/each}
           </tbody>
@@ -459,7 +461,7 @@
       <div class="scroll">
         <table>
           <thead>
-            <tr><th>Draft</th><th>Lane</th><th>Where</th><th>What</th><th>Verdict</th><th>By</th><th>Comment</th><th>Reason</th></tr>
+            <tr><th>Draft</th><th>Session</th><th>Where</th><th>What</th><th>Verdict</th><th>By</th><th>Comment</th><th>Reason</th></tr>
           </thead>
           <tbody>
             {#each d.drafts as draft (draft.id)}

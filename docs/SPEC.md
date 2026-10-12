@@ -35,7 +35,7 @@ branch.
 | **Review loop** | What a review is: a reviewer and an executor taking turns on one pull request (§3.2). |
 | **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the executor (§3.2). |
 | **Executor** | The model session that changes code: in a review loop it checks each finding against the code and fixes the ones that hold (§3.2); in an execute run it takes an issue to a pull request (§4a). |
-| **Lane** | Before #309, one independent reviewer inside a review. Old runs still show them, and the run record still lists each model session of a run as a lane. |
+| **Lane** | Before #309, one independent reviewer inside a review. Old runs still show them, as sessions with the history role `lane` (#324). |
 | **Finding** | One problem the reviewer reports, at one line. Before #309 a lane posted each as a comment. |
 | **Summary** | What the check says when a review ends (§3.3). |
 | **Turn** | One unit of Discord work: one message (or a quick burst from one person) and Henk's answer to it (§5.2). |

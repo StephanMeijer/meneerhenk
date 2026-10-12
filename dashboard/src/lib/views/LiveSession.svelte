@@ -88,7 +88,7 @@
     {#if !log.ended}<Live {connection} />{/if}
   </div>
   {#if log.cut}
-    <p class="panel-note">Earlier turns are in the transcript once the lane ends.</p>
+    <p class="panel-note">Earlier turns are in the transcript once the session ends.</p>
   {/if}
   <div class="log" bind:this={box} onscroll={scrolled} role="log" aria-live="off" tabindex="-1">
     {#if log.messages.length === 0 && !log.ended}
@@ -110,10 +110,10 @@
   </div>
   <div class="panel-foot">
     {#if log.ended && log.elsewhere}
-      <span>This lane runs in another Henk process, whose conversation this page cannot hear. Its tool calls show on the run.</span>
+      <span>This session runs in another Henk process, whose conversation this page cannot hear. Its tool calls show on the run.</span>
     {:else if log.ended}
       <span>
-        The lane has ended. <a href={href(transcriptPath(runId, session))} use:link>The whole conversation</a>
+        The session has ended. <a href={href(transcriptPath(runId, session))} use:link>The whole conversation</a>
         is in its transcript, where old tool results may be shortened.
       </span>
     {:else}

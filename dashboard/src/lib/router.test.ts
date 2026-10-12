@@ -14,7 +14,8 @@ describe('routeOf', () => {
       query: new URLSearchParams('source=api'),
     });
     expect(routeOf(`${BASE}/quality`)).toEqual({ name: 'not_found', path: '/quality' });
-    expect(routeOf(`${BASE}/lanes`, '?period=7d')).toMatchObject({ name: 'lanes' });
+    expect(routeOf(`${BASE}/sessions`, '?period=7d')).toMatchObject({ name: 'sessions' });
+    expect(routeOf(`${BASE}/lanes`)).toEqual({ name: 'not_found', path: '/lanes' });
     expect(routeOf(`${BASE}/runs/r-1`)).toEqual({ name: 'run', id: 'r-1' });
     expect(routeOf(`${BASE}/runs/r-1/transcripts/lane.a`)).toEqual({
       name: 'transcript',
