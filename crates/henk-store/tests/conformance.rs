@@ -19,8 +19,8 @@ use henk_store::{
     DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction,
     InboundEvent, LOOP_FINDING_KIND, LaneStatus, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter,
     OutcomeRecord, PLAN_POINT_KIND, Page, PgStore, PruneCounts, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, ToolCallFilter, ToolCallKey,
-    ToolCallRecord, TranscriptRecord,
+    RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, TokenUsage, ToolCallFilter,
+    ToolCallKey, ToolCallRecord, TranscriptRecord,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -107,6 +107,7 @@ macro_rules! for_each_scenario {
             a_loop_run_keeps_why_it_stopped,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
             a_review_loops_sessions_are_their_own_kinds,
+            a_session_keeps_what_the_cache_served,
         );
     };
 }
@@ -880,17 +881,80 @@ async fn a_superseded_run_names_the_run_that_replaced_it(store: &dyn RunStore) {
     assert_eq!(listed[0].superseded_by, Some(id("r-new")));
 }
 
+/// #330: a session keeps its cache reads and writes beside its tokens in,
+/// which stay the whole prompt; a session that used no cache reads 0.
+async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
+    store.create_run(&new_run("r-cache")).await.unwrap();
+    for lane in ["reviewer", "executor"] {
+        store.start_lane(&id("r-cache"), lane, "m").await.unwrap();
+    }
+    let cached = TokenUsage {
+        input: 10_000,
+        output: 300,
+        cache_read: 8_000,
+        cache_write: 1_500,
+    };
+    store
+        .finish_lane(
+            &id("r-cache"),
+            "reviewer",
+            LaneStatus::Finished,
+            4,
+            cached,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_lane(
+            &id("r-cache"),
+            "executor",
+            LaneStatus::Finished,
+            2,
+            TokenUsage::new(500, 50),
+            None,
+        )
+        .await
+        .unwrap();
+    let lanes = store.lanes(&id("r-cache")).await.unwrap();
+    let read = |name: &str| {
+        let lane = lanes.iter().find(|l| l.name == name).unwrap();
+        (
+            lane.input_tokens,
+            lane.output_tokens,
+            lane.cache_read_tokens,
+            lane.cache_write_tokens,
+        )
+    };
+    assert_eq!(read("reviewer"), (10_000, 300, 8_000, 1_500));
+    assert_eq!(read("executor"), (500, 50, 0, 0));
+}
+
 async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
     store.create_run(&new_run("r-1")).await.unwrap();
     for lane in ["a", "b", "c"] {
         store.start_lane(&id("r-1"), lane, "m").await.unwrap();
     }
     store
-        .finish_lane(&id("r-1"), "a", LaneStatus::Finished, 9, 1, 1, None)
+        .finish_lane(
+            &id("r-1"),
+            "a",
+            LaneStatus::Finished,
+            9,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     store
-        .finish_lane(&id("r-1"), "b", LaneStatus::TimedOut, 30, 1, 1, None)
+        .finish_lane(
+            &id("r-1"),
+            "b",
+            LaneStatus::TimedOut,
+            30,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     store
@@ -899,8 +963,7 @@ async fn lanes_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {
             "c",
             LaneStatus::DidNotFinish,
             2,
-            1,
-            1,
+            TokenUsage::new(1, 1),
             Some("rate limited"),
         )
         .await
@@ -1001,7 +1064,14 @@ async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunSto
     assert!(OffsetDateTime::parse(&lane.started_at, &Rfc3339).is_ok());
     assert_eq!(lane.finished_at, None);
     store
-        .finish_lane(&run, "a", LaneStatus::Finished, 1, 1, 1, None)
+        .finish_lane(
+            &run,
+            "a",
+            LaneStatus::Finished,
+            1,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     assert!(store.lanes(&run).await.unwrap()[0].finished_at.is_some());
@@ -1121,7 +1191,14 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
             .unwrap();
         store.start_lane(&id(run), "lane-a", "m-1").await.unwrap();
         store
-            .finish_lane(&id(run), "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+            .finish_lane(
+                &id(run),
+                "lane-a",
+                LaneStatus::Finished,
+                1,
+                TokenUsage::new(1, 1),
+                None,
+            )
             .await
             .unwrap();
         if let Some(status) = status {
@@ -1138,8 +1215,7 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
             "lane-b",
             LaneStatus::DidNotFinish,
             1,
-            1,
-            1,
+            TokenUsage::new(1, 1),
             Some("rate limited by the model endpoint"),
         )
         .await
@@ -1149,7 +1225,14 @@ async fn lane_endings_are_the_ended_reviews_newest_first(store: &dyn RunStore) {
         .await
         .unwrap();
     store
-        .finish_lane(&id("r-2"), "check-1", LaneStatus::TimedOut, 1, 1, 1, None)
+        .finish_lane(
+            &id("r-2"),
+            "check-1",
+            LaneStatus::TimedOut,
+            1,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
 
@@ -1215,7 +1298,14 @@ async fn lanes_and_stages_of_many_runs_come_in_one_read(store: &dyn RunStore) {
     store.start_lane(&id("r-1"), "a", "m").await.unwrap();
     store.start_lane(&id("r-2"), "a", "m").await.unwrap();
     store
-        .finish_lane(&id("r-2"), "a", LaneStatus::TimedOut, 1, 1, 1, None)
+        .finish_lane(
+            &id("r-2"),
+            "a",
+            LaneStatus::TimedOut,
+            1,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     store
@@ -1422,7 +1512,14 @@ async fn dropping_running_lanes_leaves_finished_ones_alone(store: &dyn RunStore)
     store.start_lane(&id("r-1"), "a", "m").await.unwrap();
     store.start_lane(&id("r-1"), "b", "m").await.unwrap();
     store
-        .finish_lane(&id("r-1"), "a", LaneStatus::Finished, 3, 1, 1, None)
+        .finish_lane(
+            &id("r-1"),
+            "a",
+            LaneStatus::Finished,
+            3,
+            TokenUsage::new(1, 1),
+            None,
+        )
         .await
         .unwrap();
     store
@@ -1444,7 +1541,14 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
     store.start_lane(&run.id, "b", "model-y").await.unwrap();
     store.start_lane(&run.id, "a", "model-x").await.unwrap();
     store
-        .finish_lane(&run.id, "a", LaneStatus::Finished, 4, 1000, 200, None)
+        .finish_lane(
+            &run.id,
+            "a",
+            LaneStatus::Finished,
+            4,
+            TokenUsage::new(1000, 200),
+            None,
+        )
         .await
         .unwrap();
     store
@@ -1453,8 +1557,7 @@ async fn lanes_findings_and_events_attach_to_a_run(store: &dyn RunStore) {
             "b",
             LaneStatus::DidNotFinish,
             1,
-            10,
-            0,
+            TokenUsage::new(10, 0),
             Some("rate limited"),
         )
         .await

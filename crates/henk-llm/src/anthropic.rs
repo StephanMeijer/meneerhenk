@@ -9,8 +9,8 @@ use crate::error::LlmError;
 use crate::http::{build_client, post_json, with_retry};
 use crate::schema;
 use crate::types::{
-    Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
-    ToolChoice, Usage,
+    Block, CacheTtl, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments,
+    ToolCall, ToolChoice, Usage,
 };
 
 pub(crate) const API_VERSION: &str = "2023-06-01";
@@ -50,7 +50,7 @@ impl AnthropicClient {
                 // system prompt are the same on every turn of a run.
                 body.insert(
                     "system".into(),
-                    json!([{"type": "text", "text": system, "cache_control": ephemeral()}]),
+                    json!([{"type": "text", "text": system, "cache_control": ephemeral(request.cache_ttl)}]),
                 );
             } else {
                 body.insert("system".into(), json!(system));
@@ -66,7 +66,7 @@ impl AnthropicClient {
         }
         let mut messages = encode_messages(&request.messages);
         if self.config.prompt_cache {
-            mark_conversation_end(&mut messages);
+            mark_conversation_end(&mut messages, request.cache_ttl);
         }
         body.insert("messages".into(), Value::Array(messages));
         if !request.tools.is_empty() {
@@ -99,7 +99,7 @@ impl AnthropicClient {
 /// Marks the last block of the last message that may carry a cache marker
 /// (a thinking block may not), so the next turn reads the whole
 /// conversation so far from the cache.
-fn mark_conversation_end(messages: &mut [Value]) {
+fn mark_conversation_end(messages: &mut [Value], ttl: CacheTtl) {
     let Some(content) = messages
         .last_mut()
         .and_then(|m| m.get_mut("content"))
@@ -114,14 +114,19 @@ fn mark_conversation_end(messages: &mut [Value]) {
         )
     });
     if let Some(Value::Object(block)) = markable {
-        block.insert("cache_control".into(), ephemeral());
+        block.insert("cache_control".into(), ephemeral(ttl));
     }
 }
 
-/// The prompt-cache marker: the 5-minute cache, which every turn of a lane
-/// refreshes well within its lifetime.
-fn ephemeral() -> Value {
-    json!({"type": "ephemeral"})
+/// The prompt-cache marker: the 5-minute cache, which every turn of a
+/// session refreshes well within its lifetime, or the 1-hour one for a
+/// session that waits longer between turns (#330). Both markers of a
+/// request get the same lifetime, so a longer one never follows a shorter.
+fn ephemeral(ttl: CacheTtl) -> Value {
+    match ttl {
+        CacheTtl::Short => json!({"type": "ephemeral"}),
+        CacheTtl::Long => json!({"type": "ephemeral", "ttl": "1h"}),
+    }
 }
 
 /// Encodes messages, merging consecutive same-role messages because the

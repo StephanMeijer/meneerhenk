@@ -26,9 +26,9 @@ use henk_domain::allowlist::Platform;
 use henk_domain::marker::ModelId;
 use henk_domain::run::RunId;
 use henk_domain::scope::{self, Scope};
-use henk_llm::{ChatMessage, ModelClient, Usage};
+use henk_llm::{CacheTtl, ChatMessage, ModelClient, Usage};
 use henk_mcp::{McpError, McpSession, NameMap};
-use henk_store::{LaneStatus, RunStore, ToolCallRecord, ToolUsage};
+use henk_store::{LaneStatus, RunStore, TokenUsage, ToolCallRecord, ToolUsage};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
@@ -91,6 +91,19 @@ impl SessionOutcome {
     }
 }
 
+/// A session's usage as the run record keeps it (#330): the whole prompt,
+/// cached or not, as tokens in, so sessions stay comparable with those
+/// from before caching, and the part read from and written into the cache
+/// beside it.
+fn stored_usage(usage: &Usage) -> TokenUsage {
+    TokenUsage {
+        input: usage.prompt_tokens(),
+        output: usage.output_tokens,
+        cache_read: usage.cache_read_tokens,
+        cache_write: usage.cache_write_tokens,
+    }
+}
+
 /// Runs one session and records it as a lane of `run`.
 #[instrument(skip_all, fields(run = %run, session = %spec.name, model = %spec.model.model()))]
 pub async fn run_session(
@@ -139,10 +152,7 @@ pub async fn run_session(
             &spec.name,
             status,
             u64::from(outcome.turns),
-            // The whole prompt, cached or not, so lanes stay comparable
-            // with runs from before caching.
-            outcome.usage.prompt_tokens(),
-            outcome.usage.output_tokens,
+            stored_usage(&outcome.usage),
             error.as_deref(),
         )
         .await
@@ -247,9 +257,57 @@ pub struct ResumableSession {
     /// The rounds [`ResumableSession::compact_rounds`] dropped, kept for
     /// the transcript, which holds the whole conversation.
     dropped: Vec<ChatMessage>,
+    /// How many rounds [`ResumableSession::compact_rounds`] dropped so far.
+    rounds_dropped: usize,
     turns: u32,
     usage: Usage,
     status: Option<(LaneStatus, Option<String>)>,
+}
+
+/// The prompt cache's lifetime for a role in a pairing whose partner's
+/// round may take `partner_timeout_secs` (#330). Past 5 minutes, the short
+/// cache could expire while the role waits, and every resume would write
+/// the whole conversation again.
+#[must_use]
+pub fn cache_ttl_for(partner_timeout_secs: u64) -> CacheTtl {
+    if partner_timeout_secs > SHORT_CACHE_SECS {
+        CacheTtl::Long
+    } else {
+        CacheTtl::Short
+    }
+}
+
+/// How long the short prompt cache lasts.
+const SHORT_CACHE_SECS: u64 = 5 * 60;
+
+/// The rounds [`ResumableSession::compact_rounds`] dropped from a
+/// session's conversation, counted from 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundsDropped {
+    /// The session.
+    pub session: String,
+    /// The first round dropped.
+    pub first: usize,
+    /// The last round dropped.
+    pub last: usize,
+    /// The round it happened before.
+    pub before: usize,
+}
+
+impl RoundsDropped {
+    /// The run's line for it.
+    #[must_use]
+    pub fn note(&self) -> String {
+        let rounds = if self.first == self.last {
+            format!("round {}", self.first)
+        } else {
+            format!("rounds {} to {}", self.first, self.last)
+        };
+        format!(
+            "{}: dropped {rounds} from its conversation before round {} to stay under max_conversation_chars; the prompt cache is written again from there",
+            self.session, self.before
+        )
+    }
 }
 
 /// Makes a fresh [`Continuation`] for each round of a [`ResumableSession`]:
@@ -301,6 +359,7 @@ impl ResumableSession {
             messages: Vec::new(),
             round_starts: Vec::new(),
             dropped: Vec::new(),
+            rounds_dropped: 0,
             turns: 0,
             usage: Usage::default(),
             status: None,
@@ -327,20 +386,27 @@ impl ResumableSession {
         self.limits.timeout = timeout;
     }
 
+    /// The prompt cache's lifetime of the next rounds (#330).
+    pub fn set_cache_ttl(&mut self, ttl: CacheTtl) {
+        self.limits.cache_ttl = ttl;
+    }
+
     /// When the conversation is over its `max_conversation_chars`, drops
     /// every round but the last `keep_rounds` and puts `summary` in front
     /// of the first one kept (#286). Rounds are dropped whole, so every
     /// tool call keeps its result and the roles still alternate. Thinking
     /// blocks go too: a model refuses one replayed after an edit of the
     /// history before it (see `henk_agent::compact`). The stored transcript
-    /// still holds the dropped rounds. Returns whether anything was dropped.
-    pub fn compact_rounds(&mut self, summary: &str, keep_rounds: usize) -> bool {
+    /// still holds the dropped rounds. Returns what was dropped, if
+    /// anything: a last resort, since the prompt cache is written again
+    /// from there (#330), which the caller puts on the run.
+    pub fn compact_rounds(&mut self, summary: &str, keep_rounds: usize) -> Option<RoundsDropped> {
         if henk_agent::compact::size(&self.messages) <= self.limits.max_conversation_chars {
-            return false;
+            return None;
         }
         let keep = keep_rounds.max(1);
         if self.round_starts.len() <= keep {
-            return false;
+            return None;
         }
         let first_kept = self.round_starts.len() - keep;
         let cut = self.round_starts.get(first_kept).copied().unwrap_or(0);
@@ -365,7 +431,14 @@ impl ResumableSession {
             );
         }
         info!(lane = %self.name, dropped = cut, "compacted the earlier rounds");
-        true
+        let dropped = RoundsDropped {
+            session: self.name.clone(),
+            first: self.rounds_dropped + 1,
+            last: self.rounds_dropped + first_kept,
+            before: self.rounds_dropped + first_kept + self.round_starts.len() + 1,
+        };
+        self.rounds_dropped += first_kept;
+        Some(dropped)
     }
 
     /// Model calls over every round.
@@ -463,8 +536,7 @@ impl ResumableSession {
                 &self.name,
                 *status,
                 u64::from(self.turns),
-                self.usage.prompt_tokens(),
-                self.usage.output_tokens,
+                stored_usage(&self.usage),
                 error.as_deref(),
             )
             .await
@@ -556,6 +628,16 @@ async fn run_recorded(
                     Ok(json) => store.session_message(run, session, *turn, &json).await,
                     Err(error) => tracing::warn!(%error, "could not serialise a message"),
                 }
+                continue;
+            }
+            // A shortened history writes the prompt cache again (#330):
+            // never routine, so it is on the run.
+            if let AgentEvent::Compacted { turn, stubbed, .. } = &event {
+                let note = format!(
+                    "{session}: shortened {stubbed} old tool {} after turn {turn} to stay under max_conversation_chars; the prompt cache is written again from there",
+                    if *stubbed == 1 { "result" } else { "results" }
+                );
+                let _ = store.event(run, "warn", &note).await;
                 continue;
             }
             let Some(call) = call_record(session, model, cap, event) else {
@@ -766,6 +848,7 @@ mod tests {
                 keep_recent_turns: 2,
                 max_repeated_calls: 3,
                 record_argument_bytes: 4096,
+                cache_ttl: henk_llm::CacheTtl::Short,
             },
             continuation: None,
             turn_warning: None,
@@ -1091,6 +1174,16 @@ mod tests {
         assert_eq!(requests[1].tools.len(), 2);
     }
 
+    /// #330: a role that may wait longer than the short cache lasts keeps
+    /// its cache for the hour.
+    #[test]
+    fn a_role_that_may_wait_past_five_minutes_keeps_the_long_cache() {
+        assert_eq!(cache_ttl_for(600), CacheTtl::Long);
+        assert_eq!(cache_ttl_for(301), CacheTtl::Long);
+        assert_eq!(cache_ttl_for(300), CacheTtl::Short);
+        assert_eq!(cache_ttl_for(60), CacheTtl::Short);
+    }
+
     #[tokio::test]
     async fn rounds_past_the_budget_give_way_to_their_summary() {
         let store = store_with_run().await;
@@ -1112,7 +1205,12 @@ mod tests {
                 )
                 .await;
         }
-        assert!(session.compact_rounds("f1 fixed in abc.", 1));
+        let dropped = session.compact_rounds("f1 fixed in abc.", 1).unwrap();
+        assert_eq!((dropped.first, dropped.last, dropped.before), (1, 2, 4));
+        assert_eq!(
+            dropped.note(),
+            "executor: dropped rounds 1 to 2 from its conversation before round 4 to stay under max_conversation_chars; the prompt cache is written again from there"
+        );
         let kept: Vec<String> = session.messages().iter().map(ChatMessage::text).collect();
         assert_eq!(kept.len(), 2, "{kept:?}");
         assert!(
@@ -1121,7 +1219,10 @@ mod tests {
         );
         assert!(kept[0].contains("f1 fixed in abc.") && kept[0].ends_with("round 3"));
         assert_eq!(kept[1], "three");
-        assert!(!session.compact_rounds("again", 1), "one round left");
+        assert!(
+            session.compact_rounds("again", 1).is_none(),
+            "one round left"
+        );
 
         session
             .resume(
@@ -1150,7 +1251,10 @@ mod tests {
                 )
                 .await;
         }
-        assert!(!small.compact_rounds("s", 1), "within budget, nothing goes");
+        assert!(
+            small.compact_rounds("s", 1).is_none(),
+            "within budget, nothing goes"
+        );
     }
 
     /// A compaction edits the history, so the kept rounds lose their
@@ -1188,7 +1292,7 @@ mod tests {
         for text in ["round 1", "round 2", "round 3"] {
             round(&mut session, text).await;
         }
-        assert!(session.compact_rounds("f1 fixed in abc.", 1));
+        assert!(session.compact_rounds("f1 fixed in abc.", 1).is_some());
         round(&mut session, "round 4").await;
 
         let sent = scripted.requests().pop().unwrap();

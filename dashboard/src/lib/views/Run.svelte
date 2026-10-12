@@ -2,7 +2,7 @@
   import { ApiError, cancelRun, run as loadRun, runToolCalls, startRun } from '$lib/api/client';
   import { connectEventSource, follow, type Connect } from '$lib/api/stream';
   import type { Cancelled, RunDetail, RunMessage, StartRequest, Started, ToolCall } from '$lib/api/types';
-  import { about, clockTime, count, draftPlace, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
+  import { about, cacheRead, clockTime, count, draftPlace, draftWhat, kindText, runDuration, shortCommit, utc, verdictText } from '$lib/format';
   import { applyRun, connectionAfter, type Connection } from '$lib/live';
   import { eventPath, href, link, navigate, runPath, transcriptPath } from '$lib/router';
   import Commit from '$lib/ui/Commit.svelte';
@@ -416,6 +416,7 @@
           <thead>
             <tr>
               <th>Lane</th><th>Model</th><th>Status</th><th class="num">Turns</th><th class="num">Tokens in</th>
+              <th class="num" title="Read from the prompt cache, and the share of tokens in">Cached</th>
               <th class="num">Tokens out</th><th>Error</th>
             </tr>
           </thead>
@@ -439,6 +440,7 @@
                   {/if}
                 </td>
                 <td class="num">{count(lane.input_tokens)}</td>
+                <td class="num" title={lane.cache_write_tokens > 0 ? `${count(lane.cache_write_tokens)} written into the cache` : undefined}>{cacheRead(lane)}</td>
                 <td class="num">{count(lane.output_tokens)}</td>
                 <td class="text">{lane.error ?? ''}</td>
               </tr>

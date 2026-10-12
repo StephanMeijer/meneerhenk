@@ -14,7 +14,7 @@ use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
 use henk_mcp::McpSession;
 use henk_platform::{IssueTarget, IssueUpdate};
-use henk_session::{ResumableSession, model_id, platform_tools};
+use henk_session::{ResumableSession, cache_ttl_for, model_id, platform_tools};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -660,7 +660,7 @@ async fn plan_session(
             model,
             system,
             set,
-            role_limits(app, planner.max_turns(Role::Planner), planner_round),
+            role_limits(app, planner, Role::Planner, reviewer_round),
         )
         .with_continuation(planner_continuation(Arc::clone(&handoff))),
         reviewer: ResumableSession::new(
@@ -668,7 +668,7 @@ async fn plan_session(
             reviewer_model,
             reviewer_system,
             reviewer_set,
-            role_limits(app, reviewer.max_turns(Role::Reviewer), reviewer_round),
+            role_limits(app, reviewer, Role::Reviewer, planner_round),
         )
         .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
         planner_round: Duration::from_secs(planner_round),
@@ -684,11 +684,19 @@ async fn plan_session(
     pairing.run(opening, &issue, &cancel).await
 }
 
-/// A session's limits per turn: its role's turns and time.
-fn role_limits(app: &App, max_turns: u32, timeout_secs: u64) -> AgentConfig {
+/// A session's limits per turn: its role's turns and time, and its prompt
+/// cache's lifetime, long when its partner's round may outlast the short
+/// one (#330).
+fn role_limits(
+    app: &App,
+    config: &crate::config::RoleConfig,
+    role: Role,
+    partner_secs: u64,
+) -> AgentConfig {
     AgentConfig {
-        max_turns,
-        timeout: Duration::from_secs(timeout_secs),
+        max_turns: config.max_turns(role),
+        cache_ttl: cache_ttl_for(partner_secs),
+        timeout: Duration::from_secs(config.timeout_secs(role)),
         max_repeated_calls: app.settings.agent.max_repeated_calls,
         record_argument_bytes: app.settings.agent.record_argument_bytes,
         ..AgentConfig::default()
@@ -742,7 +750,7 @@ mod tests {
 
     use henk_domain::allowlist::{Platform, RepoRef};
     use henk_domain::plan::PlanSection;
-    use henk_llm::testing::ScriptedClient;
+    use henk_llm::testing::{ScriptedClient, assert_resumed_with_only_the_update};
     use henk_llm::{
         Block, ChatMessage, Completion, ModelClient, Role, StopReason, ToolArguments, ToolCall,
         Usage,
@@ -1648,27 +1656,6 @@ model = "r"
         )
     }
 
-    /// `after`, the first request of a round, holds `before`, the last of
-    /// the round before, unchanged, then only the answer to it and the
-    /// update; the system prompt and tools are the same (#321).
-    fn resumed_with_only_the_update(
-        before: &henk_llm::CompletionRequest,
-        after: &henk_llm::CompletionRequest,
-    ) {
-        assert_eq!(before.system, after.system);
-        assert_eq!(before.tools, after.tools);
-        assert_eq!(
-            after.messages[..before.messages.len()],
-            before.messages[..],
-            "the earlier round is unchanged"
-        );
-        assert_eq!(
-            after.messages.len(),
-            before.messages.len() + 2,
-            "its answer and the update"
-        );
-    }
-
     /// #328: the reviewer raises a point, the planner takes it and revises,
     /// the reviewer raises nothing more, and only then does anything reach
     /// the tracker.
@@ -1787,8 +1774,13 @@ model = "r"
 
         // #321: each round resumes both conversations with only the update.
         let plans = f.model.requests();
-        resumed_with_only_the_update(&plans[2], &plans[3]);
-        resumed_with_only_the_update(&reviews[2], &reviews[3]);
+        assert_resumed_with_only_the_update(&plans[2], &plans[3]);
+        assert_resumed_with_only_the_update(&reviews[2], &reviews[3]);
+        // #330: each waits for the other's round of up to 10 minutes, so
+        // each keeps its prompt cache for the hour.
+        for request in plans.iter().chain(&reviews) {
+            assert_eq!(request.cache_ttl, henk_llm::CacheTtl::Long);
+        }
         let handed = plans[3].messages.last().unwrap().text();
         assert!(
             handed.starts_with("Round 1. The reviewer's points"),

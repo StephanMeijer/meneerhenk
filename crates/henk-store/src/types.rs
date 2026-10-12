@@ -549,6 +549,32 @@ pub struct RunRecord {
     pub loop_rounds: Option<u32>,
 }
 
+/// What a session's model calls took and gave, as the run record keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// The whole prompt of every call, cache reads and writes included.
+    pub input: u64,
+    /// The answers.
+    pub output: u64,
+    /// Of `input`, read from the prompt cache.
+    pub cache_read: u64,
+    /// Of `input`, written into the prompt cache.
+    pub cache_write: u64,
+}
+
+impl TokenUsage {
+    /// `input` tokens in and `output` out, none of them through a cache.
+    #[must_use]
+    pub const fn new(input: u64, output: u64) -> Self {
+        Self {
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+        }
+    }
+}
+
 /// A stored lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRecord {
@@ -560,10 +586,15 @@ pub struct LaneRecord {
     pub status: LaneStatus,
     /// Model calls made.
     pub turns: u64,
-    /// Tokens in.
+    /// Tokens in: the whole prompt of every model call, cache reads and
+    /// writes included.
     pub input_tokens: u64,
     /// Tokens out.
     pub output_tokens: u64,
+    /// Of `input_tokens`, read from the model's prompt cache (#330).
+    pub cache_read_tokens: u64,
+    /// Of `input_tokens`, written into the prompt cache (#330).
+    pub cache_write_tokens: u64,
     /// The error, when it did not finish.
     pub error: Option<String>,
     /// RFC 3339: when it started.

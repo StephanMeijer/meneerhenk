@@ -54,6 +54,8 @@ describe('Run', () => {
     expect(card?.querySelector('.reason')?.textContent).toBe('confirmed by opus: src/a.rs:4 loops.');
     const lanes = section('Lanes');
     expect(lanes.map((row) => row[0])).toEqual(['lane-a', 'lane-b']);
+    // #330: what the prompt cache served each session, and its share.
+    expect(lanes.map((row) => row[5])).toEqual(['80 (80%)', '']);
     const transcriptLink = document.querySelector<HTMLAnchorElement>('a[title="The whole conversation"]');
     expect(transcriptLink?.getAttribute('href')).toBe('/dashboard/runs/r-1/transcripts/lane-a');
     expect(document.querySelectorAll('a[title="The whole conversation"]')).toHaveLength(1);

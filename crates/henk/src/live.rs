@@ -439,13 +439,12 @@ impl RunStore for Announcing {
         name: &str,
         status: LaneStatus,
         turns: u64,
-        input_tokens: u64,
-        output_tokens: u64,
+        tokens: henk_store::TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
         let _writing = self.feed.writing().await;
         self.inner
-            .finish_lane(run, name, status, turns, input_tokens, output_tokens, error)
+            .finish_lane(run, name, status, turns, tokens, error)
             .await?;
         self.feed.sessions().ended(run, name);
         self.announce_lanes(run).await;
@@ -841,12 +840,11 @@ mod tests {
             name: &str,
             status: LaneStatus,
             turns: u64,
-            input_tokens: u64,
-            output_tokens: u64,
+            tokens: henk_store::TokenUsage,
             error: Option<&str>,
         ) -> Result<(), StoreError> {
             self.inner
-                .finish_lane(run, name, status, turns, input_tokens, output_tokens, error)
+                .finish_lane(run, name, status, turns, tokens, error)
                 .await
         }
         async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
@@ -1006,7 +1004,14 @@ mod tests {
             let (store, run) = (Arc::clone(&store), run.clone());
             async move {
                 store
-                    .finish_lane(&run, "lane-a", LaneStatus::Finished, 1, 1, 1, None)
+                    .finish_lane(
+                        &run,
+                        "lane-a",
+                        LaneStatus::Finished,
+                        1,
+                        henk_store::TokenUsage::new(1, 1),
+                        None,
+                    )
                     .await
             }
         });
@@ -1015,7 +1020,14 @@ mod tests {
             let (store, run) = (Arc::clone(&store), run.clone());
             async move {
                 store
-                    .finish_lane(&run, "lane-b", LaneStatus::Finished, 2, 2, 2, None)
+                    .finish_lane(
+                        &run,
+                        "lane-b",
+                        LaneStatus::Finished,
+                        2,
+                        henk_store::TokenUsage::new(2, 2),
+                        None,
+                    )
                     .await
             }
         });
@@ -1183,6 +1195,7 @@ mod tests {
                 keep_recent_turns: 2,
                 max_repeated_calls: 3,
                 record_argument_bytes: 4096,
+                cache_ttl: henk_llm::CacheTtl::Short,
             },
             continuation: None,
             turn_warning: None,
@@ -1340,7 +1353,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .finish_lane(&run, "lane-a", LaneStatus::Finished, 3, 10, 2, None)
+            .finish_lane(
+                &run,
+                "lane-a",
+                LaneStatus::Finished,
+                3,
+                henk_store::TokenUsage::new(10, 2),
+                None,
+            )
             .await
             .unwrap();
         store

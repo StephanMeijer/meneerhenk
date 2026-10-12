@@ -20,10 +20,10 @@ use crate::types::{
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
     LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
     OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str,
-    lane_dots, lane_endings, merge_days, platform_parse, platform_str, stage_dots, stage_records,
-    status_str, to_i64, to_u64,
+    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    kind_parse, kind_str, lane_dots, lane_endings, merge_days, platform_parse, platform_str,
+    stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -38,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/008_stages.sql"),
     include_str!("../migrations/postgres/009_stats.sql"),
     include_str!("../migrations/postgres/010_loop.sql"),
+    include_str!("../migrations/postgres/011_lane_cache.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -730,8 +731,7 @@ impl RunStore for PgStore {
         name: &str,
         status: LaneStatus,
         turns: u64,
-        input_tokens: u64,
-        output_tokens: u64,
+        tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
         // Counts beyond i64 cannot happen; saturate like the SQLite store.
@@ -739,17 +739,20 @@ impl RunStore for PgStore {
         self.client()
             .await?
             .execute(
-                "UPDATE lanes SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8
+                "UPDATE lanes SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8,
+                 cache_read_tokens = $9, cache_write_tokens = $10
                  WHERE run_id = $1 AND name = $2",
                 &[
                     &run.as_str(),
                     &name,
                     &status.as_str(),
                     &count(turns),
-                    &count(input_tokens),
-                    &count(output_tokens),
+                    &count(tokens.input),
+                    &count(tokens.output),
                     &now(),
                     &error,
+                    &count(tokens.cache_read),
+                    &count(tokens.cache_write),
                 ],
             )
             .await?;
@@ -761,7 +764,7 @@ impl RunStore for PgStore {
             .client()
             .await?
             .query(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at FROM lanes WHERE run_id = $1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens FROM lanes WHERE run_id = $1 ORDER BY name",
                 &[&run.as_str()],
             )
             .await?;
@@ -779,6 +782,8 @@ impl RunStore for PgStore {
                     turns: to_u64("lanes.turns", row.try_get(3)?)?,
                     input_tokens: to_u64("lanes.input_tokens", row.try_get(4)?)?,
                     output_tokens: to_u64("lanes.output_tokens", row.try_get(5)?)?,
+                    cache_read_tokens: to_u64("lanes.cache_read_tokens", row.try_get(9)?)?,
+                    cache_write_tokens: to_u64("lanes.cache_write_tokens", row.try_get(10)?)?,
                     error: row.try_get(6)?,
                     started_at: text(row.try_get(7)?),
                     finished_at: row.try_get::<_, Option<OffsetDateTime>>(8)?.map(text),

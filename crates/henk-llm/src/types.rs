@@ -209,6 +209,20 @@ pub enum ToolChoice {
     Named(ToolName),
 }
 
+/// How long the provider keeps the prompt cache a request writes (#330).
+/// Only Anthropic takes a choice; others ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheTtl {
+    /// The default, about 5 minutes: enough for the turns of one session,
+    /// each of which refreshes it.
+    #[default]
+    Short,
+    /// About an hour, at a higher write price: for a session that waits
+    /// longer than 5 minutes between its turns, such as a role in a pairing
+    /// while the other one works.
+    Long,
+}
+
 /// Everything one completion needs. The model itself is fixed per client.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompletionRequest {
@@ -224,6 +238,8 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     /// Sampling temperature, when the caller wants to set it.
     pub temperature: Option<f64>,
+    /// How long the prompt cache it writes should last.
+    pub cache_ttl: CacheTtl,
 }
 
 /// Why the model stopped.

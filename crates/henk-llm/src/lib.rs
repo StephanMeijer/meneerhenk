@@ -27,6 +27,6 @@ pub use error::LlmError;
 pub use http::{RetryPolicy, ensure_tls_provider};
 pub use models::list_models;
 pub use types::{
-    Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
-    ToolChoice, ToolDef, ToolName, ToolResult, Usage,
+    Block, CacheTtl, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments,
+    ToolCall, ToolChoice, ToolDef, ToolName, ToolResult, Usage,
 };

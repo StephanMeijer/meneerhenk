@@ -576,7 +576,8 @@ at: string, };
 
 export type Lane = { 
 /**
- * `lane-a`, `check-1`, `planner`, `address`.
+ * `reviewer`, `executor`, `planner`; `lane-a`, `check-1` and
+ * `address` in older runs.
  */
 name: string, 
 /**
@@ -593,13 +594,22 @@ status: string,
  */
 turns: number, 
 /**
- * Tokens in, not read from a cache.
+ * Tokens in: the whole prompt of every model call, cache reads and
+ * writes included.
  */
 input_tokens: number, 
 /**
  * Tokens out.
  */
 output_tokens: number, 
+/**
+ * Of `input_tokens`, read from the model's prompt cache (#330).
+ */
+cache_read_tokens: number, 
+/**
+ * Of `input_tokens`, written into the prompt cache (#330).
+ */
+cache_write_tokens: number, 
 /**
  * Why it did not finish.
  */

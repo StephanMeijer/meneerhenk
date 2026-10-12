@@ -17,10 +17,10 @@ use crate::types::{
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LaneEnding, LaneRecord,
     LaneStatus, MAX_PAYLOAD_BYTES, MOST_LANE_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord,
     OutcomeRow, Page, PruneCounts, RawRun, RunFilter, RunRecord, RunStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage,
-    TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str,
-    lane_dots, lane_endings, merge_days, now, platform_parse, platform_str, stage_dots,
-    stage_records, status_str, to_i64, to_u64,
+    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    kind_parse, kind_str, lane_dots, lane_endings, merge_days, now, platform_parse, platform_str,
+    stage_dots, stage_records, status_str, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -62,6 +62,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!("../migrations/sqlite/012_stats.sql")),
         M::up(include_str!("../migrations/sqlite/013_run_instant.sql")),
         M::up(include_str!("../migrations/sqlite/014_loop.sql")),
+        M::up(include_str!("../migrations/sqlite/015_lane_cache.sql")),
     ])
 }
 
@@ -357,23 +358,26 @@ impl RunStore for SqliteStore {
         name: &str,
         status: LaneStatus,
         turns: u64,
-        input_tokens: u64,
-        output_tokens: u64,
+        tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
+        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         self.with(|c| {
             c.execute(
-                "UPDATE lanes SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8
+                "UPDATE lanes SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8,
+                 cache_read_tokens = ?9, cache_write_tokens = ?10
                  WHERE run_id = ?1 AND name = ?2",
                 params![
                     run.as_str(),
                     name,
                     status.as_str(),
-                    i64::try_from(turns).unwrap_or(i64::MAX),
-                    i64::try_from(input_tokens).unwrap_or(i64::MAX),
-                    i64::try_from(output_tokens).unwrap_or(i64::MAX),
+                    count(turns),
+                    count(tokens.input),
+                    count(tokens.output),
                     now(),
-                    error
+                    error,
+                    count(tokens.cache_read),
+                    count(tokens.cache_write),
                 ],
             )?;
             Ok(())
@@ -383,7 +387,7 @@ impl RunStore for SqliteStore {
     async fn lanes(&self, run: &RunId) -> Result<Vec<LaneRecord>, StoreError> {
         self.with(|c| {
             let mut statement = c.prepare(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at FROM lanes WHERE run_id = ?1 ORDER BY name",
+                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens FROM lanes WHERE run_id = ?1 ORDER BY name",
             )?;
             let rows = statement.query_map(params![run.as_str()], |row| {
                 Ok((
@@ -396,6 +400,8 @@ impl RunStore for SqliteStore {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
                 ))
             })?;
             let mut lanes = Vec::new();
@@ -410,6 +416,8 @@ impl RunStore for SqliteStore {
                     error,
                     started_at,
                     finished_at,
+                    cache_read,
+                    cache_write,
                 ) = row?;
                 let status = LaneStatus::parse(&status)
                     .ok_or(StoreError::Corrupt { column: "lanes.status", value: status })?;
@@ -420,6 +428,8 @@ impl RunStore for SqliteStore {
                     turns: to_u64("lanes.turns", turns)?,
                     input_tokens: to_u64("lanes.input_tokens", input_tokens)?,
                     output_tokens: to_u64("lanes.output_tokens", output_tokens)?,
+                    cache_read_tokens: to_u64("lanes.cache_read_tokens", cache_read)?,
+                    cache_write_tokens: to_u64("lanes.cache_write_tokens", cache_write)?,
                     error,
                     started_at,
                     finished_at,

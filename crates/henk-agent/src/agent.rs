@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use henk_domain::repeat::{self, CallArguments, RepeatGuard, RepeatVerdict};
 use henk_llm::{
-    ChatMessage, CompletionRequest, LlmError, ModelClient, StopReason, ToolArguments, ToolChoice,
-    ToolResult, Usage,
+    CacheTtl, ChatMessage, CompletionRequest, LlmError, ModelClient, StopReason, ToolArguments,
+    ToolChoice, ToolResult, Usage,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +40,9 @@ pub struct AgentConfig {
     /// ones are cut, with their length kept. 0 keeps none. The loop itself
     /// does not use it; the session that records the calls does.
     pub record_argument_bytes: usize,
+    /// How long the model's prompt cache should last (#330): long for a
+    /// session that waits for another between its rounds.
+    pub cache_ttl: CacheTtl,
 }
 
 impl Default for AgentConfig {
@@ -52,6 +55,7 @@ impl Default for AgentConfig {
             keep_recent_turns: 2,
             max_repeated_calls: repeat::DEFAULT_LIMIT,
             record_argument_bytes: 4096,
+            cache_ttl: CacheTtl::Short,
         }
     }
 }
@@ -96,6 +100,17 @@ pub enum AgentEvent {
         turn: u32,
         /// The message.
         message: ChatMessage,
+    },
+    /// Old tool results were shortened to stay under the conversation
+    /// budget (#330). The conversation's prefix changed, so the model's
+    /// prompt cache is written again from there.
+    Compacted {
+        /// The turn after which it happened.
+        turn: u32,
+        /// Tool results shortened.
+        stubbed: usize,
+        /// Characters of the conversation after.
+        chars: usize,
     },
     /// The repeat guard refused a call that repeated the ones before it.
     RepeatRefused {
@@ -397,6 +412,7 @@ impl Agent {
                 tool_choice: ToolChoice::Auto,
                 max_tokens: None,
                 temperature: None,
+                cache_ttl: self.config.cache_ttl,
             };
             let completion = tokio::select! {
                 biased;
@@ -595,12 +611,16 @@ impl Agent {
             |name| self.tools.keeps_in_context(name),
         );
         if stubbed > 0 {
+            let chars = crate::compact::size(messages);
             debug!(
                 turn,
-                stubbed,
-                chars = crate::compact::size(messages),
-                "old tool results elided to stay under the conversation budget"
+                stubbed, chars, "old tool results elided to stay under the conversation budget"
             );
+            self.emit(AgentEvent::Compacted {
+                turn,
+                stubbed,
+                chars,
+            });
         }
     }
 

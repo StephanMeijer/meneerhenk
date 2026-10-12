@@ -246,6 +246,26 @@ fn indent(text: &str) -> String {
         .join("\n")
 }
 
+/// What a session read from and wrote into the prompt cache, with the
+/// share of its prompt the cache served (#330): empty when it used none.
+#[must_use]
+pub fn cache_text(lane: &LaneRecord) -> String {
+    if lane.cache_read_tokens == 0 && lane.cache_write_tokens == 0 {
+        return String::new();
+    }
+    format!(
+        "  cache read {} written {} ({}% hit)",
+        lane.cache_read_tokens,
+        lane.cache_write_tokens,
+        hit_percent(lane.cache_read_tokens, lane.input_tokens)
+    )
+}
+
+/// `read` of `prompt` as a whole percentage, rounded down.
+fn hit_percent(read: u64, prompt: u64) -> u64 {
+    read.saturating_mul(100).checked_div(prompt).unwrap_or(0)
+}
+
 /// One draft as a line: what it was, and what became of it (#189).
 #[must_use]
 pub fn draft_text(draft: &DraftRecord) -> String {
@@ -391,6 +411,7 @@ pub fn render(
             lane.input_tokens,
             lane.output_tokens
         );
+        let _ = write!(out, "{}", cache_text(lane));
         match &lane.error {
             Some(error) => {
                 let _ = writeln!(out, "  {error}");
@@ -470,6 +491,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_session_line_says_what_the_cache_served() {
+        let mut lane = LaneRecord {
+            name: "reviewer".into(),
+            model: "m".into(),
+            status: LaneStatus::Finished,
+            turns: 4,
+            input_tokens: 10_000,
+            output_tokens: 300,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            error: None,
+            started_at: "t0".into(),
+            finished_at: Some("t1".into()),
+        };
+        assert_eq!(cache_text(&lane), "", "no cache, nothing said");
+        lane.cache_read_tokens = 8_150;
+        lane.cache_write_tokens = 1_200;
+        assert_eq!(
+            cache_text(&lane),
+            "  cache read 8150 written 1200 (81% hit)"
+        );
+    }
+
+    #[test]
     fn renders_every_section() {
         let run = RunRecord {
             id: RunId::parse("r-1").unwrap(),
@@ -499,6 +544,8 @@ mod tests {
             turns: 3,
             input_tokens: 100,
             output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             error: Some("rate limited".into()),
             started_at: "t0".into(),
             finished_at: Some("t1".into()),
