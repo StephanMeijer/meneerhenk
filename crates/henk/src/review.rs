@@ -80,9 +80,9 @@ struct ReviewRun<'a> {
     commit: &'a CommitSha,
     run: &'a RunId,
     link: &'a str,
-    /// Whether the review posts on the pull request: the lanes do, a review
-    /// loop does not (#285). A loop that declines hands over to the lanes,
-    /// which post, so their cancel and failure notices post too.
+    /// Whether the review posts on the pull request, and so its cancel and
+    /// failure notices: the lanes do, a review loop does not (#285). A
+    /// reviewer alone on GitLab posts only its summary note (#307).
     posts: &'a AtomicBool,
     /// The last commit a review loop pushed (#284), the pull request's new
     /// head, which every ending of the review reports its check on too.
