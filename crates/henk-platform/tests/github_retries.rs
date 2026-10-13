@@ -9,11 +9,12 @@
     missing_docs
 )]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::review::CommitSha;
-use henk_platform::github::{GitHubApi, GitHubAuth, GitHubWriter};
+use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter, Installations};
 use henk_platform::push::{NewPull, PushWriter as _};
 use henk_platform::retry::RetryPolicy;
 use henk_platform::{PlatformError, PlatformWriter as _, ReviewTarget};
@@ -259,4 +260,77 @@ async fn a_pull_request_that_was_opened_is_not_opened_again() {
         .await
         .unwrap();
     assert_eq!(opened.number, 12);
+}
+
+#[tokio::test]
+async fn a_branch_with_reserved_characters_is_found_when_the_create_failed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/docspec/app/pulls"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls"))
+        .and(query_param("head", "docspec:feat/a+b&c%d e"))
+        .and(query_param("base", "release/1.0+x"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"number": 13, "html_url": "https://github.com/docspec/app/pull/13"}
+        ])))
+        .mount(&server)
+        .await;
+    let opened = writer(&server)
+        .open_pull_request(
+            &RepoRef::parse(Platform::GitHub, "docspec/app").unwrap(),
+            &NewPull {
+                title: "Fix".to_owned(),
+                head: "feat/a+b&c%d e".to_owned(),
+                base: "release/1.0+x".to_owned(),
+                body: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.number, 13);
+}
+
+#[tokio::test]
+async fn the_clients_retry_policy_covers_the_installation_token() {
+    let server = MockServer::start().await;
+    let tokens = "/app/installations/222/access_tokens";
+    Mock::given(method("POST"))
+        .and(path(tokens))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(tokens))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(
+                json!({"token": "ghs_docspec", "expires_at": "2999-01-01T00:00:00Z"}),
+            ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&server)
+        .await;
+    let auth = GitHubAuth::app(Arc::new(Installations::new(
+        AppCredentials::from_pem(1, include_str!("fixtures/test-app-key.pem")).unwrap(),
+        None,
+    )));
+    let api = GitHubApi::new(&server.uri(), auth)
+        .unwrap()
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+        })
+        .for_installation(222);
+    assert_eq!(api.get("/repos/docspec/app").await.unwrap()["ok"], true);
+    assert_eq!(count(&server, "POST", tokens).await, 2);
 }

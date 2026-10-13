@@ -38,6 +38,22 @@ const PAGE_SIZE: usize = 100;
 /// is [`PlatformError::TooMany`], never a quietly partial list.
 const MAX_PAGES: usize = 100;
 
+/// `value` as a query-string value: every byte but an unreserved one is
+/// percent-encoded, so `+`, `&`, `%`, `#` and a space survive the trip.
+pub(crate) fn encode_query_value(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 /// A check run to create.
 #[derive(Debug, Clone, Copy)]
 pub struct NewCheckRun<'a> {
@@ -132,7 +148,9 @@ impl GitHubApi {
     /// Returns [`PlatformError`] when it is not an App client scoped to a
     /// repository or installation, or the installation cannot be found.
     pub async fn installation(&self) -> Result<u64, PlatformError> {
-        self.auth.installation(&self.http, &self.api_base).await
+        self.auth
+            .installation(&self.http, &self.api_base, self.retry)
+            .await
     }
 
     async fn request_accepting(
@@ -141,7 +159,10 @@ impl GitHubApi {
         url: &str,
         accept: &str,
     ) -> Result<reqwest::RequestBuilder, PlatformError> {
-        let token = self.auth.bearer(&self.http, &self.api_base).await?;
+        let token = self
+            .auth
+            .bearer(&self.http, &self.api_base, self.retry)
+            .await?;
         Ok(self
             .http
             .request(method, url)
@@ -202,7 +223,9 @@ impl GitHubApi {
     ///
     /// Returns [`PlatformError`] when no token can be minted.
     pub async fn git_token(&self) -> Result<secrecy::SecretString, PlatformError> {
-        self.auth.bearer(&self.http, &self.api_base).await
+        self.auth
+            .bearer(&self.http, &self.api_base, self.retry)
+            .await
     }
 
     /// The HTTPS clone URL of `owner/name` on this GitHub: `github.com` for
@@ -458,7 +481,7 @@ impl GitHubApi {
             .get(&format!(
                 "/repos/{owner}/{repo}/commits/{}/check-runs?check_name={}&filter=all&per_page=100",
                 run.head_sha,
-                run.name.replace(' ', "%20")
+                encode_query_value(run.name)
             ))
             .await?;
         Ok(found
@@ -535,4 +558,17 @@ fn decode(body: &str) -> Result<Value, PlatformError> {
     }
     serde_json::from_str(body)
         .map_err(|e| PlatformError::Decode(format!("{e}: {}", truncate(body))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_query_value;
+
+    #[test]
+    fn a_query_value_keeps_only_unreserved_bytes() {
+        assert_eq!(encode_query_value("feat/a+b&c"), "feat%2Fa%2Bb%26c");
+        assert_eq!(encode_query_value("100% a#b"), "100%25%20a%23b");
+        assert_eq!(encode_query_value("v1.2_x-y~z"), "v1.2_x-y~z");
+        assert_eq!(encode_query_value("é"), "%C3%A9");
+    }
 }

@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use henk_domain::allowlist::RepoRef;
 
 use crate::error::PlatformError;
+use crate::github::api::encode_query_value;
 use crate::github::writer::GitHubWriter;
 use crate::push::{
     CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
@@ -158,8 +159,8 @@ impl PushWriter for GitHubWriter {
                     .api()
                     .get(&format!(
                         "{path}?state=open&head={}&base={}",
-                        head.replace('#', "%23"),
-                        pull.base.replace('#', "%23")
+                        encode_query_value(&head),
+                        encode_query_value(&pull.base)
                     ))
                     .await?;
                 Ok(open.as_array().and_then(|pulls| pulls.first()).cloned())

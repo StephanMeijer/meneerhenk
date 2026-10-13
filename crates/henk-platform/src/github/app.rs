@@ -199,15 +199,13 @@ impl Installations {
         api_base: &str,
         owner: &str,
         name: &str,
+        retry: RetryPolicy,
     ) -> Result<u64, PlatformError> {
         let id = if let Some(id) = self.known(owner) {
             id
         } else {
             let what = format!("GET /repos/{owner}/{name}/installation");
-            let id = with_retry(RetryPolicy::default(), &what, || {
-                self.look_up(http, api_base, owner, name)
-            })
-            .await?;
+            let id = with_retry(retry, &what, || self.look_up(http, api_base, owner, name)).await?;
             debug!(owner, installation = id, "found installation");
             self.remember(owner, id);
             id
@@ -272,6 +270,7 @@ impl Installations {
         http: &reqwest::Client,
         api_base: &str,
         id: u64,
+        retry: RetryPolicy,
     ) -> Result<SecretString, PlatformError> {
         if !self.allows(id) {
             return Err(PlatformError::NotInstalled {
@@ -287,7 +286,7 @@ impl Installations {
             return Ok(cached.token.clone());
         }
         let what = format!("POST /app/installations/{id}/access_tokens");
-        let fresh = with_retry(RetryPolicy::default(), &what, || {
+        let fresh = with_retry(retry, &what, || {
             mint_installation_token(http, api_base, &self.credentials, id, SystemTime::now())
         })
         .await?;
@@ -425,6 +424,7 @@ impl GitHubAuth {
         &self,
         http: &reqwest::Client,
         api_base: &str,
+        retry: RetryPolicy,
     ) -> Result<u64, PlatformError> {
         match self {
             Self::Token(_) => Err(PlatformError::Auth(
@@ -440,7 +440,7 @@ impl GitHubAuth {
                         Scope::Installation(id) => Ok(*id),
                         Scope::Repository { owner, name } => {
                             installations
-                                .installation_for(http, api_base, owner, name)
+                                .installation_for(http, api_base, owner, name, retry)
                                 .await
                         }
                         Scope::Unscoped => Err(PlatformError::Auth(
@@ -464,12 +464,13 @@ impl GitHubAuth {
         &self,
         http: &reqwest::Client,
         api_base: &str,
+        retry: RetryPolicy,
     ) -> Result<SecretString, PlatformError> {
         match self {
             Self::Token(token) => Ok(token.clone()),
             Self::App { installations, .. } => {
-                let id = self.installation(http, api_base).await?;
-                installations.token(http, api_base, id).await
+                let id = self.installation(http, api_base, retry).await?;
+                installations.token(http, api_base, id, retry).await
             }
         }
     }
