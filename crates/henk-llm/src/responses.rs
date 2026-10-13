@@ -139,6 +139,7 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
             }
         }
         Role::Assistant => {
+            let start = out.len();
             for block in &message.blocks {
                 match block {
                     Block::Opaque(item) if is_reasoning_item(item) => out.push(item.clone()),
@@ -162,6 +163,13 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
                     Block::Opaque(_) | Block::Text(_) | Block::ToolResult(_) => {}
                 }
             }
+            // A reasoning item must be followed by the item it produced;
+            // the API refuses one that is not. A turn cut at the output cap
+            // while thinking holds only reasoning, and a reasoning item
+            // with nothing after it is of no use to the model anyway.
+            while out.len() > start && out.last().is_some_and(is_reasoning_item) {
+                out.pop();
+            }
         }
     }
 }
@@ -171,8 +179,9 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
 ///
 /// # Errors
 ///
-/// Returns [`LlmError::Server`] or [`LlmError::BadRequest`] for a response
-/// whose `status` is `failed`, and [`LlmError::Decode`] when it has no
+/// Returns [`LlmError::RateLimited`], [`LlmError::Server`] or
+/// [`LlmError::BadRequest`] for a response whose `status` is `failed`
+/// (the first two are retried), and [`LlmError::Decode`] when it has no
 /// `output` or an unreadable item.
 pub fn decode(response: &Value) -> Result<Completion, LlmError> {
     let status = response.get("status").and_then(Value::as_str);
@@ -187,16 +196,20 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
             .and_then(Value::as_str)
             .unwrap_or("the response failed");
         let message = format!("{code}: {message}");
-        return Err(if code == "server_error" {
-            LlmError::Server {
+        // A failed response arrives with HTTP 200, so the status-based
+        // mapping of `post_json` never sees it. The transient codes are
+        // mapped to the errors a real 429 or 5xx would give, so they are
+        // retried; any other code is the request's own fault.
+        return Err(match code {
+            "rate_limit_exceeded" => LlmError::RateLimited { retry_after: None },
+            "server_error" | "vector_store_timeout" => LlmError::Server {
                 status: 500,
                 body: message,
-            }
-        } else {
-            LlmError::BadRequest {
+            },
+            _ => LlmError::BadRequest {
                 status: 400,
                 body: message,
-            }
+            },
         });
     }
     let output = response

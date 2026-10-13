@@ -185,6 +185,67 @@ fn other_providers_opaque_content_is_not_sent() {
 }
 
 #[test]
+fn a_reasoning_item_with_nothing_after_it_is_not_sent() {
+    let reasoning =
+        json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc"});
+    let alone = client().body(&CompletionRequest {
+        messages: vec![ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Opaque(reasoning.clone()),
+                Block::Opaque(reasoning.clone()),
+                Block::Text(String::new()),
+            ],
+        }],
+        ..Default::default()
+    });
+    assert_eq!(alone["input"], json!([]), "{alone}");
+
+    let before_text = client().body(&CompletionRequest {
+        messages: vec![ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Opaque(reasoning.clone()),
+                Block::Text("Done.".to_owned()),
+                Block::Opaque(json!({"type": "reasoning", "id": "rs_2"})),
+            ],
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        before_text["input"],
+        json!([
+            reasoning,
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]},
+        ]),
+        "the one with an item after it stays, the trailing one goes"
+    );
+}
+
+#[test]
+fn a_turn_cut_while_thinking_goes_back_without_its_reasoning() {
+    let cut = responses::decode(&fixture("incomplete.json")).unwrap();
+    assert_eq!(cut.stop, StopReason::MaxTokens);
+    assert!(matches!(cut.message.blocks.as_slice(), [Block::Opaque(_)]));
+    let body = client().body(&CompletionRequest {
+        messages: vec![
+            ChatMessage::user("Review this."),
+            cut.message,
+            ChatMessage::user("You ran out of tokens. Continue."),
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        body["input"],
+        json!([
+            {"role": "user", "content": [{"type": "input_text", "text": "Review this."}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "You ran out of tokens. Continue."}]},
+        ]),
+        "no reasoning item is left dangling before the nudge"
+    );
+}
+
+#[test]
 fn text_decodes_with_its_cached_tokens() {
     let completion = responses::decode(&fixture("text.json")).unwrap();
     assert_eq!(completion.message.text(), "Looks good.");
@@ -258,6 +319,20 @@ fn a_failed_response_is_an_error() {
             "error": {"code": "invalid_prompt", "message": "no"},
         })),
         Err(LlmError::BadRequest { .. })
+    ));
+    assert!(matches!(
+        responses::decode(&json!({
+            "status": "failed",
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+        })),
+        Err(LlmError::RateLimited { retry_after: None })
+    ));
+    assert!(matches!(
+        responses::decode(&json!({
+            "status": "failed",
+            "error": {"code": "vector_store_timeout", "message": "too slow"},
+        })),
+        Err(LlmError::Server { .. })
     ));
     assert!(matches!(
         responses::decode(&json!({"error": "a proxy's own"})),
@@ -351,6 +426,37 @@ async fn a_rate_limit_is_retried_and_a_bad_request_is_not() {
         client.complete(&request).await,
         Err(LlmError::BadRequest { status: 400, .. })
     ));
+}
+
+#[tokio::test]
+async fn a_rate_limit_in_the_body_of_a_200_is_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "failed",
+            "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+            "output": [],
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("text.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(config(&format!("{}/v1", server.uri()))).unwrap();
+    let completion = client
+        .complete(&CompletionRequest {
+            messages: vec![ChatMessage::user("hi")],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(completion.message.text(), "Looks good.");
 }
 
 #[test]
