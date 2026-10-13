@@ -519,20 +519,56 @@ pub struct HostSlots {
 /// Where a backend says what a run should know while its workspace opens:
 /// lines for the run's timeline, or nowhere.
 #[derive(Debug, Clone, Default)]
-pub struct Notes(Option<tokio::sync::mpsc::UnboundedSender<String>>);
+pub struct Notes {
+    to: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    deadline: Option<tokio::time::Instant>,
+}
 
 impl Notes {
     /// Notes that reach `to`.
     #[must_use]
     pub fn to(to: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
-        Self(Some(to))
+        Self {
+            to: Some(to),
+            deadline: None,
+        }
+    }
+
+    /// These notes, with waits (see [`Self::within`]) given up at `deadline`.
+    #[must_use]
+    pub fn until(mut self, deadline: Option<tokio::time::Instant>) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
+    /// Awaits `wait`, a wait for a sandbox host, and gives it up when the
+    /// deadline passes first. Only what the backend puts in here counts:
+    /// opening itself, such as the upload and the setup, is not timed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the deadline passes before `wait` is done.
+    pub async fn within<T>(
+        &self,
+        wait: impl std::future::Future<Output = T>,
+    ) -> Result<T, WorkspaceError> {
+        let Some(deadline) = self.deadline else {
+            return Ok(wait.await);
+        };
+        tokio::select! {
+            out = wait => Ok(out),
+            () = tokio::time::sleep_until(deadline) => Err(WorkspaceError::Backend(
+                "the run's time limit was reached while it waited for a sandbox host"
+                    .to_owned(),
+            )),
+        }
     }
 
     /// Says `note`, and logs it.
     pub fn say(&self, note: impl Into<String>) {
         let note = note.into();
         tracing::debug!(%note, "workspace");
-        if let Some(to) = &self.0 {
+        if let Some(to) = &self.to {
             let _ = to.send(note);
         }
     }
@@ -676,8 +712,10 @@ pub(crate) async fn open_prepared(
 /// Opens a workspace with `provider`, putting what it says while it opens,
 /// such as that it waits for a sandbox host (#403), on `run`'s timeline as
 /// it says it. A wait for a sandbox host counts against the run's time:
-/// past `deadline` while it waits, the open is given up. Opening itself is
-/// not timed, as before; the run's own limit takes over after it.
+/// past `deadline` while the backend waits for a seat, the open is given
+/// up (the backend races only that wait, through [`Notes::within`]).
+/// Opening itself is not timed, as before; the run's own limit takes over
+/// after it.
 pub(crate) async fn open_noted(
     provider: &dyn WorkspaceProvider,
     store: &dyn henk_store::RunStore,
@@ -687,17 +725,9 @@ pub(crate) async fn open_noted(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
     let (to, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let notes = Notes::to(to);
+    let notes = Notes::to(to).until(deadline);
     let opening = provider.open_with(source, profile, &notes);
     tokio::pin!(opening);
-    let out_of_time = async {
-        match deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline).await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(out_of_time);
-    let mut waiting = false;
     loop {
         tokio::select! {
             opened = &mut opening => {
@@ -707,14 +737,7 @@ pub(crate) async fn open_noted(
                 return opened;
             }
             Some(note) = said.recv() => {
-                waiting |= note.starts_with(WAITING);
                 let _ = store.event(run, "info", &note).await;
-            }
-            () = &mut out_of_time, if waiting => {
-                return Err(WorkspaceError::Backend(
-                    "the run's time limit was reached while it waited for a sandbox host"
-                        .to_owned(),
-                ));
             }
         }
     }

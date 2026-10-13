@@ -840,7 +840,7 @@ impl WorkspaceProvider for SshPool {
             None
         } else {
             wait(&mut began, &mut counted);
-            Some(self.turnstile.lock().await)
+            Some(notes.within(self.turnstile.lock()).await?)
         };
         loop {
             // Listening before looking, so a seat given back in between is
@@ -889,28 +889,32 @@ impl WorkspaceProvider for SshPool {
                     first
                 } else {
                     wait(&mut began, &mut counted);
-                    self.turnstile.lock().await
+                    notes.within(self.turnstile.lock()).await?
                 });
                 continue;
             }
             wait(&mut began, &mut counted);
             // Until a seat is given back, or a host passed over as down may
-            // be tried again.
+            // be tried again. Only this wait counts against the run's time.
             let retry = self
                 .hosts
                 .iter()
                 .filter(|h| tried.contains(&h.id))
                 .filter_map(PooledHost::down_until)
                 .min();
-            match retry {
-                Some(at) => {
-                    tokio::select! {
-                        () = &mut freed => {}
-                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+            notes
+                .within(async {
+                    match retry {
+                        Some(at) => {
+                            tokio::select! {
+                                () = &mut freed => {}
+                                () = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+                            }
+                        }
+                        None => freed.await,
                     }
-                }
-                None => freed.await,
-            }
+                })
+                .await?;
         }
     }
 }
@@ -1959,6 +1963,75 @@ pub(crate) mod tests {
             "a, down but not full, is not named"
         );
         opened.close().await;
+        drop(held);
+    }
+
+    /// The local runner, with a `create` that is slow.
+    struct SlowCreate {
+        inner: Arc<LocalRunner>,
+        takes: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for SlowCreate {
+        async fn call(
+            &self,
+            tokens: &[String],
+            stdin: &[u8],
+            keep: Option<usize>,
+            wait: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            if tokens.first().map(String::as_str) == Some("create") {
+                tokio::time::sleep(self.takes).await;
+            }
+            self.inner.call(tokens, stdin, keep, wait).await
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_wait_for_a_seat_counts_against_the_deadline_not_the_opening() {
+        let slow = Arc::new(SlowCreate {
+            inner: LocalRunner::new("henk-limit-slow"),
+            takes: Duration::from_millis(800),
+        });
+        let pool = limited(vec![("a", slow as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-slow-src");
+        let held = pool.hosts[0].seat(&pool.signals).unwrap();
+        let (to, mut said) = tokio::sync::mpsc::unbounded_channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        let notes = Notes::to(to).until(Some(deadline));
+        let profile = Profile::default();
+        let open = pool.open_with(source.path(), &profile, &notes);
+        tokio::pin!(open);
+        // The seat is given back after the wait began, and the opening then
+        // runs past the deadline.
+        let freeing = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(held);
+        };
+        let (opened, ()) = tokio::join!(&mut open, freeing);
+        let opened = opened.expect("the opening is not timed, only the wait");
+        assert!(tokio::time::Instant::now() > deadline);
+        assert!(said.recv().await.unwrap().starts_with("waiting for"));
+        opened.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_wait_for_a_seat_that_outlasts_the_deadline_is_given_up() {
+        let a = LocalRunner::new("henk-limit-deadline");
+        let pool = limited(vec![("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-deadline-src");
+        let held = pool.hosts[0].seat(&pool.signals).unwrap();
+        let (to, _said) = tokio::sync::mpsc::unbounded_channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+        let notes = Notes::to(to).until(Some(deadline));
+        let error = pool
+            .open_with(source.path(), &Profile::default(), &notes)
+            .await
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("time limit"), "{error}");
         drop(held);
     }
 
