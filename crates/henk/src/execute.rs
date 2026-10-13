@@ -1118,7 +1118,7 @@ requester_id = 3
         secs: u64,
         pool: Arc<crate::workspace::ssh::SshPool>,
     ) -> Fixture {
-        let mut f = fixture(name, script, 0).await;
+        let mut f = fixture(name, script).await;
         f.app.settings.execution.as_mut().unwrap().run_timeout_secs = secs;
         f.app.workspace_provider = pool;
         f
