@@ -677,7 +677,8 @@ pub struct RunRecord {
     /// The run that replaced it, when it was superseded (#231).
     pub superseded_by: Option<RunId>,
     /// Why a review loop stopped (#286): `converged`, `max_rounds`,
-    /// `repeating_finding`, `build_failing`, `timeout` and the like.
+    /// `repeating_finding`, `timeout` and the like. Runs from before #396
+    /// may read `build_failing`, when Henk still ran checks of his own.
     pub loop_stop: Option<String>,
     /// How many rounds a review loop ran (#286).
     pub loop_rounds: Option<u32>,

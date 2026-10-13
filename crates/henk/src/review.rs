@@ -3851,9 +3851,138 @@ requester_id = 3
         }
     }
 
+    /// The host backend, running `command` in the workspace the first time
+    /// an export finds a change: the executor's, on its way to the push.
+    /// What Henk's own checks did there before #396, for the tests that
+    /// need a step at that moment.
+    struct BeforePush {
+        command: Vec<String>,
+    }
+
+    impl BeforePush {
+        fn sh(script: &str) -> Arc<Self> {
+            Arc::new(Self {
+                command: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workspace::WorkspaceProvider for BeforePush {
+        async fn open(
+            &self,
+            source: &std::path::Path,
+            profile: &henk_domain::workspace::Profile,
+        ) -> Result<Arc<dyn crate::workspace::Workspace>, crate::workspace::WorkspaceError>
+        {
+            let inner = crate::workspace::host::HostProvider
+                .open(source, profile)
+                .await?;
+            Ok(Arc::new(Planted {
+                inner,
+                command: self.command.clone(),
+                done: std::sync::atomic::AtomicBool::new(false),
+            }))
+        }
+    }
+
+    struct Planted {
+        inner: Arc<dyn crate::workspace::Workspace>,
+        command: Vec<String>,
+        done: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workspace::Workspace for Planted {
+        async fn exec(
+            &self,
+            argv: &[String],
+            cwd: &henk_domain::path::WorkspacePath,
+            timeout: Duration,
+        ) -> Result<crate::workspace::ExecResult, crate::workspace::WorkspaceError> {
+            self.inner.exec(argv, cwd, timeout).await
+        }
+
+        async fn read(
+            &self,
+            path: &henk_domain::path::WorkspacePath,
+            max_bytes: u64,
+        ) -> Result<Vec<u8>, crate::workspace::WorkspaceError> {
+            self.inner.read(path, max_bytes).await
+        }
+
+        async fn write(
+            &self,
+            path: &henk_domain::path::WorkspacePath,
+            content: &[u8],
+        ) -> Result<(), crate::workspace::WorkspaceError> {
+            self.inner.write(path, content).await
+        }
+
+        async fn list(
+            &self,
+            dir: &henk_domain::path::WorkspacePath,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            cap: usize,
+        ) -> Result<Vec<String>, crate::workspace::WorkspaceError> {
+            self.inner.list(dir, only, cap).await
+        }
+
+        async fn search(
+            &self,
+            dir: &henk_domain::path::WorkspacePath,
+            pattern: &crate::workspace::Pattern,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            context: usize,
+            max_file_bytes: u64,
+            cap: usize,
+        ) -> Result<Vec<crate::workspace::Hit>, crate::workspace::WorkspaceError> {
+            self.inner
+                .search(dir, pattern, only, context, max_file_bytes, cap)
+                .await
+        }
+
+        async fn export(
+            &self,
+        ) -> Result<Vec<crate::workspace::Exported>, crate::workspace::WorkspaceError> {
+            let exported = self.inner.export().await?;
+            if exported.is_empty() || self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(exported);
+            }
+            let ran = self
+                .inner
+                .exec(
+                    &self.command,
+                    &henk_domain::path::WorkspacePath::root(),
+                    Duration::from_secs(20),
+                )
+                .await?;
+            assert_eq!(ran.code, Some(0), "{ran:?}");
+            self.inner.export().await
+        }
+
+        async fn baseline(&self) -> Result<(), crate::workspace::WorkspaceError> {
+            self.inner.baseline().await
+        }
+
+        async fn close(&self) {
+            self.inner.close().await;
+        }
+    }
+
     #[tokio::test]
     async fn a_loop_cancelled_just_before_its_push_ends_cancelled_not_failed() {
-        let (mut f, _reviewer, _executor, remote) = looping(
+        // A step as the executor's changes are listed for the push says
+        // when it runs, and waits until the review was cancelled: the next
+        // step is the push.
+        let signals = crate::git::ScratchDir::new("review-loop-cancel-push-signals").unwrap();
+        let (running, go) = (signals.path().join("running"), signals.path().join("go"));
+        let script = format!(
+            ": > '{}'; while [ ! -e '{}' ]; do :; done",
+            running.display(),
+            go.display()
+        );
+        let (f, _reviewer, _executor, remote) = looping(
             "review-loop-cancel-push",
             ScriptedClient::new(
                 "r",
@@ -3871,25 +4000,9 @@ requester_id = 3
                     say("Fixed."),
                 ],
             ),
-            Arc::new(crate::workspace::host::HostProvider),
+            BeforePush::sh(&script),
         )
         .await;
-        // The project's check says when it runs, and waits until the review
-        // was cancelled: the next step is the push.
-        let signals = crate::git::ScratchDir::new("review-loop-cancel-push-signals").unwrap();
-        let (running, go) = (signals.path().join("running"), signals.path().join("go"));
-        let script = format!(
-            ": > '{}'; while [ ! -e '{}' ]; do :; done",
-            running.display(),
-            go.display()
-        );
-        f.app
-            .settings
-            .roles
-            .executor
-            .as_mut()
-            .unwrap()
-            .check_commands = vec![vec!["/bin/sh".to_owned(), "-c".to_owned(), script]];
         let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
         let run = RunId::parse("r-loop-cancel-push").unwrap();
         let cancel = f.app.shutdown.child_token();
@@ -4839,8 +4952,8 @@ requester_id = 3
     /// A loop on `provider` whose reviewer finds two things and then
     /// nothing. With `fixes`, the executor fixes the first and rejects the
     /// second, and that one commit is pushed, as Henk, with the default
-    /// trailers, after the checks pass; without, it rejects both, and
-    /// nothing is checked or pushed.
+    /// trailers, once the push rules hold; without, it rejects both, and
+    /// nothing is pushed.
     async fn executor_on(
         name: &str,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,
@@ -4877,13 +4990,7 @@ requester_id = 3
             provider,
         )
         .await;
-        configure(
-            &mut f,
-            &loop_config_and(
-                &settings,
-                &format!("check_commands = [[\"true\"]]\n{PEOPLE}"),
-            ),
-        );
+        configure(&mut f, &loop_config_and(&settings, PEOPLE));
         let run = RunId::parse(format!("r-{name}")).unwrap();
         let report = run_review(
             &f.app,
@@ -4904,7 +5011,7 @@ requester_id = 3
         let summary = report.summary.unwrap();
         if !fixes {
             assert_eq!(head, f.head.as_str(), "nothing pushed");
-            assert_eq!(checks, 1, "the setup step only: no change, no checks");
+            assert_eq!(checks, 1, "the setup step only");
             assert!(summary.contains("pushed 0 commits"), "{summary}");
             return;
         }
@@ -4931,7 +5038,10 @@ requester_id = 3
             crate::git::tests::remote_change(remote.path(), f.head.as_str(), "src/a.rs").await;
         assert_eq!(changed, ["src/a.rs"]);
         assert_eq!(content, "fn main() {\n    let x = 3;\n}\n");
-        assert_eq!(checks, 2, "the setup step and the check");
+        assert_eq!(
+            checks, 1,
+            "the setup step only: Henk runs no checks of his own before a push (#396)"
+        );
     }
 
     #[tokio::test]
@@ -5093,9 +5203,13 @@ requester_id = 3
         assert_eq!(content, "fn main() {\n    let x = 3;\n}\n");
         let (names, _, system) = seen(&executor);
         assert!(names.iter().any(|n| n == "bash"), "{names:?}");
-        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "run_checks"), "{names:?}");
         assert!(
             system.contains("commands of your own in the checkout with `bash`"),
+            "{system}"
+        );
+        assert!(
+            system.contains("Find how the repository checks itself"),
             "{system}"
         );
     }
@@ -5121,8 +5235,14 @@ requester_id = 3
             .unwrap();
         let (names, _, system) = seen(&executor);
         assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
-        assert!(names.iter().any(|n| n == "run_checks"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "run_checks"), "{names:?}");
         assert!(!system.contains("`bash`"), "{system}");
+        // No shell, no checks: the pull request's CI decides (#396).
+        assert!(
+            !system.contains("Find how the repository checks itself"),
+            "{system}"
+        );
+        assert!(system.contains("the pull request's CI decides"), "{system}");
     }
 
     /// mise and one setup step, every command on the fake backend passing.
@@ -5164,8 +5284,8 @@ requester_id = 3
 
     const SET_UP: &str = "[workspace]\ntoolchain = \"mise\"\nsetup = [[\"make\", \"deps\"]]\n";
 
-    /// A loop on `provider` with `settings`, a check, and an executor that
-    /// answers `executor`.
+    /// A loop on `provider` with `settings` and an executor that answers
+    /// `executor`.
     async fn set_up_loop(
         name: &str,
         settings: &str,
@@ -5180,10 +5300,7 @@ requester_id = 3
             Arc::new(provider.clone()),
         )
         .await;
-        configure(
-            &mut looping.0,
-            &loop_config_and(settings, "check_commands = [[\"true\"]]\n"),
-        );
+        configure(&mut looping.0, &loop_config_and(settings, ""));
         looping
     }
 
@@ -5205,12 +5322,10 @@ requester_id = 3
             ],
             "mise first, in safe mode, then the operator's steps, before anything else"
         );
-        assert!(ran.len() > 3, "the check ran: {ran:?}");
-        assert!(
-            ran.iter()
-                .skip(3)
-                .all(|c| c == "env MISE_SAFE=1 mise exec -- true"),
-            "the checks run through mise: {ran:?}"
+        assert_eq!(
+            ran.len(),
+            3,
+            "Henk runs no checks of his own after the setup (#396): {ran:?}"
         );
         assert!(!ran.iter().any(|c| c.contains("trust")), "{ran:?}");
         let (files, content) =
@@ -5404,33 +5519,23 @@ requester_id = 3
         }
     }
 
-    /// `text` as a TOML basic string.
-    fn toml_string(text: &str) -> String {
-        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-    }
-
     #[tokio::test]
     async fn the_loop_pushes_from_a_clean_checkout_with_only_the_changeset() {
-        let check = r#"echo stray > stray.txt; mkdir -p "$HOME/.cache" && echo c > "$HOME/.cache/x"; mkdir -p .git/hooks && echo evil > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit; echo checked"#;
-        let (mut f, _, _, remote) = looping(
+        let step = r#"echo stray > stray.txt; mkdir -p "$HOME/.cache" && echo c > "$HOME/.cache/x"; mkdir -p .git/hooks && echo evil > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit; echo checked"#;
+        let (f, _, _, remote) = looping(
             "loop-clean",
             ScriptedClient::new("r", one_finding()),
             ScriptedClient::new("f", fixes_f1()),
-            Arc::new(crate::workspace::host::HostProvider),
+            BeforePush::sh(step),
         )
         .await;
-        let checks = format!(
-            "check_commands = [[\"sh\", \"-c\", {}]]\n",
-            toml_string(check)
-        );
-        configure(&mut f, &loop_config_and("", &checks));
         let run = RunId::parse("r-loop-clean").unwrap();
         run_review(&f.app, request(&run), CancellationToken::new())
             .await
             .unwrap();
         let (head, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_ne!(head, f.head.as_str(), "pushed");
-        // What the check left in the tree is part of the changeset and its
+        // What a command left in the tree is part of the changeset and its
         // limits; its HOME and a .git it made are not, and no hook it
         // planted ran when Henk committed.
         let (changed, stray) =
@@ -5438,9 +5543,10 @@ requester_id = 3
         assert_eq!(changed, ["src/a.rs", "stray.txt"]);
         assert_eq!(stray, "stray\n");
         let execs = execs(&f.app, &run).await;
-        assert_eq!(execs.len(), 1, "{execs:?}");
-        assert!(execs[0].contains("exit 0"), "{execs:?}");
-        assert!(execs[0].ends_with("\nchecked"), "{execs:?}");
+        assert!(
+            execs.is_empty(),
+            "Henk runs no checks of his own: {execs:?}"
+        );
         let push = crate::git::scratch_prefix("henk-loop-r-loop-clean-push-1");
         let left: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()

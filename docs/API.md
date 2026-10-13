@@ -191,8 +191,8 @@ One run with everything the run record holds about it:
   `publish` (nothing reaches the issue before it), `done`. A run's
   `loop_stop` and `loop_rounds` say why and after how many rounds a review
   loop or a plan's review stopped. An execute run goes `requested`,
-  `started`, `checkout`, `session` (the executor), `commit` (the checks
-  and the changeset), `push` (the new branch), `publish` (the pull request
+  `started`, `checkout`, `session` (the executor), `commit` (the
+  changeset), `push` (the new branch), `publish` (the pull request
   opened), `done`; its `summary` names the pull request. An address run, from before
   #327, went `requested`, `started`, `workspace`, `session`, `commit`,
   `push`, `replies`, `done`.

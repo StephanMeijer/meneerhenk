@@ -91,7 +91,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
         assert!(henk_domain::text::is_in_style(EXECUTE));
-        for tool in ["edit_file", "run_checks", "propose_pull_request"] {
+        for tool in ["edit_file", "propose_pull_request"] {
             assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");
         }
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER_WORKSPACE));
@@ -104,10 +104,24 @@ mod tests {
         for tool in ["report_finding", "finish_round", "reopens"] {
             assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
         }
-        for tool in ["list_findings", "give_verdict", "run_checks"] {
+        for tool in ["list_findings", "give_verdict"] {
             assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
+        // Henk's own checks are gone; the executor runs the repository's
+        // with bash, and says which (#396).
+        for prompt in [EXECUTE, LOOP_EXECUTOR, EXECUTOR_BASH] {
+            assert!(!prompt.contains("run_checks"), "{prompt}");
+        }
         assert!(EXECUTOR_BASH.contains("`bash`") && EXECUTOR_BASH.contains("`mktemp`"));
+        for source in [
+            "`.github/workflows`",
+            "`.gitlab-ci.yml`",
+            "`Makefile`",
+            "`AGENTS.md`",
+        ] {
+            assert!(EXECUTOR_BASH.contains(source), "{source}");
+        }
+        assert!(EXECUTOR_BASH.contains("Name each check you ran"));
         assert!(PLAN_WORKSPACE.contains("{{tools}}"));
         assert!(PLAN_WORKSPACE.contains("`list_commits`"));
         // The planner's copy is one commit without history (#183).

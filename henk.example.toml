@@ -244,9 +244,9 @@ model = "claude"
 max_turns = 40
 timeout_secs = 600
 max_changed_files = 20
-# The project's checks, run in the workspace with an empty environment and
-# [workspace] command_secs each. They run the pull request's code.
-# check_commands = [["cargo", "test", "--offline"]]
+# Henk runs no checks of his own: the executor finds the repository's
+# checks (its CI, Makefile, AGENTS.md) and runs them with bash, and the
+# pull request's CI decides.
 requester_id = 523456789012345678
 #
 # Who Henk commits as, author and committer alike; his Signed-off-by uses
@@ -273,11 +273,12 @@ requester_id = 523456789012345678
 # requester_signoff = true
 
 # Where the review loop's workspace is: the reviewer's and the executor's
-# file tools and the checks run there. Henk copies the pull request's files
+# file tools, and their bash, run there. Henk copies the pull request's files
 # into it; only the executor's checked changeset comes back, and he commits
-# it in a fresh checkout nothing ran in. The "host" backend runs
-# the checks as Henk's own user on this machine: not isolated, and only the
-# time and output limits hold. `henk config check` says so.
+# it in a fresh checkout nothing ran in. The "host" backend runs the setup
+# steps as Henk's own user on this machine and gives no model bash, so no
+# checks run there and the pull request's CI decides: not isolated, and only
+# the time and output limits hold. `henk config check` says so.
 # [workspace]
 # backend = "host"
 # command_secs = 600

@@ -1,6 +1,7 @@
 //! The tools a model changes code with: the shared code tools to read and
-//! search (`code_tools`), edit files in the workspace and run the project's
-//! checks. The review loop's executor works with these (#284). The tools
+//! search (`code_tools`), edit files in the workspace, and `bash` on a
+//! backend apart from Henk, where the executor runs the repository's own
+//! checks (#396). The review loop's executor works with these (#284). The tools
 //! talk only to a [`Workspace`]; nothing here reaches the network, git or a
 //! credential. Committing and pushing are Henk's code, after the session.
 
@@ -13,18 +14,15 @@ use henk_domain::path::WorkspacePath;
 use henk_llm::{ToolDef, ToolName};
 use serde_json::{Value, json};
 
-use crate::checks::{describe, run_checks};
 use crate::code_tools::{self, MAX_FILE_BYTES};
 use crate::workspace::Workspace;
 
 /// What the edit tools share.
 pub struct EditContext {
-    /// Where the files are and the checks run.
+    /// Where the files are and the model's commands run.
     pub workspace: Arc<dyn Workspace>,
-    /// The project's checks.
-    pub check_commands: Vec<Vec<String>>,
-    /// Time limit per check.
-    pub check_timeout: Duration,
+    /// Time limit per `bash` command.
+    pub command_timeout: Duration,
     /// Files one push may change.
     pub max_changed_files: usize,
     /// Whether the model may run commands of its own (`bash`, #172): only
@@ -98,7 +96,6 @@ macro_rules! edit_tool {
 
 edit_tool!(EditFile);
 edit_tool!(WriteFile);
-edit_tool!(RunChecks);
 
 #[async_trait::async_trait]
 impl Tool for EditFile {
@@ -184,30 +181,8 @@ impl Tool for WriteFile {
     }
 }
 
-#[async_trait::async_trait]
-impl Tool for RunChecks {
-    fn definition(&self) -> ToolDef {
-        ToolDef {
-            name: name("run_checks"),
-            description: "Runs the project's configured checks (build, tests, lint) in the workspace and reports each.".to_owned(),
-            input_schema: schema(&json!({}), &[]),
-        }
-    }
-
-    async fn call(&self, _args: Value) -> ToolOutput {
-        let ctx = &self.0;
-        let results = run_checks(
-            ctx.workspace.as_ref(),
-            &ctx.check_commands,
-            ctx.check_timeout,
-        )
-        .await;
-        ToolOutput::ok(describe(&results))
-    }
-}
-
-/// The tools to read, change and check the code: what the executor of a
-/// review loop works with (#284).
+/// The tools to read and change the code, and to run the repository's
+/// checks where commands may run: what the executor works with (#284).
 #[must_use]
 pub fn edit_tools(ctx: &Arc<EditContext>) -> ToolSet {
     let mut set = ToolSet::new();
@@ -216,13 +191,12 @@ pub fn edit_tools(ctx: &Arc<EditContext>) -> ToolSet {
         code_tools::add_bash(
             &mut set,
             &ctx.workspace,
-            ctx.check_timeout,
+            ctx.command_timeout,
             code_tools::BashUse::Executor,
         );
     }
     set.add(EditFile(Arc::clone(ctx)))
-        .add(WriteFile(Arc::clone(ctx)))
-        .add(RunChecks(Arc::clone(ctx)));
+        .add(WriteFile(Arc::clone(ctx)));
     set
 }
 
@@ -265,8 +239,7 @@ pub(crate) mod tests {
             .unwrap();
         let ctx = Arc::new(EditContext {
             workspace,
-            check_commands: vec![vec!["true".to_owned()]],
-            check_timeout: Duration::from_secs(5),
+            command_timeout: Duration::from_secs(5),
             max_changed_files: 2,
             bash: false,
             state: Mutex::default(),
@@ -361,10 +334,26 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn checks_run_in_the_workspace() {
-        let (provider, ctx) = workspace("henk-tools-checks").await;
-        let out = RunChecks(Arc::clone(&ctx)).call(json!({})).await;
-        assert_eq!(out.content, "$ true: passed");
-        assert_eq!(*provider.ran.lock().unwrap(), ["true"]);
+    async fn the_checks_are_the_executor_s_own_with_bash_and_henk_has_none() {
+        let (_provider, ctx) = workspace("henk-tools-checks").await;
+        let names = |ctx: &Arc<EditContext>| {
+            edit_tools(ctx)
+                .names()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let without = names(&ctx);
+        assert!(!without.iter().any(|n| n == "run_checks"), "{without:?}");
+        assert!(!without.iter().any(|n| n == "bash"), "{without:?}");
+        let with_bash = Arc::new(EditContext {
+            workspace: Arc::clone(&ctx.workspace),
+            command_timeout: ctx.command_timeout,
+            max_changed_files: ctx.max_changed_files,
+            bash: true,
+            state: Mutex::default(),
+        });
+        let with = names(&with_bash);
+        assert!(with.iter().any(|n| n == "bash"), "{with:?}");
+        assert!(!with.iter().any(|n| n == "run_checks"), "{with:?}");
     }
 }

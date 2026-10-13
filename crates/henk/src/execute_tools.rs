@@ -36,7 +36,7 @@ impl Tool for ProposePullRequest {
         ToolDef {
             name: ToolName::parse("propose_pull_request")
                 .unwrap_or_else(|_| unreachable!("a constant tool name")),
-            description: "Ends your work: Henk runs the checks, commits your changes to the new branch and opens the pull request with this title and description. Call it once, last. summary: what you changed, in a few sentences. left_out: what the issue asks that you did not do, and why; empty when nothing.".to_owned(),
+            description: "Ends your work: Henk commits your changes to the new branch and opens the pull request with this title and description; he runs no checks of his own, and the pull request's CI decides. Call it once, last. summary: what you changed, and which checks you ran and how they ended, in a few sentences. left_out: what the issue asks that you did not do, and why; empty when nothing.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -78,7 +78,7 @@ impl Tool for ProposePullRequest {
             left_out,
         });
         ToolOutput::ok(
-            "Proposed. Henk runs the checks, commits, pushes and opens the pull request. End your turn now.",
+            "Proposed. Henk commits, pushes and opens the pull request. End your turn now.",
         )
     }
 }
