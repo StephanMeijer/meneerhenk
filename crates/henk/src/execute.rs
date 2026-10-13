@@ -785,7 +785,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn an_execute_run_nobody_known_asked_for_credits_no_one() {
-        let f = fixture("henk-exec-nobody", vec![write_csv(), propose(), done()], 0).await;
+        let f = fixture("henk-exec-nobody", vec![write_csv(), propose(), done()]).await;
         let report = run_execute(
             &f.app,
             ExecuteRequest {
