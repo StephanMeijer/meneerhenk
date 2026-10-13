@@ -211,12 +211,25 @@ impl Runner for SshRunner {
             channel.eof().await.map_err(lost)?;
             let (mut out, mut err) = (Kept::new(keep), Kept::new(keep));
             let mut code = None;
+            let mut detail = None;
             while let Some(message) = channel.wait().await {
                 match message {
                     ChannelMsg::Data { data } => out.push(&data)?,
                     ChannelMsg::ExtendedData { data, ext: 1 } => err.push(&data)?,
                     ChannelMsg::ExitStatus { exit_status } => {
                         code = i32::try_from(exit_status).ok();
+                    }
+                    ChannelMsg::ExitSignal {
+                        signal_name,
+                        core_dumped,
+                        error_message,
+                        ..
+                    } => {
+                        let name = match signal_name {
+                            russh::Sig::Custom(name) => name,
+                            other => format!("{other:?}"),
+                        };
+                        detail = Some(signal_detail(&name, core_dumped, &error_message));
                     }
                     ChannelMsg::Failure => {
                         return Err(WorkspaceError::Backend(
@@ -231,6 +244,7 @@ impl Runner for SshRunner {
                 stdout: out.finish(),
                 stderr: err.finish(),
                 gave_up: false,
+                detail,
             })
         };
         match tokio::time::timeout(wait, exchange).await {
@@ -249,6 +263,20 @@ impl Runner for SshRunner {
             }),
         }
     }
+}
+
+/// What a request killed by a signal says about it (#339).
+fn signal_detail(name: &str, core_dumped: bool, message: &str) -> String {
+    let mut said = format!("killed by signal {name}");
+    if core_dumped {
+        said.push_str(", core dumped");
+    }
+    let message = message.trim();
+    if !message.is_empty() {
+        said.push_str(": ");
+        said.push_str(message);
+    }
+    said
 }
 
 /// Workspaces on the sandbox host.
@@ -1399,5 +1427,14 @@ pub(crate) mod tests {
             assert!(id.starts_with('w') && id[1..].bytes().all(|c| c.is_ascii_hexdigit()));
         }
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_request_killed_by_a_signal_says_so() {
+        assert_eq!(signal_detail("KILL", false, ""), "killed by signal KILL");
+        assert_eq!(
+            signal_detail("SEGV", true, " out of bounds \n"),
+            "killed by signal SEGV, core dumped: out of bounds"
+        );
     }
 }

@@ -181,25 +181,49 @@ pub fn pod(settings: &PodSettings, id: &str, image: &str, limits: &Limits) -> Po
     }
 }
 
-/// The exit code `pods/exec` reports: 0 on success, the code of a
-/// `NonZeroExitCode` failure, and none when the command did not end by
-/// itself.
-fn exit_code(status: Option<&Status>) -> Option<i32> {
-    let status = status?;
+/// How `pods/exec` says the command ended: 0 on success, the code of a
+/// `NonZeroExitCode` failure, and otherwise no code but what the API server
+/// said, its message and reason, so the failure says why (#339).
+fn exec_end(status: Option<&Status>) -> (Option<i32>, Option<String>) {
+    let Some(status) = status else {
+        return (None, None);
+    };
     if status.status.as_deref() == Some("Success") {
-        return Some(0);
+        return (Some(0), None);
     }
-    status
+    let code = status
         .details
-        .as_ref()?
-        .causes
-        .as_ref()?
-        .iter()
-        .find(|cause| cause.reason.as_deref() == Some("ExitCode"))?
-        .message
-        .as_deref()?
-        .parse()
-        .ok()
+        .as_ref()
+        .and_then(|details| details.causes.as_ref())
+        .and_then(|causes| {
+            causes
+                .iter()
+                .find(|cause| cause.reason.as_deref() == Some("ExitCode"))
+        })
+        .and_then(|cause| cause.message.as_deref())
+        .and_then(|code| code.parse().ok());
+    if code.is_some() {
+        return (code, None);
+    }
+    let said = match (status.message.as_deref(), status.reason.as_deref()) {
+        (Some(message), Some(reason)) if !message.is_empty() => {
+            Some(format!("{message} ({reason})"))
+        }
+        (Some(message), _) if !message.is_empty() => Some(message.to_owned()),
+        (_, Some(reason)) => Some(format!("the exec failed: {reason}")),
+        _ => None,
+    };
+    (None, said)
+}
+
+/// `error`, with how the container ended beside it rather than in its
+/// place (#339).
+fn beside(error: WorkspaceError, ended: &str) -> WorkspaceError {
+    let said = match error {
+        WorkspaceError::Backend(said) | WorkspaceError::Unreachable(said) => said,
+        other => other.to_string(),
+    };
+    WorkspaceError::Backend(format!("{said}; {ended}"))
 }
 
 fn api_error(what: &str) -> impl Fn(kube::Error) -> WorkspaceError + '_ {
@@ -392,6 +416,10 @@ async fn drain(
 
 #[async_trait::async_trait]
 impl Runner for PodRunner {
+    fn location(&self) -> Option<String> {
+        Some(format!("pod {}", self.name))
+    }
+
     async fn call(
         &self,
         tokens: &[String],
@@ -435,16 +463,21 @@ impl Runner for PodRunner {
             let (sent, stdout, stderr) =
                 tokio::join!(feed, drain(&mut out, keep), drain(&mut err, keep));
             sent.map_err(|e| WorkspaceError::Backend(format!("writing to the sandbox Pod: {e}")))?;
-            let code = match status {
-                Some(status) => exit_code(status.await.as_ref()),
-                None => None,
+            let (code, mut detail) = match status {
+                Some(status) => exec_end(status.await.as_ref()),
+                None => (None, None),
             };
-            let _ = process.join().await;
+            if let Err(broke) = process.join().await
+                && detail.is_none()
+            {
+                detail = Some(format!("the exec stream broke: {broke}"));
+            }
             Ok(Reply {
                 code,
                 stdout: stdout?,
                 stderr: stderr?,
                 gave_up: false,
+                detail,
             })
         };
         let reply = match tokio::time::timeout(wait, exchange).await {
@@ -476,7 +509,7 @@ impl Runner for PodRunner {
                 Ok(reply)
             }
             Err(error) => Err(match self.ended_by_now().await {
-                Some(why) => WorkspaceError::Backend(why),
+                Some(why) => beside(error, &why),
                 None => error,
             }),
         }
@@ -1136,7 +1169,7 @@ pub(crate) mod tests {
             status: Some("Success".to_owned()),
             ..Status::default()
         };
-        assert_eq!(exit_code(Some(&success)), Some(0));
+        assert_eq!(exec_end(Some(&success)), (Some(0), None));
         let failed = Status {
             status: Some("Failure".to_owned()),
             reason: Some("NonZeroExitCode".to_owned()),
@@ -1150,14 +1183,45 @@ pub(crate) mod tests {
             }),
             ..Status::default()
         };
-        assert_eq!(exit_code(Some(&failed)), Some(3));
-        assert_eq!(exit_code(None), None);
+        assert_eq!(exec_end(Some(&failed)), (Some(3), None));
+        assert_eq!(exec_end(None), (None, None));
         assert_eq!(
-            exit_code(Some(&Status {
+            exec_end(Some(&Status {
                 status: Some("Failure".to_owned()),
                 ..Status::default()
             })),
-            None
+            (None, None)
+        );
+        // A failure that is not the command's own exit keeps what the API
+        // server said (#339).
+        assert_eq!(
+            exec_end(Some(&Status {
+                status: Some("Failure".to_owned()),
+                reason: Some("InternalError".to_owned()),
+                message: Some(
+                    "error executing command in container: container not found".to_owned()
+                ),
+                ..Status::default()
+            })),
+            (
+                None,
+                Some(
+                    "error executing command in container: container not found (InternalError)"
+                        .to_owned()
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn how_the_pod_ended_is_put_beside_the_error_not_in_its_place() {
+        let error = WorkspaceError::Backend(
+            "running a request in the sandbox Pod failed: failed to switch protocol: 500"
+                .to_owned(),
+        );
+        assert_eq!(
+            beside(error, "the sandbox Pod is gone: its node went away").to_string(),
+            "the workspace failed: running a request in the sandbox Pod failed: failed to switch protocol: 500; the sandbox Pod is gone: its node went away"
         );
     }
 }
