@@ -821,18 +821,23 @@ How many at once (#403):
 - `max_concurrent` on a host is the most workspaces Henk keeps open there
   at once: a review's, a plan's and an execute run's alike. In
   `[workspace.ssh]` it is the one host's limit, or every host's default.
-  Left out, a host has no limit. The right number is the machine's: a
-  2-vCPU host might take one or two, a 16-core one eight.
+  Left out, a host has no limit; it is at most 1024. The right number is
+  the machine's: a 2-vCPU host might take one or two, a 16-core one eight.
 - A host at its limit is passed over like one that's down. When every
   host a run may use is full, the run waits for one to free up, in the
   order the runs came, and its timeline says so (`waiting for a sandbox
   host: goat (8) is at its limit`, then `got a sandbox host after 42s`).
-  The queue is one for the pool: a run kept to `goat` that waits holds
-  back the runs behind it.
+  The queue is one for the pool: while a run waits, every run that comes
+  after it waits behind it, even one kept to hosts that have room or no
+  limit (its timeline says `runs that came earlier go first`). A host
+  passed over as down is tried again by a waiting run once its minute is
+  up.
 - The wait counts against the run's time limit (`[review.loop]` and
   `[execution] run_timeout_secs`, `[planning] run_timeout_secs`): a review
   or an execute run whose time runs out while it waits fails, saying it
-  waited for a sandbox host, and a plan goes on without its workspace.
+  waited for a sandbox host. A plan's does too: its run says the planner
+  workspace is none because it waited for a sandbox host, and the plan
+  fails at its time limit before the planner begins.
   Opening a workspace that doesn't wait isn't timed.
 - A workspace gives its place back when it's closed, when its run fails,
   and when a workspace that was being made is given up. A restart starts
