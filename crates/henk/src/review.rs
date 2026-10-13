@@ -1995,6 +1995,100 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// One slot held by a slow review A of #7, with reviews of the numbers
+    /// in `waiting` queued behind it, in that order.
+    async fn queue_behind_one(
+        name: &str,
+        waiting: &[u64],
+    ) -> (
+        Arc<App>,
+        crate::coordinator::Coordinator,
+        CommitSha,
+        Option<crate::git::ScratchDir>,
+    ) {
+        let model =
+            ScriptedClient::new("scripted", converging(8)).with_delay(Duration::from_millis(400));
+        let mut f = fixture(name, DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let (app, commit, remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let _ = coordinator.submit_review(request(&placeholder), commit.clone());
+        until("review A holds the slot", || {
+            coordinator.running_reviews() == 1
+        })
+        .await;
+        for number in waiting {
+            let mut next = request(&placeholder);
+            next.target.number = *number;
+            let _ = coordinator.submit_review(next, commit.clone());
+        }
+        (app, coordinator, commit, remote)
+    }
+
+    fn queue_numbers(coordinator: &crate::coordinator::Coordinator) -> Vec<(usize, u64)> {
+        coordinator
+            .slots()
+            .waiting
+            .iter()
+            .map(|w| (w.position, w.number))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_moved_review_starts_before_the_ones_it_passed() {
+        let (app, coordinator, _commit, _remote) =
+            queue_behind_one("henk-queue-move", &[8, 9, 10]).await;
+        assert_eq!(queue_numbers(&coordinator), [(1, 8), (2, 9), (3, 10)]);
+        let last = coordinator.slots().waiting[2].run.clone();
+        assert_eq!(coordinator.move_queued(&last, 1), Ok((3, 1)));
+        assert_eq!(queue_numbers(&coordinator), [(1, 10), (2, 8), (3, 9)]);
+        // A finishes and frees the slot: #10 takes it, before #8 and #9.
+        until("#10 holds the slot", || {
+            queue_numbers(&coordinator) == [(1, 8), (2, 9)] && coordinator.running_reviews() == 1
+        })
+        .await;
+        // A move past the end is the last place; a running review cannot move.
+        let first = coordinator.slots().waiting[0].run.clone();
+        assert_eq!(coordinator.move_queued(&first, 99), Ok((1, 2)));
+        assert_eq!(queue_numbers(&coordinator), [(1, 9), (2, 8)]);
+        assert_eq!(
+            coordinator.move_queued(&last, 1),
+            Err(crate::slot_queue::NotWaiting),
+            "#10 runs"
+        );
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_superseding_commit_keeps_the_queued_review_s_place() {
+        let (app, coordinator, _commit, _remote) =
+            queue_behind_one("henk-queue-supersede", &[8, 9]).await;
+        let old = coordinator.slots().waiting[0].run.clone();
+        let mut newer = request(&RunId::parse("r-placeholder").unwrap());
+        newer.target.number = 8;
+        let (decision, new) = coordinator.submit_review(
+            newer,
+            CommitSha::parse("1111111111111111111111111111111111111111").unwrap(),
+        );
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        until("the old one has left", || {
+            coordinator.slots().waiting.len() == 2
+        })
+        .await;
+        let waiting = coordinator.slots().waiting;
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|w| (w.position, w.number, w.run.clone()))
+                .collect::<Vec<_>>(),
+            [(1, 8, new.clone()), (2, 9, waiting[1].run.clone())],
+            "the newer commit of #8 waits where the old one did"
+        );
+        assert_ne!(new, old);
+        app.shutdown.cancel();
+    }
+
     /// A review that waited with a queued check, then ran preflight against
     /// `writer`, with a dashboard so the queue link differs from the run's.
     async fn queued_then_preflight(writer: FakeWriter) -> (App, Arc<FakeWriter>, RunId) {

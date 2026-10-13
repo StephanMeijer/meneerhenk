@@ -81,4 +81,59 @@ describe('Queued', () => {
     await settle();
     expect(document.querySelector('[role=status]')?.textContent).toBe('That run is not running here.');
   });
+
+  const three = {
+    limit: 1,
+    in_use: 1,
+    waiting: [waitingReview('r-a', 8, 1), waitingReview('r-b', 9, 2), waitingReview('r-c', 10, 3)],
+  };
+  const labelled = (label: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+
+  it('moves a review to the top or the bottom, and offers neither where it is already (#401)', async () => {
+    const move = vi.fn((id: string, position: number) => Promise.resolve({ run_id: id, from: 2, to: position }));
+    render(Queued, { slots: three, move, now: () => NOW });
+    await settle();
+    expect(labelled('Move r-a to the top'), 'first already').toBeNull();
+    expect(labelled('Move r-c to the bottom'), 'last already').toBeNull();
+    labelled('Move r-b to the top')?.click();
+    await settle();
+    expect(move).toHaveBeenLastCalledWith('r-b', 1);
+    expect(document.querySelector('[role=status]')?.textContent).toBe('Moved r-b from position 2 to 1.');
+    labelled('Move r-a to the bottom')?.click();
+    await settle();
+    expect(move).toHaveBeenLastCalledWith('r-a', 3);
+  });
+
+  it('moves a dragged row to the place of the row it is dropped on', async () => {
+    const move = vi.fn((id: string, position: number) => Promise.resolve({ run_id: id, from: 3, to: position }));
+    render(Queued, { slots: three, move, now: () => NOW });
+    await settle();
+    const rows = [...document.querySelectorAll('ol.queued > li')];
+    const fire = (row: Element | undefined, type: string) =>
+      row?.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+    fire(rows[2], 'dragstart');
+    fire(rows[0], 'dragover');
+    await settle(1);
+    expect(rows[0]?.classList.contains('over')).toBe(true);
+    fire(rows[0], 'drop');
+    await settle();
+    expect(move).toHaveBeenCalledWith('r-c', 1);
+    expect(rows[0]?.classList.contains('over')).toBe(false);
+    // A row dropped on itself moves nowhere.
+    fire(rows[1], 'dragstart');
+    fire(rows[1], 'drop');
+    await settle();
+    expect(move).toHaveBeenCalledTimes(1);
+  });
+
+  it('says why a move did not go through', async () => {
+    const move = vi.fn(() =>
+      Promise.reject(new ApiError(409, 'conflict', 'That review is not waiting for a slot here.')),
+    );
+    render(Queued, { slots: three, move, now: () => NOW });
+    await settle();
+    labelled('Move r-c to the top')?.click();
+    await settle();
+    expect(document.querySelector('[role=status]')?.textContent).toBe('That review is not waiting for a slot here.');
+  });
 });

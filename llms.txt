@@ -26,7 +26,7 @@ The JSON API the dashboard uses, at `/dashboard/api/v1`, behind the same sign-in
 - Live: `GET /dashboard/api/v1/runs/stream` and `GET /dashboard/api/v1/runs/{id}/stream` send changes as server-sent events.
 - Events: `GET /dashboard/api/v1/events` and `GET /dashboard/api/v1/events/{id}`.
 - Health and tools: `GET /dashboard/api/v1/health` and `GET /dashboard/api/v1/tool-calls/summary`.
-- Actions: `POST /dashboard/api/v1/runs` starts a review, a plan or an execute run, and `POST /dashboard/api/v1/runs/{id}/cancel` cancels a running one.
+- Actions: `POST /dashboard/api/v1/runs` starts a review, a plan or an execute run, `POST /dashboard/api/v1/runs/{id}/cancel` cancels a running one, and `POST /dashboard/api/v1/runs/{id}/queue` moves a review waiting for a slot to another place in the queue (`{"position": 1}` starts it next).
 - Errors: a body `{"error": {"code", "message"}}` with the codes `unauthenticated` (401), `forbidden` (403), `csrf` (403), `bad_request` (400), `unsupported_media_type` (415), `not_found` (404), `conflict` (409) and `store` (500).
 
 ## MCP server
@@ -34,12 +34,14 @@ The JSON API the dashboard uses, at `/dashboard/api/v1`, behind the same sign-in
 The Model Context Protocol at `POST /mcp` (Streamable HTTP), for agents. It answers only when the operator set `[mcp_server] enabled = true` and at least one token.
 
 - [Setting it up](https://github.com/StephanMeijer/meneerhenk/blob/main/README.md#mcp-server): each client has its own named token in `[[mcp_server.tokens]]`, kept in an environment variable and sent as `Authorization: Bearer <token>`. A request without a valid token gets 401; with the server off or no token set, 503.
-- Scopes: a `read` token may only read; a `write` token may also start and cancel. What a client starts or cancels is recorded as `mcp:<token name>`, so a cancel over MCP shows on the run as cancelled by that name.
+- Scopes: a `read` token may only read; a `write` token may also start, cancel and move. What a client starts, cancels or moves is recorded as `mcp:<token name>`, so a cancel over MCP shows on the run as cancelled by that name.
 - Connecting Claude Code: `claude mcp add --transport http henk https://henk.example.com/mcp --header "Authorization: Bearer $HENK_MCP_TOKEN"`.
 - `start_review`: starts a review of a pull or merge request, as `POST /review` does; answers the event id and the run id. Needs `write`.
 - `start_plan`: starts a plan of an issue, as `POST /plan` does. Needs `write`.
 - `start_execute`: takes an issue to a pull request, as `POST /execute` does: the executor makes the change on a new branch, Henk opens the pull request and then reviews it. Needs `write`.
 - `cancel_run`: cancels a run this Henk process is running; a review ends cancelled with a neutral check. Needs `write`.
+- `list_queued_runs`: the review slots in use and the reviews waiting for one, in the order they will start.
+- `move_queued_run`: moves a review waiting for a slot to another place in the queue; position 1 starts next. Needs `write`.
 - `list_runs`: runs, newest first, by kind, status, platform, repository, target and time.
 - `get_run`: one run in full: status, sessions, stages, the review loop's findings and their verdicts, tool usage, timeline and the requests that started it.
 - `get_run_events`: a run's timeline, in order.

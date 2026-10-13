@@ -115,6 +115,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/dashboard/api/v1/events/e-1"),
     ("POST", "/dashboard/api/v1/runs"),
     ("POST", "/dashboard/api/v1/runs/r-review/cancel"),
+    ("POST", "/dashboard/api/v1/runs/r-review/queue"),
 ];
 
 #[tokio::test]
@@ -1584,6 +1585,101 @@ async fn cancelling_through_the_api_fires_the_token_or_says_it_is_not_running_he
 }
 
 #[tokio::test]
+async fn moving_a_waiting_review_through_the_api_reorders_the_stream_and_is_on_record() {
+    let f = fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.review.max_concurrent = 1;
+        },
+    );
+    let (cookie, csrf) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    assert_eq!(events.next().await.unwrap().event, "snapshot");
+    let _held = f
+        .dashboard
+        .coordinator
+        .take_a_slot()
+        .expect("the only slot");
+    let commit =
+        henk_domain::review::CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+    let mut runs = Vec::new();
+    for number in [8, 9] {
+        let request = crate::review::ReviewRequest {
+            target: henk_platform::ReviewTarget {
+                repo: henk_domain::allowlist::RepoRef::parse(Platform::GitHub, "docspec/app")
+                    .unwrap(),
+                number,
+            },
+            commit: None,
+            trigger: "new commits".to_owned(),
+            requester: None,
+            acknowledge: None,
+            run: None,
+            submitted_at: None,
+            queued_check: None,
+        };
+        runs.push(
+            f.dashboard
+                .coordinator
+                .submit_review(request, commit.clone())
+                .1,
+        );
+    }
+    let targets = |d: &Value| {
+        d["waiting"]
+            .as_array()
+            .map(|w| {
+                w.iter()
+                    .map(|e| e["target"].as_u64().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    slots_where(&mut events, |d| targets(d) == [8, 9]).await;
+
+    let uri = format!("/dashboard/api/v1/runs/{}/queue", runs[1]);
+    let moved = act(&f, &uri, &cookie, &csrf, &json!({"position": 1})).await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+    assert_eq!(
+        moved.json(),
+        json!({"run_id": runs[1].as_str(), "from": 2, "to": 1})
+    );
+    let after = slots_where(&mut events, |d| targets(d) == [9, 8]).await;
+    assert_eq!(after["waiting"][0]["position"], 1);
+    let recorded: Vec<_> = f
+        .dashboard
+        .app
+        .store
+        .inbound_events_for_run(&runs[1])
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "queue_moved")
+        .collect();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].source, "dashboard");
+    assert_eq!(
+        recorded[0].requester.as_deref(),
+        Some(format!("github:{ALLOWED}").as_str())
+    );
+
+    let first = act(&f, &uri, &cookie, &csrf, &json!({"position": 0})).await;
+    assert_eq!(first.status, StatusCode::BAD_REQUEST);
+    let unknown = act(
+        &f,
+        "/dashboard/api/v1/runs/r-20261013-deadbeef/queue",
+        &cookie,
+        &csrf,
+        &json!({"position": 1}),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::CONFLICT);
+    assert_eq!(unknown.code(), "conflict");
+    f.dashboard.app.shutdown.cancel();
+}
+
+#[tokio::test]
 async fn health_answers_and_no_response_holds_a_secret() {
     let f = fixture("https://127.0.0.1:9");
     seed(&f).await;
@@ -1903,6 +1999,8 @@ fn api_types_are_current() {
         types::Slots::decl(&cfg),
         types::SandboxHosts::decl(&cfg),
         types::SandboxHost::decl(&cfg),
+        types::MoveBody::decl(&cfg),
+        types::Moved::decl(&cfg),
         types::WaitingReview::decl(&cfg),
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),

@@ -76,6 +76,16 @@ pub(crate) struct RunRef {
     run_id: String,
 }
 
+/// A waiting review and where it goes (#401).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(crate) struct QueueMove {
+    /// The run id, such as `r-20261007-1a2b3c4d`.
+    run_id: String,
+    /// Its new place in the queue, 1 being the next to start; past the
+    /// end is last.
+    position: u64,
+}
+
 /// What `list_runs` takes. Every filter is optional.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ListRuns {
@@ -296,6 +306,36 @@ impl HenkMcp {
     }
 
     #[tool(
+        description = "The review slots in use and the reviews waiting for one, in the order they will start, each with its run id, pull request and who asked."
+    )]
+    async fn list_queued_runs(&self) -> Result<CallToolResult, ErrorData> {
+        answer(&runs::queue_of(&self.app, &self.coordinator))
+    }
+
+    #[tool(
+        description = "Move a review waiting for a slot to another place in the queue: position 1 starts next. list_queued_runs says what waits, in order."
+    )]
+    async fn move_queued_run(
+        &self,
+        Parameters(input): Parameters<QueueMove>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let caller = caller(&parts)?;
+        if caller.scope != McpScope::Write {
+            return Ok(refused(READ_ONLY));
+        }
+        let who = caller.requester();
+        api(runs::move_queued_run(
+            &self.app,
+            &self.coordinator,
+            (input.run_id, input.position),
+            &who,
+            "mcp",
+        )
+        .await)
+    }
+
+    #[tool(
         description = "List runs, newest first, by kind, status, platform, repository, target and time, a page at a time."
     )]
     async fn list_runs(
@@ -411,8 +451,9 @@ impl HenkMcp {
     }
 }
 
-/// What a read token is told when it tries to start or cancel.
-const READ_ONLY: &str = "This token may only read: starting and cancelling need a write token.";
+/// What a read token is told when it tries to start, cancel or move a run.
+const READ_ONLY: &str =
+    "This token may only read: starting, cancelling and moving need a write token.";
 
 impl HenkMcp {
     /// Publishes a start for a write token and waits a little for the

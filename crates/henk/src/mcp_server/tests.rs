@@ -45,6 +45,7 @@ const ON: &str = "[mcp_server]\nenabled = true\n[[mcp_server.tokens]]\nname = \"
 
 struct Henk {
     app: Arc<App>,
+    coordinator: Arc<crate::coordinator::Coordinator>,
     url: String,
     _server: tokio::task::JoinHandle<()>,
 }
@@ -97,6 +98,7 @@ async fn start_henk(mcp_server: &str, tokens: Vec<Token>) -> Henk {
     });
     Henk {
         app,
+        coordinator: Arc::clone(&composed.coordinator),
         url: format!("http://127.0.0.1:{}/mcp", address.port()),
         _server: server,
     }
@@ -203,8 +205,10 @@ async fn a_client_lists_the_tools_and_reads_runs_events_and_health() {
             "get_run_events",
             "get_transcript",
             "health",
+            "list_queued_runs",
             "list_runs",
             "list_tool_calls",
+            "move_queued_run",
             "start_execute",
             "start_plan",
             "start_review",
@@ -342,7 +346,7 @@ async fn a_write_token_starts_a_review_as_its_own_requester_and_a_read_token_may
     assert!(error);
     assert_eq!(
         text,
-        "This token may only read: starting and cancelling need a write token."
+        "This token may only read: starting, cancelling and moving need a write token."
     );
     henk.app.shutdown.cancel();
 }
@@ -370,7 +374,7 @@ async fn start_execute_answers_with_the_execute_listeners_outcome() {
     assert!(error);
     assert_eq!(
         text,
-        "This token may only read: starting and cancelling need a write token."
+        "This token may only read: starting, cancelling and moving need a write token."
     );
     henk.app.shutdown.cancel();
 }
@@ -386,7 +390,7 @@ async fn a_read_token_may_not_cancel_a_running_run() {
     assert!(error, "a read token may not cancel");
     assert_eq!(
         text,
-        "This token may only read: starting and cancelling need a write token."
+        "This token may only read: starting, cancelling and moving need a write token."
     );
     assert!(!token.is_cancelled(), "the run is still running");
 }
@@ -407,6 +411,90 @@ async fn a_write_token_cancels_a_running_run_and_the_cancel_is_on_record() {
     let (error, _, text) = call(&session, "cancel_run", json!({ "run_id": "r-2" })).await;
     assert!(error, "not running any more");
     assert!(text.starts_with("That run is not running here"), "{text}");
+}
+
+#[tokio::test]
+async fn a_write_token_moves_a_waiting_review_that_list_queued_runs_shows() {
+    let henk = start_henk(ON, both()).await;
+    // Every slot taken, so the reviews wait.
+    let held: Vec<_> = std::iter::from_fn(|| henk.coordinator.take_a_slot()).collect();
+    assert!(!held.is_empty());
+    let commit = henk_domain::review::CommitSha::parse(SHA).unwrap();
+    let mut runs = Vec::new();
+    for number in [8, 9] {
+        let request = crate::review::ReviewRequest {
+            target: henk_platform::ReviewTarget {
+                repo: henk_domain::allowlist::RepoRef::parse(
+                    henk_domain::allowlist::Platform::GitHub,
+                    "docspec/app",
+                )
+                .unwrap(),
+                number,
+            },
+            commit: None,
+            trigger: "test".to_owned(),
+            requester: None,
+            acknowledge: None,
+            run: None,
+            submitted_at: None,
+            queued_check: None,
+        };
+        runs.push(henk.coordinator.submit_review(request, commit.clone()).1);
+    }
+    let reader = client(&henk, READ).await;
+    let (error, queue, text) = call(&reader, "list_queued_runs", json!({})).await;
+    assert!(!error, "{text}");
+    let order = |queue: &Value| {
+        queue["waiting"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["run_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&queue), [runs[0].as_str(), runs[1].as_str()]);
+    let (error, _, text) = call(
+        &reader,
+        "move_queued_run",
+        json!({ "run_id": runs[1].as_str(), "position": 1 }),
+    )
+    .await;
+    assert!(error);
+    assert_eq!(
+        text,
+        "This token may only read: starting, cancelling and moving need a write token."
+    );
+
+    let writer = client(&henk, WRITE).await;
+    let (error, moved, text) = call(
+        &writer,
+        "move_queued_run",
+        json!({ "run_id": runs[1].as_str(), "position": 1 }),
+    )
+    .await;
+    assert!(!error, "{text}");
+    assert_eq!(
+        (moved["from"].as_u64(), moved["to"].as_u64()),
+        (Some(2), Some(1))
+    );
+    let (_, queue, _) = call(&writer, "list_queued_runs", json!({})).await;
+    assert_eq!(order(&queue), [runs[1].as_str(), runs[0].as_str()]);
+    let recorded = henk
+        .app
+        .store
+        .inbound_events_for_run(&runs[1])
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "queue_moved")
+        .map(|e| e.requester)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        [Some("mcp:claude".to_owned())],
+        "the write token's name"
+    );
+    henk.app.shutdown.cancel();
 }
 
 #[tokio::test]
@@ -525,7 +613,7 @@ async fn doctor_says_which_tokens_are_set_and_probe_lists_the_tools() {
             .contains("not set; MCP client reader cannot connect")
     );
     assert!(
-        said[2].0.contains("11 tools at http://127.0.0.1:"),
+        said[2].0.contains("13 tools at http://127.0.0.1:"),
         "{said:?}"
     );
     assert!(said[2].0.ends_with("as claude\")"), "{said:?}");

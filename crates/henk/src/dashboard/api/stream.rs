@@ -28,7 +28,7 @@ use super::runs::{run_detail, run_of};
 use super::types::{
     Draft, Finding, Heartbeat, Progress, Round, RunDetail, RunEvent, RunMessage, RunSummary,
     RunUpdate, RunningMessage, RunningSnapshot, Session, SessionDot, Slots, Stage, StageDot,
-    ToolCall, TranscriptRef, WaitingReview,
+    ToolCall, TranscriptRef,
 };
 use crate::dashboard::Dashboard;
 use crate::dashboard::auth::ApiViewer;
@@ -335,17 +335,7 @@ async fn running_now(dashboard: &Dashboard) -> Option<RunningSnapshot> {
 
 /// The coordinator's review slots, as the overview shows them.
 fn slots(dashboard: &Dashboard) -> Slots {
-    let now = dashboard.coordinator.slots();
-    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-    Slots {
-        limit: count(now.limit),
-        in_use: count(now.in_use),
-        waiting: now
-            .waiting
-            .into_iter()
-            .map(|w| WaitingReview::from_waiting(&dashboard.app.settings, w))
-            .collect(),
-    }
+    super::runs::queue_of(&dashboard.app, &dashboard.coordinator)
 }
 
 /// A running run's sessions or stages as the overview's dots, from a change

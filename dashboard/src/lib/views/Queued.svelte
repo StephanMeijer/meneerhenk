@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { ApiError, cancelRun } from '$lib/api/client';
-  import type { Cancelled, Slots, WaitingReview } from '$lib/api/types';
+  import { ApiError, cancelRun, moveQueuedRun } from '$lib/api/client';
+  import type { Cancelled, Moved, Slots, WaitingReview } from '$lib/api/types';
   import { about, kindText } from '$lib/format';
   import Commit from '$lib/ui/Commit.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
@@ -14,16 +14,21 @@
    * id but no run page until it starts, so a row links its target. `shown`
    * are the run ids "Running now" lists: a review that just took its slot
    * may be there a moment before the next `slots` message drops it here.
-   * `cancel` and `now` are replaced in the tests. */
+   * A colleague may move one to another place (#401): by dragging its row,
+   * or with "Move to top" and "Move to bottom". The list keeps the server's
+   * order: the `slots` message after a move redraws it for everyone.
+   * `cancel`, `move` and `now` are replaced in the tests. */
   let {
     slots,
     shown = [],
     cancel = cancelRun,
+    move = moveQueuedRun,
     now,
   }: {
     slots: Slots | null;
     shown?: string[];
     cancel?: (id: string) => Promise<Cancelled>;
+    move?: (id: string, position: number) => Promise<Moved>;
     now?: () => Date;
   } = $props();
 
@@ -34,6 +39,33 @@
   let confirming = $state(false);
   let cancelling: string | null = $state(null);
   let note: string | null = $state(null);
+  /** The run being moved, and the rows a drag is over. */
+  let moving: string | null = $state(null);
+  let dragged: string | null = $state(null);
+  let over: string | null = $state(null);
+  /** The last place in the whole queue, rows "Running now" shows included. */
+  let last = $derived(slots?.waiting.length ?? 0);
+
+  async function moveTo(entry: WaitingReview, position: number): Promise<void> {
+    if (position === entry.position) return;
+    moving = entry.run_id;
+    note = null;
+    try {
+      const moved = await move(entry.run_id, position);
+      note = `Moved ${moved.run_id} from position ${moved.from} to ${moved.to}.`;
+    } catch (error) {
+      note = error instanceof ApiError ? error.message : 'The move did not go through.';
+    } finally {
+      moving = null;
+    }
+  }
+
+  function dropOn(target: WaitingReview): void {
+    const entry = queued.find((e) => e.run_id === dragged);
+    dragged = null;
+    over = null;
+    if (entry !== undefined) void moveTo(entry, target.position);
+  }
 
   function why(entry: WaitingReview): string {
     if (entry.reason === 'no_slot' && slots !== null) {
@@ -69,7 +101,31 @@
   {:else}
     <ol class="queued">
       {#each queued as entry (entry.run_id)}
-        <li>
+        <li
+          draggable="true"
+          class:dragged={dragged === entry.run_id}
+          class:over={over === entry.run_id && dragged !== entry.run_id}
+          ondragstart={(event) => {
+            dragged = entry.run_id;
+            event.dataTransfer?.setData('text/plain', entry.run_id);
+          }}
+          ondragover={(event) => {
+            if (dragged === null) return;
+            event.preventDefault();
+            over = entry.run_id;
+          }}
+          ondragleave={() => {
+            if (over === entry.run_id) over = null;
+          }}
+          ondrop={(event) => {
+            event.preventDefault();
+            dropOn(entry);
+          }}
+          ondragend={() => {
+            dragged = null;
+            over = null;
+          }}
+        >
           <span class="position" aria-label="Position {entry.position}">{entry.position}</span>
           <span class="who-what">
             <span class="mono">{entry.run_id}</span>
@@ -89,12 +145,26 @@
             <span class="muted">requested <Time iso={entry.since} /></span>
           </span>
           <span class="why muted">{why(entry)}</span>
-          <button type="button" class="danger" onclick={() => {
-              asking = entry;
-              confirming = true;
-            }} disabled={cancelling === entry.run_id}>
-            <Icon name="slash" />Cancel
-          </button>
+          <span class="actions">
+            {#if entry.position > 1}
+              <button type="button" aria-label="Move {entry.run_id} to the top" onclick={() => moveTo(entry, 1)}
+                disabled={moving === entry.run_id}>
+                <Icon name="arrow-up" />Move to top
+              </button>
+            {/if}
+            {#if entry.position < last}
+              <button type="button" aria-label="Move {entry.run_id} to the bottom" onclick={() => moveTo(entry, last)}
+                disabled={moving === entry.run_id}>
+                <Icon name="arrow-down" />Move to bottom
+              </button>
+            {/if}
+            <button type="button" class="danger" onclick={() => {
+                asking = entry;
+                confirming = true;
+              }} disabled={cancelling === entry.run_id}>
+              <Icon name="slash" />Cancel
+            </button>
+          </span>
         </li>
       {/each}
     </ol>
@@ -111,7 +181,7 @@
       <Elapsed since={asking.since} {now} /> for a slot and has not started.
     </p>
     <ul class="effects">
-      <li>It ends as cancelled while queued, and the pull request gets one comment saying so.</li>
+      <li>It ends as cancelled while queued, and its queued check on the pull request closes as cancelled.</li>
       <li>The reviews behind it move up.</li>
     </ul>
   {/if}
@@ -147,7 +217,11 @@
   .effects { margin: 0; padding-left: 1.2rem; }
   .panel-foot .note { margin: 0; }
 
-  .queued button { justify-self: end; white-space: nowrap; }
+  .queued > li[draggable='true'] { cursor: grab; }
+  .queued > li.dragged { opacity: 0.5; }
+  .queued > li.over { box-shadow: inset 0 2px 0 var(--accent); }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-self: end; }
+  .queued button { white-space: nowrap; }
 
   @media (max-width: 960px) {
     .queued > li { grid-template-columns: 2rem minmax(0, 1fr) minmax(0, 1fr); }
@@ -157,6 +231,6 @@
     .queued > li { grid-template-columns: 2rem minmax(0, 1fr); align-items: start; }
     .queued > li > :not(.position) { grid-column: 2; }
     .position { grid-row: 1 / span 6; }
-    .queued button { justify-self: start; }
+    .actions { justify-self: start; }
   }
 </style>

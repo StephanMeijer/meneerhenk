@@ -4,6 +4,7 @@
 import { noteServerDate } from '../clock';
 import type {
   Cancelled,
+  Moved,
   ErrorBody,
   EventDetail,
   EventFacets,
@@ -171,6 +172,12 @@ export function startRun(request: StartRequest): Promise<Started> {
 /** Cancels a running run. */
 export function cancelRun(id: string): Promise<Cancelled> {
   return postJson<Cancelled>(`/runs/${encodeURIComponent(id)}/cancel`, {});
+}
+
+/** Moves a review waiting for a slot to `position` in the queue, 1 being
+ * the next to start (#401). */
+export function moveQueuedRun(id: string, position: number): Promise<Moved> {
+  return postJson<Moved>(`/runs/${encodeURIComponent(id)}/queue`, { position });
 }
 
 /** Tool calls per tool, model and kind of session; `query` is the `GET /tool-calls/summary` query. */
