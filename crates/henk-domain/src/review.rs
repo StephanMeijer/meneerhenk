@@ -280,6 +280,10 @@ pub enum Stopped {
     /// pull request could not be reviewed: closed, a draft, or the
     /// configuration no longer allows it (#262). Not Henk's failure.
     NotReviewed,
+    /// The pull request was merged before the review started or while its
+    /// loop worked (#413): the work landed and nothing is left to do, so
+    /// the review ends as a success without another session.
+    Merged,
 }
 
 impl ReviewOutcome {
@@ -324,10 +328,21 @@ impl ReviewOutcome {
         Self::stopped_as(commit, Stopped::NotReviewed, Some(reason.into()))
     }
 
-    /// Whether the review completed: at least one session finished, or there
-    /// was nothing to review.
+    /// The outcome of a review of a pull request that is merged (#413):
+    /// before any session, or, with the loop's sessions and report added,
+    /// while it worked.
+    #[must_use]
+    pub fn merged(commit: CommitSha) -> Self {
+        Self::stopped_as(commit, Stopped::Merged, None)
+    }
+
+    /// Whether the review completed: at least one session finished, there
+    /// was nothing to review, or the pull request is merged (#413).
     #[must_use]
     pub fn completed(&self) -> bool {
+        if self.stopped == Some(Stopped::Merged) {
+            return true;
+        }
         self.stopped.is_none()
             && (self.nothing_to_review
                 || self.sessions.iter().any(|session| {
@@ -363,6 +378,9 @@ impl ReviewOutcome {
         ) {
             // Stopped on purpose: neither a pass nor Henk's failure (§8.2).
             CheckConclusion::Neutral
+        } else if self.stopped == Some(Stopped::Merged) {
+            // The work landed: whatever was left open is moot (#413).
+            CheckConclusion::Success
         } else if !self.completed() {
             CheckConclusion::Failure
         } else if self.open_findings == 0 && !self.findings_left {
@@ -395,6 +413,12 @@ impl ReviewOutcome {
             Some(Stopped::NotReviewed) => {
                 let why = self.not_reviewed.as_deref().unwrap_or("it could not run");
                 return format!("Not reviewed: {why}.");
+            }
+            Some(Stopped::Merged) if self.sessions.is_empty() => {
+                return "Already merged: nothing to review.".to_owned();
+            }
+            Some(Stopped::Merged) => {
+                return "Merged while the review loop worked: nothing more to do.".to_owned();
             }
             None => {}
         }
@@ -677,6 +701,29 @@ mod tests {
             "Not reviewed: pull request #7 is a draft."
         );
         assert!(crate::text::is_in_style(&draft.summary()));
+    }
+
+    /// #413: a merged pull request is a success, before a session or after
+    /// the loop's.
+    #[test]
+    fn a_review_of_a_merged_pull_request_is_a_success_and_says_so() {
+        let before = ReviewOutcome::merged(outcome(&[], 0).commit);
+        assert!(before.completed());
+        assert_eq!(before.check_conclusion(), CheckConclusion::Success);
+        assert_eq!(before.summary(), "Already merged: nothing to review.");
+        let during = ReviewOutcome {
+            sessions: outcome(&[("reviewer", SessionOutcome::Finished)], 0).sessions,
+            open_findings: 1,
+            report: Some("The review loop ran 1 round.".to_owned()),
+            ..ReviewOutcome::merged(outcome(&[], 0).commit)
+        };
+        assert!(during.completed());
+        assert_eq!(during.check_conclusion(), CheckConclusion::Success);
+        assert_eq!(
+            during.summary(),
+            "Merged while the review loop worked: nothing more to do.\n\nThe review loop ran 1 round."
+        );
+        assert!(crate::text::is_in_style(&during.summary()));
     }
 
     #[test]

@@ -24,6 +24,15 @@ pub fn web_base(api_base: &str) -> String {
     }
 }
 
+/// Whether a pull request as the REST API returns it is merged (#413):
+/// `merged`, or `merged_at` where a listing leaves `merged` out.
+pub(crate) fn merged(pr: &serde_json::Value) -> bool {
+    pr.get("merged")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || pr.get("merged_at").is_some_and(|at| !at.is_null())
+}
+
 #[cfg(test)]
 mod tests {
     use super::web_base;

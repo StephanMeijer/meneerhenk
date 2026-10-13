@@ -41,6 +41,12 @@ pub(crate) fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), Cancel
     }
 }
 
+/// The pull request was merged while the run worked (#413): nothing is
+/// pushed to it, and the run ends as a success rather than a refused push.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("the pull request was merged meanwhile")]
+pub(crate) struct MergedMeanwhile;
+
 /// Where a push goes.
 pub(crate) enum PushTo<'a> {
     /// A pull request's own branch, as the review loop read it.
@@ -183,6 +189,11 @@ impl Pusher<'_> {
                     .pull_facts(target)
                     .await
                     .context("reading the pull request again")?;
+                // Merged meanwhile: the work landed, and nothing more is
+                // pushed to it (#413). A merge can move the head too.
+                if now.push.merged {
+                    return Err(MergedMeanwhile.into());
+                }
                 if now.head != facts.head {
                     return Err(anyhow!(
                         "the branch moved to {} while I worked",

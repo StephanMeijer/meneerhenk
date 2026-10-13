@@ -189,7 +189,8 @@ One run with everything the run record holds about it:
   `queued` (the wait for a review slot), `started`, `diff`, `checkout`,
   `rounds` (the review loop's rounds), `push` (when the loop pushed, or
   skipped when it may not), `publish` (skipped: a review posts nothing),
-  `done`. Reviews from before #324 have `lanes` where `rounds` is, and runs
+  `done`. A review of a merged pull request skips the stages it did not reach
+  with `already merged` (#413). Reviews from before #324 have `lanes` where `rounds` is, and runs
   from before #309 can have a `fact_check` stage after it. A plan goes `requested`,
   `started`, `session` (the planner's draft and the review's rounds),
   `publish` (nothing reaches the issue before it), `done`. A run's

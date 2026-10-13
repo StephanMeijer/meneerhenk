@@ -187,6 +187,9 @@ pub enum LoopStop {
     /// queued), so the reviewer reviewed one round alone and nothing was
     /// fixed (#307). Why, in Henk's own words.
     ReviewOnly(String),
+    /// The pull request was merged while the loop worked (#413): the work
+    /// landed, so no further round starts and nothing more is pushed.
+    Merged,
 }
 
 impl LoopStop {
@@ -203,6 +206,7 @@ impl LoopStop {
             Self::PushRefused(_) => "push_refused",
             Self::Cancelled => "cancelled",
             Self::ReviewOnly(_) => "review_only",
+            Self::Merged => "merged",
         }
     }
 
@@ -216,6 +220,7 @@ impl LoopStop {
                 | Self::MaxRounds(_)
                 | Self::RepeatingFinding { .. }
                 | Self::ReviewOnly(_)
+                | Self::Merged
         )
     }
 
@@ -245,6 +250,7 @@ impl fmt::Display for LoopStop {
             }
             Self::Cancelled => f.write_str("cancelled"),
             Self::ReviewOnly(why) => write!(f, "reviewed only, since {why}"),
+            Self::Merged => f.write_str("the pull request was merged"),
         }
     }
 }
@@ -677,6 +683,9 @@ mod tests {
             alone.to_string(),
             "reviewed only, since its branch is the default branch (main)"
         );
+        assert_eq!(LoopStop::Merged.as_str(), "merged");
+        assert!(LoopStop::Merged.ended_well(), "the work landed (#413)");
+        assert_eq!(LoopStop::Merged.to_string(), "the pull request was merged");
     }
 
     #[test]
