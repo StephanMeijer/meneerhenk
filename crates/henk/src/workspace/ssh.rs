@@ -564,8 +564,9 @@ impl PooledHost {
 pub struct SshPool {
     hosts: Vec<PooledHost>,
     signals: Arc<Signals>,
-    /// Held by the open that waits first: the others queue behind it, so
-    /// hosts go to waiting opens in the order they came. A waiter that may
+    /// Held by the open that waits first, until it has a seat: the others
+    /// queue behind it, so hosts go to waiting opens in the order they
+    /// came. Packing, upload and setup happen after it is let go. A waiter that may
     /// use only some hosts holds back every open behind it, even one whose
     /// hosts have room; the order is one queue for the pool.
     turnstile: tokio::sync::Mutex<()>,
@@ -582,6 +583,15 @@ impl std::fmt::Debug for SshPool {
             .entries(self.hosts.iter().map(|h| &h.id))
             .finish()
     }
+}
+
+/// The hosts an open has passed over so far.
+#[derive(Default)]
+struct Passed {
+    /// Hosts tried and not to be chosen again for now.
+    tried: Vec<String>,
+    /// Why each host that could not be reached was refused.
+    refused: Vec<String>,
 }
 
 /// How an attempt to open on the pool's hosts went.
@@ -748,20 +758,22 @@ impl SshPool {
         source: &Path,
         archive: &mut Option<Vec<u8>>,
         profile: &Profile,
-        tried: &mut Vec<String>,
-        refused: &mut Vec<String>,
+        passed: &mut Passed,
         counted: &mut Option<Waiter>,
+        turn: &mut Option<tokio::sync::MutexGuard<'_, ()>>,
     ) -> Result<Attempt, WorkspaceError> {
         loop {
-            let (host, seat) = match self.reserve(profile, tried) {
+            let (host, seat) = match self.reserve(profile, &passed.tried) {
                 Reserved::Seated(host, seat) => (host, seat),
                 Reserved::Full => return Ok(Attempt::Full),
                 Reserved::None => return Ok(Attempt::Exhausted),
             };
             // The open has its host: whatever packing and upload take, it
-            // is no longer waiting for one with room.
+            // is no longer waiting for one with room, and the opens behind
+            // it need not wait for its setup.
             *counted = None;
-            tried.push(host.id.clone());
+            *turn = None;
+            passed.tried.push(host.id.clone());
             if archive.is_none() {
                 *archive = Some(packed(source).await?);
             }
@@ -778,7 +790,7 @@ impl SshPool {
                 Err(WorkspaceError::Unreachable(why)) => {
                     tracing::warn!(host = %host.id, %why, "sandbox host passed over");
                     host.mark_down(self.down_for);
-                    refused.push(format!("{}: {why}", host.id));
+                    passed.refused.push(format!("{}: {why}", host.id));
                 }
                 Err(other) => return Err(other),
             }
@@ -845,7 +857,7 @@ impl WorkspaceProvider for SshPool {
             )));
         }
         let mut archive = None;
-        let (mut tried, mut refused) = (Vec::new(), Vec::new());
+        let mut passed = Passed::default();
         // When the open began to wait, said once on the run's timeline.
         // Counted as waiting, for the dashboard, from then until it has a
         // seat on a host.
@@ -877,15 +889,17 @@ impl WorkspaceProvider for SshPool {
             // A host that could not be reached is tried again once it no
             // longer counts as down.
             let now = Instant::now();
-            tried.retain(|id| self.hosts.iter().any(|h| &h.id == id && h.is_down(now)));
+            passed
+                .tried
+                .retain(|id| self.hosts.iter().any(|h| &h.id == id && h.is_down(now)));
             match self
                 .attempt(
                     source,
                     &mut archive,
                     profile,
-                    &mut tried,
-                    &mut refused,
+                    &mut passed,
                     &mut counted,
+                    &mut turn,
                 )
                 .await?
             {
@@ -904,7 +918,7 @@ impl WorkspaceProvider for SshPool {
                 Attempt::Exhausted => {
                     return Err(WorkspaceError::Unreachable(format!(
                         "no sandbox host could be used: {}",
-                        refused.join("; ")
+                        passed.refused.join("; ")
                     )));
                 }
                 Attempt::Full => {}
@@ -925,7 +939,7 @@ impl WorkspaceProvider for SshPool {
             let retry = self
                 .hosts
                 .iter()
-                .filter(|h| tried.contains(&h.id))
+                .filter(|h| passed.tried.contains(&h.id))
                 .filter_map(PooledHost::down_until)
                 .min();
             notes
@@ -1919,6 +1933,67 @@ pub(crate) mod tests {
         );
         early.close().await;
         late.await.unwrap().close().await;
+    }
+
+    /// The local runner, with the creation of a workspace held back until
+    /// the test lets it go, and a count of the creations that have begun.
+    struct SlowSetup {
+        inner: Arc<LocalRunner>,
+        begun: AtomicUsize,
+        go: Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for SlowSetup {
+        async fn call(
+            &self,
+            tokens: &[String],
+            stdin: &[u8],
+            keep: Option<usize>,
+            wait: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            if tokens.first().map(String::as_str) == Some("create") {
+                self.begun.fetch_add(1, Ordering::SeqCst);
+                self.go.acquire().await.unwrap().forget();
+            }
+            self.inner.call(tokens, stdin, keep, wait).await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_with_a_seat_does_not_hold_back_the_ones_behind_it() {
+        let slow = Arc::new(SlowSetup {
+            inner: LocalRunner::new("henk-limit-slow"),
+            begun: AtomicUsize::new(0),
+            go: Semaphore::new(0),
+        });
+        let pool = limited(vec![("a", Arc::clone(&slow) as Arc<dyn Runner>, Some(2))]);
+        let source = crate::workspace::contract::source("henk-limit-slow-src");
+        let held = (
+            pool.hosts[0].seat(&pool.signals).unwrap(),
+            pool.hosts[0].seat(&pool.signals).unwrap(),
+        );
+        let (first, _said_first) = opening(&pool, source.path());
+        assert!(waits(&first).await);
+        let (second, _said_second) = opening(&pool, source.path());
+        assert!(waits(&second).await);
+        // Two seats come free together, and the setup of neither is done.
+        drop(held);
+        for _ in 0..100 {
+            if slow.begun.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            slow.begun.load(Ordering::SeqCst),
+            2,
+            "both opens set up at once"
+        );
+        assert_eq!(pool.sandbox_hosts().waiting, 0, "neither is waiting now");
+        slow.go.add_permits(2);
+        first.await.unwrap().unwrap().close().await;
+        second.await.unwrap().unwrap().close().await;
     }
 
     #[tokio::test]

@@ -901,7 +901,8 @@ How many at once (#403):
   after it waits behind it, even one kept to hosts that have room or no
   limit (its timeline says `runs that came earlier go first`). A host
   passed over as down is tried again by a waiting run once its minute is
-  up.
+  up. A run that has a seat no longer holds the others back while its
+  checkout is packed, uploaded and set up.
 - The wait counts against the run's time limit (`[review.loop]` and
   `[execution] run_timeout_secs`, `[planning] run_timeout_secs`): a review
   or an execute run whose time runs out while it waits fails, saying it
