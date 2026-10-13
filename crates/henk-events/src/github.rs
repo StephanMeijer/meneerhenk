@@ -36,6 +36,20 @@ pub fn parse_github(event: &str, payload: &Value) -> EventKind {
     }
 }
 
+/// The App installation a delivery came through and the account it
+/// belongs to: `(owner, installation id)`. Every delivery of an App's
+/// webhook carries it.
+#[must_use]
+pub fn installation_of(payload: &Value) -> Option<(String, u64)> {
+    let id = payload
+        .pointer("/installation/id")
+        .and_then(Value::as_u64)?;
+    let owner = payload
+        .pointer("/repository/owner/login")
+        .and_then(Value::as_str)?;
+    Some((owner.to_owned(), id))
+}
+
 fn parse_pull_request(action: &str, payload: &Value, repo: RepoRef, sender: Sender) -> EventKind {
     let action = match action {
         "opened" | "ready_for_review" => PullRequestAction::Opened,
@@ -318,5 +332,22 @@ mod tests {
             parse_github("pull_request", &json!({})),
             EventKind::Ignored(_)
         ));
+    }
+
+    #[test]
+    fn a_delivery_names_its_installation_and_account() {
+        let payload = serde_json::json!({
+            "installation": {"id": 222},
+            "repository": {"full_name": "docspec/docspec", "owner": {"login": "docspec"}},
+        });
+        assert_eq!(
+            super::installation_of(&payload),
+            Some(("docspec".to_owned(), 222))
+        );
+        assert_eq!(
+            super::installation_of(&serde_json::json!({"repository": {"owner": {"login": "x"}}})),
+            None,
+            "a delivery without an installation"
+        );
     }
 }

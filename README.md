@@ -453,6 +453,35 @@ Roles keep naming models by id. `henk llm models` lists what an endpoint
 serves and takes `--endpoint <id>` instead of `--model`. `henk doctor`
 checks each endpoint once and then each model on it.
 
+### Serving several GitHub accounts
+
+One Henk serves every account its GitHub App is installed on: a user and
+an organisation, or several organisations. Install the App on each account
+and allowlist what Henk may work on there (`github_owners`,
+`github_repositories`). The App's one webhook URL brings every
+installation's deliveries to the same Henk.
+
+Each repository's work goes out as the installation on its account. The
+comments, check runs, clones, pushes and the GitHub MCP server's reads all
+use it, never another account's token. A webhook delivery names its
+installation. Work started from the dashboard, the MCP server,
+`POST /review` or `henk review <url>` looks the installation up by
+repository, once per account.
+
+`[github] installation_id` is optional. Without it, Henk acts for every
+installation, and the allowlist decides where he works. To act for only
+some installations, name them:
+
+```toml
+[github]
+app_id = 123456
+installations = [7654321, 7654322]   # or installation_id = 7654321 for one
+```
+
+Henk signs the GitHub MCP server in as each session's installation by
+setting `GITHUB_APP_ID` and `GITHUB_APP_INSTALLATION_ID` himself. Remove
+both from `[mcp.github].env`; `henk config check` refuses them.
+
 ## Check a deployment
 
 ```sh
@@ -461,9 +490,11 @@ henk doctor --probe    # also one short prompt to every model
 ```
 
 Every check is reported on its own line; the command fails when any
-check fails. With `installation_id = 0`, or when the installation token
-is refused, the GitHub check lists the App's installations so the right
-id can be copied into the config.
+check fails. The GitHub check lists each of the App's installations with
+its account, says whether its token mints, and marks the ones
+`installations` leaves out as ignored. With `--probe` it also lists the
+repositories each installation reaches. It warns about every allowlisted
+account or repository that no usable installation reaches.
 
 ## First live run
 
@@ -543,8 +574,8 @@ export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
 ```
 
 The first line of `henk review`'s output is the run id. The repository must
-be on the allowlist; the App must be installed on it (`doctor` lists the
-installations when the token is refused). Variants:
+be on the allowlist; the App must be installed on its account (`doctor`
+lists the installations and what they reach). Variants:
 
 ```sh
 RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript

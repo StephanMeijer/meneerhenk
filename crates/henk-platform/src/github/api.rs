@@ -6,10 +6,14 @@ use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
 use tracing::instrument;
 
-use crate::error::{PlatformError, truncate};
-use crate::github::app::GitHubAuth;
+use henk_domain::allowlist::RepoRef;
 
-/// A thin client bound to one authentication.
+use crate::error::{PlatformError, truncate};
+use crate::github::app::{GitHubAuth, Installations, Scope};
+
+/// A thin client bound to one authentication. With App authentication it
+/// acts for one installation: build it once, then take
+/// [`Self::for_repository`] for each repository's work.
 #[derive(Debug)]
 pub struct GitHubApi {
     http: reqwest::Client,
@@ -66,6 +70,48 @@ impl GitHubApi {
             graphql_url,
             auth,
         })
+    }
+
+    fn scoped(&self, scope: Scope) -> Self {
+        Self {
+            http: self.http.clone(),
+            api_base: self.api_base.clone(),
+            graphql_url: self.graphql_url.clone(),
+            auth: self.auth.scoped(scope),
+        }
+    }
+
+    /// The same client acting for the installation that reaches `repo`,
+    /// found on its first call. Every call it makes, and the git token it
+    /// gives, is that installation's.
+    #[must_use]
+    pub fn for_repository(&self, repo: &RepoRef) -> Self {
+        self.scoped(Scope::Repository {
+            owner: repo.owner().to_owned(),
+            name: repo.name().to_owned(),
+        })
+    }
+
+    /// The same client acting for installation `id`.
+    #[must_use]
+    pub fn for_installation(&self, id: u64) -> Self {
+        self.scoped(Scope::Installation(id))
+    }
+
+    /// The App's installations, when this client authenticates as an App.
+    #[must_use]
+    pub fn installations(&self) -> Option<&std::sync::Arc<Installations>> {
+        self.auth.installations()
+    }
+
+    /// The installation this client acts for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when it is not an App client scoped to a
+    /// repository or installation, or the installation cannot be found.
+    pub async fn installation(&self) -> Result<u64, PlatformError> {
+        self.auth.installation(&self.http, &self.api_base).await
     }
 
     async fn request(
@@ -194,16 +240,32 @@ impl GitHubApi {
     /// [`PlatformError::TooMany`] when the list goes on past `MAX_PAGES`
     /// (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
+        self.get_pages(path, false).await
+    }
+
+    /// [`Self::get_all`] authenticated as the App itself (JWT), for
+    /// `/app/installations`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_all`], and [`PlatformError::Auth`] when the client has
+    /// no App credentials.
+    pub async fn get_all_as_app(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
+        self.get_pages(path, true).await
+    }
+
+    async fn get_pages(&self, path: &str, as_app: bool) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
         let separator = if path.contains('?') { '&' } else { '?' };
         // One page past the cap tells a list of exactly the cap, which ends
         // there, from one that goes on.
         for page in 1..=MAX_PAGES + 1 {
-            let page_items = self
-                .get(&format!(
-                    "{path}{separator}per_page={PAGE_SIZE}&page={page}"
-                ))
-                .await?;
+            let paged = format!("{path}{separator}per_page={PAGE_SIZE}&page={page}");
+            let page_items = if as_app {
+                self.get_as_app(&paged).await?
+            } else {
+                self.get(&paged).await?
+            };
             let Some(array) = page_items.as_array() else {
                 return Ok(items);
             };

@@ -14,5 +14,5 @@ pub mod gitlab;
 
 pub use bus::{EventBus, EventRecorder, Hook, Listener};
 pub use event::{CommentKind, Event, EventKind, EventSource, Handled, PullRequestAction, Sender};
-pub use github::parse_github;
+pub use github::{installation_of, parse_github};
 pub use gitlab::parse_gitlab;

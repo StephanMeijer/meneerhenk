@@ -128,7 +128,7 @@ pub async fn run_execute(
 ) -> anyhow::Result<ExecuteReport> {
     let (execution, executor) = configured(app)?;
     let platform = request.target.repo.platform();
-    let issues = app.issue_writer(platform)?;
+    let issues = app.issue_writer(&request.target.repo)?;
     if !app.settings.allowlist.allows(&request.target.repo) {
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
@@ -251,7 +251,7 @@ impl Work<'_> {
         stages::mark(store, run, Stage::Started, StageState::Done, what).await;
 
         stages::mark(store, run, Stage::Checkout, StageState::Running, "").await;
-        let writer = self.app.push_writer(target.repo.platform())?;
+        let writer = self.app.push_writer(&target.repo)?;
         let opened = tokio::select! {
             opened = self.open(&*writer) => opened,
             () = cancel.cancelled() => return Err(Cancelled.into()),

@@ -15,7 +15,7 @@ mod tests;
 
 use std::sync::Arc;
 
-use henk_domain::allowlist::Platform;
+use henk_domain::allowlist::RepoRef;
 use henk_platform::PlatformWriter;
 
 pub use execute::ExecuteListener;
@@ -26,17 +26,17 @@ pub use review::ReviewListener;
 /// Where listeners get a platform writer. The application implements it;
 /// tests substitute a fake.
 pub trait Writers: Send + Sync {
-    /// The writer for a platform.
+    /// The writer for `repo`.
     ///
     /// # Errors
     ///
-    /// Returns an error when the platform is not configured.
-    fn writer(&self, platform: Platform) -> anyhow::Result<Arc<dyn PlatformWriter>>;
+    /// Returns an error when its platform is not configured.
+    fn writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn PlatformWriter>>;
 }
 
 impl Writers for crate::app::App {
-    fn writer(&self, platform: Platform) -> anyhow::Result<Arc<dyn PlatformWriter>> {
-        Self::writer(self, platform)
+    fn writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn PlatformWriter>> {
+        Self::writer(self, repo)
     }
 }
 
@@ -48,7 +48,7 @@ pub(crate) mod testing {
 
     use std::sync::{Arc, Mutex};
 
-    use henk_domain::allowlist::Platform;
+    use henk_domain::allowlist::{Platform, RepoRef};
     use henk_domain::review::{CommitSha, ReviewOutcome};
     use henk_platform::{
         PlatformError, PlatformWriter, PostedComment, PullRequestInfo, PullRequestState,
@@ -240,8 +240,8 @@ pub(crate) mod testing {
     pub struct FakeWriters(pub Arc<FakeWriter>);
 
     impl Writers for FakeWriters {
-        fn writer(&self, platform: Platform) -> anyhow::Result<Arc<dyn PlatformWriter>> {
-            match platform {
+        fn writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn PlatformWriter>> {
+            match repo.platform() {
                 Platform::GitHub => Ok(Arc::clone(&self.0) as Arc<dyn PlatformWriter>),
                 Platform::GitLab => Err(anyhow::anyhow!("GitLab is not configured")),
             }
