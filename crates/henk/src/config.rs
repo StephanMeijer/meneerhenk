@@ -1240,6 +1240,10 @@ pub struct SshConfig {
     /// pinned: any other key is refused, and there is no trust on first use.
     #[serde(default)]
     pub host_key: Option<String>,
+    /// The most workspaces Henk keeps open on the one host at once, or on
+    /// each host by default (#403). Absent: no limit.
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
     /// Several hosts, by id: a workspace opens on one of them.
     #[serde(default)]
     pub hosts: BTreeMap<String, SshHostConfig>,
@@ -1263,6 +1267,10 @@ pub struct SshHostConfig {
     pub key_path_env: Option<String>,
     /// The host's public key as an OpenSSH line, pinned.
     pub host_key: String,
+    /// The most workspaces Henk keeps open on this host at once;
+    /// `[workspace.ssh].max_concurrent`, or no limit.
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
 }
 
 /// One sandbox host with every default applied.
@@ -1281,7 +1289,13 @@ pub struct SshHost {
     pub key_path_env: String,
     /// The pinned host key line.
     pub host_key: String,
+    /// The most workspaces open on it at once; `None` is no limit.
+    pub max_concurrent: Option<usize>,
 }
+
+/// The highest `max_concurrent` a sandbox host may have (#403): far more
+/// workspaces than one machine runs at once. Above it, leave it out.
+pub const MAX_CONCURRENT_LIMIT: usize = 1024;
 
 const fn default_ssh_port() -> u16 {
     22
@@ -1311,6 +1325,7 @@ impl SshConfig {
                 user: self.user.clone(),
                 key_path_env: self.key_path_env.clone(),
                 host_key: host_key.clone(),
+                max_concurrent: self.max_concurrent,
             }];
         }
         self.hosts
@@ -1325,6 +1340,7 @@ impl SshConfig {
                     .clone()
                     .unwrap_or_else(|| self.key_path_env.clone()),
                 host_key: host.host_key.clone(),
+                max_concurrent: host.max_concurrent.or(self.max_concurrent),
             })
             .collect()
     }
@@ -1408,6 +1424,19 @@ impl SshConfig {
             }
             if russh::keys::PublicKey::from_openssh(host.host_key.trim()).is_err() {
                 return refuse(format!("{at}host_key is not an OpenSSH public key line"));
+            }
+            if host.max_concurrent == Some(0) {
+                return refuse(format!(
+                    "{at}max_concurrent must be at least 1; leave it out for no limit"
+                ));
+            }
+            if host
+                .max_concurrent
+                .is_some_and(|n| n > MAX_CONCURRENT_LIMIT)
+            {
+                return refuse(format!(
+                    "{at}max_concurrent must be at most {MAX_CONCURRENT_LIMIT}; leave it out for no limit"
+                ));
             }
         }
         Ok(())
@@ -2636,9 +2665,13 @@ impl Settings {
                 } else {
                     format!(" {}", host.id)
                 };
+                let limit = host
+                    .max_concurrent
+                    .map(|n| format!(", at most {n} at once"))
+                    .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "  sandbox host{name}: {}@{}:{} (key from ${})",
+                    "  sandbox host{name}: {}@{}:{} (key from ${}){limit}",
                     host.user, host.host, host.port, host.key_path_env
                 );
             }
@@ -4189,6 +4222,79 @@ github_owners = ["docspec"]
             "[workspace.ssh.hosts.{id}]\nhost = \"{id}.example\"\nhost_key = \"{}\"\n{extra}",
             host_key_line()
         )
+    }
+
+    #[test]
+    fn a_sandbox_host_takes_at_most_max_concurrent_workspaces() {
+        // [workspace.ssh] sets the default each host may override (#403).
+        let hosts = format!(
+            "max_concurrent = 2\n{}{}",
+            pooled("goat", "max_concurrent = 1\n"),
+            pooled("fox", "")
+        );
+        let settings = pool(&hosts, "").unwrap();
+        let limits: Vec<(String, Option<usize>)> = settings
+            .workspace_ssh
+            .as_ref()
+            .unwrap()
+            .hosts()
+            .into_iter()
+            .map(|h| (h.id, h.max_concurrent))
+            .collect();
+        assert_eq!(
+            limits,
+            [("fox".to_owned(), Some(2)), ("goat".to_owned(), Some(1))]
+        );
+        let text = settings.describe();
+        assert!(
+            text.contains("  sandbox host goat: henk@goat.example:22 (key from $HENK_SANDBOX_KEY_PATH), at most 1 at once"),
+            "{text}"
+        );
+        // Unset is no limit, and says nothing.
+        let free = pool(&pooled("fox", ""), "").unwrap();
+        assert_eq!(
+            free.workspace_ssh
+                .as_ref()
+                .unwrap()
+                .hosts()
+                .first()
+                .unwrap()
+                .max_concurrent,
+            None
+        );
+        assert!(!free.describe().contains("), at most"));
+        for zero in [
+            format!("max_concurrent = 0\n{}", pooled("fox", "")),
+            pooled("fox", "max_concurrent = 0\n"),
+        ] {
+            let refused = pool(&zero, "").unwrap_err().to_string();
+            assert!(
+                refused.contains("max_concurrent must be at least 1; leave it out for no limit"),
+                "{refused}"
+            );
+        }
+        // Above the bound is refused too, before a semaphore that large
+        // could panic at startup.
+        for huge in [
+            format!("max_concurrent = 1025\n{}", pooled("fox", "")),
+            pooled("fox", "max_concurrent = 4611686018427387904\n"),
+        ] {
+            let refused = pool(&huge, "").unwrap_err().to_string();
+            assert!(
+                refused.contains("max_concurrent must be at most 1024; leave it out for no limit"),
+                "{refused}"
+            );
+        }
+        let most = pool(&pooled("fox", "max_concurrent = 1024\n"), "").unwrap();
+        assert_eq!(
+            most.workspace_ssh
+                .unwrap()
+                .hosts()
+                .first()
+                .unwrap()
+                .max_concurrent,
+            Some(1024)
+        );
     }
 
     #[test]

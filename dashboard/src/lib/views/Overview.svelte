@@ -5,7 +5,7 @@
   import { serverNow } from '$lib/clock';
   import type { Health, Me, OverviewStats, Page, RunCount, RunningMessage, RunSummary, SessionStats } from '$lib/api/types';
   import { PERIODS, about, count, kindText, periodSince, runDuration } from '$lib/format';
-  import { applyRunning, connectionAfter, type Connection, type Running } from '$lib/live';
+  import { applyRunning, connectionAfter, hostsLine, type Connection, type Running } from '$lib/live';
   import { shownInRounds } from '$lib/roles';
   import { href, link, navigate, runPath, withQuery } from '$lib/router';
   import { lookOf } from '$lib/status';
@@ -76,13 +76,13 @@
   let matching = $derived(loadCount(countQuery));
 
   // What runs now, as /runs/stream says it: no polling (#202).
-  let running: Running = $state({ runs: [], count: 0, slots: null });
+  let running: Running = $state({ runs: [], count: 0, slots: null, sandbox_hosts: null });
   let connection: Connection = $state('connecting');
 
   onMount(() => {
     const following = follow<RunningMessage>(
       '/runs/stream',
-      ['snapshot', 'run', 'progress', 'slots'],
+      ['snapshot', 'run', 'progress', 'slots', 'sandbox_hosts'],
       (message) => (running = applyRunning(running, message)),
       (open) => (connection = connectionAfter(connection, open)),
       connect,
@@ -146,6 +146,9 @@
     <h2 id="running-title">Running now <span class="count-badge">({running.count})</span></h2>
     <span class="note">{running.count} running, {queuedCount} queued · Updates as runs start and end</span>
   </div>
+  {#if running.sandbox_hosts && running.sandbox_hosts.hosts.length > 0}
+    <p class="sandbox-hosts">Sandbox hosts: {hostsLine(running.sandbox_hosts)}</p>
+  {/if}
   {#if running.runs.length === 0}
     <Empty why="Nothing runs right now." />
   {:else}
@@ -228,6 +231,7 @@
 </section>
 
 <style>
+  .sandbox-hosts { margin: 0; padding: 6px var(--space-4); color: var(--muted); border-top: 1px solid var(--line-soft); }
   .running { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line-soft); }
   .running > li {
     display: grid;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LiveMessage, ToolCall } from './api/types';
-import { NO_LOG, applyLive, applyRun, applyRunning, callsOf, connectionAfter } from './live';
+import { NO_LOG, applyLive, applyRun, applyRunning, callsOf, connectionAfter, hostsLine } from './live';
 import { draft, loopDetail, reviewStages, runDetail, runSummary, waitingReview } from './testing/fixtures';
 
 const call = (turn: number, outcome = 'ok', tool = 'read_file'): ToolCall => ({
@@ -102,12 +102,15 @@ describe('applyRun', () => {
   });
 });
 
+/** No sandbox hosts: Henk without the ssh backend. */
+const NO_HOSTS = { hosts: [], waiting: 0 };
+
 describe('running runs moving on', () => {
   it('takes a run\'s lanes and stages from progress, and keeps them through a run message', () => {
     const run = { ...runSummary('r-1', 'running'), sessions: [{ name: 'lane-a', role: 'lane', status: 'running' }] };
-    let state = applyRunning({ runs: [], count: 0, slots: null }, {
+    let state = applyRunning({ runs: [], count: 0, slots: null, sandbox_hosts: null }, {
       kind: 'snapshot',
-      data: { runs: [run], count: 1, slots: { limit: 2, in_use: 1, waiting: [] } },
+      data: { runs: [run], count: 1, slots: { limit: 2, in_use: 1, waiting: [] }, sandbox_hosts: NO_HOSTS },
     });
     expect(state.slots?.limit).toBe(2);
     state = applyRunning(state, {
@@ -123,14 +126,46 @@ describe('running runs moving on', () => {
   });
 
   it('takes the slots from a slots message between snapshots, keeping the runs', () => {
-    const before = applyRunning({ runs: [], count: 0, slots: null }, {
+    const before = applyRunning({ runs: [], count: 0, slots: null, sandbox_hosts: null }, {
       kind: 'snapshot',
-      data: { runs: [runSummary('r-1', 'running')], count: 1, slots: { limit: 1, in_use: 0, waiting: [] } },
+      data: { runs: [runSummary('r-1', 'running')], count: 1, slots: { limit: 1, in_use: 0, waiting: [] }, sandbox_hosts: NO_HOSTS },
     });
     const slots = { limit: 1, in_use: 1, waiting: [waitingReview('r-8', 8, 1)] };
     const after = applyRunning(before, { kind: 'slots', data: slots });
     expect(after.slots).toEqual(slots);
     expect([after.runs, after.count]).toEqual([before.runs, before.count]);
+  });
+});
+
+describe('sandbox hosts', () => {
+  it('takes the hosts from a sandbox_hosts message, keeping the rest (#403)', () => {
+    const before = applyRunning({ runs: [], count: 0, slots: null, sandbox_hosts: null }, {
+      kind: 'snapshot',
+      data: {
+        runs: [runSummary('r-1', 'running')],
+        count: 1,
+        slots: { limit: 1, in_use: 1, waiting: [] },
+        sandbox_hosts: { hosts: [{ id: 'goat', limit: 1, in_use: 0 }], waiting: 0 },
+      },
+    });
+    expect(before.sandbox_hosts?.hosts[0]?.in_use).toBe(0);
+    const now = { hosts: [{ id: 'goat', limit: 1, in_use: 1 }], waiting: 2 };
+    const after = applyRunning(before, { kind: 'sandbox_hosts', data: now });
+    expect(after.sandbox_hosts).toEqual(now);
+    expect([after.runs, after.count, after.slots]).toEqual([before.runs, before.count, before.slots]);
+  });
+
+  it("says each host's slots, and how many runs wait for one", () => {
+    expect(
+      hostsLine({
+        hosts: [
+          { id: 'fox', limit: null, in_use: 3 },
+          { id: 'goat', limit: 2, in_use: 2 },
+        ],
+        waiting: 1,
+      }),
+    ).toBe('fox 3 in use · goat 2 of 2 in use · 1 waiting for one');
+    expect(hostsLine({ hosts: [{ id: 'goat', limit: 2, in_use: 0 }], waiting: 0 })).toBe('goat 0 of 2 in use');
   });
 });
 
@@ -148,9 +183,9 @@ describe('stages and heartbeats', () => {
 
 describe('applyRunning', () => {
   it('follows runs starting and ending, and keeps the count', () => {
-    let state = applyRunning({ runs: [], count: 0, slots: null }, {
+    let state = applyRunning({ runs: [], count: 0, slots: null, sandbox_hosts: null }, {
       kind: 'snapshot',
-      data: { runs: [runSummary('r-1', 'running')], count: 5, slots: { limit: 3, in_use: 1, waiting: [] } },
+      data: { runs: [runSummary('r-1', 'running')], count: 5, slots: { limit: 3, in_use: 1, waiting: [] }, sandbox_hosts: NO_HOSTS },
     });
     state = applyRunning(state, { kind: 'run', data: runSummary('r-2', 'running') });
     expect([state.runs.map((r) => r.id), state.count]).toEqual([['r-2', 'r-1'], 6]);

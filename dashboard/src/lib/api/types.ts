@@ -210,11 +210,15 @@ count: number,
 /**
  * The review slots and what waits for one.
  */
-slots: Slots, };
+slots: Slots, 
+/**
+ * The sandbox hosts' slots, and how many runs wait for one (#403).
+ */
+sandbox_hosts: SandboxHosts, };
 
 export type RunMessage = { "kind": "snapshot", "data": RunDetail } | { "kind": "run", "data": RunUpdate } | { "kind": "sessions", "data": Array<Session> } | { "kind": "rounds", "data": Array<Round> } | { "kind": "tool_call", "data": ToolCall } | { "kind": "draft", "data": Draft } | { "kind": "finding", "data": Finding } | { "kind": "event", "data": RunEvent } | { "kind": "transcript", "data": TranscriptRef } | { "kind": "stages", "data": Array<Stage> } | { "kind": "heartbeat", "data": Heartbeat } | { "kind": "end" };
 
-export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots };
+export type RunningMessage = { "kind": "snapshot", "data": RunningSnapshot } | { "kind": "run", "data": RunSummary } | { "kind": "progress", "data": Progress } | { "kind": "slots", "data": Slots } | { "kind": "sandbox_hosts", "data": SandboxHosts };
 
 export type RunDetail = { 
 /**
@@ -331,6 +335,30 @@ in_use: number,
  * yet.
  */
 waiting: Array<WaitingReview>, };
+
+export type SandboxHosts = { 
+/**
+ * Every host, in id order.
+ */
+hosts: Array<SandboxHost>, 
+/**
+ * Runs waiting for a host with room.
+ */
+waiting: number, };
+
+export type SandboxHost = { 
+/**
+ * The host's id.
+ */
+id: string, 
+/**
+ * Its `max_concurrent`; `null` is no limit.
+ */
+limit: number | null, 
+/**
+ * Workspaces open on it.
+ */
+in_use: number, };
 
 export type WaitingReview = { 
 /**

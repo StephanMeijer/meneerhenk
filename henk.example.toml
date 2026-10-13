@@ -314,6 +314,10 @@ requester_id = 523456789012345678
 # port = 22
 # user = "root"
 # key_path_env = "HENK_SANDBOX_KEY_PATH"
+# The most workspaces Henk keeps open on the host at once (#403), reviews,
+# plans and execute runs alike; a run waits for room rather than overload
+# it. Left out: no limit. With several hosts below, every host's default.
+# max_concurrent = 2
 # Several sandbox hosts instead of one (#389): a workspace opens on the
 # least busy one a profile may use, and a host that cannot be reached is
 # passed over. user, port and key_path_env above are every host's
@@ -322,6 +326,7 @@ requester_id = 523456789012345678
 ## [workspace.ssh.hosts.goat]
 ## host = "goat.example.com"
 ## host_key = "ssh-ed25519 AAAA..."
+## max_concurrent = 8
 ## [workspace.ssh.hosts.fox]
 ## host = "fox.example.com"
 ## host_key = "ssh-ed25519 AAAA..."

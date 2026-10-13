@@ -165,6 +165,7 @@ pub async fn run_execute(
         run: &run,
         link: &link,
         model,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(execution.run_timeout_secs),
     };
     let result = work.run(&cancel).await;
     let on_issue = OnIssue {
@@ -230,6 +231,9 @@ struct Work<'a> {
     run: &'a RunId,
     link: &'a str,
     model: Arc<dyn henk_llm::ModelClient>,
+    /// When the run's time is up: from when the work began, so a wait for a
+    /// sandbox host counts against it (#403).
+    deadline: tokio::time::Instant,
 }
 
 impl Work<'_> {
@@ -305,7 +309,8 @@ impl Work<'_> {
         .context("checking out the default branch")?;
         let branch = self.free_branch(&checkout).await?;
         let profile = self.app.settings.workspace.profile_for(&repo.path());
-        let workspace = open_prepared(self.app, self.run, &checkout, profile).await?;
+        let workspace =
+            open_prepared(self.app, self.run, &checkout, profile, Some(self.deadline)).await?;
         Ok((base, workspace, branch))
     }
 
@@ -516,7 +521,11 @@ impl Work<'_> {
             tools,
             limits: AgentConfig {
                 max_turns: self.executor.max_turns,
-                timeout: Duration::from_secs(self.execution.run_timeout_secs),
+                // What is left of the run's time, after the checkout and any
+                // wait for a sandbox host (#403).
+                timeout: self
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now()),
                 max_repeated_calls: settings.agent.max_repeated_calls,
                 record_argument_bytes: settings.agent.record_argument_bytes,
                 ..AgentConfig::default()
@@ -1098,6 +1107,106 @@ requester_id = 3
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// [`fixture`] whose run may take `secs` and whose workspaces open on
+    /// `pool`, a sandbox host at its limit (#403).
+    async fn on_full_host(
+        name: &str,
+        script: Vec<Completion>,
+        secs: u64,
+        pool: Arc<crate::workspace::ssh::SshPool>,
+    ) -> Fixture {
+        let mut f = fixture(name, script, 0).await;
+        f.app.settings.execution.as_mut().unwrap().run_timeout_secs = secs;
+        f.app.workspace_provider = pool;
+        f
+    }
+
+    #[tokio::test]
+    async fn an_execute_run_whose_time_runs_out_waiting_for_a_sandbox_host_fails_saying_so() {
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-exec-wait-out").await;
+        let f = on_full_host("henk-exec-wait-out-remote", vec![done()], 1, pool).await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_execute(&f.app, request("r-exec-wait-out"), CancellationToken::new()),
+        )
+        .await
+        .expect("it gives up at its time limit")
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("the run's time limit was reached while it waited for a sandbox host"),
+            "{why}"
+        );
+        assert!(f.model.requests().is_empty(), "no session");
+        let run = record(&f, "r-exec-wait-out").await;
+        assert_eq!(run.status, RunStatus::Failed);
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        assert!(
+            stages.iter().any(|s| s.stage == henk_store::Stage::Checkout
+                && s.state == StageState::Failed
+                && s.detail.contains("waited for a sandbox host")),
+            "{stages:?}"
+        );
+        assert!(
+            !stages.iter().any(|s| s.stage.as_str() == "session"),
+            "{stages:?}"
+        );
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert!(
+            comments
+                .iter()
+                .any(|c| c.contains("waited for a sandbox host")),
+            "{comments:?}"
+        );
+        held.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_executor_gets_what_is_left_of_the_run_after_a_wait_for_a_sandbox_host() {
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-exec-wait").await;
+        let mut f = on_full_host("henk-exec-wait-remote", vec![], 4, pool).await;
+        // One answer that takes 3s: inside the run's 4s, but not inside
+        // what is left of them after a 2s wait for the host.
+        let slow = Arc::new(
+            ScriptedClient::new("scripted", [Ok(done())]).with_delay(Duration::from_secs(3)),
+        );
+        f.app
+            .models
+            .insert("m".to_owned(), Arc::clone(&slow) as Arc<dyn ModelClient>);
+        let (result, ()) = tokio::join!(
+            run_execute(&f.app, request("r-exec-wait"), CancellationToken::new()),
+            async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                held.close().await;
+            }
+        );
+        let why = format!("{:#}", result.unwrap_err());
+        assert!(why.contains("the time limit of 4s was reached"), "{why}");
+        assert_eq!(slow.requests().len(), 1, "the session began");
+        let run = record(&f, "r-exec-wait").await;
+        let said: Vec<String> = f
+            .app
+            .store
+            .events(&run.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            said.iter()
+                .any(|m| m.starts_with("got a sandbox host after ")),
+            "{said:?}"
+        );
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        assert!(
+            stages
+                .iter()
+                .any(|s| s.stage == henk_store::Stage::Checkout && s.state == StageState::Done),
+            "{stages:?}"
         );
     }
 }

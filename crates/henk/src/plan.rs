@@ -121,6 +121,7 @@ pub async fn run_plan(
         writer: Arc::clone(&writer),
         state: Mutex::new(PlanState::new(ChangeBudget::new(planning.change_budget))),
         sub_issue_cap: planning.sub_issue_cap,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(planning.run_timeout_secs),
     });
     let result = plan_body(
         app,
@@ -436,7 +437,14 @@ async fn plan_body(
     begin_stages(&*app.store, &context.run, request, context.model.as_str()).await;
     // The planner's own copy of the default branch, when the profile says
     // so; closed on every path out of here.
-    let workspace = open_for_plan(app, &request.target.repo, &context.run, &cancel).await;
+    let workspace = open_for_plan(
+        app,
+        &request.target.repo,
+        &context.run,
+        context.deadline,
+        &cancel,
+    )
+    .await;
     let result = plan_session(
         app,
         request,
@@ -673,7 +681,7 @@ async fn plan_session(
         .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
         planner_round: Duration::from_secs(planner_round),
         reviewer_round: Duration::from_secs(reviewer_round),
-        deadline: tokio::time::Instant::now() + Duration::from_secs(planning.run_timeout_secs),
+        deadline: context.deadline,
         round: 0,
     };
     let issue = IssueMaterial {
@@ -1299,6 +1307,51 @@ model = "r"
             "{events:?}"
         );
         assert_eq!(p.provider.live(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_plan_whose_time_runs_out_waiting_for_a_sandbox_host_fails_before_the_planner() {
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-plan-wait-out").await;
+        let config = planning_config("plan = true\n")
+            .replace("[planning]\n", "[planning]\nrun_timeout_secs = 1\n");
+        let (f, _remote) = planned_on(
+            "henk-plan-wait-out-remote",
+            &config,
+            vec![write_plan("## Goal\n\nExport runs."), done()],
+            pool,
+        )
+        .await;
+        let run = RunId::parse("r-plan-wait-out").unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_plan(&f.app, request(run.as_str()), CancellationToken::new()),
+        )
+        .await
+        .expect("it gives up at its time limit")
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("the time limit of 1s was reached before the planner began"),
+            "{why}"
+        );
+        assert!(f.model.requests().is_empty(), "the planner never began");
+        let events = f.app.store.events(&run).await.unwrap();
+        assert!(
+            events.iter().any(|e| e.level == "warn"
+                && e.message.contains("planner workspace: none")
+                && e.message.contains("waited for a sandbox host")),
+            "{events:?}"
+        );
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert!(
+            comments[0].starts_with("Planning failed."),
+            "{}",
+            comments[0]
+        );
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        held.close().await;
     }
 
     #[tokio::test]
