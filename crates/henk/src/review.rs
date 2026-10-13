@@ -101,7 +101,7 @@ pub async fn run_review(
     cancel: CancellationToken,
 ) -> anyhow::Result<ReviewReport> {
     let platform = request.target.platform();
-    let writer = app.writer(platform)?;
+    let writer = app.writer(&request.target.repo)?;
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
 
@@ -423,7 +423,7 @@ pub async fn report_cancelled_while_queued(
         .await;
     if let Err(error) = created {
         // No run page: the check links where the queue is shown.
-        match app.writer(platform) {
+        match app.writer(&request.target.repo) {
             Ok(writer) => {
                 close_queued_as_cancelled(&writer, request, &app.settings.queue_link(&run), by)
                     .await;
@@ -463,7 +463,7 @@ pub async fn report_cancelled_while_queued(
         &cancelled,
     )
     .await;
-    match app.writer(platform) {
+    match app.writer(&request.target.repo) {
         Ok(writer) => close_queued_as_cancelled(&writer, request, &link, by).await,
         Err(writer_error) => error!(%writer_error, "could not close the queued check"),
     }
@@ -581,7 +581,7 @@ async fn close_queued_as_interrupted(app: &App, request: &ReviewRequest, link: &
         return;
     };
     let outcome = ReviewOutcome::interrupted(commit.clone());
-    match app.writer(request.target.platform()) {
+    match app.writer(&request.target.repo) {
         Ok(writer) => {
             if let Err(finish_error) = writer
                 .finish_review(&request.target, commit, Some(handle), &outcome, link)
@@ -5414,7 +5414,11 @@ requester_id = 3
             Arc::new(mcp.connect("gitlab-write").await),
             "meneerhenk",
         )));
-        let refused = f.app.push_writer(Platform::GitLab).err().unwrap();
+        let refused = f
+            .app
+            .push_writer(&RepoRef::parse(Platform::GitLab, "g/p").unwrap())
+            .err()
+            .unwrap();
         assert!(
             refused.to_string().contains("needs the token in $"),
             "{refused}"
@@ -5428,7 +5432,11 @@ requester_id = 3
                 .unwrap(),
             ),
         ));
-        assert!(f.app.push_writer(Platform::GitLab).is_ok());
+        assert!(
+            f.app
+                .push_writer(&RepoRef::parse(Platform::GitLab, "g/p").unwrap())
+                .is_ok()
+        );
 
         let run = RunId::parse("r-loop-gitlab").unwrap();
         let mut on_gitlab = request(&run);

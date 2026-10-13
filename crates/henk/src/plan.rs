@@ -87,7 +87,7 @@ pub async fn run_plan(
         .as_ref()
         .ok_or_else(|| anyhow!("planning is not configured"))?;
     let platform = request.target.repo.platform();
-    let writer = app.issue_writer(platform)?;
+    let writer = app.issue_writer(&request.target.repo)?;
     if !app.settings.allowlist.allows(&request.target.repo) {
         return Err(anyhow!("{} is not on the allowlist", request.target.repo));
     }
@@ -588,7 +588,7 @@ async fn plan_session(
         .ok_or_else(|| anyhow!("planning is not configured"))?;
     let (planner, reviewer) = (planner(app)?, plan_reviewer(app)?);
     let platform = request.target.repo.platform();
-    let session = app.read_session(platform).await?;
+    let session = app.read_session(&request.target.repo).await?;
     let scope = Scope::Plan {
         repo: request.target.repo.clone(),
         issue: request.target.number,

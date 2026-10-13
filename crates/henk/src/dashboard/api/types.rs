@@ -597,6 +597,8 @@ pub struct Session {
     pub cache_read_tokens: u64,
     /// Of `input_tokens`, written into the prompt cache (#330).
     pub cache_write_tokens: u64,
+    /// Of `output_tokens`, spent reasoning before answering (#365).
+    pub reasoning_tokens: u64,
     /// Why it did not finish.
     pub error: Option<String>,
     /// The turn of its latest tool call: how far a running session has come,
@@ -1043,6 +1045,7 @@ impl From<&SessionRecord> for Session {
             output_tokens: session.output_tokens,
             cache_read_tokens: session.cache_read_tokens,
             cache_write_tokens: session.cache_write_tokens,
+            reasoning_tokens: session.reasoning_tokens,
             error: session.error.clone(),
             last_call_turn: None,
             started_at: session.started_at.clone(),

@@ -113,7 +113,7 @@ pub(crate) async fn run_loop(
         .as_ref()
         .ok_or_else(|| anyhow!("the review loop is not configured"))?;
     let store = &*app.store;
-    let writer = app.push_writer(target.repo.platform())?;
+    let writer = app.push_writer(&target.repo)?;
     let facts = writer
         .pull_facts(target)
         .await
@@ -165,8 +165,7 @@ pub(crate) async fn run_loop(
         stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;
     }
 
-    let mut rounds =
-        Rounds::new(on, config, profile, &workspace, &diff, writer, credential)?.alone(alone);
+    let mut rounds = Rounds::new(on, config, profile, &workspace, &diff, writer)?.alone(alone);
     // Closed on every path; a run future that is dropped drops it instead,
     // and every backend destroys itself then too.
     let ended = rounds.run(facts, &diff, cancel).await;
@@ -223,7 +222,6 @@ struct Rounds<'a> {
     /// Why the reviewer reviews alone, if it does (#307).
     alone: Option<String>,
     writer: Arc<dyn PushWriter>,
-    credential: Option<GitCredential>,
     requester: String,
     /// The round under way, or the last one.
     round: u32,
@@ -245,7 +243,6 @@ impl<'a> Rounds<'a> {
         workspace: &Arc<dyn Workspace>,
         diff: &Arc<ReviewDiff>,
         writer: Arc<dyn PushWriter>,
-        credential: Option<GitCredential>,
     ) -> anyhow::Result<Self> {
         let app = on.app;
         let (reviewer, address) = loop_roles(&app.settings)?;
@@ -332,7 +329,6 @@ impl<'a> Rounds<'a> {
             fixing,
             handoff,
             writer,
-            credential,
             requester: format!("discord:{}", address.requester_id),
             round: 0,
             pushed: Vec::new(),
@@ -749,9 +745,14 @@ impl<'a> Rounds<'a> {
             requester: &self.requester,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
-        let checkout = pusher
-            .checkout_pull(&name, facts, self.credential.clone())
-            .await?;
+        // Asked again for each push: a loop can outlast the token it
+        // started with.
+        let credential = self
+            .writer
+            .git_credential()
+            .await
+            .context("getting a credential for git")?;
+        let checkout = pusher.checkout_pull(&name, facts, credential).await?;
         let notes = [format!("review loop round {}", self.round)];
         let to = PushTo::Pull {
             target: self.on.target,

@@ -213,7 +213,7 @@ async fn close_check(app: &App, run: &RunRecord) {
         warn!(run = %run.id, repo = %run.repo, "an interrupted run names no valid repository");
         return;
     };
-    let writer = match app.writer(run.platform) {
+    let writer = match app.writer(&repo) {
         Ok(writer) => writer,
         Err(error) => {
             warn!(%error, run = %run.id, "no writer to close the check of an interrupted run");

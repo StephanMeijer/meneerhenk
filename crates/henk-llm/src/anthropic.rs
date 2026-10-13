@@ -248,6 +248,8 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
             output_tokens: count("output_tokens"),
             cache_read_tokens: count("cache_read_input_tokens"),
             cache_write_tokens: count("cache_creation_input_tokens"),
+            // Anthropic counts thinking in output_tokens without a split.
+            reasoning_tokens: 0,
         }
     });
     Ok(Completion {

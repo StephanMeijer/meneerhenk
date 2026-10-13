@@ -271,6 +271,9 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     /// Prompt tokens written to the provider's prompt cache.
     pub cache_write_tokens: u64,
+    /// Of `output_tokens`, those the model spent reasoning before it
+    /// answered. Already counted in `output_tokens`.
+    pub reasoning_tokens: u64,
 }
 
 impl Usage {
@@ -292,6 +295,7 @@ impl Usage {
         self.cache_write_tokens = self
             .cache_write_tokens
             .saturating_add(other.cache_write_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
     }
 }
 

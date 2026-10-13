@@ -60,7 +60,7 @@ pub async fn open_for_plan(
         return None;
     }
     let opening = async {
-        let writer = app.push_writer(repo.platform())?;
+        let writer = app.push_writer(repo)?;
         let head = writer
             .repo_head(repo)
             .await
