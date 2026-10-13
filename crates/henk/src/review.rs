@@ -4821,8 +4821,8 @@ requester_id = 3
     /// A loop on `provider` whose reviewer finds two things and then
     /// nothing. With `fixes`, the executor fixes the first and rejects the
     /// second, and that one commit is pushed, as Henk, with the default
-    /// trailers, after the checks pass; without, it rejects both, and
-    /// nothing is checked or pushed.
+    /// trailers, once the push rules hold; without, it rejects both, and
+    /// nothing is pushed.
     async fn executor_on(
         name: &str,
         provider: Arc<dyn crate::workspace::WorkspaceProvider>,

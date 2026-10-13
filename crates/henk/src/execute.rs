@@ -377,12 +377,8 @@ impl Work<'_> {
 
         stages::mark(store, run, Stage::Commit, StageState::Running, "").await;
         let changes = self.checked(workspace, &editing, &proposal).await?;
-        let checked = format!(
-            "{} {}, the checks pass",
-            changes.len(),
-            if changes.len() == 1 { "file" } else { "files" }
-        );
-        stages::mark(store, run, Stage::Commit, StageState::Done, checked).await;
+        let to_push = format!("{} file(s) to push", changes.len());
+        stages::mark(store, run, Stage::Commit, StageState::Done, to_push).await;
         stop_if_cancelled(cancel)?;
 
         self.publish(writer, base, branch, &proposal, &changes, cancel)
@@ -874,6 +870,11 @@ requester_id = 3
                 "done"
             ]
         );
+        let commit_stage = stages
+            .iter()
+            .find(|s| s.stage.as_str() == "commit" && s.state == StageState::Done)
+            .expect("the commit stage is done");
+        assert_eq!(commit_stage.detail, "1 file(s) to push");
         assert_eq!(f.provider.live(), 0, "the workspace is closed");
 
         // Then the pull request is reviewed in a run of its own.
