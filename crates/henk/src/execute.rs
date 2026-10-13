@@ -167,6 +167,7 @@ pub async fn run_execute(
         run: &run,
         link: &link,
         model,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(execution.run_timeout_secs),
     };
     let result = work.run(&cancel).await;
     let on_issue = OnIssue {
@@ -232,6 +233,9 @@ struct Work<'a> {
     run: &'a RunId,
     link: &'a str,
     model: Arc<dyn henk_llm::ModelClient>,
+    /// When the run's time is up: from when the work began, so a wait for a
+    /// sandbox host counts against it (#403).
+    deadline: tokio::time::Instant,
 }
 
 impl Work<'_> {
@@ -307,7 +311,8 @@ impl Work<'_> {
         .context("checking out the default branch")?;
         let branch = self.free_branch(&checkout).await?;
         let profile = self.app.settings.workspace.profile_for(&repo.path());
-        let workspace = open_prepared(self.app, self.run, &checkout, profile).await?;
+        let workspace =
+            open_prepared(self.app, self.run, &checkout, profile, Some(self.deadline)).await?;
         Ok((base, workspace, branch))
     }
 
@@ -523,7 +528,11 @@ impl Work<'_> {
             tools,
             limits: AgentConfig {
                 max_turns: self.executor.max_turns,
-                timeout: Duration::from_secs(self.execution.run_timeout_secs),
+                // What is left of the run's time, after the checkout and any
+                // wait for a sandbox host (#403).
+                timeout: self
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now()),
                 max_repeated_calls: settings.agent.max_repeated_calls,
                 record_argument_bytes: settings.agent.record_argument_bytes,
                 ..AgentConfig::default()

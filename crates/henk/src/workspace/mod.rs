@@ -600,6 +600,7 @@ pub(crate) async fn open_prepared(
     run: &henk_domain::run::RunId,
     checkout: &crate::git::Checkout,
     profile: &henk_domain::workspace::Profile,
+    deadline: Option<tokio::time::Instant>,
 ) -> anyhow::Result<Arc<dyn Workspace>> {
     use anyhow::Context as _;
     let opened = open_noted(
@@ -608,6 +609,7 @@ pub(crate) async fn open_prepared(
         run,
         checkout.path(),
         profile,
+        deadline,
     )
     .await
     .context("opening the workspace")?;
@@ -628,18 +630,29 @@ pub(crate) async fn open_prepared(
 
 /// Opens a workspace with `provider`, putting what it says while it opens,
 /// such as that it waits for a sandbox host (#403), on `run`'s timeline as
-/// it says it.
+/// it says it. A wait for a sandbox host counts against the run's time:
+/// past `deadline` while it waits, the open is given up. Opening itself is
+/// not timed, as before; the run's own limit takes over after it.
 pub(crate) async fn open_noted(
     provider: &dyn WorkspaceProvider,
     store: &dyn henk_store::RunStore,
     run: &henk_domain::run::RunId,
     source: &Path,
     profile: &Profile,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
     let (to, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
     let notes = Notes::to(to);
     let opening = provider.open_with(source, profile, &notes);
     tokio::pin!(opening);
+    let out_of_time = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(out_of_time);
+    let mut waiting = false;
     loop {
         tokio::select! {
             opened = &mut opening => {
@@ -649,11 +662,21 @@ pub(crate) async fn open_noted(
                 return opened;
             }
             Some(note) = said.recv() => {
+                waiting |= note.starts_with(WAITING);
                 let _ = store.event(run, "info", &note).await;
+            }
+            () = &mut out_of_time, if waiting => {
+                return Err(WorkspaceError::Backend(
+                    "the run's time limit was reached while it waited for a sandbox host"
+                        .to_owned(),
+                ));
             }
         }
     }
 }
+
+/// How a note that a run waits for a sandbox host begins.
+pub(crate) const WAITING: &str = "waiting for a sandbox host";
 
 /// Puts where `workspace` runs on `run`'s timeline (#389), when it says.
 pub(crate) async fn note_location(
@@ -1057,6 +1080,41 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_wait_for_a_sandbox_host_counts_against_the_deadline() {
+        use henk_store::{NewRun, RunStore as _, SqliteStore};
+        let store = SqliteStore::in_memory().unwrap();
+        let run = henk_domain::run::RunId::parse("r-noted").unwrap();
+        store
+            .create_run(&NewRun {
+                id: run.clone(),
+                kind: henk_domain::run::RunKind::Review,
+                platform: henk_domain::allowlist::Platform::GitHub,
+                repo: "o/r".into(),
+                target: 1,
+                commit: None,
+                requester: None,
+                trigger: "test".into(),
+                link: "l".into(),
+            })
+            .await
+            .unwrap();
+        let source = contract::source("henk-open-noted-src");
+        // A deadline already past does not stop an open that never waits.
+        let past = tokio::time::Instant::now();
+        let provider = fake::FakeProvider::default();
+        let opened = open_noted(
+            &provider,
+            &store,
+            &run,
+            source.path(),
+            &Profile::default(),
+            Some(past),
+        )
+        .await;
+        assert!(opened.is_ok(), "{:?}", opened.err());
+    }
 
     fn limits(command_secs: u64, run_secs: u64) -> Limits {
         Limits {

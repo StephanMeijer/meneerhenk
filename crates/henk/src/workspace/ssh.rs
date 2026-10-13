@@ -707,11 +707,8 @@ impl SshPool {
             .filter_map(|h| h.limit.map(|n| format!("{} ({n})", h.id)))
             .collect();
         match full.as_slice() {
-            [one] => format!("waiting for a sandbox host: {one} is at its limit"),
-            many => format!(
-                "waiting for a sandbox host: {} are at their limit",
-                many.join(", ")
-            ),
+            [one] => format!("{}: {one} is at its limit", super::WAITING),
+            many => format!("{}: {} are at their limit", super::WAITING, many.join(", ")),
         }
     }
 }

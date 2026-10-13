@@ -135,6 +135,9 @@ pub(crate) async fn run_loop(
         .await
         .context("getting a credential for git")?;
     let profile = app.settings.workspace.profile_for(&target.repo.path());
+    // The run's time counts from here: a wait for a sandbox host is part of
+    // it (#403).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs);
     stages::mark(store, run, Stage::Checkout, StageState::Running, "").await;
     let opening = open_workspace(
         app,
@@ -142,7 +145,7 @@ pub(crate) async fn run_loop(
         &facts,
         alone.is_some().then_some(commit),
         credential.clone(),
-        profile,
+        (profile, deadline),
     );
     // A setup can take minutes; a cancel does not wait for it. The
     // workspace dropped mid-setup destroys itself.
@@ -165,8 +168,9 @@ pub(crate) async fn run_loop(
         stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;
     }
 
-    let mut rounds =
-        Rounds::new(on, config, profile, &workspace, &diff, writer, credential)?.alone(alone);
+    let mut rounds = Rounds::new(on, config, profile, &workspace, &diff, writer, credential)?
+        .alone(alone)
+        .until(deadline);
     // Closed on every path; a run future that is dropped drops it instead,
     // and every backend destroys itself then too.
     let ended = rounds.run(facts, &diff, cancel).await;
@@ -189,7 +193,7 @@ async fn open_workspace(
     facts: &PullFacts,
     reviewed: Option<&CommitSha>,
     credential: Option<GitCredential>,
-    profile: &Profile,
+    (profile, deadline): (&Profile, tokio::time::Instant),
 ) -> anyhow::Result<Arc<dyn Workspace>> {
     let dir =
         ScratchDir::new(&format!("henk-loop-{run}")).context("making the checkout directory")?;
@@ -207,7 +211,7 @@ async fn open_workspace(
         }
     }
     .context("checking out the pull request")?;
-    crate::workspace::open_prepared(app, run, &checkout, profile).await
+    crate::workspace::open_prepared(app, run, &checkout, profile, Some(deadline)).await
 }
 
 /// The loop's state across rounds.
@@ -619,6 +623,13 @@ impl<'a> Rounds<'a> {
             session.set_timeout(limit);
         }
         None
+    }
+
+    /// The run's time limit ends at `deadline`, taken before its workspace
+    /// opened, so a wait for one counts (#403).
+    fn until(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// The reviewer reviews alone, without an executor, when `why` says why.

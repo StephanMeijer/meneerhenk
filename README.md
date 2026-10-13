@@ -829,6 +829,11 @@ How many at once (#403):
   host: goat (8) is at its limit`, then `got a sandbox host after 42s`).
   The queue is one for the pool: a run kept to `goat` that waits holds
   back the runs behind it.
+- The wait counts against the run's time limit (`[review.loop]` and
+  `[execution] run_timeout_secs`, `[planning] run_timeout_secs`): a review
+  or an execute run whose time runs out while it waits fails, saying it
+  waited for a sandbox host, and a plan goes on without its workspace.
+  Opening a workspace that doesn't wait isn't timed.
 - A workspace gives its place back when it's closed, when its run fails,
   and when a workspace that was being made is given up. A restart starts
   every host empty, after the sweep.

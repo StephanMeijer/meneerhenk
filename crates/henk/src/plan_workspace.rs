@@ -48,11 +48,14 @@ async fn fetched(
 /// `plan = true`: the repository at its default branch, set up as the
 /// profile says, never exported, with the profile's limits for `bash`, and
 /// which branch and commit it holds. Whatever fails is a warning on the run
-/// and the planner works without it; a cancelled plan stops waiting at once.
+/// and the planner works without it; a cancelled plan stops waiting at once,
+/// and one whose time runs out while its workspace opens, such as while it
+/// waits for a sandbox host, goes on without it (#403).
 pub async fn open_for_plan(
     app: &App,
     repo: &RepoRef,
     run: &RunId,
+    deadline: tokio::time::Instant,
     cancel: &CancellationToken,
 ) -> Option<PlanWorkspace> {
     let profile = app.settings.workspace.profile_for(&repo.path());
@@ -71,7 +74,7 @@ pub async fn open_for_plan(
             Arc::clone(&app.store),
             checkout.path().to_path_buf(),
             profile.clone(),
-            run.clone(),
+            (run.clone(), deadline),
             PLANNER.to_owned(),
         )
         .await;
@@ -136,19 +139,27 @@ async fn open_one(
     store: Arc<dyn RunStore>,
     source: PathBuf,
     profile: Profile,
-    run: RunId,
+    (run, deadline): (RunId, tokio::time::Instant),
     name: String,
 ) -> (String, anyhow::Result<Arc<dyn Workspace>>) {
-    let opened =
-        match crate::workspace::open_noted(&*provider, &*store, &run, &source, &profile).await {
-            Ok(opened) => opened,
-            Err(error) => {
-                return (
-                    name,
-                    Err(anyhow::Error::new(error).context("opening the workspace")),
-                );
-            }
-        };
+    let opened = match crate::workspace::open_noted(
+        &*provider,
+        &*store,
+        &run,
+        &source,
+        &profile,
+        Some(deadline),
+    )
+    .await
+    {
+        Ok(opened) => opened,
+        Err(error) => {
+            return (
+                name,
+                Err(anyhow::Error::new(error).context("opening the workspace")),
+            );
+        }
+    };
     crate::workspace::note_location(&*store, &run, &*opened).await;
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));

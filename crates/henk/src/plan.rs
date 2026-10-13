@@ -121,6 +121,7 @@ pub async fn run_plan(
         writer: Arc::clone(&writer),
         state: Mutex::new(PlanState::new(ChangeBudget::new(planning.change_budget))),
         sub_issue_cap: planning.sub_issue_cap,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(planning.run_timeout_secs),
     });
     let result = plan_body(
         app,
@@ -436,7 +437,14 @@ async fn plan_body(
     begin_stages(&*app.store, &context.run, request, context.model.as_str()).await;
     // The planner's own copy of the default branch, when the profile says
     // so; closed on every path out of here.
-    let workspace = open_for_plan(app, &request.target.repo, &context.run, &cancel).await;
+    let workspace = open_for_plan(
+        app,
+        &request.target.repo,
+        &context.run,
+        context.deadline,
+        &cancel,
+    )
+    .await;
     let result = plan_session(
         app,
         request,
@@ -673,7 +681,7 @@ async fn plan_session(
         .with_continuation(reviewer_continuation(Arc::clone(&handoff))),
         planner_round: Duration::from_secs(planner_round),
         reviewer_round: Duration::from_secs(reviewer_round),
-        deadline: tokio::time::Instant::now() + Duration::from_secs(planning.run_timeout_secs),
+        deadline: context.deadline,
         round: 0,
     };
     let issue = IssueMaterial {
