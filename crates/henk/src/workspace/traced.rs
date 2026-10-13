@@ -8,7 +8,7 @@ use std::time::Duration;
 use henk_domain::path::WorkspacePath;
 use henk_domain::run::RunId;
 use henk_store::RunStore;
-use tracing::warn;
+use tracing::{Level, debug, info, warn};
 
 use henk_domain::ignore::PathFilter;
 
@@ -104,6 +104,94 @@ fn line(argv: &[String], result: &Result<ExecResult, WorkspaceError>) -> String 
     }
 }
 
+/// A command that ran this long is logged at INFO though it succeeded.
+const LONG: Duration = Duration::from_mins(1);
+/// The most of a command's text a log line holds.
+const COMMAND_CHARS: usize = 200;
+/// The end of a command's output a log line holds: lines, then bytes.
+const TAIL_LINES: usize = 20;
+const TAIL_BYTES: usize = 2_000;
+
+/// How loudly a command is logged (#345): a command stopped at its limit
+/// warns, one that failed or ran a minute or more informs, the rest is
+/// debug.
+fn level(done: &ExecResult) -> Level {
+    if done.timed_out {
+        Level::WARN
+    } else if done.code != Some(0) || done.duration >= LONG {
+        Level::INFO
+    } else {
+        Level::DEBUG
+    }
+}
+
+/// The last `lines` lines of `output`, at most `bytes` of them, cut on a
+/// character boundary.
+fn tail(output: &str, lines: usize, bytes: usize) -> &str {
+    let output = output.trim_end();
+    let mut start = output
+        .rmatch_indices('\n')
+        .nth(lines.saturating_sub(1))
+        .map_or(0, |(at, _)| at + 1);
+    start = start.max(output.len().saturating_sub(bytes));
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    output.get(start..).unwrap_or_default()
+}
+
+/// The command as a log field: its words joined, control characters
+/// escaped, at most [`COMMAND_CHARS`] characters.
+fn command_text(argv: &[String]) -> String {
+    let joined = crate::runs::terminal_safe(&argv.join(" ")).replace('\n', "\\n");
+    if joined.chars().count() <= COMMAND_CHARS {
+        return joined;
+    }
+    let mut cut: String = joined.chars().take(COMMAND_CHARS).collect();
+    cut.push('…');
+    cut
+}
+
+impl Traced {
+    /// Logs one command (#345): what the run's timeline holds, in Henk's
+    /// own log, since a workspace's commands never reach its Pod's log.
+    fn log(&self, argv: &[String], done: &ExecResult) {
+        let run = self.run.as_str();
+        let session = self.label.as_deref().unwrap_or("");
+        let at = self.inner.location();
+        let workspace = at.as_deref().unwrap_or("");
+        let command = command_text(argv);
+        let exit = if done.timed_out {
+            "timeout".to_owned()
+        } else {
+            done.code
+                .map_or_else(|| "signal".to_owned(), |code| code.to_string())
+        };
+        let duration_ms = u64::try_from(done.duration.as_millis()).unwrap_or(u64::MAX);
+        let output = tail(&done.output, TAIL_LINES, TAIL_BYTES);
+        macro_rules! at_level {
+            ($macro:ident) => {
+                $macro!(
+                    run,
+                    session,
+                    workspace,
+                    command,
+                    exit,
+                    duration_ms,
+                    timed_out = done.timed_out,
+                    output,
+                    "workspace command"
+                )
+            };
+        }
+        match level(done) {
+            Level::WARN => at_level!(warn),
+            Level::INFO => at_level!(info),
+            _ => at_level!(debug),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Workspace for Traced {
     async fn exec(
@@ -120,22 +208,34 @@ impl Workspace for Traced {
         if let Err(error) = self.store.event(&self.run, "info", &text).await {
             warn!(%error, "could not record a command");
         }
-        if let Err(error) = &result
-            && matches!(
-                error,
-                WorkspaceError::Backend(_) | WorkspaceError::Unreachable(_)
-            )
-        {
+        match &result {
+            Ok(done) => self.log(argv, done),
             // On the timeline already, as the exec line; logged here.
-            let at = self.inner.location();
-            warn!(
+            Err(error)
+                if matches!(
+                    error,
+                    WorkspaceError::Backend(_) | WorkspaceError::Unreachable(_)
+                ) =>
+            {
+                let at = self.inner.location();
+                warn!(
+                    run = %self.run,
+                    session = self.label.as_deref().unwrap_or(""),
+                    workspace = at.as_deref().unwrap_or(""),
+                    operation = "exec",
+                    %error,
+                    "workspace operation failed"
+                );
+            }
+            // The model's own mistake, such as a directory that is not
+            // there: an answer, not a failure.
+            Err(error) => debug!(
                 run = %self.run,
                 session = self.label.as_deref().unwrap_or(""),
-                workspace = at.as_deref().unwrap_or(""),
-                operation = "exec",
+                command = command_text(argv),
                 %error,
-                "workspace operation failed"
-            );
+                "workspace command refused"
+            ),
         }
         result
     }
@@ -384,5 +484,57 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    fn done(code: Option<i32>, secs: u64, timed_out: bool) -> ExecResult {
+        ExecResult {
+            code,
+            timed_out,
+            output: String::new(),
+            duration: Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn a_command_is_logged_as_loudly_as_it_matters() {
+        assert_eq!(level(&done(Some(0), 2, false)), Level::DEBUG);
+        assert_eq!(level(&done(Some(1), 2, false)), Level::INFO, "failed");
+        assert_eq!(level(&done(None, 2, false)), Level::INFO, "a signal");
+        assert_eq!(level(&done(Some(0), 75, false)), Level::INFO, "long");
+        assert_eq!(level(&done(None, 600, true)), Level::WARN, "at its limit");
+    }
+
+    #[test]
+    fn the_log_holds_the_end_of_the_output() {
+        let output = (1..=30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let kept = tail(&output, 20, 2_000);
+        assert!(
+            kept.starts_with("line 11\n") && kept.ends_with("line 30"),
+            "{kept}"
+        );
+        assert_eq!(tail("", 20, 2_000), "");
+        assert_eq!(tail("one line", 20, 2_000), "one line");
+        let wide = "é".repeat(2_000);
+        let kept = tail(&wide, 20, 2_001);
+        assert!(
+            kept.len() <= 2_001 && kept.chars().all(|c| c == 'é'),
+            "cut on a character"
+        );
+    }
+
+    #[test]
+    fn a_long_or_odd_command_is_cut_and_escaped() {
+        let argv = vec!["bash".to_owned(), "-c".to_owned(), "x".repeat(300)];
+        let text = command_text(&argv);
+        assert_eq!(text.chars().count(), 201);
+        assert!(
+            text.starts_with("bash -c xxx") && text.ends_with('…'),
+            "{text}"
+        );
+        let odd = command_text(&["printf".to_owned(), "a\u{1b}[2Jb\nc".to_owned()]);
+        assert_eq!(odd, "printf a\\u{1b}[2Jb\\nc");
     }
 }

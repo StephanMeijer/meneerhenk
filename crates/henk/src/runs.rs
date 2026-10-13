@@ -227,7 +227,7 @@ pub fn transcript_text(body: &str) -> Result<String, serde_json::Error> {
 /// escape sequence in them would reach the operator's terminal as a
 /// command: a changed title, hidden lines, a clipboard write. What is
 /// stored is left as it is.
-fn terminal_safe(text: &str) -> String {
+pub(crate) fn terminal_safe(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_control() && c != '\n' && c != '\t' {

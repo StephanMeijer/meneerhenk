@@ -625,6 +625,20 @@ their links are posted on the platforms. An
 event and its outcomes are on the dashboard at `/dashboard/events/{id}`, a
 run and the events that led to it at `/dashboard/runs/{id}`.
 
+A workspace's commands run over `pods/exec` or ssh, so they never reach a
+sandbox Pod's own log: `kubectl logs` on one stays empty. Henk logs each
+command himself (#345), as `workspace command`.
+- **Fields:** `run`, `session`, `workspace` (the Pod or sandbox host),
+  `command` (up to 200 characters), `exit` (a code, `signal` or
+  `timeout`), `duration_ms` and `output`. `output` is the last 20 lines,
+  at most 2 KB.
+- **Levels:**
+  - WARN for a command stopped at its time limit;
+  - INFO for one that failed or ran a minute or more;
+  - DEBUG otherwise.
+- **Workspace failures:** a failure of the workspace itself is logged as
+  `workspace operation failed` (#339).
+
 ### Taking an issue to a pull request
 
 With `[execution]` configured, a colleague can ask Henk to take an open
