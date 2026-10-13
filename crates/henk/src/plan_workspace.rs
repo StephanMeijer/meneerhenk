@@ -60,7 +60,7 @@ pub async fn open_for_plan(
         return None;
     }
     let opening = async {
-        let writer = app.push_writer(repo.platform())?;
+        let writer = app.push_writer(repo)?;
         let head = writer
             .repo_head(repo)
             .await
@@ -148,6 +148,7 @@ async fn open_one(
             );
         }
     };
+    crate::workspace::note_location(&*store, &run, &*opened).await;
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
     match setup::prepare(&traced, &profile).await {

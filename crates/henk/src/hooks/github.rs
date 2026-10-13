@@ -8,7 +8,8 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use henk_events::{EventBus, EventSource, Hook, parse_github};
+use henk_events::{EventBus, EventSource, Hook, installation_of, parse_github};
+use henk_platform::github::Installations;
 use henk_platform::webhook::verify_github_signature;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
@@ -20,13 +21,27 @@ use super::{HttpHook, new_event, publish};
 pub struct GitHubHook {
     secret: Option<SecretString>,
     bus: Arc<EventBus>,
+    /// Where a delivery's installation is remembered for its account, so
+    /// the work it starts acts for that installation without a lookup.
+    installations: Option<Arc<Installations>>,
 }
 
 impl GitHubHook {
     /// Builds the hook. Without a secret the route answers 503.
     #[must_use]
     pub fn new(secret: Option<SecretString>, bus: Arc<EventBus>) -> Self {
-        Self { secret, bus }
+        Self {
+            secret,
+            bus,
+            installations: None,
+        }
+    }
+
+    /// Remembers each delivery's installation in `installations`.
+    #[must_use]
+    pub fn with_installations(mut self, installations: Option<Arc<Installations>>) -> Self {
+        self.installations = installations;
+        self
     }
 }
 
@@ -74,6 +89,11 @@ async fn receive(State(hook): State<Arc<GitHubHook>>, headers: HeaderMap, body: 
             return (StatusCode::BAD_REQUEST, format!("not JSON: {error}")).into_response();
         }
     };
+    if let (Some(installations), Some((owner, id))) =
+        (&hook.installations, installation_of(&payload))
+    {
+        installations.remember(&owner, id);
+    }
     let kind = parse_github(&event_name, &payload);
     let event = new_event(EventSource::GitHubWebhook { delivery }, kind, Some(payload));
     info!(event = %event.id, github_event = %event_name, kind = event.kind.name(), "GitHub webhook");

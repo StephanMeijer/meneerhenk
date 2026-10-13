@@ -1,0 +1,10 @@
+{
+  "id": "resp_cut",
+  "object": "response",
+  "status": "incomplete",
+  "incomplete_details": {"reason": "max_output_tokens"},
+  "output": [
+    {"type": "reasoning", "id": "rs_9", "summary": [], "encrypted_content": "gAAAAB-cut"}
+  ],
+  "usage": {"input_tokens": 50, "output_tokens": 16, "output_tokens_details": {"reasoning_tokens": 16}}
+}

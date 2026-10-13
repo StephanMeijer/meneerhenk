@@ -3,7 +3,7 @@
 //! No credential lives here (§8.4). Every secret is named by the environment
 //! variable that holds it and read by the component that needs it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -12,12 +12,14 @@ use serde::Deserialize;
 use henk_domain::allowlist::{AllowRule, Allowlist, Platform, RepoRef};
 use henk_domain::commit::{CommitPerson, Email, IdentityError, TrailerPolicy};
 use henk_domain::discord::HenkIdentity;
-use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person};
+use henk_domain::identity::{
+    DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person, RequesterId,
+};
 use henk_domain::mail::EmailAddress;
 use henk_domain::role::Role;
 use henk_domain::skill::SkillName;
 use henk_domain::workspace::{BackendKind, Limits, Profile, Toolchain, WorkspacePolicy};
-use henk_llm::{Effort, MaxTokensParam, Provider, RetryPolicy};
+use henk_llm::{Api, Effort, MaxTokensParam, Provider, RetryPolicy};
 use henk_mcp::McpServerConfig;
 
 /// An example configuration, printed by `henk config example`.
@@ -160,8 +162,8 @@ fn validate_mcp_serve(config: &McpServeConfig) -> Result<(), ConfigError> {
     if config.enabled && config.tokens.is_empty() {
         return fail("mcp_server.enabled needs at least one [[mcp_server.tokens]]".to_owned());
     }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut envs = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut envs = BTreeSet::new();
     for token in &config.tokens {
         let fine = !token.name.is_empty()
             && token
@@ -388,8 +390,15 @@ pub struct AllowlistConfig {
 pub struct GitHubConfig {
     /// App id.
     pub app_id: u64,
-    /// Installation id.
-    pub installation_id: u64,
+    /// The one installation Henk may act for. Without it or
+    /// `installations`, Henk acts for every installation of the App the
+    /// allowlist lets it work in.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+    /// The installations Henk may act for, when it serves several accounts
+    /// but not every installation of the App.
+    #[serde(default)]
+    pub installations: Option<Vec<u64>>,
     /// Env var holding the path to the PEM private key.
     #[serde(default = "default_github_key_env")]
     pub private_key_path_env: String,
@@ -402,6 +411,54 @@ pub struct GitHubConfig {
     #[serde(default = "default_github_mcp")]
     pub mcp_server: String,
 }
+
+impl GitHubConfig {
+    /// The installations Henk may act for; `None` is every one.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<BTreeSet<u64>> {
+        match (self.installation_id, &self.installations) {
+            (Some(id), _) => Some(BTreeSet::from([id])),
+            (None, Some(ids)) => Some(ids.iter().copied().collect()),
+            (None, None) => None,
+        }
+    }
+
+    fn validate(&self, mcp: &BTreeMap<String, McpServerConfig>) -> Result<(), ConfigError> {
+        let bad = |message: String| Err(ConfigError::GitHub(message));
+        match (self.installation_id, &self.installations) {
+            (Some(_), Some(_)) => {
+                return bad("github: set installation_id or installations, not both".to_owned());
+            }
+            (_, Some(ids)) if ids.is_empty() => {
+                return bad(
+                    "github.installations is empty; leave it out to serve every installation"
+                        .to_owned(),
+                );
+            }
+            _ => {}
+        }
+        if self.installation_id == Some(0) || self.installations.iter().flatten().any(|&id| id == 0)
+        {
+            return bad("github: 0 is not an installation id".to_owned());
+        }
+        if let Some(server) = mcp.get(&self.mcp_server) {
+            for key in MCP_INSTALLATION_ENV {
+                if server.env.contains_key(key) {
+                    return bad(format!(
+                        "[mcp.{}] sets {key}; Henk sets it for each session, to the \
+                         installation of the repository the session reads, so remove it",
+                        self.mcp_server
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The environment the GitHub MCP server signs in as an App installation
+/// with. Henk sets both for each session it starts (#378).
+pub const MCP_INSTALLATION_ENV: [&str; 2] = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID"];
 
 fn default_github_key_env() -> String {
     "GITHUB_APP_PRIVATE_KEY_PATH".to_owned()
@@ -447,6 +504,11 @@ fn default_gitlab_write_mcp() -> String {
 pub struct EndpointFileConfig {
     /// Wire format.
     pub provider: Provider,
+    /// Which OpenAI API an `openai` endpoint is called through:
+    /// `chat_completions` (the default, which every OpenAI-compatible
+    /// server speaks) or `responses` (#365).
+    #[serde(default)]
+    pub api: Option<Api>,
     /// Base URL.
     pub base_url: String,
     /// Env var with the API key.
@@ -481,9 +543,10 @@ pub struct ModelFileConfig {
     /// Per-attempt timeout in seconds.
     #[serde(default = "default_model_timeout_secs")]
     pub timeout_secs: u64,
-    /// Which parameter carries the output cap (OpenAI style only).
+    /// Which parameter carries the output cap (OpenAI Chat Completions
+    /// only).
     #[serde(default)]
-    pub max_tokens_param: MaxTokensParam,
+    pub max_tokens_param: Option<MaxTokensParam>,
     /// Thinking effort (Anthropic style only): `low`, `medium`, `high`,
     /// `xhigh` or `max`. Left out, the model's own default applies.
     #[serde(default)]
@@ -907,7 +970,9 @@ pub struct ExecutorConfig {
     /// The executor runs each repository's own checks with `bash`.
     #[serde(default)]
     pub check_commands: Option<toml::Value>,
-    /// The Team Lead on whose behalf CLI and API runs push.
+    /// The Team Lead the executor role belongs to. It credits nobody: a
+    /// commit names only the requester who asked, when Henk knows them by
+    /// a stable id, and no one otherwise (#399).
     pub requester_id: DiscordUserId,
     /// Who Henk commits as, author and committer alike. Absent: the App's
     /// own `meneer-henk[bot]` noreply address.
@@ -992,12 +1057,6 @@ impl ExecutorConfig {
             .map(CommitIdentityConfig::person)
             .transpose()
     }
-
-    /// Every trailer setting in force: the default, then each repository.
-    fn policies(&self) -> impl Iterator<Item = TrailerPolicy> + '_ {
-        let base = self.trailers.over(TrailerPolicy::default());
-        std::iter::once(base).chain(self.repositories.values().map(move |c| c.over(base)))
-    }
 }
 
 fn default_max_changed_files() -> usize {
@@ -1038,6 +1097,10 @@ pub struct WorkspaceConfig {
     /// Whether the planner gets a workspace too (#172), at the default
     /// branch.
     pub plan: bool,
+    /// The sandbox hosts the default profile may use (ssh backend, #389);
+    /// empty: every host.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     /// Named profiles; what they leave out comes from the default.
     pub profiles: BTreeMap<String, ProfileConfig>,
     /// Repository, as `owner/name`, to profile name.
@@ -1149,17 +1212,23 @@ fn is_dns_label(name: &str) -> bool {
         && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
 }
 
-/// The sandbox host of the `ssh` backend: where it is, who Henk signs in
-/// as, where his key is and which host key to expect. No secret is in this
-/// file (§8.4): the key's path comes from the variable `key_path_env` names.
+/// The sandbox hosts of the `ssh` backend: where each is, who Henk signs
+/// in as, where his key is and which host key to expect. No secret is in
+/// this file (§8.4): a key's path comes from the variable `key_path_env`
+/// names.
+///
+/// One host is written as before (`host`, `host_key`, `port`); several
+/// (#389) as `[workspace.ssh.hosts.<id>]`, with `user`, `port` and
+/// `key_path_env` here as the defaults each host may override.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshConfig {
-    /// Host name or address.
-    pub host: String,
-    /// SSH port.
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
+    /// The one host's name or address.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// SSH port: the one host's, or every host's default.
+    #[serde(default)]
+    pub port: Option<u16>,
     /// The user Henk signs in as: root, which Henk's own requests need to
     /// make and remove each run's user, or one with passwordless sudo.
     #[serde(default = "default_ssh_user")]
@@ -1167,8 +1236,50 @@ pub struct SshConfig {
     /// The variable holding the path of Henk's private key.
     #[serde(default = "default_ssh_key_path_env")]
     pub key_path_env: String,
-    /// The host's public key as an OpenSSH line (`ssh-ed25519 AAAA...`),
+    /// The one host's public key as an OpenSSH line (`ssh-ed25519 AAAA...`),
     /// pinned: any other key is refused, and there is no trust on first use.
+    #[serde(default)]
+    pub host_key: Option<String>,
+    /// Several hosts, by id: a workspace opens on one of them.
+    #[serde(default)]
+    pub hosts: BTreeMap<String, SshHostConfig>,
+}
+
+/// One sandbox host of several (#389).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshHostConfig {
+    /// Host name or address.
+    pub host: String,
+    /// SSH port; `[workspace.ssh].port`, or 22.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The user Henk signs in as; `[workspace.ssh].user`.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// The variable holding the path of Henk's key for this host;
+    /// `[workspace.ssh].key_path_env`.
+    #[serde(default)]
+    pub key_path_env: Option<String>,
+    /// The host's public key as an OpenSSH line, pinned.
+    pub host_key: String,
+}
+
+/// One sandbox host with every default applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshHost {
+    /// Its id: from `[workspace.ssh.hosts.<id>]`, or `default` for the one
+    /// host written the old way.
+    pub id: String,
+    /// Host name or address.
+    pub host: String,
+    /// SSH port.
+    pub port: u16,
+    /// The user Henk signs in as.
+    pub user: String,
+    /// The variable holding the path of Henk's private key.
+    pub key_path_env: String,
+    /// The pinned host key line.
     pub host_key: String,
 }
 
@@ -1184,11 +1295,57 @@ fn default_ssh_key_path_env() -> String {
     "HENK_SANDBOX_KEY_PATH".to_owned()
 }
 
+/// The id of the one host written as `[workspace.ssh] host = ...`.
+pub const DEFAULT_SSH_HOST: &str = "default";
+
 impl SshConfig {
-    /// The sandbox host is usable, and present when a profile needs it.
+    /// Every host, defaults applied, in id order.
+    #[must_use]
+    pub fn hosts(&self) -> Vec<SshHost> {
+        let port = self.port.unwrap_or_else(default_ssh_port);
+        if let (Some(host), Some(host_key)) = (&self.host, &self.host_key) {
+            return vec![SshHost {
+                id: DEFAULT_SSH_HOST.to_owned(),
+                host: host.clone(),
+                port,
+                user: self.user.clone(),
+                key_path_env: self.key_path_env.clone(),
+                host_key: host_key.clone(),
+            }];
+        }
+        self.hosts
+            .iter()
+            .map(|(id, host)| SshHost {
+                id: id.clone(),
+                host: host.host.clone(),
+                port: host.port.unwrap_or(port),
+                user: host.user.clone().unwrap_or_else(|| self.user.clone()),
+                key_path_env: host
+                    .key_path_env
+                    .clone()
+                    .unwrap_or_else(|| self.key_path_env.clone()),
+                host_key: host.host_key.clone(),
+            })
+            .collect()
+    }
+
+    /// The sandbox hosts are usable, present when a profile needs one, and
+    /// every host a profile names is one of them.
     fn check(ssh: Option<&Self>, workspace: &WorkspacePolicy) -> Result<(), ConfigError> {
         match ssh {
-            Some(ssh) => ssh.validate(),
+            Some(ssh) => {
+                ssh.validate()?;
+                let ids: Vec<String> = ssh.hosts().into_iter().map(|h| h.id).collect();
+                for (name, profile) in workspace.named() {
+                    if let Some(unknown) = profile.hosts.iter().find(|h| !ids.contains(h)) {
+                        return Err(ConfigError::Workspace(format!(
+                            "workspace profile {name}: hosts names {unknown:?}, which is not a sandbox host ({})",
+                            ids.join(", ")
+                        )));
+                    }
+                }
+                Ok(())
+            }
             None if workspace
                 .named()
                 .any(|(_, profile)| profile.backend == BackendKind::Ssh) =>
@@ -1203,18 +1360,55 @@ impl SshConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
-        let refuse = |what: &str| Err(ConfigError::Workspace(format!("workspace.ssh: {what}")));
-        if self.host.trim().is_empty() {
-            return refuse("host is empty");
+        let refuse = |what: String| Err(ConfigError::Workspace(format!("workspace.ssh: {what}")));
+        let one = self.host.is_some() || self.host_key.is_some();
+        match (one, self.hosts.is_empty()) {
+            (true, false) => {
+                return refuse(
+                    "write one host (host, host_key) or several ([workspace.ssh.hosts.<id>]), not both"
+                        .to_owned(),
+                );
+            }
+            (false, true) => {
+                return refuse(
+                    "no host: set host and host_key, or [workspace.ssh.hosts.<id>]".to_owned(),
+                );
+            }
+            (true, true) if self.host.is_none() => return refuse("host is missing".to_owned()),
+            (true, true) if self.host_key.is_none() => {
+                return refuse("host_key is missing".to_owned());
+            }
+            _ => {}
         }
-        if self.user.trim().is_empty() {
-            return refuse("user is empty");
-        }
-        if self.key_path_env.trim().is_empty() {
-            return refuse("key_path_env names no variable");
-        }
-        if russh::keys::PublicKey::from_openssh(self.host_key.trim()).is_err() {
-            return refuse("host_key is not an OpenSSH public key line");
+        for host in self.hosts() {
+            let at = if one {
+                String::new()
+            } else {
+                format!("hosts.{}.", host.id)
+            };
+            if !host
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                || host.id.is_empty()
+            {
+                return refuse(format!(
+                    "host id {:?} must be lowercase letters, digits and -",
+                    host.id
+                ));
+            }
+            if host.host.trim().is_empty() {
+                return refuse(format!("{at}host is empty"));
+            }
+            if host.user.trim().is_empty() {
+                return refuse(format!("{at}user is empty"));
+            }
+            if host.key_path_env.trim().is_empty() {
+                return refuse(format!("{at}key_path_env names no variable"));
+            }
+            if russh::keys::PublicKey::from_openssh(host.host_key.trim()).is_err() {
+                return refuse(format!("{at}host_key is not an OpenSSH public key line"));
+            }
         }
         Ok(())
     }
@@ -1237,6 +1431,7 @@ impl Default for WorkspaceConfig {
             toolchain: profile.toolchain,
             review: profile.review,
             plan: profile.plan,
+            hosts: profile.hosts,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
             ssh: None,
@@ -1276,6 +1471,9 @@ pub struct ProfileConfig {
     pub review: Option<bool>,
     /// Whether the planner gets a workspace; the default's when not given.
     pub plan: Option<bool>,
+    /// The sandbox hosts it may use (ssh backend, #389); the default's when
+    /// not given.
+    pub hosts: Option<Vec<String>>,
 }
 
 /// The workspace settings, checked.
@@ -1324,6 +1522,7 @@ impl WorkspaceConfig {
             toolchain: self.toolchain,
             review: self.review,
             plan: self.plan,
+            hosts: self.hosts,
         };
         let profiles = self
             .profiles
@@ -1346,6 +1545,7 @@ impl WorkspaceConfig {
                     toolchain: p.toolchain.or(base.toolchain),
                     review: p.review.unwrap_or(base.review),
                     plan: p.plan.unwrap_or(base.plan),
+                    hosts: p.hosts.unwrap_or_else(|| base.hosts.clone()),
                 };
                 (name, profile)
             })
@@ -1520,6 +1720,9 @@ pub enum ConfigError {
     /// A skill or a reference to one is unusable.
     #[error("skills: {0}")]
     Skill(String),
+    /// The `[github]` section is unusable.
+    #[error("{0}")]
+    GitHub(String),
 }
 
 /// The configuration, validated and turned into domain values.
@@ -1627,6 +1830,9 @@ impl Config {
             validate_execution(execution, &self.roles)?;
         }
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
+        if let Some(github) = &self.github {
+            github.validate(&self.mcp)?;
+        }
         let skills_dir = self.skills.map(|s| s.dir);
         validate_skill_references(skills_dir.as_deref(), &self.roles)?;
         let committers = self
@@ -1909,6 +2115,12 @@ fn validate_endpoints(endpoints: &BTreeMap<String, EndpointFileConfig>) -> Resul
         if endpoint.api_key_env.trim().is_empty() {
             return fail("api_key_env is empty".to_owned());
         }
+        if endpoint.api.is_some() && endpoint.provider != Provider::OpenAi {
+            return fail(format!(
+                "api applies to provider \"openai\" only; {} has one API",
+                endpoint.provider.as_str()
+            ));
+        }
         for (name, value) in &endpoint.headers {
             if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
                 return fail(format!("header name {name:?} is not a valid header name"));
@@ -1963,6 +2175,15 @@ fn validate_models(
             return Err(ConfigError::Model(
                 id.clone(),
                 "model name is empty".to_owned(),
+            ));
+        }
+        if model.max_tokens_param.is_some() && endpoint.api == Some(Api::Responses) {
+            return Err(ConfigError::Model(
+                id.clone(),
+                format!(
+                    "max_tokens_param applies to Chat Completions only; endpoint {} uses the Responses API, which always sends max_output_tokens",
+                    model.endpoint
+                ),
             ));
         }
         if model.effort.is_some() && endpoint.provider != Provider::Anthropic {
@@ -2193,6 +2414,38 @@ fn build_allowlist(config: &AllowlistConfig) -> Result<Allowlist, ConfigError> {
 }
 
 impl Settings {
+    /// What a commit on `platform` credits `requester` with (#399): their
+    /// `[[people]]` entry, found by the id they asked with, or else the
+    /// platform account they asked with when that is `platform`'s own. An
+    /// MCP client is no person and gets nothing.
+    #[must_use]
+    pub fn committer_for(&self, requester: &RequesterId, platform: Platform) -> Option<Committer> {
+        let by = |found: fn(&Committer) -> Option<u64>, id: u64| {
+            self.committers
+                .values()
+                .find(|c| found(c) == Some(id))
+                .cloned()
+        };
+        match (requester, platform) {
+            (RequesterId::Discord(id), _) => self.committers.get(id).cloned(),
+            (RequesterId::GitHub(id), Platform::GitHub) => {
+                Some(by(|c| c.github_id, *id).unwrap_or(Committer {
+                    github_id: Some(*id),
+                    ..Committer::default()
+                }))
+            }
+            (RequesterId::GitLab(id), Platform::GitLab) => {
+                Some(by(|c| c.gitlab_id, *id).unwrap_or(Committer {
+                    gitlab_id: Some(*id),
+                    ..Committer::default()
+                }))
+            }
+            (RequesterId::GitHub(id), Platform::GitLab) => by(|c| c.github_id, *id),
+            (RequesterId::GitLab(id), Platform::GitHub) => by(|c| c.gitlab_id, *id),
+            (RequesterId::Mcp(_), _) => None,
+        }
+    }
+
     /// The client configuration of endpoint `id` alone, with the key read
     /// from the environment: for what is the endpoint's business, such as
     /// listing the models it serves (#368). The model fields hold defaults.
@@ -2214,6 +2467,7 @@ impl Settings {
             .ok_or_else(|| format!("environment variable {} is not set", endpoint.api_key_env))?;
         Ok(henk_llm::ModelConfig {
             provider: endpoint.provider,
+            api: endpoint.api.unwrap_or_default(),
             base_url: endpoint.base_url.clone(),
             api_key: key.into(),
             model: String::new(),
@@ -2251,7 +2505,7 @@ impl Settings {
             model: model.model.clone(),
             max_tokens: model.max_tokens,
             timeout: Duration::from_secs(model.timeout_secs),
-            max_tokens_param: model.max_tokens_param,
+            max_tokens_param: model.max_tokens_param.unwrap_or_default(),
             effort: model.effort,
             prompt_cache: model.prompt_cache,
             ..self.endpoint_config(&model.endpoint, lookup_env)?
@@ -2371,6 +2625,35 @@ impl Settings {
         }
     }
 
+    /// The sandbox hosts of the ssh backend, and which profiles keep to
+    /// which (#389).
+    fn describe_sandbox_hosts(&self, out: &mut String) {
+        if let Some(ssh) = &self.workspace_ssh {
+            let hosts = ssh.hosts();
+            for host in &hosts {
+                let name = if hosts.len() == 1 && host.id == DEFAULT_SSH_HOST {
+                    String::new()
+                } else {
+                    format!(" {}", host.id)
+                };
+                let _ = writeln!(
+                    out,
+                    "  sandbox host{name}: {}@{}:{} (key from ${})",
+                    host.user, host.host, host.port, host.key_path_env
+                );
+            }
+            for (name, profile) in self.workspace.named() {
+                if profile.backend == BackendKind::Ssh && !profile.hosts.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "  profile {name} uses sandbox hosts {}",
+                        profile.hosts.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
     /// The workspace profiles, for [`Self::describe`], with a warning for
     /// every backend that is not isolated.
     fn describe_workspace(&self, out: &mut String) {
@@ -2427,13 +2710,7 @@ impl Settings {
                 weak.push(profile.backend);
             }
         }
-        if let Some(ssh) = &self.workspace_ssh {
-            let _ = writeln!(
-                out,
-                "  sandbox host: {}@{}:{} (key from ${})",
-                ssh.user, ssh.host, ssh.port, ssh.key_path_env
-            );
-        }
+        self.describe_sandbox_hosts(out);
         if let Some(kube) = &self.workspace_kubernetes {
             let _ = writeln!(
                 out,
@@ -2460,9 +2737,15 @@ impl Settings {
                 BackendKind::Ssh => writeln!(
                     out,
                     "Warning: the ssh backend runs each run as its own user on {}; runs share its kernel, /tmp and network, and {unenforced} limits are not enforced.",
-                    self.workspace_ssh
-                        .as_ref()
-                        .map_or("the sandbox host", |s| s.host.as_str())
+                    self.workspace_ssh.as_ref().map_or_else(
+                        || "the sandbox host".to_owned(),
+                        |s| and_list(
+                            &s.hosts()
+                                .iter()
+                                .map(|h| h.host.as_str())
+                                .collect::<Vec<_>>()
+                        )
+                    )
                 ),
                 BackendKind::Kubernetes => Ok(()),
             };
@@ -2502,10 +2785,10 @@ impl Settings {
         if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
                 out,
-                "Pushes:          for Team Lead {}; {} files",
-                executor.requester_id, executor.max_changed_files
+                "Pushes:          {} files; the requester's trailers only for one Henk knows by id",
+                executor.max_changed_files
             );
-            self.describe_commits(executor, out);
+            Self::describe_commits(executor, out);
         }
         self.describe_skills(out);
     }
@@ -2586,7 +2869,7 @@ impl Settings {
     /// Henk's commit identity and trailers, for [`Self::describe`], with a
     /// warning when a requester trailer is on but the requester has no
     /// account to credit.
-    fn describe_commits(&self, address: &ExecutorConfig, out: &mut String) {
+    fn describe_commits(address: &ExecutorConfig, out: &mut String) {
         let identity = match address.henk_identity() {
             Ok(Some(person)) => person.to_string(),
             Ok(None) => "the GitHub App's noreply address".to_owned(),
@@ -2606,19 +2889,6 @@ impl Settings {
                 let policy = address.trailer_policy(&repo);
                 let _ = writeln!(out, "  {key}: {}", describe_policy(policy));
             }
-        }
-        let credits_requester = address
-            .policies()
-            .any(|p| p.requester_coauthor || p.requester_signoff);
-        let creditable = self.committers.get(&address.requester_id).is_some_and(|c| {
-            c.github_id.is_some() || c.gitlab_id.is_some() || c.commit_as.is_some()
-        });
-        if credits_requester && !creditable {
-            let _ = writeln!(
-                out,
-                "Warning:         requester {} has no github_id, gitlab_id or commit_email in [[people]]; their commits get no requester trailers",
-                address.requester_id
-            );
         }
     }
 
@@ -2667,9 +2937,16 @@ impl Settings {
                 1 => ", 1 header".to_owned(),
                 n => format!(", {n} headers"),
             };
+            let api = match endpoint.provider {
+                Provider::OpenAi => format!(
+                    " ({})",
+                    endpoint.api.unwrap_or_default().as_str().replace('_', " ")
+                ),
+                Provider::Anthropic => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "  {id}: {} at {} (key from ${}{headers})",
+                "  {id}: {}{api} at {} (key from ${}{headers})",
                 endpoint.provider.as_str(),
                 endpoint.base_url,
                 endpoint.api_key_env
@@ -2763,10 +3040,21 @@ impl Settings {
             let _ = writeln!(out, "  {alias}: {how}");
         }
         if let Some(github) = &self.github {
+            let installations = github.ceiling().map_or_else(
+                || "every installation the allowlist reaches".to_owned(),
+                |ids| {
+                    let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+                    format!(
+                        "installation{} {}",
+                        if ids.len() == 1 { "" } else { "s" },
+                        ids.join(", ")
+                    )
+                },
+            );
             let _ = writeln!(
                 out,
-                "GitHub App:      id {} installation {} as {}",
-                github.app_id, github.installation_id, github.bot_login
+                "GitHub App:      id {} {installations} as {}",
+                github.app_id, github.bot_login
             );
         }
         if let Some(gitlab) = &self.gitlab {
@@ -3556,32 +3844,40 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn a_requester_without_an_account_is_warned_about() {
-        let warning = "Warning:         requester 3 has no github_id";
-        let described = address("", "").unwrap().describe();
-        assert!(described.contains(warning), "{described}");
-        let off = address(
-            "",
-            "[roles.executor.trailers]\nrequester_coauthor = false\n",
-        )
-        .unwrap()
-        .describe();
-        assert!(!off.contains(warning), "nothing to credit: {off}");
-        let on_somewhere = address(
-            "",
-            "[roles.executor.trailers]\nrequester_coauthor = false\n[roles.executor.repositories.\"docspec/r\"]\nrequester_signoff = true\n",
-        )
-        .unwrap()
-        .describe();
-        assert!(on_somewhere.contains(warning), "{on_somewhere}");
-        for person in [
-            "github_id = 77\n",
-            "gitlab_id = 77\n",
-            "commit_name = \"Lead\"\ncommit_email = \"lead@example.com\"\n",
-        ] {
-            let described = address(person, "").unwrap().describe();
-            assert!(!described.contains(warning), "{person}: {described}");
-        }
+    fn a_commit_credits_the_requester_who_asked_never_the_configured_one() {
+        let settings = address("github_id = 77\ngitlab_id = 88\n", "").unwrap();
+        let described = settings.describe();
+        assert!(!described.contains("requester 3 has no"), "{described}");
+        let lead = Some(Committer {
+            github_id: Some(77),
+            gitlab_id: Some(88),
+            commit_as: None,
+        });
+        let credited = |requester: &str, platform| {
+            settings.committer_for(&RequesterId::parse(requester).unwrap(), platform)
+        };
+        assert_eq!(credited("discord:3", Platform::GitHub), lead);
+        assert_eq!(
+            credited("github:77", Platform::GitLab),
+            lead,
+            "by their entry"
+        );
+        assert_eq!(
+            credited("gitlab:88", Platform::GitHub),
+            lead,
+            "by their entry"
+        );
+        // Someone with no entry is credited on their own platform only.
+        assert_eq!(
+            credited("github:5", Platform::GitHub),
+            Some(Committer {
+                github_id: Some(5),
+                ..Committer::default()
+            })
+        );
+        assert_eq!(credited("github:5", Platform::GitLab), None);
+        assert_eq!(credited("discord:9", Platform::GitHub), None);
+        assert_eq!(credited("mcp:claude", Platform::GitHub), None);
     }
 
     #[test]
@@ -3882,6 +4178,125 @@ github_owners = ["docspec"]
         key.public_key().to_openssh().unwrap()
     }
 
+    fn pool(hosts: &str, profiles: &str) -> Result<Settings, ConfigError> {
+        database(&format!(
+            "[workspace]\n{profiles}[workspace.ssh]\nuser = \"henk\"\n{hosts}"
+        ))
+    }
+
+    fn pooled(id: &str, extra: &str) -> String {
+        format!(
+            "[workspace.ssh.hosts.{id}]\nhost = \"{id}.example\"\nhost_key = \"{}\"\n{extra}",
+            host_key_line()
+        )
+    }
+
+    #[test]
+    fn several_sandbox_hosts_take_the_defaults_they_do_not_set() {
+        let hosts = format!(
+            "{}{}",
+            pooled("goat", "port = 2222\n"),
+            pooled("fox", "user = \"root\"\nkey_path_env = \"FOX_KEY\"\n")
+        );
+        let profiles = "[workspace.profiles.big]\nbackend = \"ssh\"\nhosts = [\"goat\"]\n[workspace.profiles.any]\nbackend = \"ssh\"\n";
+        let settings = pool(&hosts, profiles).unwrap();
+        let hosts = settings.workspace_ssh.as_ref().unwrap().hosts();
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|h| (
+                    h.id.as_str(),
+                    h.host.as_str(),
+                    h.port,
+                    h.user.as_str(),
+                    h.key_path_env.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("fox", "fox.example", 22, "root", "FOX_KEY"),
+                (
+                    "goat",
+                    "goat.example",
+                    2222,
+                    "henk",
+                    "HENK_SANDBOX_KEY_PATH"
+                ),
+            ]
+        );
+        assert_eq!(
+            settings
+                .workspace
+                .named()
+                .find(|(n, _)| *n == "big")
+                .unwrap()
+                .1
+                .hosts,
+            ["goat"]
+        );
+        let text = settings.describe();
+        for line in [
+            "  sandbox host fox: root@fox.example:22 (key from $FOX_KEY)",
+            "  sandbox host goat: henk@goat.example:2222 (key from $HENK_SANDBOX_KEY_PATH)",
+            "  profile big uses sandbox hosts goat",
+            "runs each run as its own user on fox.example and goat.example;",
+        ] {
+            assert!(text.contains(line), "{line}\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_pool_is_written_one_way_and_names_only_its_hosts() {
+        let refused = |hosts: &str, profiles: &str, says: &str| {
+            let error = pool(hosts, profiles).unwrap_err().to_string();
+            assert!(error.contains(says), "{says}: {error}");
+        };
+        let one = format!("host = \"h\"\nhost_key = \"{}\"\n", host_key_line());
+        refused(&format!("{one}{}", pooled("goat", "")), "", "not both");
+        refused("", "", "no host");
+        refused(&pooled("Goat", ""), "", "lowercase letters, digits and -");
+        refused(
+            &pooled("goat", ""),
+            "[workspace.profiles.big]\nbackend = \"ssh\"\nhosts = [\"fox\"]\n",
+            "hosts names \"fox\", which is not a sandbox host (goat)",
+        );
+        refused(
+            &pooled("goat", ""),
+            "[workspace.profiles.pods]\nbackend = \"host\"\nhosts = [\"goat\"]\n",
+            "not the host backend",
+        );
+        refused(
+            "[workspace.ssh.hosts.goat]\nhost = \"g\"\nhost_key = \"nope\"\n",
+            "",
+            "hosts.goat.host_key is not an OpenSSH public key line",
+        );
+    }
+
+    #[test]
+    fn a_default_profile_with_hosts_is_described_once_and_named_default() {
+        let settings = pool(
+            &pooled("goat", ""),
+            "backend = \"ssh\"\nhosts = [\"goat\"]\n",
+        )
+        .unwrap();
+        let text = settings.describe();
+        assert_eq!(text.matches("uses sandbox hosts goat").count(), 1, "{text}");
+        assert!(
+            text.contains("  profile default uses sandbox hosts goat"),
+            "{text}"
+        );
+
+        let error = pool(
+            &pooled("goat", ""),
+            "backend = \"ssh\"\nhosts = [\"fox\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("workspace profile default: hosts names \"fox\""),
+            "{error}"
+        );
+    }
+
     #[test]
     fn the_ssh_backend_needs_its_sandbox_host_and_says_what_it_shares() {
         let ssh = format!(
@@ -3889,14 +4304,19 @@ github_owners = ["docspec"]
             host_key_line()
         );
         let settings = database(&format!("[workspace]\n{ssh}")).unwrap();
-        let config = settings.workspace_ssh.as_ref().unwrap();
+        let hosts = settings.workspace_ssh.as_ref().unwrap().hosts();
         assert_eq!(
-            (
-                config.port,
-                config.user.as_str(),
-                config.key_path_env.as_str()
-            ),
-            (22, "root", "HENK_SANDBOX_KEY_PATH")
+            hosts
+                .iter()
+                .map(|h| (
+                    h.id.as_str(),
+                    h.port,
+                    h.user.as_str(),
+                    h.key_path_env.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [("default", 22, "root", "HENK_SANDBOX_KEY_PATH")],
+            "one host written the old way is a pool of one"
         );
         let text = settings.describe();
         assert!(text.contains("  sandbox: ssh, 600s per command"), "{text}");
@@ -4189,7 +4609,7 @@ github_owners = ["docspec"]
         );
         let said = settings.describe();
         for line in [
-            "Endpoints:\n  a: openai at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai at https://b.test/v1 (key from $KEY_B)\n",
+            "Endpoints:\n  a: openai (chat completions) at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai (chat completions) at https://b.test/v1 (key from $KEY_B)\n",
             "Models:\n  gpt-a: gpt-5.5 on a\n  gpt-b: gpt-5.5 on b\n",
             "warning: used by no role: gpt-a, gpt-b",
         ] {
@@ -4268,7 +4688,7 @@ github_owners = ["docspec"]
         assert!(
             settings
                 .describe()
-                .contains("  m: openai at https://x (key from $K)"),
+                .contains("  m: openai (chat completions) at https://x (key from $K)"),
             "config check names it as configured: {}",
             settings.describe()
         );
@@ -4299,6 +4719,115 @@ github_owners = ["docspec"]
         assert!(matches!(Config::parse(&bad), Err(ConfigError::Syntax(_))));
     }
 
+    fn on_api(endpoint_extra: &str, model_extra: &str) -> Result<Settings, ConfigError> {
+        let text = format!(
+            "{MINIMAL}\n[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n{endpoint_extra}[models.m]\nendpoint = \"o\"\nmodel = \"gpt\"\n{model_extra}"
+        );
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn an_openai_endpoint_speaks_chat_completions_unless_it_says_responses() {
+        let api = |settings: &Settings| {
+            settings
+                .client_config("m", |_| Some("k".to_owned()))
+                .unwrap()
+                .api
+        };
+        let default = on_api("", "").unwrap();
+        assert_eq!(api(&default), Api::ChatCompletions);
+        assert!(
+            default
+                .describe()
+                .contains("  o: openai (chat completions) at https://x.test/v1"),
+            "{}",
+            default.describe()
+        );
+        let responses = on_api("api = \"responses\"\n", "").unwrap();
+        assert_eq!(api(&responses), Api::Responses);
+        assert!(
+            responses
+                .describe()
+                .contains("  o: openai (responses) at https://x.test/v1")
+        );
+        assert_eq!(
+            api(&on_api("api = \"chat_completions\"\n", "").unwrap()),
+            Api::ChatCompletions
+        );
+        assert!(matches!(
+            on_api("api = \"completions\"\n", ""),
+            Err(ConfigError::Syntax(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn each_api_is_called_where_it_lives() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "chat"}}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "responses"}]}],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (api, answer) in [("", "chat"), ("api = \"responses\"\n", "responses")] {
+            let settings = on_api(api, "").unwrap();
+            let mut config = settings
+                .client_config("m", |_| Some("k".to_owned()))
+                .unwrap();
+            config.base_url = format!("{}/v1", server.uri());
+            let completion = henk_llm::client_for(config)
+                .unwrap()
+                .complete(&henk_llm::CompletionRequest {
+                    messages: vec![henk_llm::ChatMessage::user("hi")],
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(completion.message.text(), answer);
+        }
+    }
+
+    #[test]
+    fn the_api_is_only_chosen_where_it_means_something() {
+        let anthropic = format!(
+            "{MINIMAL}\n[endpoints.a]\nprovider = \"anthropic\"\nbase_url = \"https://x.test\"\napi_key_env = \"K\"\napi = \"responses\"\n"
+        );
+        assert!(matches!(
+            Config::parse(&anthropic).and_then(Config::into_settings),
+            Err(ConfigError::Endpoint(..))
+        ));
+        let error = on_api(
+            "api = \"responses\"\n",
+            "max_tokens_param = \"max_completion_tokens\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Model(_, why) if why.contains("max_output_tokens")),
+            "{error}"
+        );
+        let chat = on_api("", "max_tokens_param = \"max_completion_tokens\"\n").unwrap();
+        assert_eq!(
+            chat.client_config("m", |_| Some("k".to_owned()))
+                .unwrap()
+                .max_tokens_param,
+            MaxTokensParam::MaxCompletionTokens
+        );
+    }
+
     #[test]
     fn review_ignore_defaults_to_lockfiles_and_the_changelog() {
         let settings = Config::parse(MINIMAL)
@@ -4314,6 +4843,78 @@ github_owners = ["docspec"]
             Config::parse(&empty).and_then(Config::into_settings),
             Err(ConfigError::Review(_))
         ));
+    }
+
+    fn github(section: &str, mcp_env: &str) -> Result<Settings, ConfigError> {
+        let text = format!(
+            "{MINIMAL}\n[mcp.github]\ncommand = \"unused\"\nenv = {{ {mcp_env} }}\n[github]\napp_id = 1\nbot_login = \"h[bot]\"\n{section}"
+        );
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn henk_serves_every_installation_unless_told_which() {
+        let every = github("", "").unwrap();
+        assert_eq!(every.github.as_ref().unwrap().ceiling(), None);
+        assert!(
+            every.describe().contains(
+                "GitHub App:      id 1 every installation the allowlist reaches as h[bot]"
+            ),
+            "{}",
+            every.describe()
+        );
+        let one = github("installation_id = 2\n", "").unwrap();
+        assert_eq!(
+            one.github.as_ref().unwrap().ceiling(),
+            Some(BTreeSet::from([2])),
+            "installation_id is a list of one"
+        );
+        assert!(
+            one.describe()
+                .contains("GitHub App:      id 1 installation 2 as h[bot]"),
+            "{}",
+            one.describe()
+        );
+        let several = github("installations = [2, 3]\n", "").unwrap();
+        assert_eq!(
+            several.github.as_ref().unwrap().ceiling(),
+            Some(BTreeSet::from([2, 3]))
+        );
+        assert!(
+            several
+                .describe()
+                .contains("GitHub App:      id 1 installations 2, 3 as h[bot]")
+        );
+    }
+
+    #[test]
+    fn installations_must_be_one_way_and_real() {
+        for section in [
+            "installation_id = 2\ninstallations = [3]\n",
+            "installations = []\n",
+            "installation_id = 0\n",
+            "installations = [2, 0]\n",
+        ] {
+            assert!(
+                matches!(github(section, ""), Err(ConfigError::GitHub(_))),
+                "{section}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_github_mcp_server_is_not_told_its_installation_in_the_config() {
+        for env in [
+            "GITHUB_APP_INSTALLATION_ID = \"2\"",
+            "GITHUB_APP_ID = \"1\"",
+        ] {
+            let error = github("", env).unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::GitHub(why) if why.contains("Henk sets it")),
+                "{env}: {error}"
+            );
+        }
+        assert!(github("", "GITHUB_READ_ONLY = \"1\"").is_ok());
     }
 
     #[test]

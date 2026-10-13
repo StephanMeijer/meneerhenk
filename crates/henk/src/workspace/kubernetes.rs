@@ -181,25 +181,49 @@ pub fn pod(settings: &PodSettings, id: &str, image: &str, limits: &Limits) -> Po
     }
 }
 
-/// The exit code `pods/exec` reports: 0 on success, the code of a
-/// `NonZeroExitCode` failure, and none when the command did not end by
-/// itself.
-fn exit_code(status: Option<&Status>) -> Option<i32> {
-    let status = status?;
+/// How `pods/exec` says the command ended: 0 on success, the code of a
+/// `NonZeroExitCode` failure, and otherwise no code but what the API server
+/// said, its message and reason, so the failure says why (#339).
+fn exec_end(status: Option<&Status>) -> (Option<i32>, Option<String>) {
+    let Some(status) = status else {
+        return (None, None);
+    };
     if status.status.as_deref() == Some("Success") {
-        return Some(0);
+        return (Some(0), None);
     }
-    status
+    let code = status
         .details
-        .as_ref()?
-        .causes
-        .as_ref()?
-        .iter()
-        .find(|cause| cause.reason.as_deref() == Some("ExitCode"))?
-        .message
-        .as_deref()?
-        .parse()
-        .ok()
+        .as_ref()
+        .and_then(|details| details.causes.as_ref())
+        .and_then(|causes| {
+            causes
+                .iter()
+                .find(|cause| cause.reason.as_deref() == Some("ExitCode"))
+        })
+        .and_then(|cause| cause.message.as_deref())
+        .and_then(|code| code.parse().ok());
+    if code.is_some() {
+        return (code, None);
+    }
+    let said = match (status.message.as_deref(), status.reason.as_deref()) {
+        (Some(message), Some(reason)) if !message.is_empty() => {
+            Some(format!("{message} ({reason})"))
+        }
+        (Some(message), _) if !message.is_empty() => Some(message.to_owned()),
+        (_, Some(reason)) => Some(format!("the exec failed: {reason}")),
+        _ => None,
+    };
+    (None, said)
+}
+
+/// `error`, with how the container ended beside it rather than in its
+/// place (#339).
+fn beside(error: WorkspaceError, ended: &str) -> WorkspaceError {
+    let said = match error {
+        WorkspaceError::Backend(said) | WorkspaceError::Unreachable(said) => said,
+        other => other.to_string(),
+    };
+    WorkspaceError::Backend(format!("{said}; {ended}"))
 }
 
 fn api_error(what: &str) -> impl Fn(kube::Error) -> WorkspaceError + '_ {
@@ -212,29 +236,75 @@ pub(crate) struct PodRunner {
     name: String,
 }
 
+/// Why the workspace's Pod is no longer running, when it is not. The Pod's
+/// own reason comes first: catatonit exits 0 on the kubelet's SIGTERM, so
+/// the container alone says "Completed" whatever stopped it, an eviction
+/// for the scratch disk included (#392). On Kubernetes 1.32 and later, a
+/// command that runs out of memory ends the whole container.
+fn stopped(pod: &Pod) -> Option<String> {
+    let status = pod.status.as_ref();
+    let message = status
+        .and_then(|s| s.message.as_deref())
+        .map(|m| m.trim_end_matches(['.', ' ']))
+        .filter(|m| !m.is_empty());
+    match status.and_then(|s| s.reason.as_deref()) {
+        Some("Evicted") => {
+            let said = message.unwrap_or("no reason given");
+            let disk = said.contains("EmptyDir") || said.contains("ephemeral-storage");
+            return Some(if disk {
+                format!("the workspace was evicted: {said}; it wrote more than its disk_mib allows")
+            } else {
+                format!("the workspace was evicted: {said}")
+            });
+        }
+        Some("DeadlineExceeded") => {
+            return Some(format!(
+                "the workspace reached its Pod's deadline of {} hours",
+                POD_DEADLINE_SECS / 3600
+            ));
+        }
+        _ => {}
+    }
+    let terminated = status
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == CONTAINER))
+        .and_then(|c| c.state.as_ref())
+        .and_then(|state| state.terminated.as_ref());
+    if let Some(terminated) = terminated
+        && terminated.reason.as_deref() == Some("OOMKilled")
+    {
+        return Some(
+            "the workspace ran out of its memory limit (OOMKilled) and was stopped".to_owned(),
+        );
+    }
+    if pod.metadata.deletion_timestamp.is_some() {
+        return Some(
+            "the workspace's Pod was deleted (by hand, or by a henk serve starting up in the same namespace)"
+                .to_owned(),
+        );
+    }
+    let terminated = terminated?;
+    let how = match terminated.reason.as_deref() {
+        Some(reason) => reason.to_owned(),
+        None => format!("exit code {}", terminated.exit_code),
+    };
+    Some(match message {
+        Some(said) => format!("the workspace was stopped ({how}): {said}"),
+        None => format!("the workspace was stopped ({how})"),
+    })
+}
+
 impl PodRunner {
-    /// Why the workspace's container is no longer running, when it is not:
-    /// on Kubernetes 1.32 and later, a command that runs out of memory ends
-    /// the whole container, and with it the workspace.
+    /// Why the workspace's Pod is no longer running, when it is not: see
+    /// [`stopped`]. A Pod that is gone altogether says so too.
     async fn ended(&self) -> Option<String> {
-        let pod = self.pods.get(&self.name).await.ok()?;
-        let state = pod
-            .status?
-            .container_statuses?
-            .into_iter()
-            .find(|c| c.name == CONTAINER)?
-            .state?;
-        let terminated = state.terminated?;
-        Some(match terminated.reason.as_deref() {
-            Some("OOMKilled") => {
-                "the workspace ran out of its memory limit (OOMKilled) and was stopped".to_owned()
+        match self.pods.get(&self.name).await {
+            Ok(pod) => stopped(&pod),
+            Err(kube::Error::Api(status)) if status.code == 404 => {
+                Some("the workspace's Pod is gone".to_owned())
             }
-            Some(reason) => format!("the workspace was stopped ({reason})"),
-            None => format!(
-                "the workspace was stopped (exit code {})",
-                terminated.exit_code
-            ),
-        })
+            Err(_) => None,
+        }
     }
 
     /// [`Self::ended`], after waiting a little for the Pod's status: the
@@ -346,6 +416,10 @@ async fn drain(
 
 #[async_trait::async_trait]
 impl Runner for PodRunner {
+    fn location(&self) -> Option<String> {
+        Some(format!("pod {}", self.name))
+    }
+
     async fn call(
         &self,
         tokens: &[String],
@@ -389,16 +463,21 @@ impl Runner for PodRunner {
             let (sent, stdout, stderr) =
                 tokio::join!(feed, drain(&mut out, keep), drain(&mut err, keep));
             sent.map_err(|e| WorkspaceError::Backend(format!("writing to the sandbox Pod: {e}")))?;
-            let code = match status {
-                Some(status) => exit_code(status.await.as_ref()),
-                None => None,
+            let (code, mut detail) = match status {
+                Some(status) => exec_end(status.await.as_ref()),
+                None => (None, None),
             };
-            let _ = process.join().await;
+            if let Err(broke) = process.join().await
+                && detail.is_none()
+            {
+                detail = Some(format!("the exec stream broke: {broke}"));
+            }
             Ok(Reply {
                 code,
                 stdout: stdout?,
                 stderr: stderr?,
                 gave_up: false,
+                detail,
             })
         };
         let reply = match tokio::time::timeout(wait, exchange).await {
@@ -430,7 +509,7 @@ impl Runner for PodRunner {
                 Ok(reply)
             }
             Err(error) => Err(match self.ended_by_now().await {
-                Some(why) => WorkspaceError::Backend(why),
+                Some(why) => beside(error, &why),
                 None => error,
             }),
         }
@@ -655,6 +734,111 @@ pub(crate) mod tests {
             runtime_class: Some("gvisor".to_owned()),
             node_selector: BTreeMap::from([("pool".to_owned(), "sandbox".to_owned())]),
         }
+    }
+
+    /// A Pod with this status, its `work` container ended as `terminated`
+    /// says, or running when that is null.
+    fn pod_with(status: serde_json::Value, terminated: serde_json::Value) -> Pod {
+        let state = match terminated {
+            serde_json::Value::Null => serde_json::json!({"running": {}}),
+            terminated => serde_json::Value::Object(serde_json::Map::from_iter([(
+                "terminated".to_owned(),
+                terminated,
+            )])),
+        };
+        let mut status = status;
+        status["containerStatuses"] = serde_json::json!([{
+            "name": CONTAINER, "image": "sandbox:1", "imageID": "", "ready": false,
+            "restartCount": 0, "state": state
+        }]);
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "henk-w1"},
+            "status": status
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_evicted_pod_says_it_was_evicted_and_why() {
+        let pod = pod_with(
+            serde_json::json!({
+                "phase": "Failed",
+                "reason": "Evicted",
+                "message": "Usage of EmptyDir volume \"sandbox\" exceeds the limit \"8Gi\". "
+            }),
+            serde_json::json!({"exitCode": 0, "reason": "Completed"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some(
+                "the workspace was evicted: Usage of EmptyDir volume \"sandbox\" exceeds the limit \"8Gi\"; it wrote more than its disk_mib allows"
+            )
+        );
+        let pressure = pod_with(
+            serde_json::json!({"reason": "Evicted", "message": "The node was low on resource: memory."}),
+            serde_json::Value::Null,
+        );
+        assert_eq!(
+            stopped(&pressure).as_deref(),
+            Some("the workspace was evicted: The node was low on resource: memory")
+        );
+    }
+
+    #[test]
+    fn a_pod_past_its_deadline_says_so() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Failed", "reason": "DeadlineExceeded"}),
+            serde_json::json!({"exitCode": 0, "reason": "Completed"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some("the workspace reached its Pod's deadline of 6 hours")
+        );
+    }
+
+    #[test]
+    fn a_deleted_pod_says_it_was_deleted() {
+        let mut pod = pod_with(
+            serde_json::json!({"phase": "Running"}),
+            serde_json::Value::Null,
+        );
+        pod.metadata.deletion_timestamp =
+            Some(serde_json::from_value(serde_json::json!("2026-10-12T22:15:01Z")).unwrap());
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some(
+                "the workspace's Pod was deleted (by hand, or by a henk serve starting up in the same namespace)"
+            )
+        );
+    }
+
+    #[test]
+    fn out_of_memory_is_still_named() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Failed"}),
+            serde_json::json!({"exitCode": 137, "reason": "OOMKilled"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some("the workspace ran out of its memory limit (OOMKilled) and was stopped")
+        );
+        let plain = pod_with(
+            serde_json::json!({"phase": "Failed"}),
+            serde_json::json!({"exitCode": 2}),
+        );
+        assert_eq!(
+            stopped(&plain).as_deref(),
+            Some("the workspace was stopped (exit code 2)")
+        );
+    }
+
+    #[test]
+    fn a_running_pod_has_not_stopped() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Running"}),
+            serde_json::Value::Null,
+        );
+        assert_eq!(stopped(&pod), None);
     }
 
     #[test]
@@ -985,7 +1169,7 @@ pub(crate) mod tests {
             status: Some("Success".to_owned()),
             ..Status::default()
         };
-        assert_eq!(exit_code(Some(&success)), Some(0));
+        assert_eq!(exec_end(Some(&success)), (Some(0), None));
         let failed = Status {
             status: Some("Failure".to_owned()),
             reason: Some("NonZeroExitCode".to_owned()),
@@ -999,14 +1183,45 @@ pub(crate) mod tests {
             }),
             ..Status::default()
         };
-        assert_eq!(exit_code(Some(&failed)), Some(3));
-        assert_eq!(exit_code(None), None);
+        assert_eq!(exec_end(Some(&failed)), (Some(3), None));
+        assert_eq!(exec_end(None), (None, None));
         assert_eq!(
-            exit_code(Some(&Status {
+            exec_end(Some(&Status {
                 status: Some("Failure".to_owned()),
                 ..Status::default()
             })),
-            None
+            (None, None)
+        );
+        // A failure that is not the command's own exit keeps what the API
+        // server said (#339).
+        assert_eq!(
+            exec_end(Some(&Status {
+                status: Some("Failure".to_owned()),
+                reason: Some("InternalError".to_owned()),
+                message: Some(
+                    "error executing command in container: container not found".to_owned()
+                ),
+                ..Status::default()
+            })),
+            (
+                None,
+                Some(
+                    "error executing command in container: container not found (InternalError)"
+                        .to_owned()
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn how_the_pod_ended_is_put_beside_the_error_not_in_its_place() {
+        let error = WorkspaceError::Backend(
+            "running a request in the sandbox Pod failed: failed to switch protocol: 500"
+                .to_owned(),
+        );
+        assert_eq!(
+            beside(error, "the sandbox Pod is gone: its node went away").to_string(),
+            "the workspace failed: running a request in the sandbox Pod failed: failed to switch protocol: 500; the sandbox Pod is gone: its node went away"
         );
     }
 }

@@ -58,7 +58,7 @@ impl Listener for MentionListener {
         if !mentions_henk(platform, body) {
             return Handled::Ignored("does not mention Henk".to_owned());
         }
-        let writer = match self.writers.writer(platform) {
+        let writer = match self.writers.writer(repo) {
             Ok(writer) => writer,
             Err(error) => return Handled::Ignored(error.to_string()),
         };

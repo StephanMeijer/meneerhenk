@@ -240,11 +240,83 @@ impl Requester {
     }
 }
 
+/// Who asked for a run, by a stable id, as a run records it (#399): the
+/// form a commit's `Requested-by` names. A run whose requester is none of
+/// these, such as a webhook sender's login, has no requester Henk knows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequesterId {
+    /// A Discord user, `discord:<id>`.
+    Discord(DiscordUserId),
+    /// A GitHub account, `github:<id>`, as the dashboard's sign-in names it.
+    GitHub(u64),
+    /// A GitLab account, `gitlab:<id>`.
+    GitLab(u64),
+    /// An MCP client by its token's name, `mcp:<name>` (§2): no person.
+    Mcp(String),
+}
+
+impl RequesterId {
+    /// The requester a run recorded, when it is a stable id; `None` for
+    /// anything else, a login or a bare number included.
+    #[must_use]
+    pub fn parse(recorded: &str) -> Option<Self> {
+        let (kind, value) = recorded.split_once(':')?;
+        let number = || value.parse::<u64>().ok().filter(|n| *n > 0);
+        match kind {
+            "discord" => number().map(|id| Self::Discord(DiscordUserId::new(id))),
+            "github" => number().map(Self::GitHub),
+            "gitlab" => number().map(Self::GitLab),
+            "mcp" if !value.trim().is_empty() && !value.contains(char::is_whitespace) => {
+                Some(Self::Mcp(value.to_owned()))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for RequesterId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Discord(id) => write!(f, "discord:{id}"),
+            Self::GitHub(id) => write!(f, "github:{id}"),
+            Self::GitLab(id) => write!(f, "gitlab:{id}"),
+            Self::Mcp(name) => write!(f, "mcp:{name}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_requester_is_known_only_by_a_stable_id() {
+        for recorded in ["discord:523", "github:77", "gitlab:9", "mcp:claude"] {
+            let parsed = RequesterId::parse(recorded).unwrap();
+            assert_eq!(parsed.to_string(), recorded);
+        }
+        assert_eq!(
+            RequesterId::parse("github:77"),
+            Some(RequesterId::GitHub(77))
+        );
+        // A webhook sender's login, the CLI's bare id, and anything vague
+        // name nobody Henk knows.
+        for unknown in [
+            "alice",
+            "523",
+            "",
+            "github:",
+            "github:alice",
+            "github:0",
+            "slack:1",
+            "mcp:",
+            "mcp:a b",
+        ] {
+            assert_eq!(RequesterId::parse(unknown), None, "{unknown:?}");
+        }
+    }
 
     const LEAD: DiscordUserId = DiscordUserId::new(1);
     const COLLEAGUE: DiscordUserId = DiscordUserId::new(2);

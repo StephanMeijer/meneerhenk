@@ -28,8 +28,9 @@ pub struct ApiHook {
 }
 
 impl ApiHook {
-    /// Builds the hook. `requester` is the Team Lead id API work runs for;
-    /// a URL must be on one of `hosts`.
+    /// Builds the hook. `requester` is the Team Lead id the events' source
+    /// records; the runs they start name no requester (#399). A URL must be
+    /// on one of `hosts`.
     #[must_use]
     pub fn new(
         token: Option<SecretString>,
@@ -161,11 +162,10 @@ fn start(
     let source = EventSource::Api {
         requester: hook.requester.clone(),
     };
-    // The token names nobody: an execute run is then for the executor's
-    // own Team Lead, `[roles.executor] requester_id` (#329).
-    let requester = (start != Start::Execute)
-        .then(|| hook.requester.clone())
-        .flatten();
+    // The token names nobody, so no run it starts names a requester, and
+    // no commit credits one (#399). A plan still runs for
+    // `[planning] requester_id`, which `plan.rs` falls back to.
+    let requester = None;
     match start_event(start, url, commit, note, source, requester, &hook.hosts) {
         Ok(event) => {
             let id = publish(&hook.bus, event);

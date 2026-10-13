@@ -10,6 +10,7 @@ pub mod github;
 pub mod gitlab;
 pub mod issue;
 pub mod push;
+pub mod retry;
 pub mod webhook;
 pub mod writer;
 

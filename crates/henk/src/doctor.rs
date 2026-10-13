@@ -4,14 +4,15 @@
 //! secret does not hide the next problem.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::workspace::{BackendKind, Toolchain, WorkspacePolicy};
 use henk_mcp::{McpSession as _, RmcpSession};
-use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth};
+use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, Installations};
 
 use crate::app::env_var;
-use crate::config::{DatabaseConfig, Settings};
+use crate::config::{DEFAULT_SSH_HOST, DatabaseConfig, Settings, SshHost};
 
 /// The outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,8 +68,9 @@ pub async fn run(settings: &Settings, probe_models: bool) -> Vec<Check> {
     let mut checks = Vec::new();
     checks.extend(check_secrets(settings));
     checks.extend(check_models(settings, probe_models).await);
-    checks.extend(check_github(settings).await);
-    checks.extend(check_mcp(settings).await);
+    let (github, installation) = check_github(settings, probe_models).await;
+    checks.extend(github);
+    checks.extend(check_mcp(settings, installation).await);
     checks.extend(check_mcp_server(settings, probe_models, env_var).await);
     checks.push(check_database(settings).await);
     checks.extend(check_sandbox(settings, probe_models).await);
@@ -189,65 +191,131 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
     let Some(ssh) = &settings.workspace_ssh else {
         return Vec::new();
     };
-    let target = format!("{}@{}:{}", ssh.user, ssh.host, ssh.port);
-    let key = format!("secret ${}", ssh.key_path_env);
-    if env_var(&ssh.key_path_env).is_none() {
-        return vec![Check::fail(
-            key,
-            "not set; the ssh workspace backend cannot sign in",
-        )];
+    let hosts = ssh.hosts();
+    // One host keeps the names it always had; several name each (#389).
+    let named = !(hosts.len() == 1 && hosts.iter().all(|h| h.id == DEFAULT_SSH_HOST));
+    let mut checks: Vec<Check> = Vec::new();
+    let mut usable = Vec::new();
+    for host in &hosts {
+        let (host_checks, works) = check_sandbox_host(settings, host, named, probe).await;
+        // Hosts that share a key share its check.
+        for check in host_checks {
+            if !checks.contains(&check) {
+                checks.push(check);
+            }
+        }
+        if works {
+            usable.push(host.id.as_str());
+        }
+    }
+    if probe && named && !usable.is_empty() && usable.len() < hosts.len() {
+        let down: Vec<&str> = hosts
+            .iter()
+            .map(|h| h.id.as_str())
+            .filter(|id| !usable.contains(id))
+            .collect();
+        checks.push(Check::warn(
+            "sandbox hosts",
+            format!(
+                "{} of {} usable; down: {}",
+                usable.len(),
+                hosts.len(),
+                down.join(", ")
+            ),
+        ));
+    }
+    checks
+}
+
+/// One sandbox host's checks, and whether it works.
+async fn check_sandbox_host(
+    settings: &Settings,
+    host: &SshHost,
+    named: bool,
+    probe: bool,
+) -> (Vec<Check>, bool) {
+    let label = |what: &str| {
+        if named {
+            format!("sandbox {} {what}", host.id)
+        } else {
+            format!("sandbox {what}")
+        }
+    };
+    let target = format!("{}@{}:{}", host.user, host.host, host.port);
+    let key = format!("secret ${}", host.key_path_env);
+    if env_var(&host.key_path_env).is_none() {
+        return (
+            vec![Check::fail(
+                key,
+                "not set; the ssh workspace backend cannot sign in",
+            )],
+            false,
+        );
     }
     if !probe {
-        return vec![
-            Check::ok(key, "set; Henk's key for the sandbox host"),
-            Check::ok("sandbox host", format!("{target}; --probe connects")),
-        ];
+        return (
+            vec![
+                Check::ok(key, "set; Henk's key for the sandbox host"),
+                Check::ok(label("host"), format!("{target}; --probe connects")),
+            ],
+            true,
+        );
     }
-    let provider = match crate::workspace::ssh_provider(settings) {
-        Ok(Some(provider)) => provider,
-        Ok(None) => return Vec::new(),
-        Err(error) => return vec![Check::fail(key, format!("{error:#}"))],
+    let provider = match crate::workspace::ssh_target(host) {
+        Ok(target) => crate::workspace::ssh::SshProvider::new(target),
+        Err(error) => return (vec![Check::fail(key, format!("{error:#}"))], false),
     };
     match provider.probe().await {
-        Ok(report) => vec![
-            Check::ok("sandbox connection", format!("{target}, signed in")),
-            Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
-            tools_check(
-                "sandbox host tools",
-                &report,
-                &settings.workspace,
-                BackendKind::Ssh,
-            ),
-        ],
+        Ok(report) => (
+            vec![
+                Check::ok(label("connection"), format!("{target}, signed in")),
+                Check::ok(label("host key"), "matches the pinned host_key"),
+                tools_check(
+                    &label("host tools"),
+                    &report,
+                    &settings.workspace,
+                    BackendKind::Ssh,
+                    Some(&host.id),
+                ),
+            ],
+            true,
+        ),
         Err(error) => {
             let text = error.to_string();
-            let refused_key = text.contains("pinned workspace.ssh.host_key");
-            vec![
-                Check::fail("sandbox connection", format!("{target}: {text}")),
-                if refused_key {
-                    Check::fail("sandbox host key", "not the pinned workspace.ssh.host_key")
-                } else {
-                    Check::warn("sandbox host key", "not checked: no connection")
-                },
-            ]
+            let refused_key = text.contains("not the pinned");
+            (
+                vec![
+                    Check::fail(label("connection"), format!("{target}: {text}")),
+                    if refused_key {
+                        Check::fail(label("host key"), "not the pinned host_key")
+                    } else {
+                        Check::warn(label("host key"), "not checked: no connection")
+                    },
+                ],
+                false,
+            )
         }
     }
 }
 
 /// The sandbox script's probe report as a check named `name`: a tool it
 /// says is missing fails it, mise only when a profile on `backend` names it
-/// as its toolchain; a host-backed profile runs mise on Henk's own machine.
+/// as its toolchain, and on a sandbox host `host` only when that profile
+/// may use the host; a host-backed profile runs mise on Henk's own machine.
 fn tools_check(
     name: &str,
     report: &str,
     workspace: &WorkspacePolicy,
     backend: BackendKind,
+    host: Option<&str>,
 ) -> Check {
     let mut lines = report.lines();
     let version = lines.next().unwrap_or("henk-sandbox (no version)");
-    let wants_mise = workspace
-        .named()
-        .any(|(_, p)| p.backend == backend && p.toolchain == Some(Toolchain::Mise));
+    let wants_mise = workspace.named().any(|(_, p)| {
+        p.backend == backend
+            && p.toolchain == Some(Toolchain::Mise)
+            && host.is_none_or(|id| p.hosts.is_empty() || p.hosts.iter().any(|h| h == id))
+    });
     let missing: Vec<&str> = lines
         .filter_map(|l| l.strip_suffix(" missing"))
         .filter(|tool| *tool != "mise" || wants_mise)
@@ -302,7 +370,13 @@ async fn check_kubernetes(settings: &Settings, probe: bool) -> Vec<Check> {
     for image in images {
         let name = format!("sandbox image {image}");
         checks.push(match provider.probe(image).await {
-            Ok(report) => tools_check(&name, &report, &settings.workspace, BackendKind::Kubernetes),
+            Ok(report) => tools_check(
+                &name,
+                &report,
+                &settings.workspace,
+                BackendKind::Kubernetes,
+                None,
+            ),
             Err(error) => Check::fail(name, error.to_string()),
         });
     }
@@ -522,6 +596,18 @@ async fn check_endpoint(settings: &Settings, id: &str, probe: bool) -> Check {
 }
 
 /// One model on a usable endpoint; with `probe`, one short call.
+/// The output cap of the probe's one prompt: 16 tokens for "ready", or
+/// none, which leaves the model's configured cap. A thinking model spends
+/// its cap on thinking first, and so does a reasoning model on the
+/// Responses API (#365); cut short, it would stop before it answers.
+fn probe_cap(settings: &Settings, model: &crate::config::ModelFileConfig) -> Option<u32> {
+    let responses = settings
+        .endpoints
+        .get(&model.endpoint)
+        .is_some_and(|endpoint| endpoint.api == Some(henk_llm::Api::Responses));
+    (model.effort.is_none() && !responses).then_some(16)
+}
+
 async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
     let name = format!("model {id}");
     let Some(model) = settings.models.get(id) else {
@@ -541,9 +627,7 @@ async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
         messages: vec![henk_llm::ChatMessage::user(
             "Reply with the single word: ready",
         )],
-        // A thinking model spends its cap on thinking first; give it the
-        // configured one rather than cutting it off before it answers.
-        max_tokens: model.effort.is_none().then_some(16),
+        max_tokens: probe_cap(settings, model),
         ..Default::default()
     };
     match tokio::time::timeout(Duration::from_mins(1), client.complete(&request)).await {
@@ -556,80 +640,214 @@ async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
     }
 }
 
-async fn check_github(settings: &Settings) -> Vec<Check> {
+/// One installation of the App, as `GET /app/installations` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Installation {
+    id: u64,
+    account: String,
+}
+
+/// The App's identity, then every installation: whether Henk may act for
+/// it, whether its token mints, and with `probe` which repositories it
+/// reaches. Allowlist entries no usable installation covers are warned
+/// about. Also returns the App id and the first usable installation, which
+/// the GitHub MCP server is started as.
+async fn check_github(settings: &Settings, probe: bool) -> (Vec<Check>, Option<(u64, u64)>) {
+    const NAME: &str = "GitHub App installation";
     let Some(github) = &settings.github else {
-        return vec![Check::ok("GitHub", "not configured")];
+        return (vec![Check::ok("GitHub", "not configured")], None);
     };
+    let (installations, api) = match github_client(github) {
+        Ok(client) => client,
+        Err(check) => return (vec![check], None),
+    };
+    let mut checks = vec![check_app_identity(&api, &github.bot_login).await];
+    let listed = match list_installations(&api).await {
+        Ok(listed) if listed.is_empty() => {
+            checks.push(Check::fail(
+                NAME,
+                "the App is installed nowhere; install it on an account first",
+            ));
+            return (checks, None);
+        }
+        Ok(listed) => listed,
+        Err(error) => {
+            checks.push(Check::fail(NAME, error));
+            return (checks, None);
+        }
+    };
+    if let Some(ceiling) = github.ceiling() {
+        for id in ceiling
+            .iter()
+            .filter(|id| !listed.iter().any(|i| i.id == **id))
+        {
+            checks.push(Check::fail(
+                NAME,
+                format!(
+                    "installation {id} is configured but the App has no such installation; it has: {}",
+                    describe_installations(&listed)
+                ),
+            ));
+        }
+    }
+    let mut usable: Vec<(Installation, Option<Vec<String>>)> = Vec::new();
+    for installation in &listed {
+        let name = format!("{NAME} {} ({})", installation.id, installation.account);
+        if !installations.allows(installation.id) {
+            checks.push(Check::ok(
+                name,
+                "ignored: not one of [github] installations",
+            ));
+            continue;
+        }
+        let reached = reach(&api.for_installation(installation.id), probe).await;
+        match reached {
+            Ok((detail, repositories)) => {
+                checks.push(Check::ok(name, detail));
+                usable.push((installation.clone(), repositories));
+            }
+            Err(error) => checks.push(Check::fail(name, format!("token failed: {error}"))),
+        }
+    }
+    checks.extend(uncovered(&settings.allowlist, &usable));
+    let first = usable
+        .first()
+        .map(|(installation, _)| (github.app_id, installation.id));
+    (checks, first)
+}
+
+/// The App client `github` configures, or the check that says why not.
+fn github_client(
+    github: &crate::config::GitHubConfig,
+) -> Result<(Arc<Installations>, GitHubApi), Check> {
     let Some(path) = env_var(&github.private_key_path_env) else {
-        return vec![Check::fail(
+        return Err(Check::fail(
             "GitHub App key",
             format!(
                 "environment variable {} is not set",
                 github.private_key_path_env
             ),
-        )];
-    };
-    let pem = match std::fs::read_to_string(&path) {
-        Ok(pem) => pem,
-        Err(error) => {
-            return vec![Check::fail(
-                "GitHub App key",
-                format!("cannot read {path}: {error}"),
-            )];
-        }
-    };
-    let credentials = match AppCredentials::from_pem(github.app_id, github.installation_id, &pem) {
-        Ok(credentials) => credentials,
-        Err(error) => return vec![Check::fail("GitHub App key", error.to_string())],
-    };
-    let api = match GitHubApi::new(&github.api_base, GitHubAuth::app(credentials)) {
-        Ok(api) => api,
-        Err(error) => return vec![Check::fail("GitHub client", error.to_string())],
-    };
-    let mut checks = vec![check_app_identity(&api, &github.bot_login).await];
-    if github.installation_id == 0 {
-        checks.push(Check::fail(
-            "GitHub App installation",
-            format!(
-                "installation_id is 0; set it to one of these: {}",
-                list_installations(&api).await
-            ),
         ));
-        return checks;
+    };
+    let pem = std::fs::read_to_string(&path)
+        .map_err(|error| Check::fail("GitHub App key", format!("cannot read {path}: {error}")))?;
+    let credentials = AppCredentials::from_pem(github.app_id, &pem)
+        .map_err(|error| Check::fail("GitHub App key", error.to_string()))?;
+    let installations = Arc::new(Installations::new(credentials, github.ceiling()));
+    let api = GitHubApi::new(
+        &github.api_base,
+        GitHubAuth::app(Arc::clone(&installations)),
+    )
+    .map_err(|error| Check::fail("GitHub client", error.to_string()))?;
+    Ok((installations, api))
+}
+
+/// What an installation's token reaches: how many repositories, and with
+/// `probe` which ones.
+async fn reach(scoped: &GitHubApi, probe: bool) -> Result<(String, Option<Vec<String>>), String> {
+    if probe {
+        let repositories = tokio::time::timeout(Duration::from_mins(1), repositories(scoped))
+            .await
+            .unwrap_or_else(|_| Err("no answer within 60s".to_owned()))?;
+        let detail = format!(
+            "token works; {} repositories: {}",
+            repositories.len(),
+            repositories.join(", ")
+        );
+        return Ok((detail, Some(repositories)));
     }
-    match tokio::time::timeout(
+    let value = tokio::time::timeout(
         Duration::from_secs(30),
-        api.get("/installation/repositories?per_page=1"),
+        scoped.get("/installation/repositories?per_page=1"),
     )
     .await
-    {
-        Ok(Ok(value)) => {
-            let total = value
-                .get("total_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            checks.push(Check::ok(
-                "GitHub App installation",
-                format!(
-                    "installation {} token works; {total} repositories visible",
-                    github.installation_id
-                ),
-            ));
+    .map_err(|_| "no answer within 30s".to_owned())?
+    .map_err(|error| error.to_string())?;
+    let total = value
+        .get("total_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Ok((format!("token works; {total} repositories visible"), None))
+}
+
+/// A warning for each GitHub allowlist entry no usable installation
+/// reaches: its owner has none, or, when the repositories were listed, the
+/// repository is not among them.
+fn uncovered(
+    allowlist: &henk_domain::allowlist::Allowlist,
+    usable: &[(Installation, Option<Vec<String>>)],
+) -> Vec<Check> {
+    use henk_domain::allowlist::{AllowRule, Platform};
+    let of = |owner: &str| -> Vec<&(Installation, Option<Vec<String>>)> {
+        usable
+            .iter()
+            .filter(|(i, _)| i.account.eq_ignore_ascii_case(owner))
+            .collect()
+    };
+    allowlist
+        .rules()
+        .iter()
+        .filter_map(|rule| match rule {
+            AllowRule::Owner {
+                platform: Platform::GitHub,
+                owner,
+            } => of(owner).is_empty().then(|| {
+                Check::warn(
+                    "GitHub allowlist",
+                    format!("github_owners {owner}: no usable installation of the App on {owner}; Henk cannot work there"),
+                )
+            }),
+            AllowRule::Repository(repo) if repo.platform() == Platform::GitHub => {
+                let path = repo.path();
+                let installations = of(repo.owner());
+                if installations.is_empty() {
+                    return Some(Check::warn(
+                        "GitHub allowlist",
+                        format!("github_repositories {path}: no usable installation of the App on {}; Henk cannot work there", repo.owner()),
+                    ));
+                }
+                let reached = installations.iter().any(|(_, repositories)| {
+                    repositories
+                        .as_ref()
+                        .is_none_or(|list| list.iter().any(|r| r.eq_ignore_ascii_case(&path)))
+                });
+                (!reached).then(|| {
+                    Check::warn(
+                        "GitHub allowlist",
+                        format!("github_repositories {path}: the App's installation on {} does not include it", repo.owner()),
+                    )
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every repository an installation reaches, as `owner/name`.
+async fn repositories(api: &GitHubApi) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for page in 1..=100 {
+        let value = api
+            .get(&format!(
+                "/installation/repositories?per_page=100&page={page}"
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let listed = value
+            .get("repositories")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        names.extend(listed.iter().filter_map(|r| {
+            r.get("full_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }));
+        if listed.len() < 100 {
+            break;
         }
-        Ok(Err(error)) => checks.push(Check::fail(
-            "GitHub App installation",
-            format!(
-                "installation {} token failed: {error}; the App is installed as: {}",
-                github.installation_id,
-                list_installations(&api).await
-            ),
-        )),
-        Err(_) => checks.push(Check::fail(
-            "GitHub App installation",
-            "no answer within 30s",
-        )),
     }
-    checks
+    Ok(names)
 }
 
 /// `GET /app` as the App: proves the key and id match and that `bot_login`
@@ -661,43 +879,66 @@ async fn check_app_identity(api: &GitHubApi, bot_login: &str) -> Check {
     }
 }
 
-/// The installations of the App, as text for a check detail.
-async fn list_installations(api: &GitHubApi) -> String {
+/// The installations of the App.
+async fn list_installations(api: &GitHubApi) -> Result<Vec<Installation>, String> {
     match tokio::time::timeout(
         Duration::from_secs(30),
-        api.get_as_app("/app/installations"),
+        api.get_all_as_app("/app/installations"),
     )
     .await
     {
-        Ok(Ok(serde_json::Value::Array(installations))) if !installations.is_empty() => {
-            installations
-                .iter()
-                .map(|i| {
-                    let id = i.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                    let account = i
-                        .get("account")
-                        .and_then(|a| a.get("login"))
+        Ok(Ok(installations)) => Ok(installations
+            .iter()
+            .filter_map(|i| {
+                Some(Installation {
+                    id: i.get("id").and_then(serde_json::Value::as_u64)?,
+                    account: i
+                        .pointer("/account/login")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("?");
-                    let selection = i
-                        .get("repository_selection")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("?");
-                    format!("{id} ({account}, {selection} repositories)")
+                        .unwrap_or("?")
+                        .to_owned(),
                 })
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-        Ok(Ok(_)) => "none; install the App on an account first".to_owned(),
-        Ok(Err(error)) => format!("could not list installations: {error}"),
-        Err(_) => "could not list installations within 30s".to_owned(),
+            })
+            .collect()),
+        Ok(Err(error)) => Err(format!("could not list installations: {error}")),
+        Err(_) => Err("could not list installations within 30s".to_owned()),
     }
 }
 
-async fn check_mcp(settings: &Settings) -> Vec<Check> {
+fn describe_installations(listed: &[Installation]) -> String {
+    listed
+        .iter()
+        .map(|i| format!("{} ({})", i.id, i.account))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Starts every MCP server and lists its tools. The GitHub one is started
+/// as `github`'s installation, the first usable one, and skipped when there
+/// is none.
+async fn check_mcp(settings: &Settings, github: Option<(u64, u64)>) -> Vec<Check> {
     let mut checks = Vec::new();
     for (alias, config) in &settings.mcp {
         let name = format!("MCP server {alias}");
+        let reads_github = settings
+            .github
+            .as_ref()
+            .is_some_and(|g| &g.mcp_server == alias);
+        let session_config;
+        let config = match (reads_github, github) {
+            (false, _) => config,
+            (true, Some((app_id, installation))) => {
+                session_config = crate::app::github_session_config(config, app_id, installation);
+                &session_config
+            }
+            (true, None) => {
+                checks.push(Check::warn(
+                    name,
+                    "not started: no usable GitHub App installation to sign it in as",
+                ));
+                continue;
+            }
+        };
         let missing: Vec<&str> = config
             .pass_env
             .iter()
@@ -898,7 +1139,14 @@ mod tests {
             .profiles
             .insert("sandbox".to_owned(), profile(BackendKind::Ssh, None));
         assert_eq!(
-            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
+            tools_check(
+                "sandbox host tools",
+                report,
+                &workspace,
+                BackendKind::Ssh,
+                None
+            )
+            .verdict,
             Verdict::Ok("henk-sandbox 4".to_owned()),
             "only a host-backed profile wants mise"
         );
@@ -907,7 +1155,14 @@ mod tests {
             profile(BackendKind::Ssh, Some(Toolchain::Mise)),
         );
         assert_eq!(
-            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
+            tools_check(
+                "sandbox host tools",
+                report,
+                &workspace,
+                BackendKind::Ssh,
+                None
+            )
+            .verdict,
             Verdict::Fail("henk-sandbox 4; missing there: mise".to_owned()),
             "a sandbox profile wants it"
         );
@@ -976,6 +1231,122 @@ mod tests {
         assert_eq!(
             dashboard_client_id("V", None).verdict,
             Verdict::Warn("not set; the dashboard is off".to_owned())
+        );
+    }
+
+    fn sandbox_pool(extra: &str) -> Settings {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        )
+        .public_key()
+        .to_openssh()
+        .unwrap();
+        // PATH is always set: the key's variable counts as set.
+        settings(&format!(
+            "[workspace.ssh]\nkey_path_env = \"PATH\"\n[workspace.ssh.hosts.goat]\nhost = \"g.example\"\nhost_key = \"{key}\"\n[workspace.ssh.hosts.fox]\nhost = \"f.example\"\nhost_key = \"{key}\"\n{extra}"
+        ))
+    }
+
+    #[tokio::test]
+    async fn each_sandbox_host_is_checked_under_its_own_name() {
+        let names: Vec<String> = check_sandbox(&sandbox_pool(""), false)
+            .await
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["secret $PATH", "sandbox fox host", "sandbox goat host"],
+            "the shared key once, then each host"
+        );
+    }
+
+    #[test]
+    fn mise_is_wanted_on_a_sandbox_host_only_by_a_profile_that_may_use_it() {
+        let settings = sandbox_pool(
+            "[workspace.profiles.big]\nbackend = \"ssh\"\ntoolchain = \"mise\"\nhosts = [\"goat\"]\n",
+        );
+        let report = "henk-sandbox 5\nmise missing\n";
+        let tools = |host| {
+            tools_check(
+                "tools",
+                report,
+                &settings.workspace,
+                BackendKind::Ssh,
+                Some(host),
+            )
+            .verdict
+        };
+        assert!(
+            matches!(tools("goat"), Verdict::Fail(_)),
+            "big may use goat"
+        );
+        assert_eq!(
+            tools("fox"),
+            Verdict::Ok("henk-sandbox 5".to_owned()),
+            "no profile that wants mise may use fox"
+        );
+    }
+
+    #[test]
+    fn the_probe_leaves_a_reasoning_model_its_cap() {
+        let endpoints = |api: &str| {
+            format!(
+                "[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n{api}[models.m]\nendpoint = \"o\"\nmodel = \"x\"\n"
+            )
+        };
+        let cap = |api: &str| {
+            let settings = settings(&endpoints(api));
+            probe_cap(&settings, settings.models.get("m").unwrap())
+        };
+        assert_eq!(cap(""), Some(16), "Chat Completions answers in 16");
+        assert_eq!(cap("api = \"chat_completions\"\n"), Some(16));
+        assert_eq!(cap("api = \"responses\"\n"), None);
+    }
+
+    #[test]
+    fn allowlist_entries_no_installation_reaches_are_warned_about() {
+        let settings = settings("");
+        let mut allowlist = settings.allowlist.rules().to_vec();
+        let github = henk_domain::allowlist::Platform::GitHub;
+        let repo = |path| {
+            henk_domain::allowlist::AllowRule::Repository(
+                henk_domain::allowlist::RepoRef::parse(github, path).unwrap(),
+            )
+        };
+        allowlist.extend([
+            henk_domain::allowlist::AllowRule::Owner {
+                platform: github,
+                owner: "nobody".to_owned(),
+            },
+            repo("Alice/x"),
+            repo("alice/hidden"),
+            repo("stranger/y"),
+        ]);
+        let allowlist = henk_domain::allowlist::Allowlist::new(allowlist);
+        let installation = |id, account: &str| Installation {
+            id,
+            account: account.to_owned(),
+        };
+        let usable = [
+            (installation(111, "alice"), Some(vec!["alice/x".to_owned()])),
+            (installation(222, "DocSpec"), None),
+        ];
+        let warned: Vec<String> = uncovered(&allowlist, &usable)
+            .into_iter()
+            .map(|check| match check.verdict {
+                Verdict::Warn(why) => why,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            warned,
+            [
+                "github_owners nobody: no usable installation of the App on nobody; Henk cannot work there",
+                "github_repositories alice/hidden: the App's installation on alice does not include it",
+                "github_repositories stranger/y: no usable installation of the App on stranger; Henk cannot work there",
+            ],
+            "docspec is covered whatever its repositories, alice/x by its list"
         );
     }
 }

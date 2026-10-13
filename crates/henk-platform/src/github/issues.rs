@@ -209,16 +209,14 @@ impl IssueWriter for GitHubWriter {
         target: &IssueTarget,
         body: &str,
     ) -> Result<PostedComment, PlatformError> {
+        let path = format!(
+            "/repos/{}/issues/{}/comments",
+            target.repo.path(),
+            target.number
+        );
         let created = self
             .api()
-            .post(
-                &format!(
-                    "/repos/{}/issues/{}/comments",
-                    target.repo.path(),
-                    target.number
-                ),
-                &json!({"body": body}),
-            )
+            .create_comment_once(&path, &path, body, self.bot_login(), |_| true)
             .await?;
         let id = created
             .get("id")

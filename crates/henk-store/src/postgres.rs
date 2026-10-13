@@ -43,6 +43,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/012_sessions.sql"),
     include_str!("../migrations/postgres/013_rounds.sql"),
     include_str!("../migrations/postgres/014_reasoning_tokens.sql"),
+    include_str!("../migrations/postgres/015_tool_names.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -246,10 +247,16 @@ const CALL_SESSION: &str = "LEFT JOIN sessions s ON s.run_id = c.run_id AND s.na
 /// [`CALL_SESSION`]. A call whose session has no row counts as a lane's.
 const CALL_ROLE: &str = "COALESCE(s.role, 'lane')";
 
+/// The tool a call `c` counts under, as [`crate::types::counted_as`] says:
+/// every tool that does not exist, which is every call with no origin, as
+/// one (#341). [`CALL_FILTER`] matches a tool the same way.
+const CALL_TOOL: &str = "CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END";
+
 /// The `WHERE` of a tool call tally or listing over `tool_calls c` and
 /// [`CALL_SESSION`], over parameters 1 to 5: tool, model, session role,
-/// since and until.
-const CALL_FILTER: &str = "($1::text IS NULL OR c.tool = $1) AND ($2::text IS NULL OR c.model = $2)
+/// since and until. A tool is matched as [`CALL_TOOL`]
+/// counts it.
+const CALL_FILTER: &str = "($1::text IS NULL OR CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END = $1) AND ($2::text IS NULL OR c.model = $2)
      AND ($3::text IS NULL OR COALESCE(s.role, 'lane') = $3)
      AND ($4::timestamptz IS NULL OR c.at >= $4)
      AND ($5::timestamptz IS NULL OR c.at < $5)";
@@ -1176,10 +1183,10 @@ impl RunStore for PgStore {
             .await?
             .query(
                 &format!(
-                    "SELECT c.model, {CALL_ROLE}, c.tool, c.outcome, COUNT(*),
+                    "SELECT c.model, {CALL_ROLE}, {CALL_TOOL}, c.outcome, COUNT(*),
                             COALESCE(SUM(c.elapsed_ms), 0)::BIGINT
                      FROM tool_calls c {CALL_SESSION} WHERE {CALL_FILTER}
-                     GROUP BY c.model, 2, c.tool, c.outcome"
+                     GROUP BY c.model, 2, 3, c.outcome"
                 ),
                 &[&filter.tool, &filter.model, &role, &since, &until],
             )

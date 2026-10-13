@@ -538,6 +538,22 @@ impl ToolTally {
     }
 }
 
+/// The one tool unknown tools count under: each name a model invents is
+/// a tool of its own otherwise (#341). No real tool name has parentheses.
+pub const UNKNOWN_TOOL: &str = "(unknown)";
+
+/// The tool a call counts under: [`UNKNOWN_TOOL`] for one that does not
+/// exist, which is the only call with no origin, however it ended (a
+/// repeated one is refused before it is looked up); its own name otherwise.
+#[must_use]
+pub fn counted_as<'a>(tool: &'a str, origin: &str) -> &'a str {
+    if origin.is_empty() {
+        UNKNOWN_TOOL
+    } else {
+        tool
+    }
+}
+
 /// One row of tool usage: one tool of one session, or across runs one tool
 /// of one kind of session on one model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,7 +576,10 @@ impl ToolUsage {
         let mut usage: BTreeMap<(String, String), ToolTally> = BTreeMap::new();
         for call in calls {
             usage
-                .entry((call.session.clone(), call.tool.clone()))
+                .entry((
+                    call.session.clone(),
+                    counted_as(&call.tool, &call.origin).to_owned(),
+                ))
                 .or_default()
                 .add(&call.outcome, 1, call.elapsed_ms);
         }
@@ -1562,6 +1581,14 @@ mod tests {
             call("lane-a", "read_file", "refused_repeat", 0),
             call("lane-a", "bash", "cancelled", 30),
             call("check-lane-a-1", "read_file", "refused_scope", 0),
+            ToolCallRecord {
+                origin: String::new(),
+                ..call("lane-a", "nope", "unknown_tool", 0)
+            },
+            ToolCallRecord {
+                origin: String::new(),
+                ..call("lane-a", "Review complete. End. [cut]", "refused_repeat", 0)
+            },
         ];
         let shown: Vec<(String, String, u64, u64, u64, u64, u64)> = ToolUsage::from_calls(&calls)
             .into_iter()
@@ -1584,6 +1611,7 @@ mod tests {
             shown,
             [
                 row("check-lane-a-1", "read_file", 1, 0, 1, 0, 0),
+                row("lane-a", "(unknown)", 2, 0, 1, 1, 0),
                 row("lane-a", "bash", 1, 0, 0, 1, 30),
                 row("lane-a", "read_file", 3, 1, 1, 0, 15),
             ]

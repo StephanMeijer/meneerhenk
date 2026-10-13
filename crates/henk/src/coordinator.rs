@@ -160,7 +160,7 @@ pub(crate) async fn queue_check(app: &App, request: &ReviewRequest) -> Option<Re
     if !app.settings.allowlist.allows(&request.target.repo) || !reviews {
         return None;
     }
-    let writer = app.writer(request.target.platform()).ok()?;
+    let writer = app.writer(&request.target.repo).ok()?;
     let limit = app.settings.review.max_concurrent.max(1);
     let summary = format!(
         "Waiting for a review slot: all {limit} are in use. Henk starts this review when one frees."
@@ -253,7 +253,7 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
         ReviewOutcome::interrupted(commit.clone())
     };
     let link = app.settings.queue_link(run);
-    match app.writer(request.target.platform()) {
+    match app.writer(&request.target.repo) {
         Ok(writer) => {
             if let Err(error) = writer
                 .finish_review(&request.target, commit, Some(handle), &outcome, &link)

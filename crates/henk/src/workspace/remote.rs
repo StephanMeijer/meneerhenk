@@ -50,7 +50,14 @@ pub(crate) struct Reply {
     pub(crate) stderr: Vec<u8>,
     /// Henk stopped waiting before the runner finished.
     pub(crate) gave_up: bool,
+    /// What the backend itself said about how the request ended, when that
+    /// is not on stderr: an exec's failure status, a signal, a stream that
+    /// broke (#339).
+    pub(crate) detail: Option<String>,
 }
+
+/// How much of stdout explains a failure that left stderr empty.
+const STDOUT_TAIL: usize = 300;
 
 impl Reply {
     pub(crate) fn ok(self, what: &str) -> Result<Self, WorkspaceError> {
@@ -59,9 +66,84 @@ impl Reply {
         } else {
             Err(WorkspaceError::Backend(format!(
                 "{what} failed: {}",
-                String::from_utf8_lossy(&self.stderr).trim()
+                self.why()
             )))
         }
+    }
+
+    /// Like [`Reply::ok`], for a request whose stdout is diagnostic and
+    /// never file content: the failure carries the end of stdout when
+    /// stderr had nothing.
+    pub(crate) fn ok_with_output(self, what: &str) -> Result<Self, WorkspaceError> {
+        if self.code == Some(0) {
+            Ok(self)
+        } else {
+            Err(WorkspaceError::Backend(format!(
+                "{what} failed: {}",
+                self.why_with_output()
+            )))
+        }
+    }
+
+    /// Why the request did not succeed, never empty (#339): what it wrote
+    /// on stderr, else what the backend said, else how it ended. Stdout is
+    /// left out: on a read or an export it is file content, and this text
+    /// reaches the log and the run's timeline.
+    pub(crate) fn why(&self) -> String {
+        match self.stderr_or_ended() {
+            Ok(stderr) => stderr,
+            Err(ended) => ended,
+        }
+    }
+
+    /// [`Reply::why`], with the end of stdout when stderr had nothing. Only
+    /// for requests whose stdout is diagnostic.
+    pub(crate) fn why_with_output(&self) -> String {
+        let ended = match self.stderr_or_ended() {
+            Ok(stderr) => return stderr,
+            Err(ended) => ended,
+        };
+        let stdout = String::from_utf8_lossy(&self.stdout);
+        let stdout = stdout.trim();
+        if stdout.is_empty() {
+            return ended;
+        }
+        let mut start = stdout.len().saturating_sub(STDOUT_TAIL);
+        while !stdout.is_char_boundary(start) {
+            start += 1;
+        }
+        let tail = stdout.get(start..).unwrap_or_default();
+        let cut = if start > 0 { "…" } else { "" };
+        format!("{ended}; it printed: {cut}{tail}")
+    }
+
+    /// How a command that has no exit status ended, for its output: what
+    /// the backend said, else a plain statement. `None` when it has a status.
+    fn ended_note(&self) -> Option<String> {
+        if self.code.is_some() {
+            return None;
+        }
+        Some(match self.detail.as_deref().map(str::trim) {
+            Some(detail) if !detail.is_empty() => detail.to_owned(),
+            _ => "it ended without an exit status: killed, or the connection dropped".to_owned(),
+        })
+    }
+
+    /// `Ok` with stderr when it said something, else `Err` with how the
+    /// request ended.
+    fn stderr_or_ended(&self) -> Result<String, String> {
+        let stderr = String::from_utf8_lossy(&self.stderr).trim().to_owned();
+        if !stderr.is_empty() {
+            return Ok(stderr);
+        }
+        Err(match (&self.detail, self.gave_up, self.code) {
+            (Some(detail), _, _) if !detail.trim().is_empty() => detail.trim().to_owned(),
+            (_, true, _) => "no answer in time".to_owned(),
+            (_, false, None) => {
+                "it ended without an exit status: killed, or the connection dropped".to_owned()
+            }
+            (_, false, Some(code)) => format!("exit {code}, nothing on stderr"),
+        })
     }
 }
 
@@ -80,6 +162,11 @@ pub(crate) trait Runner: Send + Sync {
         keep: Option<usize>,
         wait: Duration,
     ) -> Result<Reply, WorkspaceError>;
+
+    /// Where requests go, for the run's timeline; `None` by default.
+    fn location(&self) -> Option<String> {
+        None
+    }
 
     /// Removes workspace `id` and everything it left. The script's
     /// `destroy` by default; a backend whose workspace is a machine of its
@@ -464,10 +551,24 @@ impl Workspace for RemoteWorkspace {
         if timed_out {
             text = format!("{}stopped after {}s", tail(&text, cap), limit.as_secs());
         }
+        // A command that ended without a status and without timing out was
+        // killed or cut off: say how, after the output (#339).
+        let output = match reply.ended_note().filter(|_| !timed_out) {
+            Some(note) => {
+                let note = format!("[{note}]");
+                let mut kept = tail(&text, cap.saturating_sub(note.len() + 1));
+                if !kept.is_empty() && !kept.ends_with('\n') {
+                    kept.push('\n');
+                }
+                kept.push_str(&note);
+                kept
+            }
+            None => tail(&text, cap),
+        };
         let result = ExecResult {
             code: if timed_out { None } else { reply.code },
             timed_out,
-            output: tail(&text, cap),
+            output,
             duration,
         };
         held.settle(result.duration);
@@ -489,7 +590,7 @@ impl Workspace for RemoteWorkspace {
             ))),
             _ => Err(WorkspaceError::Backend(format!(
                 "reading {path} failed: {}",
-                String::from_utf8_lossy(&reply.stderr).trim()
+                reply.why()
             ))),
         }
     }
@@ -667,8 +768,12 @@ impl Workspace for RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("recording the tree after setup")?;
+            .ok_with_output("recording the tree after setup")?;
         Ok(())
+    }
+
+    fn location(&self) -> Option<String> {
+        self.runner.location()
     }
 
     async fn close(&self) {
@@ -742,7 +847,7 @@ impl RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("making the workspace")?;
+            .ok_with_output("making the workspace")?;
         String::from_utf8_lossy(&created.stdout)
             .trim()
             .clone_into(&mut workspace.work);
@@ -755,7 +860,7 @@ impl RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("importing the checkout")?;
+            .ok_with_output("importing the checkout")?;
         Ok(workspace)
     }
 }
@@ -859,6 +964,7 @@ pub(crate) mod tests {
                         stdout: so.finish(),
                         stderr: se.finish(),
                         gave_up: false,
+                        detail: None,
                     })
                 }
                 Err(_) => Ok(Reply {
@@ -866,6 +972,162 @@ pub(crate) mod tests {
                     ..Reply::default()
                 }),
             }
+        }
+    }
+
+    fn reply(code: Option<i32>, stdout: &str, stderr: &str) -> Reply {
+        Reply {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            ..Reply::default()
+        }
+    }
+
+    #[test]
+    fn a_failure_always_says_why() {
+        let failed = |reply: Reply| reply.ok("listing files").unwrap_err().to_string();
+        assert_eq!(
+            failed(reply(Some(2), "", "grep: bad pattern\n")),
+            "the workspace failed: listing files failed: grep: bad pattern"
+        );
+        assert_eq!(
+            failed(reply(Some(1), "", "")),
+            "the workspace failed: listing files failed: exit 1, nothing on stderr"
+        );
+        assert_eq!(
+            failed(reply(None, "", "")),
+            "the workspace failed: listing files failed: it ended without an exit status: killed, or the connection dropped"
+        );
+        assert_eq!(
+            failed(Reply {
+                gave_up: true,
+                ..Reply::default()
+            }),
+            "the workspace failed: listing files failed: no answer in time"
+        );
+        assert_eq!(
+            failed(Reply {
+                detail: Some(
+                    "error executing command in container: container not found (InternalError)"
+                        .to_owned()
+                ),
+                ..Reply::default()
+            }),
+            "the workspace failed: listing files failed: error executing command in container: container not found (InternalError)"
+        );
+        assert_eq!(
+            failed(reply(Some(1), "partial output\nthen it stopped\n", "")),
+            "the workspace failed: listing files failed: exit 1, nothing on stderr"
+        );
+        let with_output = |reply: Reply| reply.ok_with_output("making the workspace");
+        assert_eq!(
+            with_output(reply(Some(1), "partial output\nthen it stopped\n", ""))
+                .unwrap_err()
+                .to_string(),
+            "the workspace failed: making the workspace failed: exit 1, nothing on stderr; it printed: partial output\nthen it stopped"
+        );
+        let long = "x".repeat(1000);
+        let said = with_output(reply(Some(1), &long, ""))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            said.ends_with(&format!("it printed: …{}", "x".repeat(300))),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_failed_read_does_not_repeat_the_file() {
+        let secret = "API_KEY=hunter2\n";
+        let said = reply(Some(1), secret, "").why();
+        assert!(!said.contains("hunter2"), "{said}");
+        let said = reply(Some(1), secret, "")
+            .ok("reading a changed file")
+            .unwrap_err()
+            .to_string();
+        assert!(!said.contains("hunter2"), "{said}");
+    }
+
+    #[test]
+    fn no_failure_ends_in_nothing() {
+        for reply in [
+            Reply::default(),
+            reply(Some(1), "", "   \n"),
+            Reply {
+                detail: Some(" ".to_owned()),
+                ..Reply::default()
+            },
+        ] {
+            let said = reply.ok("making the workspace").unwrap_err().to_string();
+            assert!(!said.trim_end().ends_with(':'), "{said}");
+        }
+    }
+
+    /// The local runner, except that the command `henk-killed` ends without
+    /// an exit status and says why, as a killed SSH command does.
+    struct Killing {
+        inner: Arc<LocalRunner>,
+        detail: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for Killing {
+        async fn call(
+            &self,
+            tokens: &[String],
+            stdin: &[u8],
+            keep: Option<usize>,
+            wait: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            if tokens.get(4) == Some(&token("henk-killed")) {
+                return Ok(Reply {
+                    stdout: b"partial".to_vec(),
+                    detail: self.detail.clone(),
+                    ..Reply::default()
+                });
+            }
+            self.inner.call(tokens, stdin, keep, wait).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_without_a_status_says_how_it_ended() {
+        use crate::workspace::WorkspaceProvider as _;
+        use crate::workspace::ssh::SshProvider;
+
+        for (detail, expected) in [
+            (
+                Some("killed by signal KILL"),
+                "partial\n[killed by signal KILL]",
+            ),
+            (
+                None,
+                "partial\n[it ended without an exit status: killed, or the connection dropped]",
+            ),
+        ] {
+            let runner = Arc::new(Killing {
+                inner: LocalRunner::new("henk-remote-killed"),
+                detail: detail.map(str::to_owned),
+            });
+            let provider = SshProvider::with_runner(runner as Arc<dyn Runner>);
+            let source = crate::workspace::contract::source("henk-remote-killed-src");
+            let ws = provider
+                .open(source.path(), &Profile::default())
+                .await
+                .unwrap();
+            let ran = ws
+                .exec(
+                    &["henk-killed".to_owned()],
+                    &WorkspacePath::root(),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ran.code, None);
+            assert!(!ran.timed_out);
+            assert_eq!(ran.output, expected);
+            ws.close().await;
         }
     }
 }

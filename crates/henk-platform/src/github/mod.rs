@@ -7,7 +7,7 @@ pub mod push;
 pub mod writer;
 
 pub use api::{GitHubApi, NewCheckRun};
-pub use app::{AppCredentials, GitHubAuth};
+pub use app::{AppCredentials, GitHubAuth, Installations, Scope};
 pub use writer::GitHubWriter;
 
 /// The web address of the GitHub an API base belongs to, without a trailing

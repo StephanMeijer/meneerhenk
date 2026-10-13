@@ -12,16 +12,19 @@ import type {
 } from './api/types';
 
 const REFUSED = new Set(['refused_scope', 'refused_repeat']);
+/** The one tool unknown tools count under, as the server counts them (#341). */
+const UNKNOWN_TOOL = '(unknown)';
 
 function addCall(detail: RunDetail, call: ToolCall): RunDetail {
   const tally = { errors: 0, refusals: 0, other: 0 };
   if (call.outcome === 'error') tally.errors = 1;
   else if (REFUSED.has(call.outcome)) tally.refusals = 1;
   else if (call.outcome !== 'ok') tally.other = 1;
-  const found = detail.tool_usage.some((row) => row.session === call.session && row.tool === call.tool);
+  const tool = call.origin === '' ? UNKNOWN_TOOL : call.tool;
+  const found = detail.tool_usage.some((row) => row.session === call.session && row.tool === tool);
   const tool_usage = found
     ? detail.tool_usage.map((row) =>
-        row.session === call.session && row.tool === call.tool
+        row.session === call.session && row.tool === tool
           ? {
               ...row,
               calls: row.calls + 1,
@@ -32,7 +35,7 @@ function addCall(detail: RunDetail, call: ToolCall): RunDetail {
             }
           : row,
       )
-    : [...detail.tool_usage, { session: call.session, tool: call.tool, calls: 1, ...tally, total_ms: call.elapsed_ms }];
+    : [...detail.tool_usage, { session: call.session, tool, calls: 1, ...tally, total_ms: call.elapsed_ms }];
   const sessions = detail.sessions.map((session) =>
     session.name === call.session
       ? { ...session, last_call_turn: Math.max(session.last_call_turn ?? 0, call.turn) }

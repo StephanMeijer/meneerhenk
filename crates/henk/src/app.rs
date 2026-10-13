@@ -5,9 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow};
+use henk_domain::allowlist::{Platform, RepoRef};
 use henk_llm::{ModelClient, client_with};
 use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
-use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter};
+use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter, Installations};
 use henk_platform::gitlab::{GitLabRest, GitLabWriter};
 use henk_platform::push::PushWriter;
 use henk_platform::{IssueWriter, PlatformWriter};
@@ -16,7 +17,7 @@ use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::{DatabaseConfig, Settings};
+use crate::config::{DatabaseConfig, GitHubConfig, Settings};
 use crate::liveness::LiveRuns;
 use crate::workspace::Backends;
 use crate::workspace::WorkspaceProvider;
@@ -29,8 +30,8 @@ pub struct App {
     pub store: Arc<dyn RunStore>,
     /// Model clients by configured id.
     pub models: BTreeMap<String, Arc<dyn ModelClient>>,
-    /// The GitHub writer, when GitHub is configured.
-    pub github: Option<Arc<GitHubWriter>>,
+    /// GitHub's writers, one per repository, when GitHub is configured.
+    pub github: Option<GitHubWriters>,
     /// The GitLab writer over its write-mode MCP session, when configured.
     pub gitlab: Option<Arc<GitLabWriter>>,
     /// Cancelled when Henk is told to stop (Ctrl-C, SIGTERM). Every review
@@ -69,6 +70,82 @@ impl std::fmt::Debug for App {
             .field("models", &self.models.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
+}
+
+/// Makes the GitHub writer for each repository. Every writer it makes acts
+/// for the App installation that reaches its repository, so a run's
+/// comments, checks, clones and pushes all go out with that installation's
+/// token, never another account's (#378).
+#[derive(Debug)]
+pub struct GitHubWriters {
+    api: GitHubApi,
+    bot_login: String,
+}
+
+impl GitHubWriters {
+    /// Writers over `api`, unscoped, posting as `bot_login`.
+    #[must_use]
+    pub fn new(api: GitHubApi, bot_login: impl Into<String>) -> Self {
+        Self {
+            api,
+            bot_login: bot_login.into(),
+        }
+    }
+
+    /// The writer for `repo`'s installation.
+    #[must_use]
+    pub fn for_repository(&self, repo: &RepoRef) -> Arc<GitHubWriter> {
+        Arc::new(GitHubWriter::new(
+            self.api.for_repository(repo),
+            self.bot_login.clone(),
+        ))
+    }
+
+    /// The unscoped client: App calls, and the installations to remember a
+    /// webhook's installation in.
+    #[must_use]
+    pub const fn api(&self) -> &GitHubApi {
+        &self.api
+    }
+}
+
+/// The unscoped GitHub App client `github` configures, its key read from
+/// the file its environment variable names.
+///
+/// # Errors
+///
+/// Returns an error when the variable is unset, or the key is unreadable.
+pub fn github_api(github: &GitHubConfig) -> anyhow::Result<GitHubApi> {
+    let key_path = env_var(&github.private_key_path_env).ok_or_else(|| {
+        anyhow!(
+            "environment variable {} is not set",
+            github.private_key_path_env
+        )
+    })?;
+    let pem = std::fs::read_to_string(&key_path).with_context(|| format!("reading {key_path}"))?;
+    let credentials =
+        AppCredentials::from_pem(github.app_id, &pem).context("GitHub App private key")?;
+    let installations = Installations::new(credentials, github.ceiling());
+    GitHubApi::new(&github.api_base, GitHubAuth::app(Arc::new(installations)))
+        .context("GitHub client")
+}
+
+/// `config` for a session that reads `repo`, signed in as `installation` of
+/// App `app_id`: the GitHub MCP server mints that installation's tokens
+/// itself, so it reaches that account's repositories and no other's.
+#[must_use]
+pub fn github_session_config(
+    config: &McpServerConfig,
+    app_id: u64,
+    installation: u64,
+) -> McpServerConfig {
+    let mut config = config.clone();
+    let [app_key, installation_key] = crate::config::MCP_INSTALLATION_ENV;
+    config.env.insert(app_key.to_owned(), app_id.to_string());
+    config
+        .env
+        .insert(installation_key.to_owned(), installation.to_string());
+    config
 }
 
 /// Reads an environment variable, treating empty as unset.
@@ -140,22 +217,10 @@ impl App {
         }
 
         let github = match &settings.github {
-            Some(github) => {
-                let key_path = env_var(&github.private_key_path_env).ok_or_else(|| {
-                    anyhow!(
-                        "environment variable {} is not set",
-                        github.private_key_path_env
-                    )
-                })?;
-                let pem = std::fs::read_to_string(&key_path)
-                    .with_context(|| format!("reading {key_path}"))?;
-                let credentials =
-                    AppCredentials::from_pem(github.app_id, github.installation_id, &pem)
-                        .context("GitHub App private key")?;
-                let api = GitHubApi::new(&github.api_base, GitHubAuth::app(credentials))
-                    .context("GitHub client")?;
-                Some(Arc::new(GitHubWriter::new(api, github.bot_login.clone())))
-            }
+            Some(github) => Some(GitHubWriters::new(
+                github_api(github)?,
+                github.bot_login.clone(),
+            )),
             None => None,
         };
 
@@ -190,7 +255,7 @@ impl App {
 
         // The sandbox host's key is read now, so a missing or broken one
         // stops Henk at start instead of failing the first review on it.
-        let ssh = crate::workspace::ssh_provider(&settings)?;
+        let ssh = crate::workspace::ssh_pool(&settings)?;
         let kubernetes = crate::workspace::kubernetes_provider(&settings).await?;
 
         Ok(Self {
@@ -240,55 +305,57 @@ impl App {
             .ok_or_else(|| anyhow!("MCP server {alias:?} is not configured"))
     }
 
-    /// Starts an MCP session by alias.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the alias is unknown or the server does not start.
-    pub async fn connect_mcp(&self, alias: &str) -> anyhow::Result<RmcpSession> {
-        let config = self.mcp_config(alias)?;
-        RmcpSession::connect(alias, config, env_var)
-            .await
-            .with_context(|| format!("MCP server {alias}"))
-    }
-
-    /// The read-only MCP session for a platform: its configured server,
-    /// started now.
+    /// The read-only MCP session for reading `repo`: its platform's
+    /// configured server, started now. On GitHub it signs in as the
+    /// installation that reaches `repo`.
     ///
     /// # Errors
     ///
     /// Returns an error when the platform or its server is not configured,
-    /// or the server does not start.
-    pub async fn read_session(
-        &self,
-        platform: henk_domain::allowlist::Platform,
-    ) -> anyhow::Result<Arc<dyn McpSession>> {
+    /// no installation reaches `repo`, or the server does not start.
+    pub async fn read_session(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn McpSession>> {
         #[cfg(test)]
         if let Some(session) = &self.test_session {
             return Ok(Arc::clone(session));
         }
-        let alias = self.read_mcp_alias(platform)?;
-        Ok(Arc::new(self.connect_mcp(alias).await?))
+        let alias = self.read_mcp_alias(repo.platform())?;
+        let config = self.mcp_config(alias)?;
+        let config = match (repo.platform(), &self.github) {
+            (Platform::GitHub, Some(github)) => {
+                let api = github.api().for_repository(repo);
+                let installation = api
+                    .installation()
+                    .await
+                    .with_context(|| format!("GitHub installation for {}", repo.path()))?;
+                let app_id = api
+                    .installations()
+                    .map(|installations| installations.app_id())
+                    .ok_or_else(|| anyhow!("GitHub is not configured as an App"))?;
+                github_session_config(config, app_id, installation)
+            }
+            _ => config.clone(),
+        };
+        let session = RmcpSession::connect(alias, &config, env_var)
+            .await
+            .with_context(|| format!("MCP server {alias}"))?;
+        Ok(Arc::new(session))
     }
 
-    /// The writer for a platform.
+    /// The writer for `repo`: on GitHub, its installation's.
     ///
     /// # Errors
     ///
     /// Returns an error when the platform is not configured.
-    pub fn writer(
-        &self,
-        platform: henk_domain::allowlist::Platform,
-    ) -> anyhow::Result<Arc<dyn PlatformWriter>> {
+    pub fn writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn PlatformWriter>> {
         #[cfg(test)]
         if let Some(writer) = &self.test_writer {
             return Ok(Arc::clone(writer));
         }
-        match platform {
+        match repo.platform() {
             henk_domain::allowlist::Platform::GitHub => self
                 .github
-                .clone()
-                .map(|w| w as Arc<dyn PlatformWriter>)
+                .as_ref()
+                .map(|w| w.for_repository(repo) as Arc<dyn PlatformWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
             henk_domain::allowlist::Platform::GitLab => self
                 .gitlab
@@ -298,25 +365,22 @@ impl App {
         }
     }
 
-    /// What Henk reads and writes on a platform to push.
+    /// What Henk reads and writes to push to `repo`.
     ///
     /// # Errors
     ///
     /// Returns an error when the platform is not configured, or GitLab is
     /// without its token.
-    pub fn push_writer(
-        &self,
-        platform: henk_domain::allowlist::Platform,
-    ) -> anyhow::Result<Arc<dyn PushWriter>> {
+    pub fn push_writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn PushWriter>> {
         #[cfg(test)]
         if let Some(writer) = &self.test_push_writer {
             return Ok(Arc::clone(writer));
         }
-        match platform {
+        match repo.platform() {
             henk_domain::allowlist::Platform::GitHub => self
                 .github
-                .clone()
-                .map(|w| w as Arc<dyn PushWriter>)
+                .as_ref()
+                .map(|w| w.for_repository(repo) as Arc<dyn PushWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
             henk_domain::allowlist::Platform::GitLab => match &self.gitlab {
                 Some(writer) if writer.can_push() => Ok(Arc::clone(writer) as Arc<dyn PushWriter>),
@@ -332,24 +396,21 @@ impl App {
         }
     }
 
-    /// The issue writer for a platform.
+    /// The issue writer for `repo`.
     ///
     /// # Errors
     ///
     /// Returns an error when the platform is not configured.
-    pub fn issue_writer(
-        &self,
-        platform: henk_domain::allowlist::Platform,
-    ) -> anyhow::Result<Arc<dyn IssueWriter>> {
+    pub fn issue_writer(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn IssueWriter>> {
         #[cfg(test)]
         if let Some(writer) = &self.test_issue_writer {
             return Ok(Arc::clone(writer));
         }
-        match platform {
+        match repo.platform() {
             henk_domain::allowlist::Platform::GitHub => self
                 .github
-                .clone()
-                .map(|w| w as Arc<dyn IssueWriter>)
+                .as_ref()
+                .map(|w| w.for_repository(repo) as Arc<dyn IssueWriter>)
                 .ok_or_else(|| anyhow!("GitHub is not configured")),
             henk_domain::allowlist::Platform::GitLab => self
                 .gitlab
@@ -382,5 +443,29 @@ impl App {
                 .map(|g| g.mcp_server.as_str())
                 .ok_or_else(|| anyhow!("GitLab is not configured")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use super::github_session_config;
+
+    #[test]
+    fn the_github_mcp_server_signs_in_as_the_repositorys_installation() {
+        let config: henk_mcp::McpServerConfig = toml::from_str(
+            "command = \"github-mcp-server\"\nenv = { GITHUB_READ_ONLY = \"1\" }\npass_env = [\"GITHUB_APP_PRIVATE_KEY_PATH\"]\n",
+        )
+        .unwrap();
+        let session = github_session_config(&config, 12, 222);
+        assert_eq!(session.env["GITHUB_APP_ID"], "12");
+        assert_eq!(session.env["GITHUB_APP_INSTALLATION_ID"], "222");
+        assert_eq!(session.env["GITHUB_READ_ONLY"], "1", "the rest is kept");
+        assert_eq!(session.pass_env, config.pass_env);
+        assert!(
+            !config.env.contains_key("GITHUB_APP_INSTALLATION_ID"),
+            "the configured server is left as it is"
+        );
     }
 }
