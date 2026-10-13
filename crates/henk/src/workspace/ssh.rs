@@ -715,6 +715,7 @@ impl SshPool {
         profile: &Profile,
         tried: &mut Vec<String>,
         refused: &mut Vec<String>,
+        counted: &mut Option<Waiter>,
     ) -> Result<Attempt, WorkspaceError> {
         let mut full = false;
         for host in self.candidates(profile) {
@@ -725,6 +726,9 @@ impl SshPool {
                 full = true;
                 continue;
             };
+            // The open has its host: whatever packing and upload take, it
+            // is no longer waiting for one with room.
+            *counted = None;
             tried.push(host.id.clone());
             if archive.is_none() {
                 *archive = Some(packed(source).await?);
@@ -817,11 +821,16 @@ impl WorkspaceProvider for SshPool {
         let mut archive = None;
         let (mut tried, mut refused) = (Vec::new(), Vec::new());
         // When the open began to wait, said once on the run's timeline.
-        // Counted as waiting, for the dashboard, from then until it opens.
-        let mut waited: Option<(Instant, Waiter)> = None;
-        let wait = |waited: &mut Option<(Instant, Waiter)>| {
-            if waited.is_none() {
-                *waited = Some((Instant::now(), Waiter::new(&self.signals)));
+        // Counted as waiting, for the dashboard, from then until it has a
+        // seat on a host.
+        let mut began: Option<Instant> = None;
+        let mut counted: Option<Waiter> = None;
+        let wait = |began: &mut Option<Instant>, counted: &mut Option<Waiter>| {
+            if counted.is_none() {
+                *counted = Some(Waiter::new(&self.signals));
+            }
+            if began.is_none() {
+                *began = Some(Instant::now());
                 notes.say(self.waiting_note(profile));
             }
         };
@@ -830,7 +839,7 @@ impl WorkspaceProvider for SshPool {
         let mut turn = if self.turnstile.try_lock().is_ok() {
             None
         } else {
-            wait(&mut waited);
+            wait(&mut began, &mut counted);
             Some(self.turnstile.lock().await)
         };
         loop {
@@ -844,11 +853,18 @@ impl WorkspaceProvider for SshPool {
             let now = Instant::now();
             tried.retain(|id| self.hosts.iter().any(|h| &h.id == id && h.is_down(now)));
             match self
-                .attempt(source, &mut archive, profile, &mut tried, &mut refused)
+                .attempt(
+                    source,
+                    &mut archive,
+                    profile,
+                    &mut tried,
+                    &mut refused,
+                    &mut counted,
+                )
                 .await?
             {
                 Attempt::Opened(workspace) => {
-                    if let Some((since, _waiter)) = waited {
+                    if let Some(since) = began {
                         let at = workspace
                             .location()
                             .unwrap_or_else(|| "a sandbox host".to_owned());
@@ -872,12 +888,12 @@ impl WorkspaceProvider for SshPool {
                 turn = Some(if let Ok(first) = self.turnstile.try_lock() {
                     first
                 } else {
-                    wait(&mut waited);
+                    wait(&mut began, &mut counted);
                     self.turnstile.lock().await
                 });
                 continue;
             }
-            wait(&mut waited);
+            wait(&mut began, &mut counted);
             // Until a seat is given back, or a host passed over as down may
             // be tried again.
             let retry = self
@@ -2096,5 +2112,27 @@ pub(crate) mod tests {
         assert_eq!(pool.sandbox_hosts(), shown(1, 0));
         next.close().await;
         assert_eq!(pool.sandbox_hosts(), shown(0, 0));
+    }
+
+    #[tokio::test]
+    async fn an_open_that_has_its_host_no_longer_counts_as_waiting() {
+        let a = LocalRunner::new("henk-limit-uploading");
+        let pool = limited(vec![("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-uploading-src");
+        let held = pool.hosts[0].seat(&pool.signals).unwrap();
+        let (open, _said) = opening(&pool, source.path());
+        assert!(waits(&open).await);
+        assert_eq!(pool.sandbox_hosts().waiting, 1);
+        // The seat is given back while a sweep keeps the open from
+        // finishing: it has its host and is not done.
+        let sweep = pool.hosts[0].provider.gate.clone().write_owned().await;
+        drop(held);
+        assert!(waits(&open).await, "held up by the sweep");
+        let shown = pool.sandbox_hosts();
+        assert_eq!(shown.hosts[0].in_use, 1, "it has the seat");
+        assert_eq!(shown.waiting, 0, "and waits for no host");
+        drop(sweep);
+        open.await.unwrap().unwrap().close().await;
+        assert_eq!(pool.sandbox_hosts().waiting, 0);
     }
 }
