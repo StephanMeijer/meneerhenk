@@ -107,6 +107,14 @@ impl Pairing<'_> {
     ) -> anyhow::Result<()> {
         let (store, run) = (&*self.app.store, self.run);
         let left = self.left();
+        // A plan whose time ran out before the planner began, such as
+        // while it waited for a sandbox host (#403), ends here.
+        if left.is_zero() {
+            return Err(anyhow!(
+                "the time limit of {}s was reached before the planner began",
+                self.config.run_timeout_secs
+            ));
+        }
         self.planner.set_timeout(left.min(self.planner_round));
         stages::mark(
             store,

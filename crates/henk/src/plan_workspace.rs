@@ -48,9 +48,10 @@ async fn fetched(
 /// `plan = true`: the repository at its default branch, set up as the
 /// profile says, never exported, with the profile's limits for `bash`, and
 /// which branch and commit it holds. Whatever fails is a warning on the run
-/// and the planner works without it; a cancelled plan stops waiting at once,
-/// and one whose time runs out while its workspace opens, such as while it
-/// waits for a sandbox host, goes on without it (#403).
+/// and the planner works without it; a cancelled plan stops waiting at once.
+/// A wait for a sandbox host counts against `deadline`, the plan's time
+/// limit (#403): one that runs past it gives up and leaves the plan no time,
+/// so the plan ends before the planner begins.
 pub async fn open_for_plan(
     app: &App,
     repo: &RepoRef,

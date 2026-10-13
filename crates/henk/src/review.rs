@@ -2539,28 +2539,6 @@ requester_id = 3
         assert_eq!(std::fs::read_dir(b.base()).unwrap().count(), 0);
     }
 
-    /// One sandbox host that takes one workspace (#403), already holding
-    /// one: what a review opened on it meets.
-    async fn full_host(
-        name: &str,
-    ) -> (
-        Arc<crate::workspace::ssh::SshPool>,
-        Arc<dyn crate::workspace::Workspace>,
-    ) {
-        use crate::workspace::WorkspaceProvider as _;
-        use crate::workspace::remote::{Runner, tests::LocalRunner};
-        let a = LocalRunner::new(name);
-        let pool = Arc::new(crate::workspace::ssh::SshPool::with_limited_runners(vec![
-            ("a".to_owned(), a as Arc<dyn Runner>, Some(1)),
-        ]));
-        let source = crate::workspace::contract::source(&format!("{name}-src"));
-        let held = pool
-            .open(source.path(), &henk_domain::workspace::Profile::default())
-            .await
-            .unwrap();
-        (pool, held)
-    }
-
     async fn messages(app: &App, run: &RunId) -> Vec<String> {
         app.store
             .events(run)
@@ -2573,7 +2551,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_review_waits_for_a_full_sandbox_host_and_says_so() {
-        let (pool, held) = full_host("henk-review-wait").await;
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-review-wait").await;
         let (f, reviewer, _, _remote) = looping_with(
             "ssh-wait",
             &ssh_loop_settings("true"),
@@ -2607,7 +2585,7 @@ requester_id = 3
 
     #[tokio::test]
     async fn a_review_whose_time_runs_out_waiting_for_a_sandbox_host_fails_saying_so() {
-        let (pool, held) = full_host("henk-review-wait-out").await;
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-review-wait-out").await;
         let (f, reviewer, _, _remote) = looping_with(
             "ssh-wait-out",
             &format!("run_timeout_secs = 1\n{}", ssh_loop_settings("true")),

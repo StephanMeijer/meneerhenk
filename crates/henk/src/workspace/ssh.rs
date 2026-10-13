@@ -815,6 +815,20 @@ pub(crate) mod tests {
     use crate::workspace::Pattern;
     use henk_domain::path::WorkspacePath;
 
+    /// One sandbox host that takes one workspace (#403), already holding
+    /// one: what a run opened on it meets until that one is closed.
+    pub(crate) async fn full_host(name: &str) -> (Arc<SshPool>, Arc<dyn Workspace>) {
+        let a = LocalRunner::new(name);
+        let pool = Arc::new(SshPool::with_limited_runners(vec![(
+            "a".to_owned(),
+            a as Arc<dyn Runner>,
+            Some(1),
+        )]));
+        let source = crate::workspace::contract::source(&format!("{name}-src"));
+        let held = pool.open(source.path(), &Profile::default()).await.unwrap();
+        (pool, held)
+    }
+
     #[tokio::test]
     async fn the_ssh_backend_keeps_the_workspace_contract() {
         let runner = LocalRunner::new("henk-ssh-contract");
