@@ -2,7 +2,8 @@
 # them, and they may reach DNS and the internet, but not the cluster itself:
 # fill in your cluster's Pod and Service ranges, and the node network if the
 # API server or the kubelets are there. A CNI that enforces NetworkPolicy is
-# needed (kind's default does not).
+# needed (kind's default does not). Henk tells the models the workspace is
+# online (#349): closing egress makes that untrue until #86 lands.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

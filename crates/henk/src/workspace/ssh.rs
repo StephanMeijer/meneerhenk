@@ -155,7 +155,7 @@ impl SshRunner {
         .await
         .map_err(|e| match e {
             russh::Error::UnknownKey => WorkspaceError::Unreachable(format!(
-                "{}:{} offered a host key that is not the pinned workspace.ssh.host_key",
+                "{}:{} offered a host key that is not the pinned host_key",
                 self.target.host, self.target.port
             )),
             other => failed("connecting to the sandbox host", &other),
@@ -571,6 +571,9 @@ pub struct SshPool {
     turnstile: tokio::sync::Mutex<()>,
     /// How long a host that could not be reached counts as down.
     down_for: Duration,
+    /// Held while a host is chosen and seated, so that opens which start
+    /// together do not all read the same counts and pick the same host.
+    choosing: std::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for SshPool {
@@ -647,6 +650,7 @@ impl SshPool {
             }),
             turnstile: tokio::sync::Mutex::new(()),
             down_for: DOWN_FOR,
+            choosing: std::sync::Mutex::new(()),
         }
     }
     /// Sweeps every host at once (see [`SshProvider::sweep`]); one host
@@ -689,25 +693,56 @@ impl SshPool {
         }
     }
 
-    /// The hosts `profile` may use, in the order to try them: up before
-    /// down, then the fewest workspaces, then by id.
-    fn candidates(&self, profile: &Profile) -> Vec<&PooledHost> {
-        let now = Instant::now();
-        let mut hosts: Vec<&PooledHost> = self
-            .hosts
+    /// The hosts `profile` may use.
+    fn allowed<'h>(&'h self, profile: &Profile) -> impl Iterator<Item = &'h PooledHost> {
+        self.hosts
             .iter()
             .filter(|h| profile.hosts.is_empty() || profile.hosts.contains(&h.id))
+    }
+
+    /// The host to try next, with a seat on it for the workspace about to
+    /// start there: up before down, then the fewest workspaces, then by id.
+    /// A host in `tried` is not chosen again, and a host at its limit is
+    /// passed over. Choosing and seating happen under one lock, so opens
+    /// that run together see each other.
+    fn reserve<'h>(&'h self, profile: &Profile, tried: &[String]) -> Reserved<'h> {
+        let _choosing = self
+            .choosing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        let mut hosts: Vec<&PooledHost> = self
+            .allowed(profile)
+            .filter(|h| !tried.contains(&h.id))
             .collect();
         hosts.sort_by_key(|h| (h.is_down(now), h.live.load(Ordering::Acquire), h.id.clone()));
-        hosts
+        let mut full = false;
+        for host in hosts {
+            // The seat counts the workspace before it is started: a start
+            // that fails drops the seat, which counts it off again.
+            match host.seat(&self.signals) {
+                Some(seat) => return Reserved::Seated(host, seat),
+                None => full = true,
+            }
+        }
+        if full { Reserved::Full } else { Reserved::None }
     }
 }
 
+/// What [`SshPool::reserve`] found.
+enum Reserved<'h> {
+    Seated(&'h PooledHost, Seat),
+    /// Every host left to try is at its limit.
+    Full,
+    /// No host is left to try.
+    None,
+}
+
 impl SshPool {
-    /// Opens on the first host of `candidates` with room that is not in
-    /// `tried`, passing over the ones that cannot be reached. The checkout
-    /// at `source` is packed into `archive` once a host has a seat for it,
-    /// so an open that waits holds no archive (#403).
+    /// Opens on the next host with room that is not in `tried` (see
+    /// [`Self::reserve`]), passing over the ones that cannot be reached.
+    /// The checkout at `source` is packed into `archive` once a host has a
+    /// seat for it, so an open that waits holds no archive (#403).
     async fn attempt(
         &self,
         source: &Path,
@@ -717,14 +752,11 @@ impl SshPool {
         refused: &mut Vec<String>,
         counted: &mut Option<Waiter>,
     ) -> Result<Attempt, WorkspaceError> {
-        let mut full = false;
-        for host in self.candidates(profile) {
-            if tried.contains(&host.id) {
-                continue;
-            }
-            let Some(seat) = host.seat(&self.signals) else {
-                full = true;
-                continue;
+        loop {
+            let (host, seat) = match self.reserve(profile, tried) {
+                Reserved::Seated(host, seat) => (host, seat),
+                Reserved::Full => return Ok(Attempt::Full),
+                Reserved::None => return Ok(Attempt::Exhausted),
             };
             // The open has its host: whatever packing and upload take, it
             // is no longer waiting for one with room.
@@ -751,19 +783,13 @@ impl SshPool {
                 Err(other) => return Err(other),
             }
         }
-        Ok(if full {
-            Attempt::Full
-        } else {
-            Attempt::Exhausted
-        })
     }
 
     /// Why the open waits, for the note that says so: the hosts `profile`
     /// may use that are full, or the opens that came earlier.
     fn waiting_note(&self, profile: &Profile) -> String {
         let full: Vec<String> = self
-            .candidates(profile)
-            .iter()
+            .allowed(profile)
             .filter(|h| h.is_full())
             .filter_map(|h| h.limit.map(|n| format!("{} ({n})", h.id)))
             .collect();
@@ -812,7 +838,7 @@ impl WorkspaceProvider for SshPool {
         profile: &Profile,
         notes: &Notes,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
-        if self.candidates(profile).is_empty() {
+        if self.allowed(profile).next().is_none() {
             return Err(WorkspaceError::Backend(format!(
                 "no sandbox host is one of the profile's hosts ({})",
                 profile.hosts.join(", ")
@@ -1441,6 +1467,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn workspaces_opened_at_once_still_spread_over_the_hosts() {
+        let (a, b) = (
+            LocalRunner::new("henk-pool-burst-a"),
+            LocalRunner::new("henk-pool-burst-b"),
+        );
+        let pool = Arc::new(pool(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]));
+        let source = crate::workspace::contract::source("henk-pool-burst-src");
+        let mut opening = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let (pool, path) = (Arc::clone(&pool), source.path().to_owned());
+            opening.spawn(async move { pool.open(&path, &Profile::default()).await });
+        }
+        let mut open = Vec::new();
+        while let Some(done) = opening.join_next().await {
+            open.push(done.unwrap().unwrap());
+        }
+        assert_eq!(
+            (workspaces(&a), workspaces(&b)),
+            (3, 3),
+            "a burst is spread, not sent to one host"
+        );
+        for workspace in open {
+            workspace.close().await;
+        }
+    }
+
+    #[tokio::test]
     async fn a_host_that_cannot_be_reached_is_passed_over_and_then_tried_last() {
         let (gone, b) = (down(), LocalRunner::new("henk-pool-up"));
         let pool = pool(vec![
@@ -1550,9 +1606,7 @@ pub(crate) mod tests {
         };
         let refused = SshProvider::new(target).probe().await.unwrap_err();
         assert!(
-            refused
-                .to_string()
-                .contains("not the pinned workspace.ssh.host_key"),
+            refused.to_string().contains("not the pinned host_key"),
             "{refused}"
         );
     }

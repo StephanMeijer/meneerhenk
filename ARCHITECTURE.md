@@ -356,7 +356,7 @@ sequenceDiagram
     L->>P: checkout
     P->>G: fresh clone_at head, credential via env only
     L->>P: commit_and_push(changeset)
-    P->>W: user_login of the requester's configured id, for the noreply address
+    P->>W: user_login of the requester who asked, by id, for the noreply address
     P->>W: pull_facts again: head unchanged, push_refusal: fork, default, protected, closed
     P->>G: apply the changeset, exactly its files changed
     P->>G: commit with Henk-Run, Requested-by and the trailers
@@ -923,6 +923,16 @@ too; without a dashboard they are not served.
 | Loop push | git over HTTPS with the App installation token as `x-access-token` | git over HTTPS with the personal access token as `oauth2` |
 | Review ended | check `success`, `neutral` or `failure` | commit status always `success`, count in the description |
 | Mention reply | reply in the review thread, or a conversation comment | reply in the discussion, or a note |
+| Accounts | every installation of the App (#378): each repository's calls, git token and MCP session are its account's installation's, from the delivery's `installation.id` or `GET /repos/{owner}/{repo}/installation` | the one personal access token |
+
+`App.github` is a `GitHubWriters`: one unscoped `GitHubApi` over a shared
+`Installations` (the App key, the optional `installations` ceiling,
+owner → installation, installation → token). `App::writer`, `push_writer`
+and `issue_writer` take the repository and return a writer whose client is
+`GitHubApi::for_repository`. Its installation is fixed for the life of the
+writer, so a run cannot reach another account with its token. Tokens are
+minted once per installation, held until two minutes before their
+`expires_at`, and minted under a lock so concurrent calls share one.
 
 ## 11. Configuration and secrets
 
@@ -936,7 +946,7 @@ carries it, and the deployment fills those variables from OpenBao.
 | Variable | Read by | Reaches |
 |---|---|---|
 | `[endpoints.*].api_key_env` | `App::build` | the clients of the endpoint's models, as a bearer token or `x-api-key` |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `App::build` and, by name, the GitHub MCP child | `AppCredentials` (RS256 on ring) and the child's own token minting, as the installation Henk names in `GITHUB_APP_INSTALLATION_ID` for each session (#378) |
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | passed by name to both GitLab MCP children; `App::build` for the review loop's push | the children; `GitLabRest` in the `PRIVATE-TOKEN` header, and git's environment as `oauth2` Basic; never argv, a log or a model |
 | `HENK_GITHUB_WEBHOOK_SECRET`, `HENK_GITLAB_WEBHOOK_TOKEN` | `server::router` | signature and token checks |
 | `HENK_API_TOKEN` | `server::router` | `POST /review` and `POST /plan` |
@@ -979,10 +989,14 @@ variable before the first webhook arrives.
   are alphas without MCP client wiring, the crate with the Agent is unpublished
   and reads global configuration, and its MCP layer is rmcp anyway. Owning the
   dispatcher is what makes §8.4 and §8.5 properties of code.
-- **Hand-written model adapters.** Two wire formats cover the proxy, Anthropic,
-  OpenAI and Ollama in about a thousand lines, including the details an MCP
-  host needs that the libraries lack: error flags on tool results, tool-name
-  mapping, untouched schemas, opaque thinking blocks echoed back.
+- **Hand-written model adapters.** Three wire formats cover the proxy, Anthropic,
+  OpenAI and Ollama in about fifteen hundred lines, including the details an
+  MCP host needs that the libraries lack: error flags on tool results,
+  tool-name mapping, untouched schemas, opaque thinking blocks and reasoning
+  items echoed back. OpenAI Chat Completions (`openai.rs`) is the default for
+  an `openai` endpoint; `api = "responses"` uses the Responses API
+  (`responses.rs`, #365), statelessly (`store: false`, encrypted reasoning
+  passed back as `Block::Opaque`).
 - **GitHub writes over REST.** See section 10.
 - **GitLab's built-in MCP server is not used.** It is OAuth-only in its
   documentation and lacks commit statuses and award emoji; `mcp-gitlab` takes a

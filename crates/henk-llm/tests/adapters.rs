@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use henk_llm::{
-    Block, CacheTtl, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig,
-    Provider, RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName,
-    ToolResult, anthropic, build_endpoint_client, client_for, client_with, openai,
+    Api, Block, CacheTtl, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam,
+    ModelConfig, Provider, RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef,
+    ToolName, ToolResult, anthropic, build_endpoint_client, client_for, client_with, openai,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -28,6 +28,7 @@ fn fixture(name: &str) -> Value {
 fn config(provider: Provider, base_url: &str) -> ModelConfig {
     ModelConfig {
         provider,
+        api: Api::default(),
         base_url: base_url.to_owned(),
         api_key: "secret-key".to_owned().into(),
         model: "test-model".to_owned(),
@@ -81,6 +82,37 @@ fn conversation() -> Vec<ChatMessage> {
 }
 
 // ---- OpenAI ----------------------------------------------------------------
+
+#[test]
+fn openai_reads_reasoning_tokens_under_either_naming() {
+    let response = |usage: Value| {
+        json!({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+            "usage": usage,
+        })
+    };
+    let chat = openai::decode(&response(json!({
+        "prompt_tokens": 7, "completion_tokens": 30,
+        "completion_tokens_details": {"reasoning_tokens": 24},
+    })))
+    .unwrap();
+    assert_eq!(
+        (chat.usage.output_tokens, chat.usage.reasoning_tokens),
+        (30, 24)
+    );
+    let responses_style = openai::decode(&response(json!({
+        "input_tokens": 7, "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 99},
+    })))
+    .unwrap();
+    assert_eq!(
+        responses_style.usage.reasoning_tokens, 10,
+        "never more than the output it is part of"
+    );
+    let mut total = chat.usage;
+    total.add(&responses_style.usage);
+    assert_eq!(total.reasoning_tokens, 34);
+}
 
 #[test]
 fn openai_reads_usage_under_either_naming() {
@@ -734,7 +766,8 @@ fn client_for_rejects_bad_config() {
 }
 
 /// Live smoke test. Set `LLM_SMOKE_BASE_URL`, `LLM_SMOKE_API_KEY`, `LLM_SMOKE_MODEL`
-/// and optionally `LLM_SMOKE_PROVIDER=anthropic`, then run with `--ignored`.
+/// and optionally `LLM_SMOKE_PROVIDER=anthropic` or `LLM_SMOKE_API=responses`,
+/// then run with `--ignored`.
 #[tokio::test]
 #[ignore = "needs a live endpoint"]
 async fn live_smoke() {
@@ -747,6 +780,9 @@ async fn live_smoke() {
         _ => Provider::OpenAi,
     };
     let mut cfg = config(provider, &base_url);
+    if std::env::var("LLM_SMOKE_API").as_deref() == Ok("responses") {
+        cfg.api = Api::Responses;
+    }
     cfg.api_key = api_key.into();
     cfg.model = model;
     cfg.timeout = Duration::from_mins(2);

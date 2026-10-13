@@ -188,7 +188,8 @@ reported as nothing to review.
 
 Models are declared in two layers (#368). An `[endpoints.<id>]` says where
 and how they are reached: `provider` (`openai` or `anthropic`), `base_url`,
-`api_key_env`, and optionally `headers` sent with every request. Declare
+`api_key_env`, and optionally `headers` sent with every request and, on an
+`openai` endpoint, `api` (see "OpenAI's Responses API" below). Declare
 one per server or account, as many of one provider as there are. A
 `[models.<id>]` says which model on which endpoint and how to call it:
 `endpoint`, `model` (the provider's name for it), `max_tokens`,
@@ -219,7 +220,8 @@ A review needs `[review.loop]` with `[roles.reviewer]` and
 limits the whole loop: no round starts after it, and a round under way
 gets only what is left. The executor's `check_commands`,
 `max_changed_files`, identity and trailers apply to every commit the loop
-pushes, and its `requester_id` is who those commits are requested by.
+pushes. Those commits name the requester who asked, when Henk knows them
+by id, and nobody otherwise (see "Pushing a review's fixes").
 Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`;
 execute runs need `[execution]` with `[roles.executor]`.
 Without `[review.loop]`
@@ -453,6 +455,63 @@ Roles keep naming models by id. `henk llm models` lists what an endpoint
 serves and takes `--endpoint <id>` instead of `--model`. `henk doctor`
 checks each endpoint once and then each model on it.
 
+### OpenAI's Responses API
+
+An `openai` endpoint is called through Chat Completions
+(`/chat/completions`) unless it says otherwise. Every OpenAI-compatible
+server speaks that: gateways, local models, other vendors. OpenAI's own
+API also has the Responses API (`/responses`, #365), where a reasoning
+model's reasoning is carried from turn to turn. A review lane then keeps
+its chain of thought across its tool calls instead of starting over at
+each one. Choose it per endpoint:
+
+```toml
+[endpoints.openai]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+api = "responses"            # default: "chat_completions"
+```
+
+Henk keeps nothing at OpenAI. Every request sends `store: false` and the
+whole conversation, and asks for the reasoning back encrypted; Henk passes
+it back unchanged on the next turn. The output cap is always sent as
+`max_output_tokens`, so `max_tokens_param` is refused on a model of a
+Responses endpoint. Sessions record the tokens spent reasoning beside the
+rest (`henk runs show`, the run page). `henk config check` names each
+OpenAI endpoint's API. `henk doctor --probe` lets a model on the Responses
+API answer within its configured cap, so a reasoning model is not cut off
+while it thinks.
+
+### Serving several GitHub accounts
+
+One Henk serves every account its GitHub App is installed on: a user and
+an organisation, or several organisations. Install the App on each account
+and allowlist what Henk may work on there (`github_owners`,
+`github_repositories`). The App's one webhook URL brings every
+installation's deliveries to the same Henk.
+
+Each repository's work goes out as the installation on its account. The
+comments, check runs, clones, pushes and the GitHub MCP server's reads all
+use it, never another account's token. A webhook delivery names its
+installation. Work started from the dashboard, the MCP server,
+`POST /review` or `henk review <url>` looks the installation up by
+repository, once per account.
+
+`[github] installation_id` is optional. Without it, Henk acts for every
+installation, and the allowlist decides where he works. To act for only
+some installations, name them:
+
+```toml
+[github]
+app_id = 123456
+installations = [7654321, 7654322]   # or installation_id = 7654321 for one
+```
+
+Henk signs the GitHub MCP server in as each session's installation by
+setting `GITHUB_APP_ID` and `GITHUB_APP_INSTALLATION_ID` himself. Remove
+both from `[mcp.github].env`; `henk config check` refuses them.
+
 ## Check a deployment
 
 ```sh
@@ -461,9 +520,11 @@ henk doctor --probe    # also one short prompt to every model
 ```
 
 Every check is reported on its own line; the command fails when any
-check fails. With `installation_id = 0`, or when the installation token
-is refused, the GitHub check lists the App's installations so the right
-id can be copied into the config.
+check fails. The GitHub check lists each of the App's installations with
+its account, says whether its token mints, and marks the ones
+`installations` leaves out as ignored. With `--probe` it also lists the
+repositories each installation reaches. It warns about every allowlisted
+account or repository that no usable installation reaches.
 
 ## First live run
 
@@ -543,8 +604,8 @@ export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
 ```
 
 The first line of `henk review`'s output is the run id. The repository must
-be on the allowlist; the App must be installed on it (`doctor` lists the
-installations when the token is refused). Variants:
+be on the allowlist; the App must be installed on its account (`doctor`
+lists the installations and what they reach). Variants:
 
 ```sh
 RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
@@ -702,8 +763,8 @@ server's merge request leaves the project ids out. Without it GitLab
 reviews fail. The token's account needs Developer access to push.
 
 The commit's subject is "Fix review findings". It ends in a trailer block,
-in this order: `Henk-Run` (the run), `Requested-by` (the requester's
-Discord id), the requester's `Co-authored-by` and `Signed-off-by`, and
+in this order: `Henk-Run` (the run), `Requested-by` (who asked, by a
+stable id), the requester's `Co-authored-by` and `Signed-off-by`, and
 Henk's `Signed-off-by` last, as
 the committer's. By default Henk signs off, so DCO checks pass, and the
 requester is credited as co-author; the requester does not sign off.
@@ -716,15 +777,24 @@ requesters in that repository agree to that.
 
 Henk commits as the App, `meneer-henk[bot]` with its GitHub noreply
 address, unless `[roles.executor.identity]` sets a `name` and `email`; that
-identity is author, committer and Henk's sign-off alike. The requester is
-credited by the `github_id` or `gitlab_id` in their `[[people]]` entry,
-for the platform of the run: Henk reads that account's current login by id
-and uses `<id>+<login>@users.noreply.github.com` on GitHub and
+identity is author, committer and Henk's sign-off alike.
+
+The requester is only ever who asked for the run, never a configured
+stand-in (#399). Henk knows them by a stable id: `github:<id>` for a
+dashboard start (the signed-in GitHub account), `discord:<id>`, or
+`gitlab:<id>`. An MCP client is `mcp:<token name>`: its commits name it in
+`Requested-by` and credit no person. A run started by the CLI, the HTTP
+API or a webhook names nobody Henk knows by id (a webhook gives only a
+login, #402), so its commits carry no `Requested-by` and no requester
+trailers, and the run notes why. A known requester is credited by their
+`[[people]]` entry, found by the id they asked with, or by that id itself
+when it is the run's platform's: Henk reads that account's current login by
+id and uses `<id>+<login>@users.noreply.github.com` on GitHub and
 `<id>-<username>@users.noreply.<host>` on GitLab, with the host of
 `[gitlab].api_url`, as for Henk's own address there.
 `commit_name` and `commit_email` in the same entry override both. A
-requester with neither gets no trailers of their own, the run notes why,
-and `henk config check` warns about it. Trailer values come only from ids
+requester with no account on the run's platform gets no trailers of their
+own, and the run notes why. Trailer values come only from ids
 and configuration, never from a display name or a comment (spec §2, §8.3);
 `config check` refuses a malformed name or email.
 
@@ -897,7 +967,10 @@ workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), and on a backend apart from Henk run a command of their own
 (`bash`, #85): one test, a build or a grep, as the workspace's user, with the repository's toolchain
-and the profile's time and output limits. Each command is on the run's
+and the profile's time and output limits. `bash` tells the model the
+workspace can reach the network and starts with nothing downloaded, so it
+does not pass `--offline` (#349); until the profile has a network setting
+(#86), keep the sandbox's network open. Each command is on the run's
 timeline, so `henk runs show <id>` lists what a review ran. A review whose
 workspace cannot be opened or set up fails before any session starts.
 
@@ -959,7 +1032,11 @@ service links, and the profile's `memory_mib`, `cpus` and `disk_mib` as its
 memory, cpu and scratch disk. The number of processes is the node's
 setting (`podPidsLimit`). A command that runs out of memory ends the whole
 Pod on Kubernetes 1.32 and later; the result says so, and the workspace is
-gone for the rest of that run. Pods live at most six hours whatever
+gone for the rest of that run. The scratch disk is a hard limit too: a
+Pod that writes more than `disk_mib` to `/sandbox` is evicted, and the
+run fails saying so. A Rust workspace's `target/` after clippy and the
+tests passes 8 GiB easily, so size `disk_mib` for the repository's own
+builds. Pods live at most six hours whatever
 happens to Henk, and `henk serve` removes those of a Henk that died when
 it starts: one Henk per sandbox namespace.
 

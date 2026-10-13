@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context as _, anyhow};
 use henk_domain::allowlist::Platform;
 use henk_domain::diff::ReviewDiff;
+use henk_domain::identity::RequesterId;
 use henk_domain::ignore::PathFilter;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::review::{CommitSha, ReviewOutcome};
@@ -52,6 +53,8 @@ struct ReviewRun<'a> {
     commit: &'a CommitSha,
     run: &'a RunId,
     link: &'a str,
+    /// Who asked, when Henk knows them by a stable id (#399).
+    requester: Option<&'a RequesterId>,
     /// The last commit a review loop pushed (#284), the pull request's new
     /// head, which every ending of the review reports its check on too.
     pushed_head: &'a Mutex<Option<CommitSha>>,
@@ -66,7 +69,8 @@ pub struct ReviewRequest {
     pub commit: Option<CommitSha>,
     /// What started it, for the run record.
     pub trigger: String,
-    /// Who asked, as a stable id, when someone did.
+    /// Who asked, as the run records it: a stable id such as
+    /// `github:<id>`, a webhook sender's login, or nobody.
     pub requester: Option<String>,
     /// A comment to react 👀 to first: (id, is review comment).
     pub acknowledge: Option<(String, bool)>,
@@ -79,6 +83,14 @@ pub struct ReviewRequest {
     /// slot (#262); the review moves it to in progress instead of opening
     /// another.
     pub queued_check: Option<ReviewHandle>,
+}
+
+impl ReviewRequest {
+    /// Who asked, when Henk knows them by a stable id (#399).
+    #[must_use]
+    pub fn requester_id(&self) -> Option<RequesterId> {
+        self.requester.as_deref().and_then(RequesterId::parse)
+    }
 }
 
 /// How a review ended, for the caller.
@@ -101,7 +113,7 @@ pub async fn run_review(
     cancel: CancellationToken,
 ) -> anyhow::Result<ReviewReport> {
     let platform = request.target.platform();
-    let writer = app.writer(platform)?;
+    let writer = app.writer(&request.target.repo)?;
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
 
@@ -150,7 +162,7 @@ pub async fn run_review(
     let handle = open_check(app, &writer, &request, &commit, &run, &link).await;
     started_stage(app, &run, handle.as_ref(), &commit).await;
 
-    let pushed_head = Mutex::new(None);
+    let (pushed_head, requester) = (Mutex::new(None), request.requester_id());
     let review = ReviewRun {
         app,
         writer: &writer,
@@ -158,6 +170,7 @@ pub async fn run_review(
         commit: &commit,
         run: &run,
         link: &link,
+        requester: requester.as_ref(),
         pushed_head: &pushed_head,
     };
     let result = loop_body(review, &info.base_ref, cancel).await;
@@ -423,7 +436,7 @@ pub async fn report_cancelled_while_queued(
         .await;
     if let Err(error) = created {
         // No run page: the check links where the queue is shown.
-        match app.writer(platform) {
+        match app.writer(&request.target.repo) {
             Ok(writer) => {
                 close_queued_as_cancelled(&writer, request, &app.settings.queue_link(&run), by)
                     .await;
@@ -463,7 +476,7 @@ pub async fn report_cancelled_while_queued(
         &cancelled,
     )
     .await;
-    match app.writer(platform) {
+    match app.writer(&request.target.repo) {
         Ok(writer) => close_queued_as_cancelled(&writer, request, &link, by).await,
         Err(writer_error) => error!(%writer_error, "could not close the queued check"),
     }
@@ -581,7 +594,7 @@ async fn close_queued_as_interrupted(app: &App, request: &ReviewRequest, link: &
         return;
     };
     let outcome = ReviewOutcome::interrupted(commit.clone());
-    match app.writer(request.target.platform()) {
+    match app.writer(&request.target.repo) {
         Ok(writer) => {
             if let Err(finish_error) = writer
                 .finish_review(&request.target, commit, Some(handle), &outcome, link)
@@ -707,6 +720,7 @@ async fn loop_body(
             target,
             commit,
             run,
+            requester: review.requester,
             pushed_head: review.pushed_head,
         };
         let report = match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await {
@@ -1074,6 +1088,14 @@ requester_id = 3
             run: Some(run.clone()),
             submitted_at: None,
             queued_check: None,
+        }
+    }
+
+    /// [`request`], asked for by `requester` as a run records it.
+    fn request_by(run: &RunId, requester: &str) -> ReviewRequest {
+        ReviewRequest {
+            requester: Some(requester.to_owned()),
+            ..request(run)
         }
     }
 
@@ -4648,8 +4670,18 @@ requester_id = 3
     }
 
     /// A loop on the host whose executor fixes f1, with `extra` after
-    /// `[roles.executor]`; the remote is returned to be kept.
+    /// `[roles.executor]`, asked for by the Team Lead in [`PEOPLE`]; the
+    /// remote is returned to be kept.
     async fn one_fix(name: &str, extra: &str) -> (Fixture, crate::git::ScratchDir, ReviewReport) {
+        one_fix_by(name, extra, Some("discord:3")).await
+    }
+
+    /// [`one_fix`], asked for by `requester`, or by nobody.
+    async fn one_fix_by(
+        name: &str,
+        extra: &str,
+        requester: Option<&str>,
+    ) -> (Fixture, crate::git::ScratchDir, ReviewReport) {
         let (mut f, _, _, remote) = looping(
             name,
             ScriptedClient::new("r", one_finding()),
@@ -4659,7 +4691,11 @@ requester_id = 3
         .await;
         configure(&mut f, &loop_config_and("", extra));
         let run = RunId::parse(format!("r-{name}")).unwrap();
-        let report = run_review(&f.app, request(&run), CancellationToken::new())
+        let asked = ReviewRequest {
+            requester: requester.map(str::to_owned),
+            ..request(&run)
+        };
+        let report = run_review(&f.app, asked, CancellationToken::new())
             .await
             .unwrap();
         (f, remote, report)
@@ -4749,9 +4785,13 @@ requester_id = 3
         .await;
         configure(&mut f, &loop_config_and("", PEOPLE));
         let run = RunId::parse("r-loop-tr-injection").unwrap();
-        run_review(&f.app, request(&run), CancellationToken::new())
-            .await
-            .unwrap();
+        run_review(
+            &f.app,
+            request_by(&run, "discord:3"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let trailers = pushed_trailers(remote.path()).await;
         assert_eq!(trailers.len(), 4, "{trailers:?}");
         let message = crate::git::tests::remote_log(remote.path(), "%B").await;
@@ -4800,6 +4840,65 @@ requester_id = 3
         assert_eq!(record.loop_stop.as_deref(), Some("push_refused"));
         let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
         assert_eq!(after, f.head.as_str(), "nothing pushed");
+    }
+
+    #[tokio::test]
+    async fn a_review_nobody_known_asked_for_declares_no_requester() {
+        // Not the executor's Team Lead, whom PEOPLE could credit: nobody
+        // asked whom Henk knows by id (#399). A webhook sender's login is
+        // a display name, so it is nobody too.
+        for (case, requester) in [("none", None), ("login", Some("alice"))] {
+            let name = format!("loop-tr-nobody-{case}");
+            let (f, remote, _) = one_fix_by(&name, PEOPLE, requester).await;
+            assert_eq!(
+                pushed_trailers(remote.path()).await,
+                [
+                    format!("Henk-Run: r-{name}"),
+                    "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>"
+                        .to_owned(),
+                ],
+                "{case}"
+            );
+            let events = f
+                .app
+                .store
+                .events(&RunId::parse(format!("r-{name}")).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.message.contains("nobody Henk knows by id asked")),
+                "{case}: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dashboard_review_credits_the_signed_in_github_user() {
+        let (_f, remote, _) = one_fix_by("loop-tr-dashboard", PEOPLE, Some("github:77")).await;
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-loop-tr-dashboard",
+                "Requested-by: github:77",
+                "Co-authored-by: alice <77+alice@users.noreply.github.com>",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_mcp_review_names_its_token_and_credits_no_person() {
+        let (_f, remote, _) = one_fix_by("loop-tr-mcp", PEOPLE, Some("mcp:claude")).await;
+        assert_eq!(
+            pushed_trailers(remote.path()).await,
+            [
+                "Henk-Run: r-loop-tr-mcp",
+                "Requested-by: mcp:claude",
+                "Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>",
+            ]
+        );
     }
 
     /// The ssh backend with the runner script run here in its test mode:
@@ -4867,9 +4966,13 @@ requester_id = 3
             ),
         );
         let run = RunId::parse(format!("r-{name}")).unwrap();
-        let report = run_review(&f.app, request(&run), CancellationToken::new())
-            .await
-            .unwrap();
+        let report = run_review(
+            &f.app,
+            request_by(&run, "discord:3"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.status, RunStatus::Finished, "{:?}", record.error);
         assert_eq!(record.loop_stop.as_deref(), Some("converged"));
@@ -5495,7 +5598,11 @@ requester_id = 3
             Arc::new(mcp.connect("gitlab-write").await),
             "meneerhenk",
         )));
-        let refused = f.app.push_writer(Platform::GitLab).err().unwrap();
+        let refused = f
+            .app
+            .push_writer(&RepoRef::parse(Platform::GitLab, "g/p").unwrap())
+            .err()
+            .unwrap();
         assert!(
             refused.to_string().contains("needs the token in $"),
             "{refused}"
@@ -5509,10 +5616,14 @@ requester_id = 3
                 .unwrap(),
             ),
         ));
-        assert!(f.app.push_writer(Platform::GitLab).is_ok());
+        assert!(
+            f.app
+                .push_writer(&RepoRef::parse(Platform::GitLab, "g/p").unwrap())
+                .is_ok()
+        );
 
         let run = RunId::parse("r-loop-gitlab").unwrap();
-        let mut on_gitlab = request(&run);
+        let mut on_gitlab = request_by(&run, "discord:3");
         on_gitlab.target.repo = RepoRef::parse(Platform::GitLab, "g/p").unwrap();
         let report = run_review(&f.app, on_gitlab, CancellationToken::new())
             .await

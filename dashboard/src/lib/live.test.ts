@@ -30,6 +30,24 @@ describe('applyRun', () => {
     expect(d.sessions.find((l) => l.name === 'lane-a')?.last_call_turn).toBe(6);
   });
 
+  it('counts every unknown tool under one row, as the server does (#341)', () => {
+    let d = runDetail('running');
+    const before = d.tool_usage.length;
+    const unknown = (turn: number, outcome: string, tool: string) => ({ ...call(turn, outcome, tool), origin: '' });
+    d = applyRun(d, { kind: 'tool_call', data: unknown(4, 'unknown_tool', 'nope') });
+    d = applyRun(d, { kind: 'tool_call', data: unknown(5, 'refused_repeat', 'Review complete. End. [cut]') });
+    expect(d.tool_usage.length).toBe(before + 1);
+    expect(d.tool_usage.at(-1)).toEqual({
+      session: 'lane-a',
+      tool: '(unknown)',
+      calls: 2,
+      errors: 0,
+      refusals: 1,
+      other: 1,
+      total_ms: 10,
+    });
+  });
+
   it('takes the rounds of a pairing as the stream sends them (#374)', () => {
     const d = runDetail('running');
     const rounds = loopDetail().rounds;

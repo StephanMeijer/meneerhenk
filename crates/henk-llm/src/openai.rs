@@ -288,9 +288,10 @@ impl ModelClient for OpenAiClient {
 }
 
 /// Reads token counts. OpenAI names them `prompt_tokens` and
-/// `completion_tokens`; some proxies pass the Anthropic-style
-/// `input_tokens` and `output_tokens` through instead.
-fn decode_usage(usage: &Value) -> Usage {
+/// `completion_tokens`; some proxies, and the Responses API, use
+/// `input_tokens` and `output_tokens` instead, with the details beside
+/// them named to match.
+pub(crate) fn decode_usage(usage: &Value) -> Usage {
     let count = |keys: [&str; 2]| {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))
@@ -304,10 +305,17 @@ fn decode_usage(usage: &Value) -> Usage {
         .find_map(|key| usage.get(*key)?.get("cached_tokens")?.as_u64())
         .unwrap_or(0)
         .min(prompt);
+    let output = count(["completion_tokens", "output_tokens"]);
+    let reasoning = ["completion_tokens_details", "output_tokens_details"]
+        .iter()
+        .find_map(|key| usage.get(*key)?.get("reasoning_tokens")?.as_u64())
+        .unwrap_or(0)
+        .min(output);
     Usage {
         input_tokens: prompt - cached,
-        output_tokens: count(["completion_tokens", "output_tokens"]),
+        output_tokens: output,
         cache_read_tokens: cached,
         cache_write_tokens: 0,
+        reasoning_tokens: reasoning,
     }
 }

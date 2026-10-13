@@ -1,0 +1,22 @@
+{
+  "id": "resp_text",
+  "object": "response",
+  "status": "completed",
+  "model": "test-model",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_1",
+      "status": "completed",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "Looks good.", "annotations": []}]
+    }
+  ],
+  "usage": {
+    "input_tokens": 120,
+    "input_tokens_details": {"cached_tokens": 100},
+    "output_tokens": 8,
+    "output_tokens_details": {"reasoning_tokens": 0},
+    "total_tokens": 128
+  }
+}

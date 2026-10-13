@@ -381,11 +381,6 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
     let app = Arc::new(App::build(settings, None).await?);
     liveness::reap_orphans(&app).await;
     interrupt_on_ctrl_c(app.shutdown.clone());
-    let requester = app
-        .settings
-        .planning
-        .as_ref()
-        .map(|p| p.requester_id.to_string());
     let single = targets.len() == 1;
     let jobs: Vec<(String, henk_platform::ReviewTarget, henk_domain::run::RunId)> = targets
         .into_iter()
@@ -405,7 +400,8 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
             target,
             commit: commit.clone(),
             trigger: "cli".to_owned(),
-            requester: requester.clone(),
+            // The CLI names nobody: its commits credit no requester (#399).
+            requester: None,
             acknowledge: None,
             run: Some(run.clone()),
             submitted_at: None,
@@ -560,6 +556,21 @@ async fn cmd_llm_models(config: &Path, endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The installation `henk mcp probe` signs the GitHub MCP server in as:
+/// the first of the App's installations Henk may act for.
+async fn probe_installation(github: &config::GitHubConfig) -> anyhow::Result<u64> {
+    let api = app::github_api(github)?;
+    let listed = api.get_all_as_app("/app/installations").await?;
+    let installations = api
+        .installations()
+        .ok_or_else(|| anyhow!("GitHub is not configured as an App"))?;
+    listed
+        .iter()
+        .filter_map(|i| i.get("id").and_then(serde_json::Value::as_u64))
+        .find(|id| installations.allows(*id))
+        .ok_or_else(|| anyhow!("the App has no installation Henk may act for"))
+}
+
 /// The platform whose scope table `henk mcp probe` compares `alias` against
 /// (#61): GitLab when the alias is `gitlab.mcp_server` or
 /// `gitlab.write_mcp_server`, GitHub when it is `github.mcp_server`.
@@ -604,7 +615,15 @@ async fn cmd_mcp_probe(
         Some(platform) => platform,
         None => probe_platform(&settings, server)?,
     };
-    let session = henk_mcp::RmcpSession::connect(server, server_config, app::env_var).await?;
+    let server_config = match &settings.github {
+        Some(github) if github.mcp_server == server => {
+            let installation = probe_installation(github).await?;
+            println!("signed in as GitHub App installation {installation}");
+            app::github_session_config(server_config, github.app_id, installation)
+        }
+        _ => server_config.clone(),
+    };
+    let session = henk_mcp::RmcpSession::connect(server, &server_config, app::env_var).await?;
     let tools = session.list_tools().await?;
     println!("{} tools from {server}:", tools.len());
     for tool in &tools {

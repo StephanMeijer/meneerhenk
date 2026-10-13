@@ -47,7 +47,7 @@ impl ReviewListener {
     ) -> Result<henk_domain::review::CommitSha, Handled> {
         let writer = self
             .writers
-            .writer(target.platform())
+            .writer(&target.repo)
             .map_err(|e| Handled::Ignored(e.to_string()))?;
         match writer.pull_request(target).await {
             Ok(info) if info.state == PullRequestState::Open => Ok(info.head),

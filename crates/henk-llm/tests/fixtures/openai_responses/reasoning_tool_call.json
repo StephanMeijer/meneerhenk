@@ -1,0 +1,29 @@
+{
+  "id": "resp_turn1",
+  "object": "response",
+  "status": "completed",
+  "model": "test-model",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_1",
+      "summary": [],
+      "encrypted_content": "gAAAAB-turn-one-reasoning"
+    },
+    {
+      "type": "function_call",
+      "id": "fc_1",
+      "call_id": "call_1",
+      "name": "get_pull_request",
+      "arguments": "{\"owner\":\"o\"}",
+      "status": "completed"
+    }
+  ],
+  "usage": {
+    "input_tokens": 300,
+    "input_tokens_details": {"cached_tokens": 0},
+    "output_tokens": 90,
+    "output_tokens_details": {"reasoning_tokens": 64},
+    "total_tokens": 390
+  }
+}

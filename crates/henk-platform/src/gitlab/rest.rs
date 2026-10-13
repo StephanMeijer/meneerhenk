@@ -119,6 +119,7 @@ impl GitLabRest {
             return Err(PlatformError::Status {
                 status: status.as_u16(),
                 body: truncate(&body),
+                retry_after: None,
             });
         }
         serde_json::from_str(&body)
@@ -138,6 +139,7 @@ impl GitLabRest {
             .ok_or_else(|| PlatformError::Status {
                 status: 404,
                 body: format!("{path} not found"),
+                retry_after: None,
             })
     }
 }

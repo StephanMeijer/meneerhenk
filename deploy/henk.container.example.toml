@@ -26,7 +26,6 @@ gitlab_groups = ["9xxlab"]
 
 [github]
 app_id = 123456
-installation_id = 7654321
 private_key_path_env = "GITHUB_APP_PRIVATE_KEY_PATH"
 bot_login = "meneer-henk[bot]"
 mcp_server = "github"
@@ -50,6 +49,13 @@ api_key_env = "LLM3_API_KEY"
 provider = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
+
+# OpenAI's Responses API, for reasoning models (#365); the README says why.
+# [endpoints.openai]
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# api_key_env = "OPENAI_API_KEY"
+# api = "responses"
 
 [models.proxy-fast]
 endpoint = "proxy"
@@ -91,7 +97,7 @@ requester_id = 523456789012345678
 [mcp.github]
 command = "github-mcp-server"
 args = ["stdio"]
-env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels", GITHUB_APP_ID = "123456", GITHUB_APP_INSTALLATION_ID = "7654321" }
+env = { GITHUB_READ_ONLY = "1", GITHUB_TOOLSETS = "context,repos,pull_requests,issues,labels" }
 pass_env = ["GITHUB_APP_PRIVATE_KEY_PATH"]
 
 [mcp.gitlab]

@@ -236,29 +236,75 @@ pub(crate) struct PodRunner {
     name: String,
 }
 
+/// Why the workspace's Pod is no longer running, when it is not. The Pod's
+/// own reason comes first: catatonit exits 0 on the kubelet's SIGTERM, so
+/// the container alone says "Completed" whatever stopped it, an eviction
+/// for the scratch disk included (#392). On Kubernetes 1.32 and later, a
+/// command that runs out of memory ends the whole container.
+fn stopped(pod: &Pod) -> Option<String> {
+    let status = pod.status.as_ref();
+    let message = status
+        .and_then(|s| s.message.as_deref())
+        .map(|m| m.trim_end_matches(['.', ' ']))
+        .filter(|m| !m.is_empty());
+    match status.and_then(|s| s.reason.as_deref()) {
+        Some("Evicted") => {
+            let said = message.unwrap_or("no reason given");
+            let disk = said.contains("EmptyDir") || said.contains("ephemeral-storage");
+            return Some(if disk {
+                format!("the workspace was evicted: {said}; it wrote more than its disk_mib allows")
+            } else {
+                format!("the workspace was evicted: {said}")
+            });
+        }
+        Some("DeadlineExceeded") => {
+            return Some(format!(
+                "the workspace reached its Pod's deadline of {} hours",
+                POD_DEADLINE_SECS / 3600
+            ));
+        }
+        _ => {}
+    }
+    let terminated = status
+        .and_then(|s| s.container_statuses.as_ref())
+        .and_then(|cs| cs.iter().find(|c| c.name == CONTAINER))
+        .and_then(|c| c.state.as_ref())
+        .and_then(|state| state.terminated.as_ref());
+    if let Some(terminated) = terminated
+        && terminated.reason.as_deref() == Some("OOMKilled")
+    {
+        return Some(
+            "the workspace ran out of its memory limit (OOMKilled) and was stopped".to_owned(),
+        );
+    }
+    if pod.metadata.deletion_timestamp.is_some() {
+        return Some(
+            "the workspace's Pod was deleted (by hand, or by a henk serve starting up in the same namespace)"
+                .to_owned(),
+        );
+    }
+    let terminated = terminated?;
+    let how = match terminated.reason.as_deref() {
+        Some(reason) => reason.to_owned(),
+        None => format!("exit code {}", terminated.exit_code),
+    };
+    Some(match message {
+        Some(said) => format!("the workspace was stopped ({how}): {said}"),
+        None => format!("the workspace was stopped ({how})"),
+    })
+}
+
 impl PodRunner {
-    /// Why the workspace's container is no longer running, when it is not:
-    /// on Kubernetes 1.32 and later, a command that runs out of memory ends
-    /// the whole container, and with it the workspace.
+    /// Why the workspace's Pod is no longer running, when it is not: see
+    /// [`stopped`]. A Pod that is gone altogether says so too.
     async fn ended(&self) -> Option<String> {
-        let pod = self.pods.get(&self.name).await.ok()?;
-        let state = pod
-            .status?
-            .container_statuses?
-            .into_iter()
-            .find(|c| c.name == CONTAINER)?
-            .state?;
-        let terminated = state.terminated?;
-        Some(match terminated.reason.as_deref() {
-            Some("OOMKilled") => {
-                "the workspace ran out of its memory limit (OOMKilled) and was stopped".to_owned()
+        match self.pods.get(&self.name).await {
+            Ok(pod) => stopped(&pod),
+            Err(kube::Error::Api(status)) if status.code == 404 => {
+                Some("the workspace's Pod is gone".to_owned())
             }
-            Some(reason) => format!("the workspace was stopped ({reason})"),
-            None => format!(
-                "the workspace was stopped (exit code {})",
-                terminated.exit_code
-            ),
-        })
+            Err(_) => None,
+        }
     }
 
     /// [`Self::ended`], after waiting a little for the Pod's status: the
@@ -688,6 +734,111 @@ pub(crate) mod tests {
             runtime_class: Some("gvisor".to_owned()),
             node_selector: BTreeMap::from([("pool".to_owned(), "sandbox".to_owned())]),
         }
+    }
+
+    /// A Pod with this status, its `work` container ended as `terminated`
+    /// says, or running when that is null.
+    fn pod_with(status: serde_json::Value, terminated: serde_json::Value) -> Pod {
+        let state = match terminated {
+            serde_json::Value::Null => serde_json::json!({"running": {}}),
+            terminated => serde_json::Value::Object(serde_json::Map::from_iter([(
+                "terminated".to_owned(),
+                terminated,
+            )])),
+        };
+        let mut status = status;
+        status["containerStatuses"] = serde_json::json!([{
+            "name": CONTAINER, "image": "sandbox:1", "imageID": "", "ready": false,
+            "restartCount": 0, "state": state
+        }]);
+        serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "henk-w1"},
+            "status": status
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_evicted_pod_says_it_was_evicted_and_why() {
+        let pod = pod_with(
+            serde_json::json!({
+                "phase": "Failed",
+                "reason": "Evicted",
+                "message": "Usage of EmptyDir volume \"sandbox\" exceeds the limit \"8Gi\". "
+            }),
+            serde_json::json!({"exitCode": 0, "reason": "Completed"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some(
+                "the workspace was evicted: Usage of EmptyDir volume \"sandbox\" exceeds the limit \"8Gi\"; it wrote more than its disk_mib allows"
+            )
+        );
+        let pressure = pod_with(
+            serde_json::json!({"reason": "Evicted", "message": "The node was low on resource: memory."}),
+            serde_json::Value::Null,
+        );
+        assert_eq!(
+            stopped(&pressure).as_deref(),
+            Some("the workspace was evicted: The node was low on resource: memory")
+        );
+    }
+
+    #[test]
+    fn a_pod_past_its_deadline_says_so() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Failed", "reason": "DeadlineExceeded"}),
+            serde_json::json!({"exitCode": 0, "reason": "Completed"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some("the workspace reached its Pod's deadline of 6 hours")
+        );
+    }
+
+    #[test]
+    fn a_deleted_pod_says_it_was_deleted() {
+        let mut pod = pod_with(
+            serde_json::json!({"phase": "Running"}),
+            serde_json::Value::Null,
+        );
+        pod.metadata.deletion_timestamp =
+            Some(serde_json::from_value(serde_json::json!("2026-10-12T22:15:01Z")).unwrap());
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some(
+                "the workspace's Pod was deleted (by hand, or by a henk serve starting up in the same namespace)"
+            )
+        );
+    }
+
+    #[test]
+    fn out_of_memory_is_still_named() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Failed"}),
+            serde_json::json!({"exitCode": 137, "reason": "OOMKilled"}),
+        );
+        assert_eq!(
+            stopped(&pod).as_deref(),
+            Some("the workspace ran out of its memory limit (OOMKilled) and was stopped")
+        );
+        let plain = pod_with(
+            serde_json::json!({"phase": "Failed"}),
+            serde_json::json!({"exitCode": 2}),
+        );
+        assert_eq!(
+            stopped(&plain).as_deref(),
+            Some("the workspace was stopped (exit code 2)")
+        );
+    }
+
+    #[test]
+    fn a_running_pod_has_not_stopped() {
+        let pod = pod_with(
+            serde_json::json!({"phase": "Running"}),
+            serde_json::Value::Null,
+        );
+        assert_eq!(stopped(&pod), None);
     }
 
     #[test]

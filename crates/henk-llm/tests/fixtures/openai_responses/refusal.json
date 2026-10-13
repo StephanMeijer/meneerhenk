@@ -1,0 +1,14 @@
+{
+  "id": "resp_refused",
+  "object": "response",
+  "status": "completed",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_2",
+      "role": "assistant",
+      "content": [{"type": "refusal", "refusal": "I can't help with that."}]
+    }
+  ],
+  "usage": {"input_tokens": 10, "output_tokens": 7}
+}

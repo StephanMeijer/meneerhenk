@@ -204,7 +204,8 @@ request is a merge request.
    is not pushed, and the loop stops.
 4. **One commit per round.** Henk applies the changeset to a clean
    checkout that nothing ran in, commits it there as "Fix review findings",
-   with the run and the requester in its trailers, and pushes it. Only a
+   with the run, and the requester when Henk knows who asked, in its
+   trailers, and pushes it. Only a
    fast-forward, never a force push: if the branch moved since he read it,
    nothing is pushed and the loop stops.
 5. **Nothing is posted.** No reply and no comment: the commit and the
@@ -321,8 +322,8 @@ Henk then:
    changeset leaves the workspace, within the same limits, and the
    project's checks must pass.
 4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
-   configurable) with one commit, "Resolve #N: <title>", with the run and
-   the requester in its trailers. A branch of that name that exists already
+   configurable) with one commit, "Resolve #N: <title>", with the run, and
+   the requester when Henk knows who asked, in its trailers. A branch of that name that exists already
    is never pushed over: the run picks the name before the session, and
    when origin has it, takes `-2`, `-3` and on. With ten names taken it
    stops before the session and says so on the issue.
