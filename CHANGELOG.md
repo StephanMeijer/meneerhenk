@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/StephanMeijer/meneerhenk/compare/v0.2.0...v0.3.0) - 2026-10-13
+
+### Added
+
+- *(github)* [**breaking**] serve several App installations
+- *(config)* [**breaking**] endpoints and models are declared separately
+- *(llm)* a client for OpenAI's Responses API
+- *(usage)* sessions record the tokens their model spent reasoning
+- *(runs)* a pairing's rounds are recorded and shown in order, with what was handed over
+
+### Fixed
+
+- *(config)* [**breaking**] the OpenAI provider is spelled openai
+- *(agent)* a tool name a model invents is cut and cleaned, and unknown tools count as one
+
+### Other
+
+- Merge pull request #384 from StephanMeijer/feat/responses-client
+- Merge pull request #397 from StephanMeijer/fix/invented-tool-names
+- Merge pull request #394 from StephanMeijer/fix/review-tool-arguments
+- Merge pull request #395 from StephanMeijer/fix/workspace-eviction-cause
+- Merge pull request #382 from StephanMeijer/feat/installations
+- Fix review findings
+- Merge pull request #377 from StephanMeijer/fix/openai-spelling
+- Fix review findings
+- *(llm)* build_endpoint_client's docs do not link a private item
+
 ## [0.2.0](https://github.com/StephanMeijer/meneerhenk/compare/v0.1.29...v0.2.0) - 2026-10-12
 
 ### Added
