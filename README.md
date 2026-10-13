@@ -482,6 +482,35 @@ OpenAI endpoint's API. `henk doctor --probe` lets a model on the Responses
 API answer within its configured cap, so a reasoning model is not cut off
 while it thinks.
 
+### Serving several GitHub accounts
+
+One Henk serves every account its GitHub App is installed on: a user and
+an organisation, or several organisations. Install the App on each account
+and allowlist what Henk may work on there (`github_owners`,
+`github_repositories`). The App's one webhook URL brings every
+installation's deliveries to the same Henk.
+
+Each repository's work goes out as the installation on its account. The
+comments, check runs, clones, pushes and the GitHub MCP server's reads all
+use it, never another account's token. A webhook delivery names its
+installation. Work started from the dashboard, the MCP server,
+`POST /review` or `henk review <url>` looks the installation up by
+repository, once per account.
+
+`[github] installation_id` is optional. Without it, Henk acts for every
+installation, and the allowlist decides where he works. To act for only
+some installations, name them:
+
+```toml
+[github]
+app_id = 123456
+installations = [7654321, 7654322]   # or installation_id = 7654321 for one
+```
+
+Henk signs the GitHub MCP server in as each session's installation by
+setting `GITHUB_APP_ID` and `GITHUB_APP_INSTALLATION_ID` himself. Remove
+both from `[mcp.github].env`; `henk config check` refuses them.
+
 ## Check a deployment
 
 ```sh
@@ -490,9 +519,11 @@ henk doctor --probe    # also one short prompt to every model
 ```
 
 Every check is reported on its own line; the command fails when any
-check fails. With `installation_id = 0`, or when the installation token
-is refused, the GitHub check lists the App's installations so the right
-id can be copied into the config.
+check fails. The GitHub check lists each of the App's installations with
+its account, says whether its token mints, and marks the ones
+`installations` leaves out as ignored. With `--probe` it also lists the
+repositories each installation reaches. It warns about every allowlisted
+account or repository that no usable installation reaches.
 
 ## First live run
 
@@ -572,8 +603,8 @@ export GITHUB_APP_PRIVATE_KEY_PATH="${XDG_RUNTIME_DIR:-/tmp}/henk/app.pem"
 ```
 
 The first line of `henk review`'s output is the run id. The repository must
-be on the allowlist; the App must be installed on it (`doctor` lists the
-installations when the token is refused). Variants:
+be on the allowlist; the App must be installed on its account (`doctor`
+lists the installations and what they reach). Variants:
 
 ```sh
 RUST_LOG=info,henk=debug HENK_TRANSCRIPT_DIR=transcripts cargo run -q -- review <url>   # debug log and a local transcript
@@ -832,7 +863,10 @@ workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), and on a backend apart from Henk run a command of their own
 (`bash`, #85): one test, a build or a grep, as the workspace's user, with the repository's toolchain
-and the profile's time and output limits. Each command is on the run's
+and the profile's time and output limits. `bash` tells the model the
+workspace can reach the network and starts with nothing downloaded, so it
+does not pass `--offline` (#349); until the profile has a network setting
+(#86), keep the sandbox's network open. Each command is on the run's
 timeline, so `henk runs show <id>` lists what a review ran. A review whose
 workspace cannot be opened or set up fails before any session starts.
 
@@ -894,7 +928,11 @@ service links, and the profile's `memory_mib`, `cpus` and `disk_mib` as its
 memory, cpu and scratch disk. The number of processes is the node's
 setting (`podPidsLimit`). A command that runs out of memory ends the whole
 Pod on Kubernetes 1.32 and later; the result says so, and the workspace is
-gone for the rest of that run. Pods live at most six hours whatever
+gone for the rest of that run. The scratch disk is a hard limit too: a
+Pod that writes more than `disk_mib` to `/sandbox` is evicted, and the
+run fails saying so. A Rust workspace's `target/` after clippy and the
+tests passes 8 GiB easily, so size `disk_mib` for the repository's own
+builds. Pods live at most six hours whatever
 happens to Henk, and `henk serve` removes those of a Henk that died when
 it starts: one Henk per sandbox namespace.
 

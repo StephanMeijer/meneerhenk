@@ -154,7 +154,13 @@ pub fn compose_with_secrets(
         .planning
         .as_ref()
         .map(|p| p.requester_id.to_string());
-    let github = Arc::new(GitHubHook::new(github_secret, Arc::clone(&bus)));
+    let github = Arc::new(
+        GitHubHook::new(github_secret, Arc::clone(&bus)).with_installations(
+            app.github
+                .as_ref()
+                .and_then(|github| github.api().installations().cloned()),
+        ),
+    );
     let gitlab = Arc::new(GitLabHook::new(gitlab_token, Arc::clone(&bus)));
     let api = Arc::new(ApiHook::new(
         api_token,
@@ -507,6 +513,175 @@ github_owners = ["docspec"]
                 "{path} passes the dashboard's trace layer {layered} time(s)"
             );
         }
+    }
+
+    /// A fake GitHub with the App on two accounts: `alice` (installation
+    /// 111, token `ghs_alice`) and `docspec` (222, `ghs_docspec`). Every
+    /// other request gets a 404, which is fine: the tests look at which
+    /// token each request carried.
+    async fn two_installations() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        for (owner, id) in [("alice", 111), ("docspec", 222)] {
+            Mock::given(method("POST"))
+                .and(path(format!("/app/installations/{id}/access_tokens")))
+                .respond_with(ResponseTemplate::new(201).set_body_json(
+                    serde_json::json!({"token": format!("ghs_{owner}"), "expires_at": "2999-01-01T00:00:00Z"}),
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(format!("^/repos/{owner}/[^/]+/installation$")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": id})),
+                )
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    /// An App on `server` whose allowlist holds both accounts.
+    async fn app_on(server: &wiremock::MockServer) -> Arc<App> {
+        use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, Installations};
+        let text = MINIMAL.replace(
+            "github_owners = [\"docspec\"]",
+            "github_owners = [\"docspec\", \"alice\"]",
+        );
+        let settings = Config::parse(&text).unwrap().into_settings().unwrap();
+        let mut app = App::build(settings, Some(std::path::Path::new(":memory:")))
+            .await
+            .unwrap();
+        let key = include_str!("../../henk-platform/tests/fixtures/test-app-key.pem");
+        let installations = Installations::new(AppCredentials::from_pem(1, key).unwrap(), None);
+        let api = GitHubApi::new(&server.uri(), GitHubAuth::app(Arc::new(installations))).unwrap();
+        app.github = Some(crate::app::GitHubWriters::new(api, "meneer-henk[bot]"));
+        Arc::new(app)
+    }
+
+    /// Every request to an account's repositories carried that account's
+    /// installation token; returns how many there were per account.
+    async fn tokens_match(server: &wiremock::MockServer) -> (usize, usize) {
+        let mut seen = (0, 0);
+        for request in server.received_requests().await.unwrap() {
+            let Some(rest) = request.url.path().strip_prefix("/repos/") else {
+                continue;
+            };
+            let owner = rest.split('/').next().unwrap();
+            let auth = request.headers["authorization"].to_str().unwrap();
+            if rest.ends_with("/installation") {
+                assert_eq!(auth.split('.').count(), 3, "a lookup goes as the App");
+                continue;
+            }
+            assert_eq!(
+                auth,
+                format!("Bearer ghs_{owner}"),
+                "{} went out with another installation's token",
+                request.url
+            );
+            match owner {
+                "alice" => seen.0 += 1,
+                "docspec" => seen.1 += 1,
+                other => panic!("a request to {other}"),
+            }
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn each_accounts_delivery_is_answered_with_its_own_installation() {
+        let server = two_installations().await;
+        let app = app_on(&server).await;
+        for (repo, id, number) in [("alice/x", 111, 7), ("docspec/docspec", 222, 8)] {
+            let owner = repo.split('/').next().unwrap();
+            // A mention: Henk answers it with a comment, as the installation.
+            let payload = serde_json::json!({
+                "action": "created",
+                "installation": {"id": id},
+                "repository": {"full_name": repo, "owner": {"login": owner}},
+                "sender": {"login": "someone", "type": "User"},
+                "issue": {"number": number, "state": "open", "pull_request": {}},
+                "comment": {"id": number, "body": "@meneer-henk hello"},
+            })
+            .to_string();
+            let request = Request::post("/webhooks/github")
+                .header("x-github-event", "issue_comment")
+                .header("x-github-delivery", format!("d-{number}"))
+                .header("x-hub-signature-256", sign("whsec", payload.as_bytes()))
+                .body(Body::from(payload))
+                .unwrap();
+            let (status, _) = call(composed(&app).router, request).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+        }
+        // The listeners run in the background; wait until both have called
+        // GitHub.
+        let mut seen = (0, 0);
+        for _ in 0..200 {
+            seen = tokens_match(&server).await;
+            if seen.0 > 0 && seen.1 > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            seen.0 > 0 && seen.1 > 0,
+            "both answers went to GitHub: {seen:?}"
+        );
+        let lookups = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/installation"))
+            .count();
+        assert_eq!(lookups, 0, "each delivery named its installation");
+    }
+
+    #[tokio::test]
+    async fn work_started_without_a_webhook_finds_its_installation() {
+        use henk_domain::allowlist::{Platform, RepoRef};
+        use henk_platform::ReviewTarget;
+        let server = two_installations().await;
+        let app = app_on(&server).await;
+        for path in ["alice/x", "docspec/pdf-fixer-cli", "docspec/docspec"] {
+            let repo = RepoRef::parse(Platform::GitHub, path).unwrap();
+            let target = ReviewTarget {
+                repo: repo.clone(),
+                number: 1,
+            };
+            // A 404 from the fake is fine; the token it carried is checked.
+            let _ = app.writer(&repo).unwrap().pull_request(&target).await;
+            let credential = app
+                .push_writer(&repo)
+                .unwrap()
+                .git_credential()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                secrecy::ExposeSecret::expose_secret(&credential.token),
+                format!("ghs_{}", repo.owner()),
+                "{path}: git pushes with its own installation's token"
+            );
+        }
+        assert_eq!(tokens_match(&server).await, (1, 2));
+        let lookups: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/installation"))
+            .map(|r| r.url.path().to_owned())
+            .collect();
+        assert_eq!(
+            lookups,
+            [
+                "/repos/alice/x/installation",
+                "/repos/docspec/pdf-fixer-cli/installation"
+            ],
+            "found by repository, once per account"
+        );
     }
 
     #[tokio::test]
