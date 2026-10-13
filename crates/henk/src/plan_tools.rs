@@ -37,6 +37,9 @@ pub struct PlanContext {
     pub state: Mutex<PlanState>,
     /// Sub-issues allowed.
     pub sub_issue_cap: u32,
+    /// When the plan's time is up: from when it began, so a wait for a
+    /// sandbox host counts against it (#403).
+    pub deadline: tokio::time::Instant,
 }
 
 /// Mutable planner state.
@@ -1049,6 +1052,7 @@ pub(crate) mod tests {
             writer,
             state: Mutex::new(PlanState::new(ChangeBudget::new(budget))),
             sub_issue_cap: 2,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_mins(10),
         })
     }
 

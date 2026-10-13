@@ -832,6 +832,13 @@ How many at once (#403):
   limit (its timeline says `runs that came earlier go first`). A host
   passed over as down is tried again by a waiting run once its minute is
   up.
+- The wait counts against the run's time limit (`[review.loop]` and
+  `[execution] run_timeout_secs`, `[planning] run_timeout_secs`): a review
+  or an execute run whose time runs out while it waits fails, saying it
+  waited for a sandbox host. A plan's does too: its run says the planner
+  workspace is none because it waited for a sandbox host, and the plan
+  fails at its time limit before the planner begins.
+  Opening a workspace that doesn't wait isn't timed.
 - A workspace gives its place back when it's closed, when its run fails,
   and when a workspace that was being made is given up. A restart starts
   every host empty, after the sweep.

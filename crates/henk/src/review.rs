@@ -2539,6 +2539,87 @@ requester_id = 3
         assert_eq!(std::fs::read_dir(b.base()).unwrap().count(), 0);
     }
 
+    async fn messages(app: &App, run: &RunId) -> Vec<String> {
+        app.store
+            .events(run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_review_waits_for_a_full_sandbox_host_and_says_so() {
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-review-wait").await;
+        let (f, reviewer, _, _remote) = looping_with(
+            "ssh-wait",
+            &ssh_loop_settings("true"),
+            ScriptedClient::new("r", converge()),
+            ScriptedClient::new("f", []),
+            pool,
+        )
+        .await;
+        let run = RunId::parse("r-ssh-wait").unwrap();
+        let (report, ()) = tokio::join!(
+            run_review(&f.app, request(&run), CancellationToken::new()),
+            async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                held.close().await;
+            }
+        );
+        report.unwrap();
+        assert!(
+            !reviewer.requests().is_empty(),
+            "it ran once the host had room"
+        );
+        let said = messages(&f.app, &run).await;
+        let at = |text: &str| said.iter().position(|m| m.starts_with(text));
+        let (waiting, got) = (
+            at("waiting for a sandbox host: a (1) is at its limit"),
+            at("got a sandbox host after "),
+        );
+        assert!(waiting.is_some() && got.is_some(), "{said:?}");
+        assert!(waiting < got, "{said:?}");
+    }
+
+    #[tokio::test]
+    async fn a_review_whose_time_runs_out_waiting_for_a_sandbox_host_fails_saying_so() {
+        let (pool, held) = crate::workspace::ssh::tests::full_host("henk-review-wait-out").await;
+        let (f, reviewer, _, _remote) = looping_with(
+            "ssh-wait-out",
+            &format!("run_timeout_secs = 1\n{}", ssh_loop_settings("true")),
+            ScriptedClient::new("r", converge()),
+            ScriptedClient::new("f", []),
+            Arc::clone(&pool) as Arc<dyn crate::workspace::WorkspaceProvider>,
+        )
+        .await;
+        let run = RunId::parse("r-ssh-wait-out").unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_review(&f.app, request(&run), CancellationToken::new()),
+        )
+        .await
+        .expect("it gives up at its time limit")
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("the run's time limit was reached while it waited for a sandbox host"),
+            "{why}"
+        );
+        assert!(reviewer.requests().is_empty());
+        let stages = stage_list(&f.app, &run).await;
+        assert!(
+            stages.iter().any(
+                |(stage, state, detail)| *stage == henk_store::Stage::Checkout
+                    && *state == StageState::Failed
+                    && detail.contains("waited for a sandbox host")
+            ),
+            "{stages:?}"
+        );
+        held.close().await;
+    }
+
     #[tokio::test]
     #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_review_on_a_real_sandbox_host_opens_and_closes_its_workspace() {
