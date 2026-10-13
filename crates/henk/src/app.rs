@@ -255,7 +255,7 @@ impl App {
 
         // The sandbox host's key is read now, so a missing or broken one
         // stops Henk at start instead of failing the first review on it.
-        let ssh = crate::workspace::ssh_provider(&settings)?;
+        let ssh = crate::workspace::ssh_pool(&settings)?;
         let kubernetes = crate::workspace::kubernetes_provider(&settings).await?;
 
         Ok(Self {

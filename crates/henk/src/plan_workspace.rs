@@ -148,6 +148,7 @@ async fn open_one(
             );
         }
     };
+    crate::workspace::note_location(&*store, &run, &*opened).await;
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
     match setup::prepare(&traced, &profile).await {

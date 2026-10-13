@@ -81,6 +81,11 @@ pub(crate) trait Runner: Send + Sync {
         wait: Duration,
     ) -> Result<Reply, WorkspaceError>;
 
+    /// Where requests go, for the run's timeline; `None` by default.
+    fn location(&self) -> Option<String> {
+        None
+    }
+
     /// Removes workspace `id` and everything it left. The script's
     /// `destroy` by default; a backend whose workspace is a machine of its
     /// own, such as a Pod, removes that instead.
@@ -669,6 +674,10 @@ impl Workspace for RemoteWorkspace {
             .await?
             .ok("recording the tree after setup")?;
         Ok(())
+    }
+
+    fn location(&self) -> Option<String> {
+        self.runner.location()
     }
 
     async fn close(&self) {

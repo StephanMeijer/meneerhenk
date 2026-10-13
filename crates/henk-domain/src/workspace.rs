@@ -145,6 +145,9 @@ pub struct Profile {
     /// repository at its default branch, set up as for any run, never
     /// exported. Off by default, and never on the host backend.
     pub plan: bool,
+    /// The sandbox hosts of the ssh backend this profile may use, by id
+    /// (#389). Empty: every host.
+    pub hosts: Vec<String>,
 }
 
 /// A tool manager that installs what the repository's own configuration
@@ -177,6 +180,7 @@ impl Default for Profile {
             toolchain: None,
             review: false,
             plan: false,
+            hosts: Vec::new(),
         }
     }
 }
@@ -201,6 +205,12 @@ impl Profile {
     }
 
     fn refusal(&self, name: &str) -> Option<String> {
+        if !self.hosts.is_empty() && self.backend != BackendKind::Ssh {
+            return Some(format!(
+                "workspace profile {name}: hosts name sandbox hosts of the ssh backend, not the {} backend",
+                self.backend
+            ));
+        }
         if let Some(limit) = self.limits.zero() {
             return Some(format!(
                 "workspace profile {name}: {limit} must be above zero"

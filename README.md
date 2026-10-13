@@ -788,7 +788,7 @@ removed. Henk's key and the platform token never
 reach the host (§8.4), and `henk serve` removes what a crashed process left
 when it starts. Runs share the host's kernel, `/tmp` and network, and
 memory, cpu, pids and disk are not limited: use a host that holds nothing
-else, and one Henk per host.
+else, and one Henk per host (or per pool of hosts, below).
 
 Henk signs in as root and installs nothing there: every request carries
 Henk's own script (`crates/henk/src/workspace/sandbox.sh`), run with
@@ -825,6 +825,55 @@ host = "sandbox.example.com"
 host_key = "ssh-ed25519 AAAA…"
 # port = 22, user = "root", key_path_env = "HENK_SANDBOX_KEY_PATH"
 ```
+
+#### Several sandbox hosts
+
+One sandbox host is a single point of failure. With several (#389), a
+workspace opens on one of them:
+
+```toml
+[workspace.ssh]                    # every host's defaults
+user = "root"
+key_path_env = "HENK_SANDBOX_KEY_PATH"
+
+[workspace.ssh.hosts.goat]
+host = "goat.example.com"
+host_key = "ssh-ed25519 AAAA…"
+
+[workspace.ssh.hosts.fox]
+host = "fox.example.com"
+host_key = "ssh-ed25519 AAAA…"
+port = 2222                        # a host may set port, user, key_path_env
+
+[workspace.profiles.big]
+backend = "ssh"
+hosts = ["goat"]                   # optional: the hosts this profile may use
+```
+
+How a host is chosen:
+- A workspace opens on the host its profile may use that has the fewest of
+  Henk's workspaces, then by id.
+- A host that can't be reached is passed over: no answer, a refused
+  connection, a key it doesn't accept, or a host key other than the pinned
+  one. The next host is tried, and the run fails only when none works. Its
+  error then names each host and why.
+- A host that couldn't be reached is tried only after the others for a
+  minute.
+- A failure on a host that works, such as an import that fails, isn't
+  retried elsewhere.
+
+What changes elsewhere:
+- **Timeline:** each run's timeline says where its workspace ran
+  (`workspace on ssh goat (root@goat.example.com:22)`).
+- **Startup:** `henk serve` sweeps every host, and one that's down doesn't
+  stop the others.
+- **`henk config check`:** lists the hosts, and which profiles keep to
+  which.
+- **`henk doctor --probe`:** checks each host under its own name and says
+  when some are down.
+
+A single `host` and `host_key` in `[workspace.ssh]`, as above, is a pool of
+one. Write one form or the other, not both.
 
 A profile can prepare the workspace before the model starts (#93): with
 `toolchain = "mise"`, Henk runs `mise install` in the checkout, so the

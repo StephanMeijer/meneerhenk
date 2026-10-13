@@ -17,7 +17,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use henk_domain::workspace::Profile;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
@@ -117,7 +118,7 @@ impl SshRunner {
         let handle = tokio::time::timeout(self.connect_wait, self.sign_in())
             .await
             .map_err(|_| {
-                WorkspaceError::Backend(format!(
+                WorkspaceError::Unreachable(format!(
                     "the sandbox host {}:{} did not answer within {}s",
                     self.target.host,
                     self.target.port,
@@ -132,7 +133,7 @@ impl SshRunner {
     /// A new connection, its host key checked and Henk signed in.
     async fn sign_in(&self) -> Result<client::Handle<Client>, WorkspaceError> {
         let failed = |what: &str, error: &dyn std::fmt::Display| {
-            WorkspaceError::Backend(format!(
+            WorkspaceError::Unreachable(format!(
                 "{what} {}:{} failed: {error}",
                 self.target.host, self.target.port
             ))
@@ -151,8 +152,8 @@ impl SshRunner {
         )
         .await
         .map_err(|e| match e {
-            russh::Error::UnknownKey => WorkspaceError::Backend(format!(
-                "{}:{} offered a host key that is not the pinned workspace.ssh.host_key",
+            russh::Error::UnknownKey => WorkspaceError::Unreachable(format!(
+                "{}:{} offered a host key that is not the pinned host_key",
                 self.target.host, self.target.port
             )),
             other => failed("connecting to the sandbox host", &other),
@@ -163,7 +164,7 @@ impl SshRunner {
             .await
             .map_err(|e| failed("signing in to the sandbox host", &e))?;
         if !auth.success() {
-            return Err(WorkspaceError::Backend(format!(
+            return Err(WorkspaceError::Unreachable(format!(
                 "the sandbox host {} did not accept Henk's key for {}",
                 self.target.host, self.target.user
             )));
@@ -178,6 +179,13 @@ impl SshRunner {
 
 #[async_trait::async_trait]
 impl Runner for SshRunner {
+    fn location(&self) -> Option<String> {
+        Some(format!(
+            "{}@{}:{}",
+            self.target.user, self.target.host, self.target.port
+        ))
+    }
+
     async fn call(
         &self,
         tokens: &[String],
@@ -187,7 +195,7 @@ impl Runner for SshRunner {
     ) -> Result<Reply, WorkspaceError> {
         let handle = self.connect().await?;
         let lost = |error: russh::Error| {
-            WorkspaceError::Backend(format!(
+            WorkspaceError::Unreachable(format!(
                 "the connection to the sandbox host failed: {error}"
             ))
         };
@@ -322,20 +330,261 @@ impl WorkspaceProvider for SshProvider {
         source: &Path,
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
-        let source = source.to_owned();
-        let archive = tokio::task::spawn_blocking(move || pack(&source))
-            .await
-            .map_err(|e| WorkspaceError::Backend(format!("cannot pack the checkout: {e}")))??;
+        let archive = packed(source).await?;
+        self.open_packed(&archive, profile).await
+    }
+}
+
+/// The checkout at `source` as an archive to import.
+async fn packed(source: &Path) -> Result<Vec<u8>, WorkspaceError> {
+    let source = source.to_owned();
+    tokio::task::spawn_blocking(move || pack(&source))
+        .await
+        .map_err(|e| WorkspaceError::Backend(format!("cannot pack the checkout: {e}")))?
+}
+
+impl SshProvider {
+    /// A workspace holding `archive`, made on this host.
+    async fn open_packed(
+        &self,
+        archive: &[u8],
+        profile: &Profile,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
         // A sweep in progress ends first.
         let _swept = self.gate.read().await;
         let workspace = RemoteWorkspace::start(
             Arc::clone(&self.runner),
             new_workspace_id(),
             profile,
-            &archive,
+            archive,
         )
         .await?;
         Ok(Arc::new(workspace))
+    }
+}
+
+/// How long a host that could not be reached is tried only after the
+/// others (#389).
+const DOWN_FOR: Duration = Duration::from_mins(1);
+
+/// A host's runner that counts its workspaces: one more when a workspace is
+/// started on it, one fewer when that workspace is released, which a
+/// workspace does exactly once, closed, dropped or failed half-way.
+struct CountingRunner {
+    id: String,
+    inner: Arc<dyn Runner>,
+    live: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Runner for CountingRunner {
+    async fn call(
+        &self,
+        tokens: &[String],
+        stdin: &[u8],
+        keep: Option<usize>,
+        wait: Duration,
+    ) -> Result<Reply, WorkspaceError> {
+        self.inner.call(tokens, stdin, keep, wait).await
+    }
+
+    fn location(&self) -> Option<String> {
+        Some(match self.inner.location() {
+            Some(at) => format!("ssh {} ({at})", self.id),
+            None => format!("ssh {}", self.id),
+        })
+    }
+
+    async fn release(&self, id: &str) -> Result<(), WorkspaceError> {
+        let released = self.inner.release(id).await;
+        let _ = self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        released
+    }
+}
+
+/// One host of the pool.
+struct PooledHost {
+    id: String,
+    provider: SshProvider,
+    live: Arc<AtomicUsize>,
+    /// Until when the host counts as down, after it could not be reached.
+    down_until: std::sync::Mutex<Option<Instant>>,
+}
+
+impl PooledHost {
+    fn is_down(&self, now: Instant) -> bool {
+        self.down_until
+            .lock()
+            .ok()
+            .and_then(|until| *until)
+            .is_some_and(|until| until > now)
+    }
+
+    fn mark_down(&self) {
+        if let Ok(mut until) = self.down_until.lock() {
+            *until = Some(Instant::now() + DOWN_FOR);
+        }
+    }
+}
+
+/// The sandbox hosts of the ssh backend (#389). A workspace opens on the
+/// least busy host its profile may use; a host that cannot be reached is
+/// passed over, and tried only after the others for a minute.
+pub struct SshPool {
+    hosts: Vec<PooledHost>,
+    /// Held while a host is chosen and counted, so that opens which start
+    /// together do not all read the same counts and pick the same host.
+    choosing: std::sync::Mutex<()>,
+}
+
+impl std::fmt::Debug for SshPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.hosts.iter().map(|h| &h.id))
+            .finish()
+    }
+}
+
+impl SshPool {
+    /// A pool of the hosts `targets` names, by id.
+    #[must_use]
+    pub fn new(targets: Vec<(String, SshTarget)>) -> Self {
+        Self::with_runners(
+            targets
+                .into_iter()
+                .map(|(id, target)| (id, Arc::new(SshRunner::new(target)) as Arc<dyn Runner>))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn with_runners(runners: Vec<(String, Arc<dyn Runner>)>) -> Self {
+        let hosts = runners
+            .into_iter()
+            .map(|(id, inner)| {
+                let live = Arc::new(AtomicUsize::new(0));
+                let counting = CountingRunner {
+                    id: id.clone(),
+                    inner,
+                    live: Arc::clone(&live),
+                };
+                PooledHost {
+                    id,
+                    provider: SshProvider::with_runner(Arc::new(counting)),
+                    live,
+                    down_until: std::sync::Mutex::new(None),
+                }
+            })
+            .collect();
+        Self {
+            hosts,
+            choosing: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// Sweeps every host at once (see [`SshProvider::sweep`]); one host
+    /// that fails does not stop the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError`] naming every host that was not swept.
+    pub fn sweep(&self) -> impl Future<Output = Result<(), WorkspaceError>> + Send + 'static {
+        let sweeps: Vec<_> = self
+            .hosts
+            .iter()
+            .map(|h| (h.id.clone(), h.provider.sweep()))
+            .collect();
+        async move {
+            let mut running = tokio::task::JoinSet::new();
+            for (id, sweep) in sweeps {
+                running.spawn(async move { (id, sweep.await) });
+            }
+            let mut failed = Vec::new();
+            while let Some(done) = running.join_next().await {
+                match done {
+                    Ok((id, Ok(()))) => tracing::info!(host = %id, "sandbox host swept"),
+                    Ok((id, Err(error))) => {
+                        tracing::warn!(host = %id, %error, "could not sweep the sandbox host");
+                        failed.push(format!("{id}: {error}"));
+                    }
+                    Err(error) => failed.push(format!("a sweep stopped: {error}")),
+                }
+            }
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                failed.sort();
+                Err(WorkspaceError::Backend(format!(
+                    "not every sandbox host was swept: {}",
+                    failed.join("; ")
+                )))
+            }
+        }
+    }
+
+    /// The hosts `profile` may use.
+    fn allowed<'h>(&'h self, profile: &Profile) -> impl Iterator<Item = &'h PooledHost> {
+        self.hosts
+            .iter()
+            .filter(|h| profile.hosts.is_empty() || profile.hosts.contains(&h.id))
+    }
+
+    /// The host to try next, counted for the workspace about to start on
+    /// it: up before down, then the fewest workspaces, then by id. A host
+    /// in `tried` is not chosen again. Choosing and counting happen under
+    /// one lock, so opens that run together see each other.
+    fn reserve<'h>(&'h self, profile: &Profile, tried: &[&str]) -> Option<&'h PooledHost> {
+        let _choosing = self
+            .choosing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        let host = self
+            .allowed(profile)
+            .filter(|h| !tried.contains(&h.id.as_str()))
+            .min_by_key(|h| (h.is_down(now), h.live.load(Ordering::Acquire), h.id.clone()))?;
+        // Counted before it is started: a start that fails releases the
+        // half-made workspace, which counts it off again.
+        host.live.fetch_add(1, Ordering::AcqRel);
+        Some(host)
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for SshPool {
+    async fn open(
+        &self,
+        source: &Path,
+        profile: &Profile,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        if self.allowed(profile).next().is_none() {
+            return Err(WorkspaceError::Backend(format!(
+                "no sandbox host is one of the profile's hosts ({})",
+                profile.hosts.join(", ")
+            )));
+        }
+        let archive = packed(source).await?;
+        let mut refused = Vec::new();
+        let mut tried = Vec::new();
+        // The host is chosen only now, after the await, from the counts as
+        // they are, and counted in the same step.
+        while let Some(host) = self.reserve(profile, &tried) {
+            tried.push(host.id.as_str());
+            match host.provider.open_packed(&archive, profile).await {
+                Ok(workspace) => return Ok(workspace),
+                Err(WorkspaceError::Unreachable(why)) => {
+                    tracing::warn!(host = %host.id, %why, "sandbox host passed over");
+                    host.mark_down();
+                    refused.push(format!("{}: {why}", host.id));
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Err(WorkspaceError::Unreachable(format!(
+            "no sandbox host could be used: {}",
+            refused.join("; ")
+        )))
     }
 }
 
@@ -748,10 +997,233 @@ pub(crate) mod tests {
             .expect("the probe ends on its own")
             .unwrap_err();
         assert!(
-            given_up.to_string().contains("did not answer"),
+            matches!(&given_up, WorkspaceError::Unreachable(why) if why.contains("did not answer")),
             "{given_up}"
         );
         silent.abort();
+    }
+
+    #[tokio::test]
+    async fn a_host_that_refuses_the_connection_is_unreachable() {
+        // A port that was free a moment ago: nothing listens there.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]),
+        );
+        let provider = SshProvider::new(SshTarget {
+            host: "127.0.0.1".to_owned(),
+            port,
+            user: "henk".to_owned(),
+            key: Arc::new(key),
+            host_key: PublicKey::from_openssh(&key_line(1)).unwrap(),
+        });
+        let refused = provider.probe().await.unwrap_err();
+        assert!(
+            matches!(refused, WorkspaceError::Unreachable(_)),
+            "{refused}"
+        );
+    }
+
+    /// A host that cannot be reached: every request fails as such. Counts
+    /// the workspaces asked of it.
+    struct Down {
+        creates: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for Down {
+        async fn call(
+            &self,
+            tokens: &[String],
+            _: &[u8],
+            _: Option<usize>,
+            _: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            if tokens.first().map(String::as_str) == Some("create") {
+                self.creates.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(WorkspaceError::Unreachable(
+                "the sandbox host 10.0.0.9:22 did not answer within 30s".to_owned(),
+            ))
+        }
+    }
+
+    fn down() -> Arc<Down> {
+        Arc::new(Down {
+            creates: AtomicUsize::new(0),
+        })
+    }
+
+    fn pool(hosts: Vec<(&str, Arc<dyn Runner>)>) -> SshPool {
+        SshPool::with_runners(
+            hosts
+                .into_iter()
+                .map(|(id, runner)| (id.to_owned(), runner))
+                .collect(),
+        )
+    }
+
+    fn workspaces(runner: &LocalRunner) -> usize {
+        std::fs::read_dir(runner.base()).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn workspaces_spread_over_the_hosts_and_each_says_where_it_runs() {
+        let (a, b) = (
+            LocalRunner::new("henk-pool-a"),
+            LocalRunner::new("henk-pool-b"),
+        );
+        let pool = pool(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]);
+        let source = crate::workspace::contract::source("henk-pool-spread-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        let second = pool.open(source.path(), &Profile::default()).await.unwrap();
+        assert_eq!((workspaces(&a), workspaces(&b)), (1, 1), "one on each");
+        assert_eq!(first.location().as_deref(), Some("ssh a"));
+        assert_eq!(second.location().as_deref(), Some("ssh b"));
+        first.close().await;
+        second.close().await;
+        assert_eq!((workspaces(&a), workspaces(&b)), (0, 0));
+        // Both idle again: the next goes to the first by id.
+        let third = pool.open(source.path(), &Profile::default()).await.unwrap();
+        assert_eq!(third.location().as_deref(), Some("ssh a"));
+        third.close().await;
+    }
+
+    #[tokio::test]
+    async fn workspaces_opened_at_once_still_spread_over_the_hosts() {
+        let (a, b) = (
+            LocalRunner::new("henk-pool-burst-a"),
+            LocalRunner::new("henk-pool-burst-b"),
+        );
+        let pool = Arc::new(pool(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]));
+        let source = crate::workspace::contract::source("henk-pool-burst-src");
+        let mut opening = tokio::task::JoinSet::new();
+        for _ in 0..6 {
+            let (pool, path) = (Arc::clone(&pool), source.path().to_owned());
+            opening.spawn(async move { pool.open(&path, &Profile::default()).await });
+        }
+        let mut open = Vec::new();
+        while let Some(done) = opening.join_next().await {
+            open.push(done.unwrap().unwrap());
+        }
+        assert_eq!(
+            (workspaces(&a), workspaces(&b)),
+            (3, 3),
+            "a burst is spread, not sent to one host"
+        );
+        for workspace in open {
+            workspace.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_that_cannot_be_reached_is_passed_over_and_then_tried_last() {
+        let (gone, b) = (down(), LocalRunner::new("henk-pool-up"));
+        let pool = pool(vec![
+            ("a", Arc::clone(&gone) as Arc<dyn Runner>),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]);
+        let source = crate::workspace::contract::source("henk-pool-down-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        assert_eq!(first.location().as_deref(), Some("ssh b"));
+        assert_eq!(gone.creates.load(Ordering::SeqCst), 1, "a was tried first");
+        first.close().await;
+        let second = pool.open(source.path(), &Profile::default()).await.unwrap();
+        assert_eq!(second.location().as_deref(), Some("ssh b"));
+        assert_eq!(
+            gone.creates.load(Ordering::SeqCst),
+            1,
+            "a is down for a while: not tried while b works"
+        );
+        second.close().await;
+    }
+
+    #[tokio::test]
+    async fn with_no_host_reachable_the_error_names_each() {
+        let pool = pool(vec![
+            ("a", down() as Arc<dyn Runner>),
+            ("b", down() as Arc<dyn Runner>),
+        ]);
+        let source = crate::workspace::contract::source("henk-pool-none-src");
+        let Err(error) = pool.open(source.path(), &Profile::default()).await else {
+            panic!("no host can open it");
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("no sandbox host could be used")
+                && text.contains("a: the sandbox host")
+                && text.contains("b: the sandbox host"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_on_a_working_host_is_not_tried_on_another() {
+        let inner = LocalRunner::new("henk-pool-fails");
+        let b = LocalRunner::new("henk-pool-spare");
+        let pool = pool(vec![
+            (
+                "a",
+                Arc::new(Twisted {
+                    inner: Arc::clone(&inner),
+                    create_fails: true,
+                    sweep_waits: Duration::ZERO,
+                }) as Arc<dyn Runner>,
+            ),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]);
+        let source = crate::workspace::contract::source("henk-pool-fails-src");
+        let Err(error) = pool.open(source.path(), &Profile::default()).await else {
+            panic!("the open failed");
+        };
+        assert!(
+            error.to_string().contains("making the workspace"),
+            "{error}"
+        );
+        assert_eq!(workspaces(&b), 0, "b was not asked");
+    }
+
+    #[tokio::test]
+    async fn a_profile_opens_only_on_the_hosts_it_names() {
+        let (a, b) = (
+            LocalRunner::new("henk-pool-named-a"),
+            LocalRunner::new("henk-pool-named-b"),
+        );
+        let pool = pool(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>),
+        ]);
+        let source = crate::workspace::contract::source("henk-pool-named-src");
+        let profile = Profile {
+            hosts: vec!["b".to_owned()],
+            ..Profile::default()
+        };
+        let ws = pool.open(source.path(), &profile).await.unwrap();
+        assert_eq!((workspaces(&a), workspaces(&b)), (0, 1));
+        ws.close().await;
+    }
+
+    #[tokio::test]
+    async fn every_host_is_swept_and_one_that_fails_does_not_stop_the_rest() {
+        let a = LocalRunner::new("henk-pool-sweep-a");
+        std::fs::create_dir_all(a.base().join("w0123456789ab/home/work")).unwrap();
+        let pool = pool(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>),
+            ("b", down() as Arc<dyn Runner>),
+        ]);
+        let error = pool.sweep().await.unwrap_err().to_string();
+        assert!(error.contains("b: "), "{error}");
+        assert!(!error.contains("a: "), "{error}");
+        assert_eq!(workspaces(&a), 0, "a was swept");
     }
 
     #[tokio::test]
@@ -763,9 +1235,7 @@ pub(crate) mod tests {
         };
         let refused = SshProvider::new(target).probe().await.unwrap_err();
         assert!(
-            refused
-                .to_string()
-                .contains("not the pinned workspace.ssh.host_key"),
+            refused.to_string().contains("not the pinned host_key"),
             "{refused}"
         );
     }

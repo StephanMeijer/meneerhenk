@@ -53,6 +53,10 @@ pub enum WorkspaceError {
     /// The backend itself failed or is closed.
     #[error("the workspace failed: {0}")]
     Backend(String),
+    /// The machine the workspace runs on could not be reached or refused
+    /// Henk (#389): another may serve the run instead.
+    #[error("the workspace failed: {0}")]
+    Unreachable(String),
 }
 
 /// What one command did.
@@ -429,6 +433,12 @@ pub trait Workspace: Send + Sync {
 
     /// Destroys the workspace. Calling it again does nothing.
     async fn close(&self);
+
+    /// Where the workspace runs, for the run's timeline: the sandbox host,
+    /// on a backend with several. `None` where there is nothing to tell.
+    fn location(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Opens workspaces of one backend.
@@ -462,12 +472,12 @@ pub type Sweep =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkspaceError>> + Send>>;
 
 /// Opens each workspace on the backend its profile names: the host always,
-/// the sandbox host when `[workspace.ssh]` is configured, the cluster when
+/// the sandbox hosts when `[workspace.ssh]` is configured, the cluster when
 /// `[workspace.kubernetes]` is.
 #[derive(Debug)]
 pub struct Backends {
     host: host::HostProvider,
-    ssh: Option<ssh::SshProvider>,
+    ssh: Option<ssh::SshPool>,
     kubernetes: Option<kubernetes::KubernetesProvider>,
 }
 
@@ -475,7 +485,7 @@ impl Backends {
     /// The backends there are.
     #[must_use]
     pub fn new(
-        ssh: Option<ssh::SshProvider>,
+        ssh: Option<ssh::SshPool>,
         kubernetes: Option<kubernetes::KubernetesProvider>,
     ) -> Self {
         Self {
@@ -549,6 +559,7 @@ pub(crate) async fn open_prepared(
         .open(checkout.path(), profile)
         .await
         .context("opening the workspace")?;
+    note_location(&*app.store, run, &*opened).await;
     let traced: Arc<dyn Workspace> = Arc::new(traced::Traced::new(
         opened,
         Arc::clone(&app.store),
@@ -560,6 +571,19 @@ pub(crate) async fn open_prepared(
             traced.close().await;
             Err(error)
         }
+    }
+}
+
+/// Puts where `workspace` runs on `run`'s timeline (#389), when it says.
+pub(crate) async fn note_location(
+    store: &dyn henk_store::RunStore,
+    run: &henk_domain::run::RunId,
+    workspace: &dyn Workspace,
+) {
+    if let Some(at) = workspace.location() {
+        let _ = store
+            .event(run, "info", &format!("workspace on {at}"))
+            .await;
     }
 }
 
@@ -755,34 +779,46 @@ impl Workspace for Metered {
     async fn close(&self) {}
 }
 
-/// The sandbox host's provider from the settings, when `[workspace.ssh]` is
-/// there: its key read from the file the configured variable names.
+/// The sandbox hosts from the settings, when `[workspace.ssh]` is there:
+/// each host's key read from the file its variable names.
 ///
 /// # Errors
 ///
-/// Returns an error when the variable is unset or the key or host key does
-/// not parse.
-pub fn ssh_provider(
-    settings: &crate::config::Settings,
-) -> anyhow::Result<Option<ssh::SshProvider>> {
-    use anyhow::Context as _;
+/// Returns an error when a variable is unset or a key or host key does not
+/// parse.
+pub fn ssh_pool(settings: &crate::config::Settings) -> anyhow::Result<Option<ssh::SshPool>> {
     let Some(config) = &settings.workspace_ssh else {
         return Ok(None);
     };
-    let path = crate::app::env_var(&config.key_path_env).ok_or_else(|| {
-        anyhow::anyhow!("environment variable {} is not set", config.key_path_env)
-    })?;
+    let targets = config
+        .hosts()
+        .iter()
+        .map(|host| Ok((host.id.clone(), ssh_target(host)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Some(ssh::SshPool::new(targets)))
+}
+
+/// Where `host` is and how to sign in there.
+///
+/// # Errors
+///
+/// Returns an error when its key variable is unset, or its key or host key
+/// does not parse.
+pub fn ssh_target(host: &crate::config::SshHost) -> anyhow::Result<ssh::SshTarget> {
+    use anyhow::Context as _;
+    let path = crate::app::env_var(&host.key_path_env)
+        .ok_or_else(|| anyhow::anyhow!("environment variable {} is not set", host.key_path_env))?;
     let key = russh::keys::load_secret_key(&path, None)
         .with_context(|| format!("reading the sandbox host key {path}"))?;
-    let host_key = russh::keys::PublicKey::from_openssh(config.host_key.trim())
-        .context("workspace.ssh.host_key")?;
-    Ok(Some(ssh::SshProvider::new(ssh::SshTarget {
-        host: config.host.clone(),
-        port: config.port,
-        user: config.user.clone(),
+    let host_key = russh::keys::PublicKey::from_openssh(host.host_key.trim())
+        .with_context(|| format!("the host key of sandbox host {}", host.id))?;
+    Ok(ssh::SshTarget {
+        host: host.host.clone(),
+        port: host.port,
+        user: host.user.clone(),
         key: Arc::new(key),
         host_key,
-    })))
+    })
 }
 
 /// What one workspace's commands may still take: each command's own

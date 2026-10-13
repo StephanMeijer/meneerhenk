@@ -12,7 +12,7 @@ use henk_mcp::{McpSession as _, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, Installations};
 
 use crate::app::env_var;
-use crate::config::{DatabaseConfig, Settings};
+use crate::config::{DEFAULT_SSH_HOST, DatabaseConfig, Settings, SshHost};
 
 /// The outcome of one check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,65 +191,131 @@ async fn check_sandbox(settings: &Settings, probe: bool) -> Vec<Check> {
     let Some(ssh) = &settings.workspace_ssh else {
         return Vec::new();
     };
-    let target = format!("{}@{}:{}", ssh.user, ssh.host, ssh.port);
-    let key = format!("secret ${}", ssh.key_path_env);
-    if env_var(&ssh.key_path_env).is_none() {
-        return vec![Check::fail(
-            key,
-            "not set; the ssh workspace backend cannot sign in",
-        )];
+    let hosts = ssh.hosts();
+    // One host keeps the names it always had; several name each (#389).
+    let named = !(hosts.len() == 1 && hosts.iter().all(|h| h.id == DEFAULT_SSH_HOST));
+    let mut checks: Vec<Check> = Vec::new();
+    let mut usable = Vec::new();
+    for host in &hosts {
+        let (host_checks, works) = check_sandbox_host(settings, host, named, probe).await;
+        // Hosts that share a key share its check.
+        for check in host_checks {
+            if !checks.contains(&check) {
+                checks.push(check);
+            }
+        }
+        if works {
+            usable.push(host.id.as_str());
+        }
+    }
+    if probe && named && !usable.is_empty() && usable.len() < hosts.len() {
+        let down: Vec<&str> = hosts
+            .iter()
+            .map(|h| h.id.as_str())
+            .filter(|id| !usable.contains(id))
+            .collect();
+        checks.push(Check::warn(
+            "sandbox hosts",
+            format!(
+                "{} of {} usable; down: {}",
+                usable.len(),
+                hosts.len(),
+                down.join(", ")
+            ),
+        ));
+    }
+    checks
+}
+
+/// One sandbox host's checks, and whether it works.
+async fn check_sandbox_host(
+    settings: &Settings,
+    host: &SshHost,
+    named: bool,
+    probe: bool,
+) -> (Vec<Check>, bool) {
+    let label = |what: &str| {
+        if named {
+            format!("sandbox {} {what}", host.id)
+        } else {
+            format!("sandbox {what}")
+        }
+    };
+    let target = format!("{}@{}:{}", host.user, host.host, host.port);
+    let key = format!("secret ${}", host.key_path_env);
+    if env_var(&host.key_path_env).is_none() {
+        return (
+            vec![Check::fail(
+                key,
+                "not set; the ssh workspace backend cannot sign in",
+            )],
+            false,
+        );
     }
     if !probe {
-        return vec![
-            Check::ok(key, "set; Henk's key for the sandbox host"),
-            Check::ok("sandbox host", format!("{target}; --probe connects")),
-        ];
+        return (
+            vec![
+                Check::ok(key, "set; Henk's key for the sandbox host"),
+                Check::ok(label("host"), format!("{target}; --probe connects")),
+            ],
+            true,
+        );
     }
-    let provider = match crate::workspace::ssh_provider(settings) {
-        Ok(Some(provider)) => provider,
-        Ok(None) => return Vec::new(),
-        Err(error) => return vec![Check::fail(key, format!("{error:#}"))],
+    let provider = match crate::workspace::ssh_target(host) {
+        Ok(target) => crate::workspace::ssh::SshProvider::new(target),
+        Err(error) => return (vec![Check::fail(key, format!("{error:#}"))], false),
     };
     match provider.probe().await {
-        Ok(report) => vec![
-            Check::ok("sandbox connection", format!("{target}, signed in")),
-            Check::ok("sandbox host key", "matches workspace.ssh.host_key"),
-            tools_check(
-                "sandbox host tools",
-                &report,
-                &settings.workspace,
-                BackendKind::Ssh,
-            ),
-        ],
+        Ok(report) => (
+            vec![
+                Check::ok(label("connection"), format!("{target}, signed in")),
+                Check::ok(label("host key"), "matches the pinned host_key"),
+                tools_check(
+                    &label("host tools"),
+                    &report,
+                    &settings.workspace,
+                    BackendKind::Ssh,
+                    Some(&host.id),
+                ),
+            ],
+            true,
+        ),
         Err(error) => {
             let text = error.to_string();
-            let refused_key = text.contains("pinned workspace.ssh.host_key");
-            vec![
-                Check::fail("sandbox connection", format!("{target}: {text}")),
-                if refused_key {
-                    Check::fail("sandbox host key", "not the pinned workspace.ssh.host_key")
-                } else {
-                    Check::warn("sandbox host key", "not checked: no connection")
-                },
-            ]
+            let refused_key = text.contains("not the pinned");
+            (
+                vec![
+                    Check::fail(label("connection"), format!("{target}: {text}")),
+                    if refused_key {
+                        Check::fail(label("host key"), "not the pinned host_key")
+                    } else {
+                        Check::warn(label("host key"), "not checked: no connection")
+                    },
+                ],
+                false,
+            )
         }
     }
 }
 
 /// The sandbox script's probe report as a check named `name`: a tool it
 /// says is missing fails it, mise only when a profile on `backend` names it
-/// as its toolchain; a host-backed profile runs mise on Henk's own machine.
+/// as its toolchain, and on a sandbox host `host` only when that profile
+/// may use the host; a host-backed profile runs mise on Henk's own machine.
 fn tools_check(
     name: &str,
     report: &str,
     workspace: &WorkspacePolicy,
     backend: BackendKind,
+    host: Option<&str>,
 ) -> Check {
     let mut lines = report.lines();
     let version = lines.next().unwrap_or("henk-sandbox (no version)");
-    let wants_mise = workspace
-        .named()
-        .any(|(_, p)| p.backend == backend && p.toolchain == Some(Toolchain::Mise));
+    let wants_mise = workspace.named().any(|(_, p)| {
+        p.backend == backend
+            && p.toolchain == Some(Toolchain::Mise)
+            && host.is_none_or(|id| p.hosts.is_empty() || p.hosts.iter().any(|h| h == id))
+    });
     let missing: Vec<&str> = lines
         .filter_map(|l| l.strip_suffix(" missing"))
         .filter(|tool| *tool != "mise" || wants_mise)
@@ -304,7 +370,13 @@ async fn check_kubernetes(settings: &Settings, probe: bool) -> Vec<Check> {
     for image in images {
         let name = format!("sandbox image {image}");
         checks.push(match provider.probe(image).await {
-            Ok(report) => tools_check(&name, &report, &settings.workspace, BackendKind::Kubernetes),
+            Ok(report) => tools_check(
+                &name,
+                &report,
+                &settings.workspace,
+                BackendKind::Kubernetes,
+                None,
+            ),
             Err(error) => Check::fail(name, error.to_string()),
         });
     }
@@ -1067,7 +1139,14 @@ mod tests {
             .profiles
             .insert("sandbox".to_owned(), profile(BackendKind::Ssh, None));
         assert_eq!(
-            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
+            tools_check(
+                "sandbox host tools",
+                report,
+                &workspace,
+                BackendKind::Ssh,
+                None
+            )
+            .verdict,
             Verdict::Ok("henk-sandbox 4".to_owned()),
             "only a host-backed profile wants mise"
         );
@@ -1076,7 +1155,14 @@ mod tests {
             profile(BackendKind::Ssh, Some(Toolchain::Mise)),
         );
         assert_eq!(
-            tools_check("sandbox host tools", report, &workspace, BackendKind::Ssh).verdict,
+            tools_check(
+                "sandbox host tools",
+                report,
+                &workspace,
+                BackendKind::Ssh,
+                None
+            )
+            .verdict,
             Verdict::Fail("henk-sandbox 4; missing there: mise".to_owned()),
             "a sandbox profile wants it"
         );
@@ -1145,6 +1231,60 @@ mod tests {
         assert_eq!(
             dashboard_client_id("V", None).verdict,
             Verdict::Warn("not set; the dashboard is off".to_owned())
+        );
+    }
+
+    fn sandbox_pool(extra: &str) -> Settings {
+        let key = russh::keys::PrivateKey::from(
+            russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]),
+        )
+        .public_key()
+        .to_openssh()
+        .unwrap();
+        // PATH is always set: the key's variable counts as set.
+        settings(&format!(
+            "[workspace.ssh]\nkey_path_env = \"PATH\"\n[workspace.ssh.hosts.goat]\nhost = \"g.example\"\nhost_key = \"{key}\"\n[workspace.ssh.hosts.fox]\nhost = \"f.example\"\nhost_key = \"{key}\"\n{extra}"
+        ))
+    }
+
+    #[tokio::test]
+    async fn each_sandbox_host_is_checked_under_its_own_name() {
+        let names: Vec<String> = check_sandbox(&sandbox_pool(""), false)
+            .await
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["secret $PATH", "sandbox fox host", "sandbox goat host"],
+            "the shared key once, then each host"
+        );
+    }
+
+    #[test]
+    fn mise_is_wanted_on_a_sandbox_host_only_by_a_profile_that_may_use_it() {
+        let settings = sandbox_pool(
+            "[workspace.profiles.big]\nbackend = \"ssh\"\ntoolchain = \"mise\"\nhosts = [\"goat\"]\n",
+        );
+        let report = "henk-sandbox 5\nmise missing\n";
+        let tools = |host| {
+            tools_check(
+                "tools",
+                report,
+                &settings.workspace,
+                BackendKind::Ssh,
+                Some(host),
+            )
+            .verdict
+        };
+        assert!(
+            matches!(tools("goat"), Verdict::Fail(_)),
+            "big may use goat"
+        );
+        assert_eq!(
+            tools("fox"),
+            Verdict::Ok("henk-sandbox 5".to_owned()),
+            "no profile that wants mise may use fox"
         );
     }
 

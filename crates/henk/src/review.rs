@@ -2507,6 +2507,38 @@ requester_id = 3
         assert_eq!(std::fs::read_dir(runner.base()).unwrap().count(), 0);
     }
 
+    /// A pool of sandbox hosts (#389): the review's timeline names the
+    /// host its workspace ran on, and nothing is left on any host.
+    #[tokio::test]
+    async fn a_review_on_a_pool_of_sandbox_hosts_says_which_host_it_got() {
+        use crate::workspace::remote::{Runner, tests::LocalRunner};
+        let (a, b) = (
+            LocalRunner::new("henk-review-pool-a"),
+            LocalRunner::new("henk-review-pool-b"),
+        );
+        let pool = crate::workspace::ssh::SshPool::with_runners(vec![
+            ("a".to_owned(), Arc::clone(&a) as Arc<dyn Runner>),
+            ("b".to_owned(), Arc::clone(&b) as Arc<dyn Runner>),
+        ]);
+        let f = review_on_ssh("ssh-pool", Arc::new(pool)).await;
+        let run = RunId::parse("r-ssh-pool").unwrap();
+        let events: Vec<String> = f
+            .app
+            .store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            events.iter().any(|m| m == "workspace on ssh a"),
+            "{events:?}"
+        );
+        assert_eq!(std::fs::read_dir(a.base()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(b.base()).unwrap().count(), 0);
+    }
+
     #[tokio::test]
     #[ignore = "needs a sandbox host (HENK_TEST_SSH_*)"]
     async fn live_a_review_on_a_real_sandbox_host_opens_and_closes_its_workspace() {
