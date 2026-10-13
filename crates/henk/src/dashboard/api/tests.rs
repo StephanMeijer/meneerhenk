@@ -1901,6 +1901,8 @@ fn api_types_are_current() {
         types::StageDot::decl(&cfg),
         types::Progress::decl(&cfg),
         types::Slots::decl(&cfg),
+        types::SandboxHosts::decl(&cfg),
+        types::SandboxHost::decl(&cfg),
         types::WaitingReview::decl(&cfg),
         types::OverviewStats::decl(&cfg),
         types::DayStats::decl(&cfg),
@@ -2415,6 +2417,11 @@ async fn the_running_stream_carries_slots_and_a_runs_lanes_and_stages_moving_on(
     assert_eq!(snapshot.event, "snapshot");
     assert!(snapshot.data["slots"]["limit"].as_u64().unwrap() >= 1);
     assert_eq!(snapshot.data["slots"]["waiting"], json!([]));
+    // No ssh backend here: no sandbox hosts, and nothing waits for one.
+    assert_eq!(
+        snapshot.data["sandbox_hosts"],
+        json!({"hosts": [], "waiting": 0})
+    );
     let sessions = &snapshot.data["runs"][0]["sessions"];
     assert!(
         sessions

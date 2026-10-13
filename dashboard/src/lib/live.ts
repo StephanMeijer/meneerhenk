@@ -6,6 +6,7 @@ import type {
   RunMessage,
   RunningMessage,
   RunSummary,
+  SandboxHosts,
   SessionMessage,
   Slots,
   ToolCall,
@@ -90,16 +91,36 @@ export function applyRun(detail: RunDetail, message: RunMessage): RunDetail {
   }
 }
 
-/** What runs now: the newest running runs and how many run in all. */
-export type Running = { runs: RunSummary[]; count: number; slots: Slots | null };
+/** What runs now: the newest running runs and how many run in all, the
+ * review slots, and the sandbox hosts' slots (#403). */
+export type Running = {
+  runs: RunSummary[];
+  count: number;
+  slots: Slots | null;
+  sandbox_hosts: SandboxHosts | null;
+};
+
+/** The sandbox hosts in words (#403): `goat 1 of 2 in use · fox 3 in use ·
+ * 1 waiting for one`. */
+export function hostsLine(now: SandboxHosts): string {
+  const hosts = now.hosts.map((host) =>
+    host.limit === null ? `${host.id} ${host.in_use} in use` : `${host.id} ${host.in_use} of ${host.limit} in use`,
+  );
+  const waiting = now.waiting > 0 ? [`${now.waiting} waiting for one`] : [];
+  return [...hosts, ...waiting].join(' · ');
+}
 
 /** "Running now" after one message of `/runs/stream`. */
 export function applyRunning(state: Running, message: RunningMessage): Running {
   if (message.kind === 'snapshot') {
-    return { runs: message.data.runs, count: message.data.count, slots: message.data.slots };
+    const { runs, count, slots, sandbox_hosts } = message.data;
+    return { runs, count, slots, sandbox_hosts };
   }
   if (message.kind === 'slots') {
     return { ...state, slots: message.data };
+  }
+  if (message.kind === 'sandbox_hosts') {
+    return { ...state, sandbox_hosts: message.data };
   }
   if (message.kind === 'progress') {
     const { run_id, sessions, stages } = message.data;

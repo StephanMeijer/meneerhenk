@@ -135,6 +135,47 @@ pub struct Slots {
     pub waiting: Vec<WaitingReview>,
 }
 
+/// The ssh backend's sandbox hosts and their slots (#403); no hosts when
+/// it is not configured.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SandboxHosts {
+    /// Every host, in id order.
+    pub hosts: Vec<SandboxHost>,
+    /// Runs waiting for a host with room.
+    pub waiting: u64,
+}
+
+/// One sandbox host's slots.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct SandboxHost {
+    /// The host's id.
+    pub id: String,
+    /// Its `max_concurrent`; `null` is no limit.
+    pub limit: Option<u64>,
+    /// Workspaces open on it.
+    pub in_use: u64,
+}
+
+impl From<crate::workspace::SandboxHosts> for SandboxHosts {
+    fn from(now: crate::workspace::SandboxHosts) -> Self {
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        Self {
+            hosts: now
+                .hosts
+                .into_iter()
+                .map(|h| SandboxHost {
+                    id: h.id,
+                    limit: h.limit.map(count),
+                    in_use: count(h.in_use),
+                })
+                .collect(),
+            waiting: count(now.waiting),
+        }
+    }
+}
+
 /// A review waiting for a slot (#251). It has its run id, but no run
 /// record until it starts.
 #[derive(Debug, Serialize)]
@@ -418,6 +459,8 @@ pub struct RunningSnapshot {
     pub count: u64,
     /// The review slots and what waits for one.
     pub slots: Slots,
+    /// The sandbox hosts' slots, and how many runs wait for one (#403).
+    pub sandbox_hosts: SandboxHosts,
 }
 
 /// One message of `/runs/{id}/stream`: its SSE event name is `kind`, its
@@ -512,6 +555,9 @@ pub enum RunningMessage {
     Progress(Progress),
     /// A review started waiting, took or freed a slot, or left the queue.
     Slots(Slots),
+    /// A workspace took or freed a sandbox host's slot, or a run started
+    /// or stopped waiting for one (#403).
+    SandboxHosts(SandboxHosts),
 }
 
 /// The sources and kinds Henk has recorded, for the events page's filters
