@@ -793,6 +793,7 @@ key_path_env = "HENK_SANDBOX_KEY_PATH"
 [workspace.ssh.hosts.goat]
 host = "goat.example.com"
 host_key = "ssh-ed25519 AAAA…"
+max_concurrent = 8                 # at most 8 workspaces here at once
 
 [workspace.ssh.hosts.fox]
 host = "fox.example.com"
@@ -816,13 +817,29 @@ How a host is chosen:
 - A failure on a host that works, such as an import that fails, isn't
   retried elsewhere.
 
+How many at once (#403):
+- `max_concurrent` on a host is the most workspaces Henk keeps open there
+  at once: a review's, a plan's and an execute run's alike. In
+  `[workspace.ssh]` it is the one host's limit, or every host's default.
+  Left out, a host has no limit. The right number is the machine's: a
+  2-vCPU host might take one or two, a 16-core one eight.
+- A host at its limit is passed over like one that's down. When every
+  host a run may use is full, the run waits for one to free up, in the
+  order the runs came, and its timeline says so (`waiting for a sandbox
+  host: goat (8) is at its limit`, then `got a sandbox host after 42s`).
+  The queue is one for the pool: a run kept to `goat` that waits holds
+  back the runs behind it.
+- A workspace gives its place back when it's closed, when its run fails,
+  and when a workspace that was being made is given up. A restart starts
+  every host empty, after the sweep.
+
 What changes elsewhere:
 - **Timeline:** each run's timeline says where its workspace ran
   (`workspace on ssh goat (root@goat.example.com:22)`).
 - **Startup:** `henk serve` sweeps every host, and one that's down doesn't
   stop the others.
-- **`henk config check`:** lists the hosts, and which profiles keep to
-  which.
+- **`henk config check`:** lists the hosts with their limit, and which
+  profiles keep to which.
 - **`henk doctor --probe`:** checks each host under its own name and says
   when some are down.
 

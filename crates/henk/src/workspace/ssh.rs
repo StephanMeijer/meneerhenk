@@ -15,6 +15,7 @@
 //! the platform token stay with Henk (§8.4): the checkout is copied in, not
 //! cloned there.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,11 +24,12 @@ use std::time::{Duration, Instant};
 use henk_domain::workspace::Profile;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, client};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use super::remote::{
     Kept, REQUEST_WAIT, RemoteWorkspace, Reply, Runner, command_line, new_workspace_id, pack,
 };
-use super::{Workspace, WorkspaceError, WorkspaceProvider};
+use super::{Notes, Workspace, WorkspaceError, WorkspaceProvider};
 
 /// How long making the connection and signing in may take. The connection
 /// is shared, so a host that accepts and then says nothing must not hold
@@ -359,7 +361,8 @@ impl WorkspaceProvider for SshProvider {
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
         let archive = packed(source).await?;
-        self.open_packed(&archive, profile).await
+        self.open_packed(&archive, profile, new_workspace_id())
+            .await
     }
 }
 
@@ -372,21 +375,17 @@ async fn packed(source: &Path) -> Result<Vec<u8>, WorkspaceError> {
 }
 
 impl SshProvider {
-    /// A workspace holding `archive`, made on this host.
+    /// A workspace `id` holding `archive`, made on this host.
     async fn open_packed(
         &self,
         archive: &[u8],
         profile: &Profile,
+        id: String,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
         // A sweep in progress ends first.
         let _swept = self.gate.read().await;
-        let workspace = RemoteWorkspace::start(
-            Arc::clone(&self.runner),
-            new_workspace_id(),
-            profile,
-            archive,
-        )
-        .await?;
+        let workspace =
+            RemoteWorkspace::start(Arc::clone(&self.runner), id, profile, archive).await?;
         Ok(Arc::new(workspace))
     }
 }
@@ -395,13 +394,51 @@ impl SshProvider {
 /// others (#389).
 const DOWN_FOR: Duration = Duration::from_mins(1);
 
-/// A host's runner that counts its workspaces: one more when a workspace is
-/// started on it, one fewer when that workspace is released, which a
-/// workspace does exactly once, closed, dropped or failed half-way.
+/// A workspace's place on a host (#403): counted while it lives, holding
+/// one of the host's slots when it has a limit. Taken before the workspace
+/// is made and dropped when it is released, or at once when the open
+/// fails or is dropped, so no place is ever lost.
+struct Seat {
+    live: Arc<AtomicUsize>,
+    permit: Option<OwnedSemaphorePermit>,
+    freed: Arc<Notify>,
+}
+
+impl Seat {
+    fn new(
+        live: &Arc<AtomicUsize>,
+        permit: Option<OwnedSemaphorePermit>,
+        freed: &Arc<Notify>,
+    ) -> Self {
+        live.fetch_add(1, Ordering::AcqRel);
+        Self {
+            live: Arc::clone(live),
+            permit,
+            freed: Arc::clone(freed),
+        }
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let _ = self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        drop(self.permit.take());
+        self.freed.notify_waiters();
+    }
+}
+
+/// The seats of a host's workspaces, by workspace id.
+type Seats = Arc<std::sync::Mutex<HashMap<String, Seat>>>;
+
+/// A host's runner that gives a workspace's seat back when the workspace is
+/// released, which a workspace does exactly once: closed, dropped or failed
+/// half-way.
 struct CountingRunner {
     id: String,
     inner: Arc<dyn Runner>,
-    live: Arc<AtomicUsize>,
+    seats: Seats,
 }
 
 #[async_trait::async_trait]
@@ -425,9 +462,12 @@ impl Runner for CountingRunner {
 
     async fn release(&self, id: &str) -> Result<(), WorkspaceError> {
         let released = self.inner.release(id).await;
-        let _ = self
-            .live
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        let seat = self
+            .seats
+            .lock()
+            .ok()
+            .and_then(|mut seats| seats.remove(id));
+        drop(seat);
         released
     }
 }
@@ -437,6 +477,10 @@ struct PooledHost {
     id: String,
     provider: SshProvider,
     live: Arc<AtomicUsize>,
+    /// Its slots, when it takes at most so many workspaces at once (#403).
+    slots: Option<Arc<Semaphore>>,
+    limit: Option<usize>,
+    seats: Seats,
     /// Until when the host counts as down, after it could not be reached.
     down_until: std::sync::Mutex<Option<Instant>>,
 }
@@ -455,13 +499,32 @@ impl PooledHost {
             *until = Some(Instant::now() + DOWN_FOR);
         }
     }
+
+    /// A seat on this host, or `None` when it is at its limit.
+    fn seat(&self, freed: &Arc<Notify>) -> Option<Seat> {
+        let permit = match &self.slots {
+            Some(slots) => Some(Arc::clone(slots).try_acquire_owned().ok()?),
+            None => None,
+        };
+        Some(Seat::new(&self.live, permit, freed))
+    }
 }
 
 /// The sandbox hosts of the ssh backend (#389). A workspace opens on the
 /// least busy host its profile may use; a host that cannot be reached is
-/// passed over, and tried only after the others for a minute.
+/// passed over, and tried only after the others for a minute. A host at its
+/// `max_concurrent` is passed over too, and when every host the profile may
+/// use is full, the open waits for a free one, in the order the opens came
+/// (#403).
 pub struct SshPool {
     hosts: Vec<PooledHost>,
+    /// Signalled whenever a seat is given back.
+    freed: Arc<Notify>,
+    /// Held by the open that waits first: the others queue behind it, so
+    /// hosts go to waiting opens in the order they came. A waiter that may
+    /// use only some hosts holds back the ones behind it that could use
+    /// others; the order is one queue for the pool.
+    turnstile: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for SshPool {
@@ -472,39 +535,67 @@ impl std::fmt::Debug for SshPool {
     }
 }
 
+/// How an attempt to open on the pool's hosts went.
+enum Attempt {
+    Opened(Arc<dyn Workspace>),
+    /// Every host left to try is at its limit.
+    Full,
+    /// No host is left to try.
+    Exhausted,
+}
+
 impl SshPool {
-    /// A pool of the hosts `targets` names, by id.
+    /// A pool of the hosts `targets` names, by id, each with its limit.
     #[must_use]
-    pub fn new(targets: Vec<(String, SshTarget)>) -> Self {
-        Self::with_runners(
+    pub fn new(targets: Vec<(String, SshTarget, Option<usize>)>) -> Self {
+        Self::with_limited_runners(
             targets
                 .into_iter()
-                .map(|(id, target)| (id, Arc::new(SshRunner::new(target)) as Arc<dyn Runner>))
+                .map(|(id, target, limit)| {
+                    (
+                        id,
+                        Arc::new(SshRunner::new(target)) as Arc<dyn Runner>,
+                        limit,
+                    )
+                })
                 .collect(),
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_runners(runners: Vec<(String, Arc<dyn Runner>)>) -> Self {
+        Self::with_limited_runners(runners.into_iter().map(|(id, r)| (id, r, None)).collect())
+    }
+
+    pub(crate) fn with_limited_runners(
+        runners: Vec<(String, Arc<dyn Runner>, Option<usize>)>,
+    ) -> Self {
         let hosts = runners
             .into_iter()
-            .map(|(id, inner)| {
-                let live = Arc::new(AtomicUsize::new(0));
+            .map(|(id, inner, limit)| {
+                let seats = Seats::default();
                 let counting = CountingRunner {
                     id: id.clone(),
                     inner,
-                    live: Arc::clone(&live),
+                    seats: Arc::clone(&seats),
                 };
                 PooledHost {
                     id,
                     provider: SshProvider::with_runner(Arc::new(counting)),
-                    live,
+                    live: Arc::new(AtomicUsize::new(0)),
+                    slots: limit.map(|n| Arc::new(Semaphore::new(n))),
+                    limit,
+                    seats,
                     down_until: std::sync::Mutex::new(None),
                 }
             })
             .collect();
-        Self { hosts }
+        Self {
+            hosts,
+            freed: Arc::new(Notify::new()),
+            turnstile: tokio::sync::Mutex::new(()),
+        }
     }
-
     /// Sweeps every host at once (see [`SshProvider::sweep`]); one host
     /// that fails does not stop the others.
     ///
@@ -559,28 +650,39 @@ impl SshPool {
     }
 }
 
-#[async_trait::async_trait]
-impl WorkspaceProvider for SshPool {
-    async fn open(
+impl SshPool {
+    /// Opens on the first host of `candidates` with room that is not in
+    /// `tried`, passing over the ones that cannot be reached.
+    async fn attempt(
         &self,
-        source: &Path,
+        archive: &[u8],
         profile: &Profile,
-    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
-        let candidates = self.candidates(profile);
-        if candidates.is_empty() {
-            return Err(WorkspaceError::Backend(format!(
-                "no sandbox host is one of the profile's hosts ({})",
-                profile.hosts.join(", ")
-            )));
-        }
-        let archive = packed(source).await?;
-        let mut refused = Vec::new();
-        for host in candidates {
-            // Counted before it is started: a start that fails releases the
-            // half-made workspace, which counts it off again.
-            host.live.fetch_add(1, Ordering::AcqRel);
-            match host.provider.open_packed(&archive, profile).await {
-                Ok(workspace) => return Ok(workspace),
+        tried: &mut Vec<String>,
+        refused: &mut Vec<String>,
+    ) -> Result<Attempt, WorkspaceError> {
+        let mut full = false;
+        for host in self.candidates(profile) {
+            if tried.contains(&host.id) {
+                continue;
+            }
+            let Some(seat) = host.seat(&self.freed) else {
+                full = true;
+                continue;
+            };
+            tried.push(host.id.clone());
+            let id = new_workspace_id();
+            match host
+                .provider
+                .open_packed(archive, profile, id.clone())
+                .await
+            {
+                Ok(workspace) => {
+                    // Given back when the workspace is released.
+                    if let Ok(mut seats) = host.seats.lock() {
+                        seats.insert(id, seat);
+                    }
+                    return Ok(Attempt::Opened(workspace));
+                }
                 Err(WorkspaceError::Unreachable(why)) => {
                     tracing::warn!(host = %host.id, %why, "sandbox host passed over");
                     host.mark_down();
@@ -589,10 +691,105 @@ impl WorkspaceProvider for SshPool {
                 Err(other) => return Err(other),
             }
         }
-        Err(WorkspaceError::Unreachable(format!(
-            "no sandbox host could be used: {}",
-            refused.join("; ")
-        )))
+        Ok(if full {
+            Attempt::Full
+        } else {
+            Attempt::Exhausted
+        })
+    }
+
+    /// What the hosts `profile` may use are holding, for the note that the
+    /// open waits.
+    fn waiting_note(&self, profile: &Profile) -> String {
+        let full: Vec<String> = self
+            .candidates(profile)
+            .iter()
+            .filter_map(|h| h.limit.map(|n| format!("{} ({n})", h.id)))
+            .collect();
+        match full.as_slice() {
+            [one] => format!("waiting for a sandbox host: {one} is at its limit"),
+            many => format!(
+                "waiting for a sandbox host: {} are at their limit",
+                many.join(", ")
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkspaceProvider for SshPool {
+    async fn open(
+        &self,
+        source: &Path,
+        profile: &Profile,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        self.open_with(source, profile, &Notes::default()).await
+    }
+
+    async fn open_with(
+        &self,
+        source: &Path,
+        profile: &Profile,
+        notes: &Notes,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        if self.candidates(profile).is_empty() {
+            return Err(WorkspaceError::Backend(format!(
+                "no sandbox host is one of the profile's hosts ({})",
+                profile.hosts.join(", ")
+            )));
+        }
+        let archive = packed(source).await?;
+        let (mut tried, mut refused) = (Vec::new(), Vec::new());
+        // Opens waiting already go first: this one queues behind them.
+        let mut turn = match self.turnstile.try_lock() {
+            Ok(free) => {
+                drop(free);
+                None
+            }
+            Err(_) => Some(self.turnstile.lock().await),
+        };
+        let mut waited: Option<Instant> = None;
+        loop {
+            // Listening before looking, so a seat given back in between is
+            // not missed.
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            match self
+                .attempt(&archive, profile, &mut tried, &mut refused)
+                .await?
+            {
+                Attempt::Opened(workspace) => {
+                    if let Some(since) = waited {
+                        let at = workspace
+                            .location()
+                            .unwrap_or_else(|| "a sandbox host".to_owned());
+                        notes.say(format!(
+                            "got a sandbox host after {}s: {at}",
+                            since.elapsed().as_secs()
+                        ));
+                    }
+                    return Ok(workspace);
+                }
+                Attempt::Exhausted => {
+                    return Err(WorkspaceError::Unreachable(format!(
+                        "no sandbox host could be used: {}",
+                        refused.join("; ")
+                    )));
+                }
+                Attempt::Full => {}
+            }
+            if turn.is_none() {
+                // First in line from here on; look again before waiting.
+                turn = Some(self.turnstile.lock().await);
+                continue;
+            }
+            if waited.is_none() {
+                waited = Some(Instant::now());
+                notes.say(self.waiting_note(profile));
+            }
+            freed.await;
+        }
     }
 }
 
@@ -1388,5 +1585,179 @@ pub(crate) mod tests {
             signal_detail("SEGV", true, " out of bounds \n"),
             "killed by signal SEGV, core dumped: out of bounds"
         );
+    }
+
+    fn limited(hosts: Vec<(&str, Arc<dyn Runner>, Option<usize>)>) -> Arc<SshPool> {
+        Arc::new(SshPool::with_limited_runners(
+            hosts
+                .into_iter()
+                .map(|(id, runner, limit)| (id.to_owned(), runner, limit))
+                .collect(),
+        ))
+    }
+
+    /// An open in a task of its own.
+    type Opening = tokio::task::JoinHandle<Result<Arc<dyn Workspace>, WorkspaceError>>;
+
+    /// Opens on `pool` in a task of its own, with its notes.
+    fn opening(
+        pool: &Arc<SshPool>,
+        source: &Path,
+    ) -> (Opening, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (pool, source) = (Arc::clone(pool), source.to_owned());
+        let (to, said) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            pool.open_with(&source, &Profile::default(), &Notes::to(to))
+                .await
+        });
+        (task, said)
+    }
+
+    /// Whether `task` is still waiting after a moment.
+    async fn waits<T>(task: &tokio::task::JoinHandle<T>) -> bool {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        !task.is_finished()
+    }
+
+    #[tokio::test]
+    async fn a_full_host_makes_the_next_open_wait_until_one_closes() {
+        let a = LocalRunner::new("henk-limit-one");
+        let pool = limited(vec![("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-one-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        let (second, mut said) = opening(&pool, source.path());
+        assert!(waits(&second).await, "the host is full");
+        assert_eq!(workspaces(&a), 1);
+        assert_eq!(
+            said.recv().await.as_deref(),
+            Some("waiting for a sandbox host: a (1) is at its limit")
+        );
+        first.close().await;
+        let second = second.await.unwrap().unwrap();
+        assert_eq!(second.location().as_deref(), Some("ssh a"));
+        let got = said.recv().await.unwrap();
+        assert!(got.starts_with("got a sandbox host after "), "{got}");
+        assert!(got.ends_with(": ssh a"), "{got}");
+        second.close().await;
+        assert_eq!(pool.hosts[0].live.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn two_hosts_of_one_each_take_two_runs_and_a_third_waits_for_either() {
+        let (a, b) = (
+            LocalRunner::new("henk-limit-two-a"),
+            LocalRunner::new("henk-limit-two-b"),
+        );
+        let pool = limited(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1)),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>, Some(1)),
+        ]);
+        let source = crate::workspace::contract::source("henk-limit-two-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        let second = pool.open(source.path(), &Profile::default()).await.unwrap();
+        assert_eq!((workspaces(&a), workspaces(&b)), (1, 1), "one on each");
+        let (third, mut said) = opening(&pool, source.path());
+        assert!(waits(&third).await);
+        assert_eq!(
+            said.recv().await.as_deref(),
+            Some("waiting for a sandbox host: a (1), b (1) are at their limit")
+        );
+        second.close().await;
+        let third = third.await.unwrap().unwrap();
+        assert_eq!(
+            third.location().as_deref(),
+            Some("ssh b"),
+            "the one that freed"
+        );
+        first.close().await;
+        third.close().await;
+    }
+
+    #[tokio::test]
+    async fn waiters_get_hosts_in_arrival_order() {
+        let a = LocalRunner::new("henk-limit-order");
+        let pool = limited(vec![("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-order-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        let (early, _said) = opening(&pool, source.path());
+        assert!(waits(&early).await);
+        let (late, _said_late) = opening(&pool, source.path());
+        assert!(waits(&late).await);
+        first.close().await;
+        let early = early.await.unwrap().unwrap();
+        assert!(waits(&late).await, "the later one waits for the earlier");
+        early.close().await;
+        late.await.unwrap().unwrap().close().await;
+    }
+
+    #[tokio::test]
+    async fn a_full_host_is_passed_over_for_one_with_room() {
+        let (a, b) = (
+            LocalRunner::new("henk-limit-room-a"),
+            LocalRunner::new("henk-limit-room-b"),
+        );
+        // a takes one at a time, b any number: once a is busy, every open
+        // goes to b, however busy b is.
+        let pool = limited(vec![
+            ("a", Arc::clone(&a) as Arc<dyn Runner>, Some(1)),
+            ("b", Arc::clone(&b) as Arc<dyn Runner>, None),
+        ]);
+        let source = crate::workspace::contract::source("henk-limit-room-src");
+        let mut open = Vec::new();
+        for _ in 0..4 {
+            open.push(pool.open(source.path(), &Profile::default()).await.unwrap());
+        }
+        assert_eq!((workspaces(&a), workspaces(&b)), (1, 3));
+        for workspace in open {
+            workspace.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_or_failed_open_gives_its_slot_back() {
+        let a = LocalRunner::new("henk-limit-leak");
+        let failing = Arc::new(Twisted {
+            inner: Arc::clone(&a),
+            create_fails: true,
+            sweep_waits: Duration::ZERO,
+        });
+        let pool = limited(vec![("a", failing as Arc<dyn Runner>, Some(1))]);
+        let source = crate::workspace::contract::source("henk-limit-leak-src");
+        assert!(pool.open(source.path(), &Profile::default()).await.is_err());
+        assert_eq!(
+            pool.hosts[0].live.load(Ordering::SeqCst),
+            0,
+            "a failed create"
+        );
+        assert_eq!(pool.hosts[0].slots.as_ref().unwrap().available_permits(), 1);
+        // An open dropped while the host is being swept, before any
+        // workspace exists, gives its slot back too.
+        let sweep = pool.hosts[0].provider.gate.clone().write_owned().await;
+        let (dropped, _said) = opening(&pool, source.path());
+        assert!(waits(&dropped).await);
+        assert_eq!(pool.hosts[0].live.load(Ordering::SeqCst), 1);
+        dropped.abort();
+        let _ = dropped.await;
+        drop(sweep);
+        assert_eq!(
+            pool.hosts[0].live.load(Ordering::SeqCst),
+            0,
+            "a dropped open"
+        );
+        assert_eq!(pool.hosts[0].slots.as_ref().unwrap().available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_a_limit_nothing_waits() {
+        let a = LocalRunner::new("henk-limit-none");
+        let pool = limited(vec![("a", Arc::clone(&a) as Arc<dyn Runner>, None)]);
+        let source = crate::workspace::contract::source("henk-limit-none-src");
+        let first = pool.open(source.path(), &Profile::default()).await.unwrap();
+        let (second, mut said) = opening(&pool, source.path());
+        let second = second.await.unwrap().unwrap();
+        assert_eq!(workspaces(&a), 2);
+        assert!(said.try_recv().is_err(), "nothing to say");
+        first.close().await;
+        second.close().await;
     }
 }

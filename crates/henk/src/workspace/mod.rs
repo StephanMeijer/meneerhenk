@@ -458,12 +458,51 @@ pub trait WorkspaceProvider: Send + Sync {
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError>;
 
+    /// [`Self::open`], telling `notes` what the run should know while it
+    /// waits, such as for a sandbox host with room (#403). Backends that
+    /// never wait need not say anything.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    async fn open_with(
+        &self,
+        source: &Path,
+        profile: &Profile,
+        notes: &Notes,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        let _ = notes;
+        self.open(source, profile).await
+    }
+
     /// Removes what a process that died left on a backend that outlives it,
     /// or `None` when the backend keeps nothing. Called once, when Henk
     /// starts: from this call on, a workspace being opened waits until the
     /// sweep is done, so the sweep never takes a live one.
     fn sweep(&self) -> Option<Sweep> {
         None
+    }
+}
+
+/// Where a backend says what a run should know while its workspace opens:
+/// lines for the run's timeline, or nowhere.
+#[derive(Debug, Clone, Default)]
+pub struct Notes(Option<tokio::sync::mpsc::UnboundedSender<String>>);
+
+impl Notes {
+    /// Notes that reach `to`.
+    #[must_use]
+    pub fn to(to: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+        Self(Some(to))
+    }
+
+    /// Says `note`, and logs it.
+    pub fn say(&self, note: impl Into<String>) {
+        let note = note.into();
+        tracing::debug!(%note, "workspace");
+        if let Some(to) = &self.0 {
+            let _ = to.send(note);
+        }
     }
 }
 
@@ -503,10 +542,19 @@ impl WorkspaceProvider for Backends {
         source: &Path,
         profile: &Profile,
     ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+        self.open_with(source, profile, &Notes::default()).await
+    }
+
+    async fn open_with(
+        &self,
+        source: &Path,
+        profile: &Profile,
+        notes: &Notes,
+    ) -> Result<Arc<dyn Workspace>, WorkspaceError> {
         match profile.backend {
             BackendKind::Host => self.host.open(source, profile).await,
             BackendKind::Ssh => match &self.ssh {
-                Some(ssh) => ssh.open(source, profile).await,
+                Some(ssh) => ssh.open_with(source, profile, notes).await,
                 None => Err(WorkspaceError::Backend(
                     "the ssh backend is not configured: [workspace.ssh] is missing".to_owned(),
                 )),
@@ -554,11 +602,15 @@ pub(crate) async fn open_prepared(
     profile: &henk_domain::workspace::Profile,
 ) -> anyhow::Result<Arc<dyn Workspace>> {
     use anyhow::Context as _;
-    let opened = app
-        .workspace_provider
-        .open(checkout.path(), profile)
-        .await
-        .context("opening the workspace")?;
+    let opened = open_noted(
+        &*app.workspace_provider,
+        &*app.store,
+        run,
+        checkout.path(),
+        profile,
+    )
+    .await
+    .context("opening the workspace")?;
     note_location(&*app.store, run, &*opened).await;
     let traced: Arc<dyn Workspace> = Arc::new(traced::Traced::new(
         opened,
@@ -570,6 +622,35 @@ pub(crate) async fn open_prepared(
         Err(error) => {
             traced.close().await;
             Err(error)
+        }
+    }
+}
+
+/// Opens a workspace with `provider`, putting what it says while it opens,
+/// such as that it waits for a sandbox host (#403), on `run`'s timeline as
+/// it says it.
+pub(crate) async fn open_noted(
+    provider: &dyn WorkspaceProvider,
+    store: &dyn henk_store::RunStore,
+    run: &henk_domain::run::RunId,
+    source: &Path,
+    profile: &Profile,
+) -> Result<Arc<dyn Workspace>, WorkspaceError> {
+    let (to, mut said) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let notes = Notes::to(to);
+    let opening = provider.open_with(source, profile, &notes);
+    tokio::pin!(opening);
+    loop {
+        tokio::select! {
+            opened = &mut opening => {
+                while let Ok(note) = said.try_recv() {
+                    let _ = store.event(run, "info", &note).await;
+                }
+                return opened;
+            }
+            Some(note) = said.recv() => {
+                let _ = store.event(run, "info", &note).await;
+            }
         }
     }
 }
@@ -793,7 +874,7 @@ pub fn ssh_pool(settings: &crate::config::Settings) -> anyhow::Result<Option<ssh
     let targets = config
         .hosts()
         .iter()
-        .map(|host| Ok((host.id.clone(), ssh_target(host)?)))
+        .map(|host| Ok((host.id.clone(), ssh_target(host)?, host.max_concurrent)))
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Some(ssh::SshPool::new(targets)))
 }

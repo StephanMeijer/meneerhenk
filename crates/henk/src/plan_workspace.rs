@@ -139,15 +139,16 @@ async fn open_one(
     run: RunId,
     name: String,
 ) -> (String, anyhow::Result<Arc<dyn Workspace>>) {
-    let opened = match provider.open(&source, &profile).await {
-        Ok(opened) => opened,
-        Err(error) => {
-            return (
-                name,
-                Err(anyhow::Error::new(error).context("opening the workspace")),
-            );
-        }
-    };
+    let opened =
+        match crate::workspace::open_noted(&*provider, &*store, &run, &source, &profile).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                return (
+                    name,
+                    Err(anyhow::Error::new(error).context("opening the workspace")),
+                );
+            }
+        };
     crate::workspace::note_location(&*store, &run, &*opened).await;
     let traced: Arc<dyn Workspace> =
         Arc::new(Traced::new(opened, store, run).labelled(name.clone()));
