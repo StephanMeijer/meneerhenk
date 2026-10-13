@@ -1234,6 +1234,10 @@ pub struct SshHost {
     pub max_concurrent: Option<usize>,
 }
 
+/// The highest `max_concurrent` a sandbox host may have (#403): far more
+/// workspaces than one machine runs at once. Above it, leave it out.
+pub const MAX_CONCURRENT_LIMIT: usize = 1024;
+
 const fn default_ssh_port() -> u16 {
     22
 }
@@ -1367,6 +1371,14 @@ impl SshConfig {
             if host.max_concurrent == Some(0) {
                 return refuse(format!(
                     "{at}max_concurrent must be at least 1; leave it out for no limit"
+                ));
+            }
+            if host
+                .max_concurrent
+                .is_some_and(|n| n > MAX_CONCURRENT_LIMIT)
+            {
+                return refuse(format!(
+                    "{at}max_concurrent must be at most {MAX_CONCURRENT_LIMIT}; leave it out for no limit"
                 ));
             }
         }
@@ -4129,6 +4141,28 @@ github_owners = ["docspec"]
                 "{refused}"
             );
         }
+        // Above the bound is refused too, before a semaphore that large
+        // could panic at startup.
+        for huge in [
+            format!("max_concurrent = 1025\n{}", pooled("fox", "")),
+            pooled("fox", "max_concurrent = 4611686018427387904\n"),
+        ] {
+            let refused = pool(&huge, "").unwrap_err().to_string();
+            assert!(
+                refused.contains("max_concurrent must be at most 1024; leave it out for no limit"),
+                "{refused}"
+            );
+        }
+        let most = pool(&pooled("fox", "max_concurrent = 1024\n"), "").unwrap();
+        assert_eq!(
+            most.workspace_ssh
+                .unwrap()
+                .hosts()
+                .first()
+                .unwrap()
+                .max_concurrent,
+            Some(1024)
+        );
     }
 
     #[test]
