@@ -900,6 +900,7 @@ pub(crate) mod tests {
                 return Err(PlatformError::Status {
                     status: 500,
                     body: "tracker down".to_owned(),
+                    retry_after: None,
                 });
             }
             Ok(())

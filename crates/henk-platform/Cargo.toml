@@ -30,6 +30,7 @@ tracing = { workspace = true }
 henk-mcp = { workspace = true, features = ["testing"] }
 rmcp = { workspace = true, features = ["server"] }
 tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

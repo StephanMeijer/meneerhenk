@@ -208,7 +208,10 @@ impl PlatformWriter for GitHubWriter {
                 target.repo.path()
             )
         };
-        self.api.post(&path, &json!({"content": "eyes"})).await?;
+        // GitHub answers a repeat with the reaction it already has.
+        self.api
+            .post_retrying(&path, &json!({"content": "eyes"}))
+            .await?;
         Ok(())
     }
 
@@ -217,16 +220,14 @@ impl PlatformWriter for GitHubWriter {
         target: &ReviewTarget,
         body: &str,
     ) -> Result<PostedComment, PlatformError> {
+        let path = format!(
+            "/repos/{}/issues/{}/comments",
+            target.repo.path(),
+            target.number
+        );
         let created = self
             .api
-            .post(
-                &format!(
-                    "/repos/{}/issues/{}/comments",
-                    target.repo.path(),
-                    target.number
-                ),
-                &json!({"body": body}),
-            )
+            .create_comment_once(&path, &path, body, self.bot_login(), |_| true)
             .await?;
         posted(&created)
     }
@@ -239,15 +240,28 @@ impl PlatformWriter for GitHubWriter {
         body: &str,
     ) -> Result<PostedComment, PlatformError> {
         if is_review_comment {
+            let path = format!(
+                "/repos/{}/pulls/{}/comments/{comment_id}/replies",
+                target.repo.path(),
+                target.number
+            );
             let created = self
                 .api
-                .post(
+                .create_comment_once(
+                    &path,
                     &format!(
-                        "/repos/{}/pulls/{}/comments/{comment_id}/replies",
+                        "/repos/{}/pulls/{}/comments",
                         target.repo.path(),
                         target.number
                     ),
-                    &json!({"body": body}),
+                    body,
+                    self.bot_login(),
+                    |comment| {
+                        comment
+                            .get("in_reply_to_id")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|id| id.to_string() == comment_id)
+                    },
                 )
                 .await?;
             posted(&created)

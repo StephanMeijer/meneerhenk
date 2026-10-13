@@ -15,6 +15,7 @@ use time::format_description::well_known::Rfc3339;
 use tracing::debug;
 
 use crate::error::PlatformError;
+use crate::retry::{RetryPolicy, with_retry};
 
 /// The App's identity and private key.
 pub struct AppCredentials {
@@ -128,9 +129,12 @@ pub struct Installations {
     allowed: Option<BTreeSet<u64>>,
     /// Owner, lowercased, to installation id.
     owners: Mutex<HashMap<String, u64>>,
-    /// Held across a mint, so one installation's token is minted once even
-    /// when several calls want it at the same moment.
-    tokens: tokio::sync::Mutex<HashMap<u64, CachedToken>>,
+    /// Each installation's token behind its own lock. That lock is held
+    /// across a mint and its retries, so one installation's token is minted
+    /// once even when several calls want it at the same moment; the map's
+    /// lock is held only to find the slot, so a mint that is waiting to try
+    /// again holds up no other installation.
+    tokens: tokio::sync::Mutex<HashMap<u64, Arc<TokenSlot>>>,
 }
 
 impl std::fmt::Debug for Installations {
@@ -198,44 +202,24 @@ impl Installations {
     ///
     /// Returns [`PlatformError::NotInstalled`] when the App is not installed
     /// there or the installation is outside the configured ones, otherwise
-    /// as the request fails.
+    /// as the request fails; a failure that was still worth another try
+    /// once `retry` ran out is [`PlatformError::Auth`], as for
+    /// [`Self::token`].
     pub async fn installation_for(
         &self,
         http: &reqwest::Client,
         api_base: &str,
         owner: &str,
         name: &str,
+        retry: RetryPolicy,
     ) -> Result<u64, PlatformError> {
         let id = if let Some(id) = self.known(owner) {
             id
         } else {
-            let jwt = self.credentials.jwt(SystemTime::now())?;
-            let response = http
-                .get(format!("{api_base}/repos/{owner}/{name}/installation"))
-                .bearer_auth(&jwt)
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()
-                .await?;
-            let status = response.status();
-            let body = response.text().await?;
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Err(PlatformError::NotInstalled {
-                    repo: format!("{owner}/{name}"),
-                    reason: "the App is not installed there".to_owned(),
-                });
-            }
-            if !status.is_success() {
-                return Err(PlatformError::Status {
-                    status: status.as_u16(),
-                    body: crate::error::truncate(&body),
-                });
-            }
-            let value: Value =
-                serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
-            let id = value.get("id").and_then(Value::as_u64).ok_or_else(|| {
-                PlatformError::Decode("installation response without id".to_owned())
-            })?;
+            let what = format!("GET /repos/{owner}/{name}/installation");
+            let id = with_retry(retry, &what, || self.look_up(http, api_base, owner, name))
+                .await
+                .map_err(|error| settled(&what, error))?;
             debug!(owner, installation = id, "found installation");
             self.remember(owner, id);
             id
@@ -249,18 +233,61 @@ impl Installations {
         Ok(id)
     }
 
+    async fn look_up(
+        &self,
+        http: &reqwest::Client,
+        api_base: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<u64, PlatformError> {
+        let jwt = self.credentials.jwt(SystemTime::now())?;
+        let response = http
+            .get(format!("{api_base}/repos/{owner}/{name}/installation"))
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.text().await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(PlatformError::NotInstalled {
+                repo: format!("{owner}/{name}"),
+                reason: "the App is not installed there".to_owned(),
+            });
+        }
+        if !status.is_success() {
+            return Err(PlatformError::status(
+                status.as_u16(),
+                &body,
+                Some(&headers),
+            ));
+        }
+        let value: Value =
+            serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
+        value
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| PlatformError::Decode("installation response without id".to_owned()))
+    }
+
     /// A token for installation `id`, minted when there is none or the one
     /// held is within two minutes of expiry.
     ///
     /// # Errors
     ///
     /// Returns [`PlatformError::NotInstalled`] for an installation outside
-    /// the configured ones, otherwise as the token request fails.
+    /// the configured ones, otherwise as the token request fails; a failure
+    /// that was still worth another try once `retry` ran out is
+    /// [`PlatformError::Auth`], so the request around it does not try the
+    /// mint again.
     pub async fn token(
         &self,
         http: &reqwest::Client,
         api_base: &str,
         id: u64,
+        retry: RetryPolicy,
     ) -> Result<SecretString, PlatformError> {
         if !self.allows(id) {
             return Err(PlatformError::NotInstalled {
@@ -268,15 +295,20 @@ impl Installations {
                 reason: format!("installation {id} is not one of [github] installations"),
             });
         }
-        let mut tokens = self.tokens.lock().await;
+        let slot = Arc::clone(self.tokens.lock().await.entry(id).or_default());
+        let mut held = slot.lock().await;
         let now = SystemTime::now();
-        if let Some(cached) = tokens.get(&id)
+        if let Some(cached) = held.as_ref()
             && cached.expires_at > now + Duration::from_mins(2)
         {
             return Ok(cached.token.clone());
         }
-        let fresh = match mint_installation_token(http, api_base, &self.credentials, id, now).await
-        {
+        let what = format!("POST /app/installations/{id}/access_tokens");
+        let minted = with_retry(retry, &what, || {
+            mint_installation_token(http, api_base, &self.credentials, id, SystemTime::now())
+        })
+        .await;
+        let fresh = match minted {
             Ok(fresh) => fresh,
             Err(error) => {
                 if matches!(
@@ -291,11 +323,29 @@ impl Installations {
                     // pointed at it, so the next call looks them up again.
                     self.forget(id);
                 }
-                return Err(error);
+                return Err(settled(&what, error));
             }
         };
-        tokens.insert(id, fresh.clone());
-        Ok(fresh.token)
+        let token = fresh.token.clone();
+        *held = Some(fresh);
+        Ok(token)
+    }
+}
+
+/// One installation's token, if minted yet.
+type TokenSlot = tokio::sync::Mutex<Option<CachedToken>>;
+
+/// The error of an auth step (a token mint, an installation lookup) whose
+/// own retries ran out. One that another try might still fix becomes
+/// [`PlatformError::Auth`], which is not retryable: the request that needed
+/// the token runs inside its own retry loop, and repeating the whole step
+/// there would multiply the attempts (`max_attempts` squared mints for one
+/// read).
+fn settled(what: &str, error: PlatformError) -> PlatformError {
+    if error.is_retryable() {
+        PlatformError::Auth(format!("{what} kept failing: {error}"))
+    } else {
+        error
     }
 }
 
@@ -428,6 +478,7 @@ impl GitHubAuth {
         &self,
         http: &reqwest::Client,
         api_base: &str,
+        retry: RetryPolicy,
     ) -> Result<u64, PlatformError> {
         match self {
             Self::Token(_) => Err(PlatformError::Auth(
@@ -443,7 +494,7 @@ impl GitHubAuth {
                         Scope::Installation(id) => Ok(*id),
                         Scope::Repository { owner, name } => {
                             installations
-                                .installation_for(http, api_base, owner, name)
+                                .installation_for(http, api_base, owner, name, retry)
                                 .await
                         }
                         Scope::Unscoped => Err(PlatformError::Auth(
@@ -467,12 +518,13 @@ impl GitHubAuth {
         &self,
         http: &reqwest::Client,
         api_base: &str,
+        retry: RetryPolicy,
     ) -> Result<SecretString, PlatformError> {
         match self {
             Self::Token(token) => Ok(token.clone()),
             Self::App { installations, .. } => {
-                let id = self.installation(http, api_base).await?;
-                installations.token(http, api_base, id).await
+                let id = self.installation(http, api_base, retry).await?;
+                installations.token(http, api_base, id, retry).await
             }
         }
     }
@@ -495,12 +547,14 @@ async fn mint_installation_token(
         .send()
         .await?;
     let status = response.status();
+    let headers = response.headers().clone();
     let body = response.text().await?;
     if !status.is_success() {
-        return Err(PlatformError::Status {
-            status: status.as_u16(),
-            body: crate::error::truncate(&body),
-        });
+        return Err(PlatformError::status(
+            status.as_u16(),
+            &body,
+            Some(&headers),
+        ));
     }
     let value: Value =
         serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;

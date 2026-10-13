@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use henk_domain::allowlist::RepoRef;
 
 use crate::error::PlatformError;
+use crate::github::api::encode_query_value;
 use crate::github::writer::GitHubWriter;
 use crate::push::{
     CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
@@ -135,19 +136,37 @@ impl PushWriter for GitHubWriter {
         repo: &RepoRef,
         pull: &NewPull,
     ) -> Result<OpenedPull, PlatformError> {
-        let opened = self
-            .api()
-            .post(
-                &format!("/repos/{}/pulls", repo.path()),
-                &json!({
-                    "title": pull.title,
-                    "head": pull.head,
-                    "base": pull.base,
-                    "body": pull.body,
-                    "draft": false,
-                }),
-            )
-            .await?;
+        let path = format!("/repos/{}/pulls", repo.path());
+        let request = json!({
+            "title": pull.title,
+            "head": pull.head,
+            "base": pull.base,
+            "body": pull.body,
+            "draft": false,
+        });
+        // GitHub names a head as owner:branch when it looks one up.
+        let head = if pull.head.contains(':') {
+            pull.head.clone()
+        } else {
+            format!("{}:{}", repo.owner(), pull.head)
+        };
+        let opened = crate::retry::create_once(
+            self.api().retry_policy(),
+            &format!("POST {path}"),
+            || self.api().post(&path, &request),
+            || async {
+                let open = self
+                    .api()
+                    .get(&format!(
+                        "{path}?state=open&head={}&base={}",
+                        encode_query_value(&head),
+                        encode_query_value(&pull.base)
+                    ))
+                    .await?;
+                Ok(open.as_array().and_then(|pulls| pulls.first()).cloned())
+            },
+        )
+        .await?;
         let number = opened
             .get("number")
             .and_then(Value::as_u64)
