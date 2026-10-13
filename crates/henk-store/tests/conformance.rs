@@ -1216,6 +1216,7 @@ async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
         output: 300,
         cache_read: 8_000,
         cache_write: 1_500,
+        reasoning: 120,
     };
     store
         .finish_session(
@@ -1247,6 +1248,7 @@ async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
             session.output_tokens,
             session.cache_read_tokens,
             session.cache_write_tokens,
+            session.reasoning_tokens,
         )
     };
     assert_eq!(
@@ -1254,8 +1256,8 @@ async fn a_session_keeps_what_the_cache_served(store: &dyn RunStore) {
         [SessionRole::Executor, SessionRole::Reviewer],
         "by name, each with the role it started in"
     );
-    assert_eq!(read("reviewer"), (10_000, 300, 8_000, 1_500));
-    assert_eq!(read("executor"), (500, 50, 0, 0));
+    assert_eq!(read("reviewer"), (10_000, 300, 8_000, 1_500, 120));
+    assert_eq!(read("executor"), (500, 50, 0, 0, 0));
 }
 
 async fn sessions_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) {

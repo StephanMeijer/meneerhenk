@@ -301,16 +301,32 @@ impl GitHubApi {
     /// [`PlatformError::TooMany`] when the list goes on past `MAX_PAGES`
     /// (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
+        self.get_pages(path, false).await
+    }
+
+    /// [`Self::get_all`] authenticated as the App itself (JWT), for
+    /// `/app/installations`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_all`], and [`PlatformError::Auth`] when the client has
+    /// no App credentials.
+    pub async fn get_all_as_app(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
+        self.get_pages(path, true).await
+    }
+
+    async fn get_pages(&self, path: &str, as_app: bool) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
         let separator = if path.contains('?') { '&' } else { '?' };
         // One page past the cap tells a list of exactly the cap, which ends
         // there, from one that goes on.
         for page in 1..=MAX_PAGES + 1 {
-            let page_items = self
-                .get(&format!(
-                    "{path}{separator}per_page={PAGE_SIZE}&page={page}"
-                ))
-                .await?;
+            let paged = format!("{path}{separator}per_page={PAGE_SIZE}&page={page}");
+            let page_items = if as_app {
+                self.get_as_app(&paged).await?
+            } else {
+                self.get(&paged).await?
+            };
             let Some(array) = page_items.as_array() else {
                 return Ok(items);
             };

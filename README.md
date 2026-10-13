@@ -834,7 +834,10 @@ workspace both list files (`list_files`, with a glob), search them by
 regular expression (`search`) and read any file by line range
 (`read_file`), and on a backend apart from Henk run a command of their own
 (`bash`, #85): one test, a build or a grep, as the workspace's user, with the repository's toolchain
-and the profile's time and output limits. Each command is on the run's
+and the profile's time and output limits. `bash` tells the model the
+workspace can reach the network and starts with nothing downloaded, so it
+does not pass `--offline` (#349); until the profile has a network setting
+(#86), keep the sandbox's network open. Each command is on the run's
 timeline, so `henk runs show <id>` lists what a review ran. A review whose
 workspace cannot be opened or set up fails before any session starts.
 
@@ -896,7 +899,11 @@ service links, and the profile's `memory_mib`, `cpus` and `disk_mib` as its
 memory, cpu and scratch disk. The number of processes is the node's
 setting (`podPidsLimit`). A command that runs out of memory ends the whole
 Pod on Kubernetes 1.32 and later; the result says so, and the workspace is
-gone for the rest of that run. Pods live at most six hours whatever
+gone for the rest of that run. The scratch disk is a hard limit too: a
+Pod that writes more than `disk_mib` to `/sandbox` is evicted, and the
+run fails saying so. A Rust workspace's `target/` after clippy and the
+tests passes 8 GiB easily, so size `disk_mib` for the repository's own
+builds. Pods live at most six hours whatever
 happens to Henk, and `henk serve` removes those of a Henk that died when
 it starts: one Henk per sandbox namespace.
 

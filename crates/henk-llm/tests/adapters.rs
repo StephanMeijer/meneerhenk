@@ -83,6 +83,37 @@ fn conversation() -> Vec<ChatMessage> {
 // ---- OpenAI ----------------------------------------------------------------
 
 #[test]
+fn openai_reads_reasoning_tokens_under_either_naming() {
+    let response = |usage: Value| {
+        json!({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+            "usage": usage,
+        })
+    };
+    let chat = openai::decode(&response(json!({
+        "prompt_tokens": 7, "completion_tokens": 30,
+        "completion_tokens_details": {"reasoning_tokens": 24},
+    })))
+    .unwrap();
+    assert_eq!(
+        (chat.usage.output_tokens, chat.usage.reasoning_tokens),
+        (30, 24)
+    );
+    let responses_style = openai::decode(&response(json!({
+        "input_tokens": 7, "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 99},
+    })))
+    .unwrap();
+    assert_eq!(
+        responses_style.usage.reasoning_tokens, 10,
+        "never more than the output it is part of"
+    );
+    let mut total = chat.usage;
+    total.add(&responses_style.usage);
+    assert_eq!(total.reasoning_tokens, 34);
+}
+
+#[test]
 fn openai_reads_usage_under_either_naming() {
     let response = |usage: Value| {
         json!({

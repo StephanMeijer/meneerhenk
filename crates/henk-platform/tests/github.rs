@@ -351,6 +351,67 @@ async fn api_errors_carry_status_and_body() {
 }
 
 #[tokio::test]
+async fn get_all_as_app_reads_every_page_of_installations() {
+    let server = MockServer::start().await;
+    let full: Vec<Value> = (1..=100).map(|id| json!({"id": id})).collect();
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .and(wiremock::matchers::query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .and(wiremock::matchers::query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"id": 101}])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    let all = api.get_all_as_app("/app/installations").await.unwrap();
+    assert_eq!(all.len(), 101);
+    assert_eq!(all[100]["id"], 101);
+}
+
+#[tokio::test]
+async fn a_reinstalled_app_is_looked_up_again_after_the_old_id_fails() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/app/installations/111/access_tokens"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/app/installations/333/access_tokens"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({"token": "ghs_new", "expires_at": "2999-01-01T00:00:00Z"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/alice/x/installation"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 333})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let api = GitHubApi::new(&server.uri(), app_auth(None)).unwrap();
+    api.installations().unwrap().remember("alice", 111);
+
+    let stale = api.for_repository(&repo("alice/x"));
+    assert!(matches!(
+        stale.git_token().await,
+        Err(henk_platform::PlatformError::Status { status: 404, .. })
+    ));
+
+    let fresh = api.for_repository(&repo("alice/x"));
+    assert_eq!(fresh.installation().await.unwrap(), 333);
+    let token = fresh.git_token().await.unwrap();
+    assert_eq!(secrecy::ExposeSecret::expose_secret(&token), "ghs_new");
+}
+
+#[tokio::test]
 async fn get_as_app_uses_the_jwt_not_an_installation_token() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

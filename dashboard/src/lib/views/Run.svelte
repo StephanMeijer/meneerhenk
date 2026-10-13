@@ -476,7 +476,7 @@
                 </td>
                 <td class="num">{count(session.input_tokens)}</td>
                 <td class="num" title={session.cache_write_tokens > 0 ? `${count(session.cache_write_tokens)} written into the cache` : undefined}>{cacheRead(session)}</td>
-                <td class="num">{count(session.output_tokens)}</td>
+                <td class="num" title={session.reasoning_tokens > 0 ? `${count(session.reasoning_tokens)} of them reasoning` : undefined}>{count(session.output_tokens)}</td>
                 <td class="text">{session.error ?? ''}</td>
               </tr>
             {/each}

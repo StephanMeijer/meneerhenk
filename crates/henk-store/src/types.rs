@@ -675,6 +675,8 @@ pub struct TokenUsage {
     pub cache_read: u64,
     /// Of `input`, written into the prompt cache.
     pub cache_write: u64,
+    /// Of `output`, spent reasoning before answering.
+    pub reasoning: u64,
 }
 
 impl TokenUsage {
@@ -686,6 +688,7 @@ impl TokenUsage {
             output,
             cache_read: 0,
             cache_write: 0,
+            reasoning: 0,
         }
     }
 }
@@ -713,6 +716,8 @@ pub struct SessionRecord {
     pub cache_read_tokens: u64,
     /// Of `input_tokens`, written into the prompt cache (#330).
     pub cache_write_tokens: u64,
+    /// Of `output_tokens`, spent reasoning before answering (#365).
+    pub reasoning_tokens: u64,
     /// The error, when it did not finish.
     pub error: Option<String>,
     /// RFC 3339: when it started.
