@@ -116,7 +116,10 @@ impl GitLabWriter {
     /// Calls a tool and parses its text as JSON. A result the server flags
     /// as an error becomes [`PlatformError::ToolFailed`]. A tool that is
     /// safe to repeat is tried again when GitLab fails for a moment (#338);
-    /// one that creates something is called once, and the caller decides.
+    /// one that creates something is called once. Only the merge request
+    /// notes are then looked up and tried again ([`Self::create_note_once`]);
+    /// a work item note, a merge request and a work item are not yet
+    /// (#412), so one 5xx fails them.
     pub(crate) async fn call_tool(
         &self,
         tool: &str,

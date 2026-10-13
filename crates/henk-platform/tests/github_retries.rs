@@ -334,3 +334,97 @@ async fn the_clients_retry_policy_covers_the_installation_token() {
     assert_eq!(api.get("/repos/docspec/app").await.unwrap()["ok"], true);
     assert_eq!(count(&server, "POST", tokens).await, 2);
 }
+
+fn app_api(server: &MockServer, retry: RetryPolicy) -> GitHubApi {
+    let auth = GitHubAuth::app(Arc::new(Installations::new(
+        AppCredentials::from_pem(1, include_str!("fixtures/test-app-key.pem")).unwrap(),
+        None,
+    )));
+    GitHubApi::new(&server.uri(), auth)
+        .unwrap()
+        .with_retry_policy(retry)
+}
+
+const FAST: RetryPolicy = RetryPolicy {
+    max_attempts: 3,
+    base_delay: Duration::from_millis(1),
+    max_delay: Duration::from_millis(5),
+};
+
+#[tokio::test]
+async fn a_failing_token_mint_is_tried_as_often_as_the_policy_says_and_no_more() {
+    let server = MockServer::start().await;
+    let tokens = "/app/installations/222/access_tokens";
+    Mock::given(method("POST"))
+        .and(path(tokens))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+    let error = app_api(&server, FAST)
+        .for_installation(222)
+        .get("/repos/docspec/app")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PlatformError::Auth(_)), "{error}");
+    assert_eq!(count(&server, "POST", tokens).await, 3);
+    assert_eq!(count(&server, "GET", "/repos/docspec/app").await, 0);
+}
+
+#[tokio::test]
+async fn a_failing_installation_lookup_is_tried_as_often_as_the_policy_says_and_no_more() {
+    let server = MockServer::start().await;
+    let lookup = "/repos/docspec/app/installation";
+    Mock::given(method("GET"))
+        .and(path(lookup))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let error = app_api(&server, FAST)
+        .for_repository(&target().repo)
+        .get("/repos/docspec/app")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PlatformError::Auth(_)), "{error}");
+    assert_eq!(count(&server, "GET", lookup).await, 3);
+    assert_eq!(count(&server, "GET", "/repos/docspec/app").await, 0);
+}
+
+#[tokio::test]
+async fn a_mint_waiting_to_try_again_holds_up_no_other_installation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/app/installations/222/access_tokens"))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/app/installations/333/access_tokens"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({"token": "ghs_alice", "expires_at": "2999-01-01T00:00:00Z"})),
+        )
+        .mount(&server)
+        .await;
+    let api = app_api(
+        &server,
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(5),
+        },
+    );
+    let failing = api.for_installation(222);
+    let backing_off = tokio::spawn(async move { failing.git_token().await });
+    // Until the first mint for 222 has failed and its retry is waiting.
+    while count(&server, "POST", "/app/installations/222/access_tokens").await == 0 {
+        tokio::task::yield_now().await;
+    }
+    let other = tokio::time::timeout(
+        Duration::from_secs(2),
+        api.for_installation(333).git_token(),
+    )
+    .await;
+    backing_off.abort();
+    let token = other.expect("333 waited for 222's backoff").unwrap();
+    assert_eq!(secrecy::ExposeSecret::expose_secret(&token), "ghs_alice");
+}

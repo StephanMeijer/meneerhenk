@@ -129,9 +129,12 @@ pub struct Installations {
     allowed: Option<BTreeSet<u64>>,
     /// Owner, lowercased, to installation id.
     owners: Mutex<HashMap<String, u64>>,
-    /// Held across a mint, so one installation's token is minted once even
-    /// when several calls want it at the same moment.
-    tokens: tokio::sync::Mutex<HashMap<u64, CachedToken>>,
+    /// Each installation's token behind its own lock. That lock is held
+    /// across a mint and its retries, so one installation's token is minted
+    /// once even when several calls want it at the same moment; the map's
+    /// lock is held only to find the slot, so a mint that is waiting to try
+    /// again holds up no other installation.
+    tokens: tokio::sync::Mutex<HashMap<u64, Arc<TokenSlot>>>,
 }
 
 impl std::fmt::Debug for Installations {
@@ -199,7 +202,9 @@ impl Installations {
     ///
     /// Returns [`PlatformError::NotInstalled`] when the App is not installed
     /// there or the installation is outside the configured ones, otherwise
-    /// as the request fails.
+    /// as the request fails; a failure that was still worth another try
+    /// once `retry` ran out is [`PlatformError::Auth`], as for
+    /// [`Self::token`].
     pub async fn installation_for(
         &self,
         http: &reqwest::Client,
@@ -212,7 +217,9 @@ impl Installations {
             id
         } else {
             let what = format!("GET /repos/{owner}/{name}/installation");
-            let id = with_retry(retry, &what, || self.look_up(http, api_base, owner, name)).await?;
+            let id = with_retry(retry, &what, || self.look_up(http, api_base, owner, name))
+                .await
+                .map_err(|error| settled(&what, error))?;
             debug!(owner, installation = id, "found installation");
             self.remember(owner, id);
             id
@@ -271,7 +278,10 @@ impl Installations {
     /// # Errors
     ///
     /// Returns [`PlatformError::NotInstalled`] for an installation outside
-    /// the configured ones, otherwise as the token request fails.
+    /// the configured ones, otherwise as the token request fails; a failure
+    /// that was still worth another try once `retry` ran out is
+    /// [`PlatformError::Auth`], so the request around it does not try the
+    /// mint again.
     pub async fn token(
         &self,
         http: &reqwest::Client,
@@ -285,9 +295,10 @@ impl Installations {
                 reason: format!("installation {id} is not one of [github] installations"),
             });
         }
-        let mut tokens = self.tokens.lock().await;
+        let slot = Arc::clone(self.tokens.lock().await.entry(id).or_default());
+        let mut held = slot.lock().await;
         let now = SystemTime::now();
-        if let Some(cached) = tokens.get(&id)
+        if let Some(cached) = held.as_ref()
             && cached.expires_at > now + Duration::from_mins(2)
         {
             return Ok(cached.token.clone());
@@ -312,11 +323,29 @@ impl Installations {
                     // pointed at it, so the next call looks them up again.
                     self.forget(id);
                 }
-                return Err(error);
+                return Err(settled(&what, error));
             }
         };
-        tokens.insert(id, fresh.clone());
-        Ok(fresh.token)
+        let token = fresh.token.clone();
+        *held = Some(fresh);
+        Ok(token)
+    }
+}
+
+/// One installation's token, if minted yet.
+type TokenSlot = tokio::sync::Mutex<Option<CachedToken>>;
+
+/// The error of an auth step (a token mint, an installation lookup) whose
+/// own retries ran out. One that another try might still fix becomes
+/// [`PlatformError::Auth`], which is not retryable: the request that needed
+/// the token runs inside its own retry loop, and repeating the whole step
+/// there would multiply the attempts (`max_attempts` squared mints for one
+/// read).
+fn settled(what: &str, error: PlatformError) -> PlatformError {
+    if error.is_retryable() {
+        PlatformError::Auth(format!("{what} kept failing: {error}"))
+    } else {
+        error
     }
 }
 
