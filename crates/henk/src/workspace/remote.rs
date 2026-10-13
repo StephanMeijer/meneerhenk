@@ -117,6 +117,18 @@ impl Reply {
         format!("{ended}; it printed: {cut}{tail}")
     }
 
+    /// How a command that has no exit status ended, for its output: what
+    /// the backend said, else a plain statement. `None` when it has a status.
+    fn ended_note(&self) -> Option<String> {
+        if self.code.is_some() {
+            return None;
+        }
+        Some(match self.detail.as_deref().map(str::trim) {
+            Some(detail) if !detail.is_empty() => detail.to_owned(),
+            _ => "it ended without an exit status: killed, or the connection dropped".to_owned(),
+        })
+    }
+
     /// `Ok` with stderr when it said something, else `Err` with how the
     /// request ended.
     fn stderr_or_ended(&self) -> Result<String, String> {
@@ -539,10 +551,24 @@ impl Workspace for RemoteWorkspace {
         if timed_out {
             text = format!("{}stopped after {}s", tail(&text, cap), limit.as_secs());
         }
+        // A command that ended without a status and without timing out was
+        // killed or cut off: say how, after the output (#339).
+        let output = match reply.ended_note().filter(|_| !timed_out) {
+            Some(note) => {
+                let note = format!("[{note}]");
+                let mut kept = tail(&text, cap.saturating_sub(note.len() + 1));
+                if !kept.is_empty() && !kept.ends_with('\n') {
+                    kept.push('\n');
+                }
+                kept.push_str(&note);
+                kept
+            }
+            None => tail(&text, cap),
+        };
         let result = ExecResult {
             code: if timed_out { None } else { reply.code },
             timed_out,
-            output: tail(&text, cap),
+            output,
             duration,
         };
         held.settle(result.duration);
@@ -1035,6 +1061,73 @@ pub(crate) mod tests {
         ] {
             let said = reply.ok("making the workspace").unwrap_err().to_string();
             assert!(!said.trim_end().ends_with(':'), "{said}");
+        }
+    }
+
+    /// The local runner, except that the command `henk-killed` ends without
+    /// an exit status and says why, as a killed SSH command does.
+    struct Killing {
+        inner: Arc<LocalRunner>,
+        detail: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for Killing {
+        async fn call(
+            &self,
+            tokens: &[String],
+            stdin: &[u8],
+            keep: Option<usize>,
+            wait: Duration,
+        ) -> Result<Reply, WorkspaceError> {
+            if tokens.get(4) == Some(&token("henk-killed")) {
+                return Ok(Reply {
+                    stdout: b"partial".to_vec(),
+                    detail: self.detail.clone(),
+                    ..Reply::default()
+                });
+            }
+            self.inner.call(tokens, stdin, keep, wait).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_command_without_a_status_says_how_it_ended() {
+        use crate::workspace::WorkspaceProvider as _;
+        use crate::workspace::ssh::SshProvider;
+
+        for (detail, expected) in [
+            (
+                Some("killed by signal KILL"),
+                "partial\n[killed by signal KILL]",
+            ),
+            (
+                None,
+                "partial\n[it ended without an exit status: killed, or the connection dropped]",
+            ),
+        ] {
+            let runner = Arc::new(Killing {
+                inner: LocalRunner::new("henk-remote-killed"),
+                detail: detail.map(str::to_owned),
+            });
+            let provider = SshProvider::with_runner(runner as Arc<dyn Runner>);
+            let source = crate::workspace::contract::source("henk-remote-killed-src");
+            let ws = provider
+                .open(source.path(), &Profile::default())
+                .await
+                .unwrap();
+            let ran = ws
+                .exec(
+                    &["henk-killed".to_owned()],
+                    &WorkspacePath::root(),
+                    Duration::from_secs(30),
+                )
+                .await
+                .unwrap();
+            assert_eq!(ran.code, None);
+            assert!(!ran.timed_out);
+            assert_eq!(ran.output, expected);
+            ws.close().await;
         }
     }
 }
