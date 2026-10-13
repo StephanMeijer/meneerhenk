@@ -84,6 +84,14 @@ impl PlatformError {
                 ..
             } => *status >= 500 || *status == 429 || (*status == 403 && retry_after.is_some()),
             Self::Transport(error) => error.is_timeout() || error.is_connect(),
+            // GitLab, through its MCP server: the server reports GitLab's
+            // own status in its error text, as a failed tool result or as
+            // the call's error.
+            Self::ToolFailed { message, .. } => gitlab_transient(message),
+            Self::Mcp(henk_mcp::McpError::Timeout { .. }) => true,
+            Self::Mcp(error @ henk_mcp::McpError::Service { .. }) => {
+                gitlab_transient(&error.to_string())
+            }
             _ => false,
         }
     }
@@ -107,6 +115,19 @@ impl PlatformError {
     }
 }
 
+/// Whether the GitLab MCP server's error text reports a GitLab failure that
+/// may pass: `GitLab API error: 502 Bad Gateway`, a 429, or its rate limit.
+fn gitlab_transient(text: &str) -> bool {
+    if text.contains("GitLab API Rate Limit Exceeded") {
+        return true;
+    }
+    text.split("GitLab API error: ")
+        .nth(1)
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|status| status >= 500 || status == 429)
+}
+
 /// `Retry-After` in seconds; an HTTP date is ignored.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
     let value = headers
@@ -127,4 +148,30 @@ pub(crate) fn truncate(body: &str) -> String {
         end -= 1;
     }
     format!("{}...", body.get(..end).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gitlab_transient;
+
+    #[test]
+    fn gitlab_failures_that_may_pass_are_told_from_the_rest() {
+        for passing in [
+            "GitLab API error: 502 Bad Gateway\n<html>",
+            "MCP server gitlab-write: GitLab API error: 500 Internal Server Error\n",
+            "GitLab API error: 429 Too Many Requests\n",
+            "GitLab API Rate Limit Exceeded: {\"message\":\"User API Key Rate limit exceeded\"}",
+        ] {
+            assert!(gitlab_transient(passing), "{passing}");
+        }
+        for lasting in [
+            "GitLab API error: 404 Not Found\n",
+            "GitLab API error: 403 Forbidden\n",
+            "GitLab API error: 422 Unprocessable Entity\n",
+            "404 Not Found",
+            "Invalid arguments: body: Required",
+        ] {
+            assert!(!gitlab_transient(lasting), "{lasting}");
+        }
+    }
 }
