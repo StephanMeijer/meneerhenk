@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/StephanMeijer/meneerhenk/compare/v0.3.1...v0.4.0) - 2026-10-13
+
+### Added
+
+- *(executor)* [**breaking**] the executor runs each repository's own checks; run_checks and check_commands are removed
+
+### Fixed
+
+- *(push)* commits name only a requester Henk knows, and none when nobody known asked
+- *(github)* a failing token mint is retried once per request, under its own lock
+- *(github)* a passing 5xx no longer loses a run's writes
+
+### Other
+
+- *(executor)* the sandbox-host wait test takes no check exit code after #398
+- Merge pull request #405 from StephanMeijer/feat/ssh-host-limit
+- Fix review findings
+- Merge remote-tracking branch 'origin/main' into pr-405-fix
+- Merge pull request #404 from StephanMeijer/fix/known-requester
+- Merge pull request #391 from StephanMeijer/fix/workspace-error-causes
+- Merge pull request #387 from StephanMeijer/fix/github-retries
+- Merge remote-tracking branch 'origin/main' into pr-398
+- Fix review findings
+- Merge pull request #388 from StephanMeijer/fix/gitlab-retries
+- Merge remote-tracking branch 'origin/main' into pr-387
+- Fix review findings
+
 ## [0.3.1](https://github.com/StephanMeijer/meneerhenk/compare/v0.3.0...v0.3.1) - 2026-10-13
 
 ### Added
