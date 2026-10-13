@@ -188,7 +188,7 @@ impl Tool for ReadFile {
                 "properties": {
                     "path": {"type": "string", "description": "File path in the repository"},
                     "start_line": {"type": "integer", "description": "First line, 1-based (default 1)"},
-                    "end_line": {"type": "integer", "description": format!("Last line, inclusive (default start_line + {})", READ_LINES - 1)}
+                    "end_line": {"type": "integer", "description": format!("Last line, inclusive (default start_line + {}); a range given the wrong way round is read the right way", READ_LINES - 1)}
                 },
                 "required": ["path"]
             }),
@@ -204,16 +204,13 @@ impl Tool for ReadFile {
         if start == 0 {
             return ToolOutput::error("start_line is 1-based; the first line is 1.");
         }
-        let last = start.saturating_add(READ_LINES - 1);
-        let end = match arg_line(&args, "end_line") {
-            Some(end) if end < start => {
-                return ToolOutput::error(format!(
-                    "end_line {end} is before start_line {start}. Ask for start_line <= end_line, at most {READ_LINES} lines."
-                ));
-            }
-            Some(end) => end.min(last),
-            None => last,
+        // A reversed range is read the right way round, and the output says so (#340).
+        let (start, end, swapped) = match arg_line(&args, "end_line") {
+            Some(end) if end < start => (end.max(1), Some(start), Some((start, end))),
+            end => (start, end, None),
         };
+        let last = start.saturating_add(READ_LINES - 1);
+        let end = end.map_or(last, |end| end.min(last));
         let bytes = match self.0.read(&path, MAX_FILE_BYTES).await {
             Ok(bytes) => bytes,
             Err(error) => return ToolOutput::error(format!("cannot read {path}: {error}")),
@@ -232,6 +229,13 @@ impl Tool for ReadFile {
             ));
         }
         let mut out = String::new();
+        if let Some((asked_start, asked_end)) = swapped {
+            let _ = writeln!(
+                out,
+                "[end_line {asked_end} is before start_line {asked_start}; read lines {start}-{}]",
+                end.min(total)
+            );
+        }
         for (index, line) in text
             .lines()
             .enumerate()
@@ -267,15 +271,20 @@ enum Output {
     Count,
 }
 
-/// The `context` and `output` arguments, checked.
-fn shape(args: &Value) -> Result<(usize, Output), String> {
-    let context = match args.get("context") {
-        None | Some(Value::Null) => 0,
-        Some(value) => value
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-            .filter(|n| *n <= MAX_CONTEXT)
-            .ok_or_else(|| format!("context is a number of lines from 0 to {MAX_CONTEXT}"))?,
+/// The `context` and `output` arguments, checked. A `context` out of range is
+/// clamped rather than refused (#340); the number asked for comes back with it.
+fn shape(args: &Value) -> Result<(usize, Option<i64>, Output), String> {
+    let (context, clamped) = match args.get("context") {
+        None | Some(Value::Null) => (0, None),
+        Some(value) => {
+            let asked = value
+                .as_i64()
+                .or_else(|| value.as_u64().map(|_| i64::MAX))
+                .ok_or_else(|| format!("context is a number of lines from 0 to {MAX_CONTEXT}"))?;
+            let context = usize::try_from(asked.max(0)).map_or(MAX_CONTEXT, |n| n.min(MAX_CONTEXT));
+            let clamped = i64::try_from(context).ok() != Some(asked);
+            (context, clamped.then_some(asked))
+        }
     };
     let output = match arg_str(args, "output").unwrap_or("lines") {
         "lines" => Output::Lines,
@@ -288,7 +297,7 @@ fn shape(args: &Value) -> Result<(usize, Output), String> {
     if context > 0 && output != Output::Lines {
         return Err("context only goes with output = lines".to_owned());
     }
-    Ok((context, output))
+    Ok((context, clamped, output))
 }
 
 /// Hits as one line each: `path:line: text`, trimmed and cut.
@@ -338,7 +347,7 @@ impl Tool for Search {
         ToolDef {
             name: name("search"),
             description: format!(
-                "Finds lines matching a regular expression in the text files of the repository, as path:line: text, at most {SEARCH_CAP}. The syntax is the common one: classes, \\b, \\d, \\w, (?i) for any case, alternation with |. `glob` keeps only matching files, `dir` a directory. `context` (0 to {MAX_CONTEXT}) adds lines around each hit, grouped per file as grep shows them, so you need not read the file for a first look. `output` = files lists each matching file once, and count gives the number of matching lines per file."
+                "Finds lines matching a regular expression in the text files of the repository, as path:line: text, at most {SEARCH_CAP}. The syntax is the common one: classes, \\b, \\d, \\w, (?i) for any case, alternation with |. `glob` keeps only matching files, `dir` a directory. `context` (0 to {MAX_CONTEXT}, more is cut to {MAX_CONTEXT}) adds lines around each hit, grouped per file as grep shows them, so you need not read the file for a first look. `output` = files lists each matching file once, and count gives the number of matching lines per file."
             ),
             input_schema: json!({
                 "type": "object",
@@ -363,7 +372,7 @@ impl Tool for Search {
             (Ok(dir), Ok(only)) => (dir, only),
             (Err(error), _) | (_, Err(error)) => return ToolOutput::error(error),
         };
-        let (context, output) = match shape(&args) {
+        let (context, clamped, output) = match shape(&args) {
             Ok(shape) => shape,
             Err(error) => return ToolOutput::error(error),
         };
@@ -384,7 +393,7 @@ impl Tool for Search {
         if found == 0 {
             return ToolOutput::ok("No matches.");
         }
-        let out = match output {
+        let mut out = match output {
             Output::Lines if context == 0 => {
                 let mut out = plain(hits.get(..SEARCH_CAP.min(hits.len())).unwrap_or(&hits));
                 if found > SEARCH_CAP {
@@ -443,6 +452,12 @@ impl Tool for Search {
                 out
             }
         };
+        if let Some(asked) = clamped {
+            let _ = writeln!(
+                out,
+                "[context is 0 to {MAX_CONTEXT} lines, not {asked}; showed {context}]"
+            );
+        }
         ToolOutput::ok(out)
     }
 }
@@ -642,10 +657,21 @@ mod tests {
                 .await
                 .is_error
         );
-        assert!(
+        assert_eq!(
             read.call(json!({"path": "src/a.rs", "start_line": 3, "end_line": 2}))
                 .await
-                .is_error
+                .content,
+            "[end_line 2 is before start_line 3; read lines 2-3]\n    2|     let x = 1;\n    3|     Parse(x);\n[4 lines; continue with start_line = 4]\n"
+        );
+        let zero = read
+            .call(json!({"path": "src/a.rs", "start_line": 2, "end_line": 0}))
+            .await;
+        assert!(!zero.is_error, "{}", zero.content);
+        assert!(
+            zero.content
+                .starts_with("[end_line 0 is before start_line 2; read lines 1-2]\n    1| "),
+            "{}",
+            zero.content
         );
         for escape in ["../outside", "/etc/passwd", ".git/config", "nope.rs"] {
             assert!(
@@ -755,9 +781,32 @@ mod tests {
                 .content,
             "No matches."
         );
+        let five = ask(json!({"pattern": "Parse", "context": 5})).await;
+        let six = ask(json!({"pattern": "Parse", "context": 6})).await;
+        assert!(!six.is_error, "{}", six.content);
+        assert_eq!(
+            six.content,
+            format!(
+                "{}[context is 0 to 5 lines, not 6; showed 5]\n",
+                five.content
+            )
+        );
+        let flat = ask(json!({"pattern": "Parse"})).await;
+        let below = ask(json!({"pattern": "Parse", "context": -1})).await;
+        assert_eq!(
+            below.content,
+            format!(
+                "{}[context is 0 to 5 lines, not -1; showed 0]\n",
+                flat.content
+            )
+        );
+        assert!(
+            !ask(json!({"pattern": "Parse", "output": "files", "context": -1}))
+                .await
+                .is_error
+        );
         for bad in [
-            json!({"pattern": "x", "context": 6}),
-            json!({"pattern": "x", "context": -1}),
+            json!({"pattern": "x", "context": "3"}),
             json!({"pattern": "x", "output": "json"}),
             json!({"pattern": "x", "output": "files", "context": 2}),
         ] {
