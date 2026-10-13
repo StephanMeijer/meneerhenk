@@ -228,7 +228,8 @@ timeout_secs = 1200
 # the pull request's branch (never a fork, the default branch, a protected
 # branch or a branch that moved; spec §3.5). On GitHub the App needs
 # "Contents: write"; on GitLab Henk pushes with [gitlab].token_env.
-# requester_id is the Team Lead those commits are for, and credit.
+# requester_id is the Team Lead the executor belongs to. It credits nobody:
+# a commit names only the requester who asked, when Henk knows them by id.
 [roles.executor]
 model = "claude"
 max_turns = 40
@@ -246,9 +247,10 @@ requester_id = 523456789012345678
 # name = "Meneer Henk"
 # email = "henk@example.com"
 #
-# The trailers of each commit, after Henk-Run and Requested-by. The
-# requester is credited by the platform id in their [[people]] entry, never
-# by a display name; without one they get no trailers of their own.
+# The trailers of each commit, after Henk-Run and Requested-by. Only the
+# requester who asked is credited, by the id they asked with or their
+# [[people]] entry, never by a display name; a run nobody Henk knows by id
+# asked for (CLI, HTTP API, webhook) credits no one.
 # [roles.executor.trailers]
 # henk_signoff = true          # Signed-off-by: Henk, for DCO checks
 # requester_coauthor = true    # Co-authored-by: the colleague who asked

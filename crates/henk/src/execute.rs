@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
 use henk_domain::execute::{branch_candidate, branch_name, commit_subject, pull_body};
+use henk_domain::identity::RequesterId;
 use henk_domain::review::CommitSha;
 use henk_domain::role::Role;
 use henk_domain::run::{RunId, RunKind};
@@ -144,12 +145,9 @@ pub async fn run_execute(
             repo: request.target.repo.path(),
             target: request.target.number,
             commit: None,
-            requester: Some(
-                request
-                    .requester
-                    .clone()
-                    .unwrap_or_else(|| executor.requester_id.to_string()),
-            ),
+            // Who asked, as given; nobody when the request names nobody, not
+            // the executor's Team Lead (#399).
+            requester: request.requester.clone(),
             trigger: request.trigger.clone(),
             link: link.clone(),
         })
@@ -407,14 +405,14 @@ impl Work<'_> {
         let requester = self
             .request
             .requester
-            .clone()
-            .unwrap_or_else(|| format!("discord:{}", self.executor.requester_id));
+            .as_deref()
+            .and_then(RequesterId::parse);
         let pusher = Pusher {
             app: self.app,
             writer: Arc::clone(writer),
             repo,
             run,
-            requester: &requester,
+            requester: requester.as_ref(),
         };
         let credential = writer
             .git_credential()
@@ -678,8 +676,8 @@ check_commands = [["make", "check"]]
                 email: "1+meneer-henk[bot]@users.noreply.github.com".to_owned(),
             })
         }
-        async fn user_login(&self, _: u64) -> Result<String, PlatformError> {
-            Err(unused())
+        async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
+            Ok(format!("user{id}"))
         }
         fn noreply_host(&self) -> Result<String, PlatformError> {
             Ok("github.com".to_owned())
@@ -817,6 +815,40 @@ check_commands = [["make", "check"]]
         }
     }
 
+    #[tokio::test]
+    async fn an_execute_run_nobody_known_asked_for_credits_no_one() {
+        let f = fixture("henk-exec-nobody", vec![write_csv(), propose(), done()], 0).await;
+        let report = run_execute(
+            &f.app,
+            ExecuteRequest {
+                requester: None,
+                ..request("r-exec-nobody")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let commit = remote_branch_log(&f.hub.remote, "henk/9-export-runs", "%B").await;
+        assert!(commit.contains("Henk-Run: r-exec-nobody"), "{commit}");
+        // Not the executor's Team Lead: nobody (#399).
+        assert!(!commit.contains("Requested-by"), "{commit}");
+        assert!(!commit.contains("Co-authored-by"), "{commit}");
+        assert_eq!(report.pull.target.number, 12);
+        assert_eq!(record(&f, "r-exec-nobody").await.requester, None);
+        let events = f
+            .app
+            .store
+            .events(&RunId::parse("r-exec-nobody").unwrap())
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.contains("nobody Henk knows by id asked")),
+            "{events:?}"
+        );
+    }
+
     async fn record(f: &Fixture, run: &str) -> henk_store::RunRecord {
         f.app
             .store
@@ -859,6 +891,11 @@ check_commands = [["make", "check"]]
         );
         assert!(commit.contains("Henk-Run: r-exec-1"), "{commit}");
         assert!(commit.contains("Requested-by: github:1234"), "{commit}");
+        // The signed-in user who asked is credited by their own id (#399).
+        assert!(
+            commit.contains("Co-authored-by: user1234 <1234+user1234@users.noreply.github.com>"),
+            "{commit}"
+        );
         assert_eq!(
             remote_branch_file(remote, "henk/9-export-runs", "src/csv.rs").await,
             "pub fn export() {}\n"

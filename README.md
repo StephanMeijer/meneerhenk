@@ -219,7 +219,8 @@ A review needs `[review.loop]` with `[roles.reviewer]` and
 limits the whole loop: no round starts after it, and a round under way
 gets only what is left. The executor's `check_commands`,
 `max_changed_files`, identity and trailers apply to every commit the loop
-pushes, and its `requester_id` is who those commits are requested by.
+pushes. Those commits name the requester who asked, when Henk knows them
+by id, and nobody otherwise (see "Pushing a review's fixes").
 Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`;
 execute runs need `[execution]` with `[roles.executor]`.
 Without `[review.loop]`
@@ -719,8 +720,8 @@ server's merge request leaves the project ids out. Without it GitLab
 reviews fail. The token's account needs Developer access to push.
 
 The commit's subject is "Fix review findings". It ends in a trailer block,
-in this order: `Henk-Run` (the run), `Requested-by` (the requester's
-Discord id), the requester's `Co-authored-by` and `Signed-off-by`, and
+in this order: `Henk-Run` (the run), `Requested-by` (who asked, by a
+stable id), the requester's `Co-authored-by` and `Signed-off-by`, and
 Henk's `Signed-off-by` last, as
 the committer's. By default Henk signs off, so DCO checks pass, and the
 requester is credited as co-author; the requester does not sign off.
@@ -733,15 +734,24 @@ requesters in that repository agree to that.
 
 Henk commits as the App, `meneer-henk[bot]` with its GitHub noreply
 address, unless `[roles.executor.identity]` sets a `name` and `email`; that
-identity is author, committer and Henk's sign-off alike. The requester is
-credited by the `github_id` or `gitlab_id` in their `[[people]]` entry,
-for the platform of the run: Henk reads that account's current login by id
-and uses `<id>+<login>@users.noreply.github.com` on GitHub and
+identity is author, committer and Henk's sign-off alike.
+
+The requester is only ever who asked for the run, never a configured
+stand-in (#399). Henk knows them by a stable id: `github:<id>` for a
+dashboard start (the signed-in GitHub account), `discord:<id>`, or
+`gitlab:<id>`. An MCP client is `mcp:<token name>`: its commits name it in
+`Requested-by` and credit no person. A run started by the CLI, the HTTP
+API or a webhook names nobody Henk knows by id (a webhook gives only a
+login, #402), so its commits carry no `Requested-by` and no requester
+trailers, and the run notes why. A known requester is credited by their
+`[[people]]` entry, found by the id they asked with, or by that id itself
+when it is the run's platform's: Henk reads that account's current login by
+id and uses `<id>+<login>@users.noreply.github.com` on GitHub and
 `<id>-<username>@users.noreply.<host>` on GitLab, with the host of
 `[gitlab].api_url`, as for Henk's own address there.
 `commit_name` and `commit_email` in the same entry override both. A
-requester with neither gets no trailers of their own, the run notes why,
-and `henk config check` warns about it. Trailer values come only from ids
+requester with no account on the run's platform gets no trailers of their
+own, and the run notes why. Trailer values come only from ids
 and configuration, never from a display name or a comment (spec §2, §8.3);
 `config check` refuses a malformed name or email.
 

@@ -12,7 +12,9 @@ use serde::Deserialize;
 use henk_domain::allowlist::{AllowRule, Allowlist, Platform, RepoRef};
 use henk_domain::commit::{CommitPerson, Email, IdentityError, TrailerPolicy};
 use henk_domain::discord::HenkIdentity;
-use henk_domain::identity::{DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person};
+use henk_domain::identity::{
+    DiscordChannelId, DiscordRoleId, DiscordUserId, People, Person, RequesterId,
+};
 use henk_domain::mail::EmailAddress;
 use henk_domain::role::Role;
 use henk_domain::skill::SkillName;
@@ -962,7 +964,9 @@ pub struct ExecutorConfig {
     /// and `[workspace] command_secs` each.
     #[serde(default)]
     pub check_commands: Vec<Vec<String>>,
-    /// The Team Lead on whose behalf CLI and API runs push.
+    /// The Team Lead the executor role belongs to. It credits nobody: a
+    /// commit names only the requester who asked, when Henk knows them by
+    /// a stable id, and no one otherwise (#399).
     pub requester_id: DiscordUserId,
     /// Who Henk commits as, author and committer alike. Absent: the App's
     /// own `meneer-henk[bot]` noreply address.
@@ -1046,12 +1050,6 @@ impl ExecutorConfig {
             .as_ref()
             .map(CommitIdentityConfig::person)
             .transpose()
-    }
-
-    /// Every trailer setting in force: the default, then each repository.
-    fn policies(&self) -> impl Iterator<Item = TrailerPolicy> + '_ {
-        let base = self.trailers.over(TrailerPolicy::default());
-        std::iter::once(base).chain(self.repositories.values().map(move |c| c.over(base)))
     }
 }
 
@@ -2258,6 +2256,38 @@ fn build_allowlist(config: &AllowlistConfig) -> Result<Allowlist, ConfigError> {
 }
 
 impl Settings {
+    /// What a commit on `platform` credits `requester` with (#399): their
+    /// `[[people]]` entry, found by the id they asked with, or else the
+    /// platform account they asked with when that is `platform`'s own. An
+    /// MCP client is no person and gets nothing.
+    #[must_use]
+    pub fn committer_for(&self, requester: &RequesterId, platform: Platform) -> Option<Committer> {
+        let by = |found: fn(&Committer) -> Option<u64>, id: u64| {
+            self.committers
+                .values()
+                .find(|c| found(c) == Some(id))
+                .cloned()
+        };
+        match (requester, platform) {
+            (RequesterId::Discord(id), _) => self.committers.get(id).cloned(),
+            (RequesterId::GitHub(id), Platform::GitHub) => {
+                Some(by(|c| c.github_id, *id).unwrap_or(Committer {
+                    github_id: Some(*id),
+                    ..Committer::default()
+                }))
+            }
+            (RequesterId::GitLab(id), Platform::GitLab) => {
+                Some(by(|c| c.gitlab_id, *id).unwrap_or(Committer {
+                    gitlab_id: Some(*id),
+                    ..Committer::default()
+                }))
+            }
+            (RequesterId::GitHub(id), Platform::GitLab) => by(|c| c.github_id, *id),
+            (RequesterId::GitLab(id), Platform::GitHub) => by(|c| c.gitlab_id, *id),
+            (RequesterId::Mcp(_), _) => None,
+        }
+    }
+
     /// The client configuration of endpoint `id` alone, with the key read
     /// from the environment: for what is the endpoint's business, such as
     /// listing the models it serves (#368). The model fields hold defaults.
@@ -2567,12 +2597,11 @@ impl Settings {
         if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
                 out,
-                "Pushes:          for Team Lead {}; {} files, {} checks",
-                executor.requester_id,
+                "Pushes:          {} files, {} checks; the requester's trailers only for one Henk knows by id",
                 executor.max_changed_files,
                 executor.check_commands.len()
             );
-            self.describe_commits(executor, out);
+            Self::describe_commits(executor, out);
         }
         self.describe_skills(out);
     }
@@ -2653,7 +2682,7 @@ impl Settings {
     /// Henk's commit identity and trailers, for [`Self::describe`], with a
     /// warning when a requester trailer is on but the requester has no
     /// account to credit.
-    fn describe_commits(&self, address: &ExecutorConfig, out: &mut String) {
+    fn describe_commits(address: &ExecutorConfig, out: &mut String) {
         let identity = match address.henk_identity() {
             Ok(Some(person)) => person.to_string(),
             Ok(None) => "the GitHub App's noreply address".to_owned(),
@@ -2673,19 +2702,6 @@ impl Settings {
                 let policy = address.trailer_policy(&repo);
                 let _ = writeln!(out, "  {key}: {}", describe_policy(policy));
             }
-        }
-        let credits_requester = address
-            .policies()
-            .any(|p| p.requester_coauthor || p.requester_signoff);
-        let creditable = self.committers.get(&address.requester_id).is_some_and(|c| {
-            c.github_id.is_some() || c.gitlab_id.is_some() || c.commit_as.is_some()
-        });
-        if credits_requester && !creditable {
-            let _ = writeln!(
-                out,
-                "Warning:         requester {} has no github_id, gitlab_id or commit_email in [[people]]; their commits get no requester trailers",
-                address.requester_id
-            );
         }
     }
 
@@ -3618,32 +3634,40 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn a_requester_without_an_account_is_warned_about() {
-        let warning = "Warning:         requester 3 has no github_id";
-        let described = address("", "").unwrap().describe();
-        assert!(described.contains(warning), "{described}");
-        let off = address(
-            "",
-            "[roles.executor.trailers]\nrequester_coauthor = false\n",
-        )
-        .unwrap()
-        .describe();
-        assert!(!off.contains(warning), "nothing to credit: {off}");
-        let on_somewhere = address(
-            "",
-            "[roles.executor.trailers]\nrequester_coauthor = false\n[roles.executor.repositories.\"docspec/r\"]\nrequester_signoff = true\n",
-        )
-        .unwrap()
-        .describe();
-        assert!(on_somewhere.contains(warning), "{on_somewhere}");
-        for person in [
-            "github_id = 77\n",
-            "gitlab_id = 77\n",
-            "commit_name = \"Lead\"\ncommit_email = \"lead@example.com\"\n",
-        ] {
-            let described = address(person, "").unwrap().describe();
-            assert!(!described.contains(warning), "{person}: {described}");
-        }
+    fn a_commit_credits_the_requester_who_asked_never_the_configured_one() {
+        let settings = address("github_id = 77\ngitlab_id = 88\n", "").unwrap();
+        let described = settings.describe();
+        assert!(!described.contains("requester 3 has no"), "{described}");
+        let lead = Some(Committer {
+            github_id: Some(77),
+            gitlab_id: Some(88),
+            commit_as: None,
+        });
+        let credited = |requester: &str, platform| {
+            settings.committer_for(&RequesterId::parse(requester).unwrap(), platform)
+        };
+        assert_eq!(credited("discord:3", Platform::GitHub), lead);
+        assert_eq!(
+            credited("github:77", Platform::GitLab),
+            lead,
+            "by their entry"
+        );
+        assert_eq!(
+            credited("gitlab:88", Platform::GitHub),
+            lead,
+            "by their entry"
+        );
+        // Someone with no entry is credited on their own platform only.
+        assert_eq!(
+            credited("github:5", Platform::GitHub),
+            Some(Committer {
+                github_id: Some(5),
+                ..Committer::default()
+            })
+        );
+        assert_eq!(credited("github:5", Platform::GitLab), None);
+        assert_eq!(credited("discord:9", Platform::GitHub), None);
+        assert_eq!(credited("mcp:claude", Platform::GitHub), None);
     }
 
     #[test]
