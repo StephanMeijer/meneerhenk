@@ -910,7 +910,7 @@ mod tests {
             "every call the model made is in its transcript: {conversation}"
         );
         assert!(
-            text.contains("tool calls (5)\n  lane-a\n    get_file_diff                5 calls, 2 refused, 3 not run, 0 ms\n"),
+            text.contains("tool calls (5)\n  lane-a\n    (unknown)                    5 calls, 2 refused, 3 not run, 0 ms\n"),
             "every call is on the run, even one that never ran: {text}"
         );
         assert!(

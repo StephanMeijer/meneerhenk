@@ -20,7 +20,7 @@ use henk_store::{
     InboundEvent, LOOP_FINDING_KIND, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
     PLAN_POINT_KIND, Page, PgStore, PruneCounts, RoundRecord, RunFilter, RunKey, RunRecord,
     RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite,
-    TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord,
+    TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, UNKNOWN_TOOL,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -106,6 +106,7 @@ macro_rules! for_each_scenario {
             loop_findings_keep_their_verdicts,
             a_loop_run_keeps_why_it_stopped,
             tool_calls_are_tallied_and_listed_across_runs_by_filter,
+            unknown_tools_count_as_one_and_are_listed_by_their_own_names,
             a_session_s_calls_count_under_its_stored_role,
             a_session_keeps_what_the_cache_served,
             a_pairing_s_rounds_come_back_in_the_order_they_started,
@@ -907,6 +908,71 @@ fn tool_call(session: &str, model: &str, tool: &str, outcome: &str, ms: u64) -> 
         result_chars: 40,
         elapsed_ms: ms,
     }
+}
+
+async fn unknown_tools_count_as_one_and_are_listed_by_their_own_names(store: &dyn RunStore) {
+    let run = new_run("r-unknown");
+    store.create_run(&run).await.unwrap();
+    for (turn, (tool, origin, outcome)) in (1u32..).zip([
+        ("nope", "", "unknown_tool"),
+        ("Review complete. End. [cut]", "", "refused_repeat"),
+        ("read_file", "workspace", "ok"),
+    ]) {
+        store
+            .record_tool_call(
+                &run.id,
+                &ToolCallRecord {
+                    turn,
+                    origin: origin.into(),
+                    ..tool_call("reviewer", "m", tool, outcome, 1)
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut usage: Vec<(String, u64, u64, u64)> = store
+        .tool_usage(&ToolCallFilter::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|u| (u.tool, u.tally.calls, u.tally.refusals, u.tally.other))
+        .collect();
+    usage.sort();
+    assert_eq!(
+        usage,
+        [
+            (UNKNOWN_TOOL.to_owned(), 2, 1, 1),
+            ("read_file".to_owned(), 1, 0, 0)
+        ]
+    );
+    let unknown = ToolCallFilter {
+        tool: Some(UNKNOWN_TOOL.into()),
+        ..ToolCallFilter::default()
+    };
+    let mut listed: Vec<String> = store
+        .list_tool_calls(&unknown, Page::new(50, 0))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.call.tool)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["Review complete. End. [cut]", "nope"]);
+    let usage = store.tool_usage(&unknown).await.unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].tally.calls, 2);
+    let by_own_name = ToolCallFilter {
+        tool: Some("nope".into()),
+        ..ToolCallFilter::default()
+    };
+    assert!(
+        store
+            .list_tool_calls(&by_own_name, Page::new(50, 0))
+            .await
+            .unwrap()
+            .is_empty(),
+        "an unknown tool is found as the one it counts under"
+    );
 }
 
 async fn tool_calls_are_kept_in_order_and_add_up_across_runs(store: &dyn RunStore) {
@@ -2573,6 +2639,37 @@ mod sqlite {
             .unwrap();
         let store = SqliteStore::open(&file.0).unwrap();
         super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    #[tokio::test]
+    async fn an_invented_tool_name_from_before_is_cut_by_the_migration() {
+        let file = File::new();
+        let before = SqliteStore::open_at(&file.0, 18).unwrap();
+        let run = super::new_run("r-prose");
+        before.create_run(&run).await.unwrap();
+        let prose = "Review complete. End. ".repeat(200);
+        for tool in [prose.as_str(), "read_file"] {
+            before
+                .record_tool_call(
+                    &run.id,
+                    &super::tool_call("reviewer", "m", tool, "unknown_tool", 1),
+                )
+                .await
+                .unwrap();
+        }
+        drop(before);
+        let store = SqliteStore::open(&file.0).unwrap();
+        let tools: Vec<String> = store
+            .tool_calls(&run.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.tool)
+            .collect();
+        assert_eq!(
+            tools,
+            [format!("{} [cut]", &prose[..58]), "read_file".to_owned()]
+        );
     }
 
     #[tokio::test]

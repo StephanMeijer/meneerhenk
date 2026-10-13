@@ -348,7 +348,10 @@ pub(crate) async fn run_tool_calls(
         .iter()
         .filter(|c| {
             matches(query.session.as_ref(), &c.session)
-                && matches(query.tool.as_ref(), &c.tool)
+                && matches(
+                    query.tool.as_ref(),
+                    henk_store::counted_as(&c.tool, &c.origin),
+                )
                 && matches(query.outcome.as_ref(), &c.outcome)
         })
         .map(ToolCall::from)
