@@ -13,6 +13,9 @@
 //! reviewed by the reviewer alone (#307): one round at the reviewed commit,
 //! no executor, nothing pushed, and its findings stand, in the check.
 //!
+//! A pull request merged before the loop starts, or while it works, ends
+//! it (#413): no workspace or no further session, and nothing more pushed.
+//!
 //! Interim until #285 and #286: the reviewer's findings and the executor's
 //! report are plain text, and the loop ends on `NO FINDINGS`, at
 //! `max_rounds`, or at the first round that cannot go on.
@@ -38,7 +41,7 @@ use henk_platform::push::{GitCredential, PullFacts, PushWriter};
 use henk_session::{ResumableSession, RoundOutcome, cache_ttl_for};
 use henk_store::{Stage, StageState};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::app::App;
 use crate::cancel::is_cancelled;
@@ -50,7 +53,7 @@ use crate::loop_tools::{
     FinishRound, GiveVerdict, Handoff, HandoffState, ListFindings, ReportFinding,
     executor_continuation, finding_text, reviewer_continuation, verdict_text,
 };
-use crate::push::{PushTo, Pusher, stop_if_cancelled};
+use crate::push::{MergedMeanwhile, PushTo, Pusher, stop_if_cancelled};
 use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::{Workspace, checked_changeset, never_exported};
@@ -90,7 +93,15 @@ pub(crate) struct LoopReport {
     /// The reviewer reviewed alone, on a pull request the loop may not push
     /// to (#307).
     pub(crate) review_only: bool,
+    /// The pull request was merged while the loop worked (#413).
+    pub(crate) merged: bool,
 }
+
+/// The pull request is merged already, so the loop does not start: no
+/// workspace opens and no session runs (#413).
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("the pull request is merged")]
+pub(crate) struct AlreadyMerged;
 
 /// Runs the loop on `diff`. A pull request the loop may not push to, or
 /// whose branch moved, gets the reviewer alone (#307). A loop that cannot get
@@ -121,6 +132,10 @@ pub(crate) async fn run_loop(
         .pull_facts(target)
         .await
         .context("reading the pull request")?;
+    // Merged while the review waited: nothing is left to review (#413).
+    if facts.push.merged {
+        return Err(AlreadyMerged.into());
+    }
     // Why the reviewer reviews alone, if it does: it is never pushed to.
     let alone = push_refusal(&facts.push).or_else(|| {
         (facts.head != *commit).then(|| {
@@ -422,6 +437,7 @@ impl<'a> Rounds<'a> {
             open,
             findings_left: stop.left_findings_open(),
             review_only: self.alone.is_some(),
+            merged: stop == LoopStop::Merged,
         })
     }
 
@@ -441,6 +457,11 @@ impl<'a> Rounds<'a> {
             let round = self.round + 1;
             if let Some(stop) = self.out_of_time("reviewer", round) {
                 return Ok(stop);
+            }
+            // A pull request merged during the last round needs no other
+            // (#413).
+            if round > 1 && self.merged().await {
+                return Ok(LoopStop::Merged);
             }
             self.round = round;
             self.handoff.start_round(round);
@@ -630,6 +651,18 @@ impl<'a> Rounds<'a> {
         self
     }
 
+    /// Whether the pull request is merged now (#413). A read that fails
+    /// says no: the push reads it again before anything is pushed.
+    async fn merged(&self) -> bool {
+        match self.writer.pull_facts(self.on.target).await {
+            Ok(facts) => facts.push.merged,
+            Err(error) => {
+                warn!(%error, "could not read whether the pull request is merged");
+                false
+            }
+        }
+    }
+
     /// The reviewer reviews alone, without an executor, when `why` says why.
     fn alone(mut self, why: Option<String>) -> Self {
         if why.is_some() {
@@ -762,6 +795,9 @@ impl<'a> Rounds<'a> {
         let sha = match pushing.await {
             Ok(sha) => sha,
             Err(error) if is_cancelled(&error) => return Err(error),
+            Err(error) if error.is::<MergedMeanwhile>() => {
+                return Ok(Pushed::Stopped(LoopStop::Merged));
+            }
             Err(error) => {
                 return Ok(Pushed::Stopped(LoopStop::PushRefused(format!(
                     "the push of round {} was refused: {error:#}",

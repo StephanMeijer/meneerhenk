@@ -49,8 +49,8 @@ impl PushWriter for GitHubWriter {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let head_ref = text(&pr, "/head/ref");
-        let open = pr.get("state").and_then(Value::as_str) == Some("open")
-            && !pr.get("merged").and_then(Value::as_bool).unwrap_or(false);
+        let merged = crate::github::merged(&pr);
+        let open = pr.get("state").and_then(Value::as_str) == Some("open") && !merged;
         let head_protected = match &head_repo {
             Some(repo) if !head_ref.is_empty() => self
                 .api()
@@ -71,6 +71,7 @@ impl PushWriter for GitHubWriter {
         Ok(PullFacts {
             push: PushFacts {
                 open,
+                merged,
                 head_repo,
                 base_repo: target.repo.path(),
                 head_ref,

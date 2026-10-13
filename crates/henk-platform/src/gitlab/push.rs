@@ -113,6 +113,7 @@ impl PushWriter for GitLabWriter {
         Ok(PullFacts {
             push: PushFacts {
                 open: mr.get("state").and_then(Value::as_str) == Some("opened"),
+                merged: mr.get("state").and_then(Value::as_str) == Some("merged"),
                 head_repo,
                 base_repo: target.repo.path(),
                 head_ref,

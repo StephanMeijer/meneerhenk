@@ -531,6 +531,60 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
     );
 }
 
+/// #413: a merged pull request reads as merged, not as closed, both where
+/// a review reads it and where a push does.
+#[tokio::test]
+async fn a_merged_pull_request_reads_as_merged_and_a_closed_one_as_closed() {
+    use henk_platform::PullRequestState;
+    use henk_platform::push::PushWriter as _;
+
+    for (state, merged, merged_at, read) in [
+        ("open", false, Value::Null, PullRequestState::Open),
+        (
+            "closed",
+            true,
+            json!("2026-10-13T09:00:00Z"),
+            PullRequestState::Merged,
+        ),
+        (
+            "closed",
+            false,
+            json!("2026-10-13T09:00:00Z"),
+            PullRequestState::Merged,
+        ),
+        ("closed", false, Value::Null, PullRequestState::Closed),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/docspec/app/pulls/{}",
+                target().number
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "Fix", "state": state, "merged": merged, "merged_at": merged_at,
+                "draft": false,
+                "head": {"sha": SHA, "ref": "fix/typo", "repo": {"full_name": "docspec/app"}},
+                "base": {"ref": "main", "repo": {"full_name": "docspec/app", "default_branch": "main"}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/docspec/app/branches/fix/typo"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"name": "fix/typo", "protected": false})),
+            )
+            .mount(&server)
+            .await;
+        let writer = push_writer(&server);
+        let info = writer.pull_request(&target()).await.unwrap();
+        assert_eq!(info.state, read, "{state} {merged} {merged_at}");
+        let facts = writer.pull_facts(&target()).await.unwrap();
+        assert_eq!(facts.push.merged, read == PullRequestState::Merged);
+        assert_eq!(facts.push.open, read == PullRequestState::Open);
+    }
+}
+
 #[tokio::test]
 async fn a_planner_fetches_the_default_branch_at_its_head() {
     use henk_platform::push::PushWriter as _;

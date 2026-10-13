@@ -122,6 +122,8 @@ impl PlatformWriter for GitHubWriter {
             draft: pr.get("draft").and_then(Value::as_bool).unwrap_or(false),
             state: if pr.get("state").and_then(Value::as_str) == Some("open") {
                 PullRequestState::Open
+            } else if crate::github::merged(&pr) {
+                PullRequestState::Merged
             } else {
                 PullRequestState::Closed
             },

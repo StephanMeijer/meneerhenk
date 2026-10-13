@@ -360,10 +360,10 @@ impl PlatformWriter for GitLabWriter {
                     .get("work_in_progress")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-            state: if mr.get("state").and_then(Value::as_str) == Some("opened") {
-                PullRequestState::Open
-            } else {
-                PullRequestState::Closed
+            state: match mr.get("state").and_then(Value::as_str) {
+                Some("opened") => PullRequestState::Open,
+                Some("merged") => PullRequestState::Merged,
+                _ => PullRequestState::Closed,
             },
         })
     }

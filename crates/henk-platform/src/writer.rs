@@ -7,13 +7,15 @@ use crate::error::PlatformError;
 
 pub use henk_domain::review::ReviewTarget;
 
-/// Open or not.
+/// Open, closed or merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullRequestState {
     /// Open.
     Open,
-    /// Closed or merged.
+    /// Closed without being merged.
     Closed,
+    /// Merged: the work landed (#413).
+    Merged,
 }
 
 /// What a review needs to know about its target.
@@ -27,7 +29,7 @@ pub struct PullRequestInfo {
     pub base_ref: String,
     /// Whether it is a draft.
     pub draft: bool,
-    /// Open or closed.
+    /// Open, closed or merged.
     pub state: PullRequestState,
 }
 

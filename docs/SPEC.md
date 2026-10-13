@@ -142,7 +142,7 @@ the pull requests, and their markers are still recognised (§8.1).
 | Review starts | The check "Meneer Henk", *in progress*, linked to the run: the queued one moves on, or a new one | Henk's award emoji on the MR *(in development)* |
 | During | Nothing but the commits Henk pushes for the executor (§3.2) | The same |
 | Review ends | The check's **summary**: "No issues found" or "N issues found", and the loop's report: how many rounds it ran, what it settled and pushed, why it stopped, and the findings that still stand | No note, but for the reviewer alone (§3.2), which posts its summary as a note. The commit status below |
-| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). When the loop pushed, the last commit it pushed gets the same check. A review superseded by a newer commit completes neutral with "Superseded by a newer commit." A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ..." | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
+| Review ends | The check completes: success (no issues), neutral (issues found: advisory, never blocks a merge), or failure (the review did not complete). When the loop pushed, the last commit it pushed gets the same check. A review superseded by a newer commit completes neutral with "Superseded by a newer commit." A queued check never stays queued: cancelled while waiting, it completes neutral; superseded, neutral as above; Henk stopping, as an interrupted review; and a pull request that can no longer be reviewed once a slot frees (closed, a draft), neutral, "Not reviewed: ...". A pull request that is merged is a success with no session run: "Already merged: nothing to review." when it was merged before the loop started, and "Merged while the review loop worked: nothing more to do." when it was merged during the loop, which then pushes nothing more (#413) | The commit status "Meneer Henk", always *success* (it must never block a pipeline), with the count as its description |
 
 - **A review posts nothing.** No comment, summary or failure note: the
   check, or on GitLab the commit status, is what it leaves, with the commits
@@ -158,7 +158,8 @@ the pull requests, and their markers are still recognised (§8.1).
   nothing more, the rounds ran out, or the reviewer reported again what the
   executor had fixed. One that broke off (a session failed or reached its time
   limit, a push was refused) did
-  *not complete*, and the check says why.
+  *not complete*, and the check says why. A pull request merged while the
+  loop works ends it before the next round or push, as a success (#413).
 - **A failed check is Henk's failure, not the code's.** The GitHub check
   concludes *failure* only when the review did not complete. The check is
   advisory and must not be a required check in branch protection; a required

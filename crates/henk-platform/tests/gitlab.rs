@@ -191,6 +191,31 @@ async fn review_lifecycle_on_gitlab() {
     writer.acknowledge(&t, "77", false).await.unwrap();
 }
 
+/// #413: a merged merge request reads as merged, not as closed.
+#[tokio::test]
+async fn a_merged_merge_request_reads_as_merged_and_a_closed_one_as_closed() {
+    use henk_platform::PullRequestState;
+
+    for (state, read) in [
+        ("opened", PullRequestState::Open),
+        ("merged", PullRequestState::Merged),
+        ("closed", PullRequestState::Closed),
+        ("locked", PullRequestState::Closed),
+    ] {
+        let tools = vec![FakeServer::tool("get_merge_request", "", &[])];
+        let fake = FakeServer::new(tools, move |_, _| {
+            text(json!({
+                "iid": 5, "title": "Fix", "state": state, "draft": false, "target_branch": "main",
+                "sha": SHA, "diff_refs": {"base_sha": BASE, "start_sha": BASE, "head_sha": SHA}
+            }))
+        });
+        let session = Arc::new(fake.connect("gitlab-write").await);
+        let writer = GitLabWriter::new(session, "meneerhenk");
+        let info = writer.pull_request(&target()).await.unwrap();
+        assert_eq!(info.state, read, "{state}");
+    }
+}
+
 #[tokio::test]
 async fn tool_errors_become_platform_errors() {
     let fake = FakeServer::new(
@@ -767,6 +792,7 @@ async fn merge_request_facts_decide_the_push() {
             .await
             .unwrap();
         assert!(refusal(&facts).unwrap().contains("not open"), "{state}");
+        assert_eq!(facts.push.merged, state == "merged", "{state} (#413)");
     }
 }
 

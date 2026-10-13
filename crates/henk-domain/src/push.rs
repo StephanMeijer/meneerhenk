@@ -6,6 +6,9 @@
 pub struct PushFacts {
     /// Open, not merged or closed.
     pub open: bool,
+    /// Merged into its base: the work landed, and nothing is left to do
+    /// (#413). Never open as well.
+    pub merged: bool,
     /// `owner/name` the pull request's branch lives in; `None` when that
     /// repository is gone.
     pub head_repo: Option<String>,
@@ -59,6 +62,7 @@ mod tests {
     fn facts() -> PushFacts {
         PushFacts {
             open: true,
+            merged: false,
             head_repo: Some("o/r".to_owned()),
             base_repo: "o/r".to_owned(),
             head_ref: "feature".to_owned(),
@@ -82,6 +86,7 @@ mod tests {
                 "closed",
                 PushFacts {
                     open: false,
+                    merged: false,
                     ..facts()
                 },
             ),

@@ -8,7 +8,7 @@ use henk_domain::diff::ReviewDiff;
 use henk_domain::identity::RequesterId;
 use henk_domain::ignore::PathFilter;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
-use henk_domain::review::{CommitSha, ReviewOutcome};
+use henk_domain::review::{CommitSha, ReviewOutcome, Stopped};
 use henk_domain::run::{RunId, RunKind};
 use henk_platform::{PlatformWriter, PullRequestState, ReviewHandle, ReviewTarget};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
@@ -173,31 +173,15 @@ pub async fn run_review(
         requester: requester.as_ref(),
         pushed_head: &pushed_head,
     };
-    let result = loop_body(review, &info.base_ref, cancel).await;
+    let result = if info.state == PullRequestState::Merged {
+        let skipped = [Stage::Diff, Stage::Checkout, Stage::Rounds, Stage::Publish];
+        Ok(already_merged(review, &skipped).await)
+    } else {
+        loop_body(review, &info.base_ref, cancel).await
+    };
 
     match result {
-        Ok((outcome, summary)) => {
-            let status = if outcome.completed() {
-                RunStatus::Finished
-            } else {
-                RunStatus::Failed
-            };
-            let closed = finish_checks(review, handle.as_ref(), &outcome).await;
-            if let Err(error) = &closed {
-                error!(%error, "could not finish the check");
-            }
-            let completed = outcome.completed();
-            end_stages(app, &run, closed.is_ok(), handle.as_ref(), completed).await;
-            app.store
-                .finish_run(&run, status, Some(&summary), None)
-                .await?;
-            info!(run = %run, open = outcome.open_findings, "review ended");
-            Ok(ReviewReport {
-                run,
-                outcome: Some(outcome),
-                summary: Some(summary),
-            })
-        }
+        Ok((outcome, summary)) => report_ended(review, handle.as_ref(), outcome, summary).await,
         Err(error) if error.is::<Interrupted>() => {
             report_interrupted(review, handle.as_ref()).await?;
             Err(error)
@@ -218,6 +202,38 @@ pub async fn run_review(
             Err(error)
         }
     }
+}
+
+/// A review that came to an end, its sessions run or nothing to run
+/// (#413): the check closed, the stages ended and the run finished with
+/// `summary`.
+async fn report_ended(
+    review: ReviewRun<'_>,
+    handle: Option<&ReviewHandle>,
+    outcome: ReviewOutcome,
+    summary: String,
+) -> anyhow::Result<ReviewReport> {
+    let ReviewRun { app, run, .. } = review;
+    let completed = outcome.completed();
+    let status = if completed {
+        RunStatus::Finished
+    } else {
+        RunStatus::Failed
+    };
+    let closed = finish_checks(review, handle, &outcome).await;
+    if let Err(error) = &closed {
+        error!(%error, "could not finish the check");
+    }
+    end_stages(app, run, closed.is_ok(), handle, completed).await;
+    app.store
+        .finish_run(run, status, Some(&summary), None)
+        .await?;
+    info!(run = %run, open = outcome.open_findings, "review ended");
+    Ok(ReviewReport {
+        run: run.clone(),
+        outcome: Some(outcome),
+        summary: Some(summary),
+    })
 }
 
 /// The review's check, in progress: the queued one moved on (#262), or a
@@ -309,7 +325,9 @@ async fn preflight(
         .pull_request(&request.target)
         .await
         .context("reading the pull request")?;
-    if info.state != PullRequestState::Open {
+    // A merged pull request passes: its run ends at once as a success
+    // (#413). One closed without merging is not reviewed.
+    if info.state == PullRequestState::Closed {
         return Err(NotReviewable(format!(
             "pull request #{} is not open",
             request.target.number
@@ -709,11 +727,12 @@ async fn loop_body(
     stages::mark(store, run, Stage::Diff, StageState::Running, "").await;
     let diff = fetch_diff(review, base_ref).await?;
     let nothing_to_review = diff.is_empty();
-    let (results, open_findings, report, findings_left, review_only) = if nothing_to_review {
+    let (results, open_findings, report, findings_left, review_only, merged) = if nothing_to_review
+    {
         for stage in [Stage::Checkout, Stage::Rounds] {
             stages::mark(store, run, stage, StageState::Skipped, "nothing to review").await;
         }
-        (Vec::new(), 0, None, false, false)
+        (Vec::new(), 0, None, false, false, false)
     } else {
         let on = crate::review_loop::LoopTarget {
             app,
@@ -725,6 +744,10 @@ async fn loop_body(
         };
         let report = match crate::review_loop::run_loop(on, Arc::clone(&diff), &cancel).await {
             Ok(report) => report,
+            Err(error) if error.is::<crate::review_loop::AlreadyMerged>() => {
+                let skipped = [Stage::Checkout, Stage::Rounds, Stage::Publish];
+                return Ok(already_merged(review, &skipped).await);
+            }
             // Stopped for its token, it ends the way the token says:
             // cancelled, superseded or interrupted, not failed.
             Err(error) => {
@@ -738,6 +761,7 @@ async fn loop_body(
             Some(report.report),
             report.findings_left,
             report.review_only,
+            report.merged,
         )
     };
     stop_if_ended(review, &cancel)?;
@@ -746,7 +770,8 @@ async fn loop_body(
         sessions: results,
         open_findings,
         nothing_to_review,
-        stopped: None,
+        // Merged while the loop worked: a success whatever it left (#413).
+        stopped: merged.then_some(Stopped::Merged),
         not_reviewed: None,
         findings_left,
         report,
@@ -774,6 +799,30 @@ async fn loop_body(
     let skipped = "a review loop posts nothing on the pull request";
     stages::mark(store, run, Stage::Publish, StageState::Skipped, skipped).await;
     Ok((outcome, summary_text))
+}
+
+/// The review of a pull request that is merged, before it started or while
+/// it waited (#413): the work landed, so no workspace opens and no session
+/// starts, and the review ends as a success that says why. The stages it
+/// did not get to are `skipped`.
+async fn already_merged(review: ReviewRun<'_>, skipped: &[Stage]) -> (ReviewOutcome, String) {
+    let ReviewRun {
+        app, commit, run, ..
+    } = review;
+    info!(run = %run, "the pull request is merged; nothing to review");
+    for &stage in skipped {
+        stages::mark(
+            &*app.store,
+            run,
+            stage,
+            StageState::Skipped,
+            "already merged",
+        )
+        .await;
+    }
+    let outcome = ReviewOutcome::merged(commit.clone());
+    let summary = outcome.summary();
+    (outcome, summary)
 }
 
 /// Closes the review's check on its commit with `outcome`, and, when a
@@ -994,6 +1043,8 @@ requester_id = 3
             remote: remote.path().to_path_buf(),
             head_repo: "o/r",
             credential: None,
+            merged_from: None,
+            reads: std::sync::atomic::AtomicUsize::new(0),
         });
         let mut f = fixture_on(
             diff,
@@ -2019,6 +2070,64 @@ requester_id = 3
         (f.app, writer, run)
     }
 
+    /// #413: a review queued for a pull request that was then merged ends
+    /// at once as a success, on the run and on its check, and no session
+    /// starts.
+    #[tokio::test]
+    async fn a_queued_review_of_a_merged_pull_request_ends_as_a_success_without_a_session() {
+        let mut f = fixture(
+            "henk-merged",
+            DIFF,
+            ScriptedClient::new("scripted", Vec::new()),
+        )
+        .await;
+        let writer = Arc::new(FakeWriter {
+            head: f.head.as_str().to_owned(),
+            patches: henk_domain::diff::split_unified(DIFF),
+            state: Some(PullRequestState::Merged),
+            ..FakeWriter::default()
+        });
+        f.app.test_writer = Some(Arc::clone(&writer) as Arc<dyn PlatformWriter>);
+        let run = RunId::parse("r-merged").unwrap();
+        let mut queued = request(&run);
+        queued.commit = Some(f.head.clone());
+        queued.queued_check = Some(ReviewHandle("queued-1".to_owned()));
+        let report = run_review(&f.app, queued, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report.summary.as_deref(),
+            Some("Already merged: nothing to review.")
+        );
+        let finished = writer.finished.lock().unwrap().clone();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].check_conclusion(), CheckConclusion::Success);
+        assert_eq!(
+            *writer.finished_checks.lock().unwrap(),
+            [Some("queued-1".to_owned())],
+            "the queued check closes"
+        );
+        assert!(f.model.requests().is_empty(), "no session");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        let stages = stage_list(&f.app, &run).await;
+        for stage in [
+            henk_store::Stage::Diff,
+            henk_store::Stage::Checkout,
+            henk_store::Stage::Rounds,
+            henk_store::Stage::Publish,
+        ] {
+            let (_, state, detail) = stages.iter().find(|(s, _, _)| *s == stage).unwrap();
+            assert_eq!(
+                (*state, detail.as_str()),
+                (StageState::Skipped, "already merged"),
+                "{stages:?}"
+            );
+        }
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
     #[tokio::test]
     async fn a_queued_check_that_could_not_be_started_is_still_completed_at_the_end() {
         let mut f = fixture(
@@ -2828,6 +2937,8 @@ requester_id = 3
             credential: Some(henk_platform::push::GitCredential::github(
                 GIT_TOKEN.to_owned().into(),
             )),
+            merged_from: None,
+            reads: std::sync::atomic::AtomicUsize::new(0),
         }));
         let run = RunId::parse("r-credential").unwrap();
         run_review(&f.app, request(&run), CancellationToken::new())
@@ -2908,6 +3019,11 @@ requester_id = 3
         head_repo: &'static str,
         /// The credential git is given, if any.
         credential: Option<henk_platform::push::GitCredential>,
+        /// From which read of the pull request on it reads as merged
+        /// (#413), counting from 1; never when unset.
+        merged_from: Option<usize>,
+        /// The reads of the pull request so far.
+        reads: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -2917,9 +3033,12 @@ requester_id = 3
             _: &ReviewTarget,
         ) -> Result<henk_platform::push::PullFacts, henk_platform::PlatformError> {
             let (head, _) = crate::git::tests::remote_feature(&self.remote).await;
+            let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let merged = self.merged_from.is_some_and(|from| read >= from);
             Ok(henk_platform::push::PullFacts {
                 push: henk_domain::push::PushFacts {
-                    open: true,
+                    open: !merged,
+                    merged,
                     head_repo: Some(self.head_repo.to_owned()),
                     base_repo: "o/r".to_owned(),
                     head_ref: "feature".to_owned(),
@@ -3170,6 +3289,8 @@ requester_id = 3
             remote: remote.path().to_path_buf(),
             head_repo,
             credential: None,
+            merged_from: None,
+            reads: std::sync::atomic::AtomicUsize::new(0),
         });
         let mut f = fixture_on(DIFF, lanes, &config, head.as_str(), provider, Some(hub)).await;
         let (reviewer, executor) = (Arc::new(reviewer), Arc::new(executor));
@@ -3722,6 +3843,148 @@ requester_id = 3
         assert!(
             reported.contains(&head),
             "the new head gets the check: {reported:?}"
+        );
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// #413: the loop's pull request reads as merged from read `from` on:
+    /// 1 is the read before the workspace opens, 2 the one before round 1's
+    /// push, 3 the one before round 2.
+    fn merging(f: &mut Fixture, remote: &crate::git::ScratchDir, from: usize) {
+        f.app.test_push_writer = Some(Arc::new(LoopHub {
+            remote: remote.path().to_path_buf(),
+            head_repo: "o/r",
+            credential: None,
+            merged_from: Some(from),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        }));
+    }
+
+    /// Round 1 of a loop: the reviewer reports one finding and the executor
+    /// fixes it. Nothing is scripted for a round 2.
+    fn one_fixed_round() -> (ScriptedClient, ScriptedClient) {
+        (
+            ScriptedClient::new(
+                "r",
+                [
+                    report(2, "x must be 3", None),
+                    finish_round(),
+                    say("Done for now."),
+                ],
+            ),
+            ScriptedClient::new(
+                "f",
+                [
+                    edit("let x = 1;", "let x = 3;"),
+                    judge("f1", "fixed", "x is 3 now."),
+                    say("Fixed."),
+                ],
+            ),
+        )
+    }
+
+    /// #413: a review that waited while its pull request was merged opens
+    /// no workspace and starts no session, and passes.
+    #[tokio::test]
+    async fn a_pull_request_merged_before_the_loop_starts_ends_it_as_a_success_without_a_session() {
+        let (reviewer, executor) = one_fixed_round();
+        let provider = Arc::new(crate::workspace::host::HostProvider);
+        let (mut f, reviewer, executor, remote) =
+            looping("review-loop-merged-first", reviewer, executor, provider).await;
+        merging(&mut f, &remote, 1);
+        let run = RunId::parse("r-loop-merged-first").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let outcome = report.outcome.unwrap();
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Success);
+        assert_eq!(
+            report.summary.unwrap(),
+            "Already merged: nothing to review."
+        );
+        assert!(reviewer.requests().is_empty() && executor.requests().is_empty());
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(record.loop_stop, None, "no loop ran");
+        let stages = stage_list(&f.app, &run).await;
+        for stage in [henk_store::Stage::Checkout, henk_store::Stage::Rounds] {
+            let (_, state, detail) = stages.iter().find(|(s, _, _)| *s == stage).unwrap();
+            assert_eq!(
+                (*state, detail.as_str()),
+                (StageState::Skipped, "already merged"),
+                "{stages:?}"
+            );
+        }
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// #413: a pull request merged while the executor fixed gets nothing
+    /// pushed, and the loop ends as a success, not a refused push.
+    #[tokio::test]
+    async fn a_pull_request_merged_before_the_push_gets_nothing_pushed_and_passes() {
+        let (reviewer, executor) = one_fixed_round();
+        let provider = Arc::new(crate::workspace::host::HostProvider);
+        let (mut f, _reviewer, _executor, remote) =
+            looping("review-loop-merged-push", reviewer, executor, provider).await;
+        merging(&mut f, &remote, 2);
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-merged-push").unwrap();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_eq!(before, after, "nothing pushed");
+        let outcome = report.outcome.unwrap();
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Success);
+        let summary = report.summary.unwrap();
+        assert!(
+            summary.starts_with("Merged while the review loop worked: nothing more to do."),
+            "{summary}"
+        );
+        assert!(summary.contains("the pull request was merged"), "{summary}");
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("merged"), Some(1))
+        );
+        assert_no_stage_running(&f.app, &run).await;
+    }
+
+    /// #413: a pull request merged after round 1 pushed starts no round 2.
+    #[tokio::test]
+    async fn a_pull_request_merged_between_rounds_starts_no_other_round() {
+        let (reviewer, executor) = one_fixed_round();
+        let provider = Arc::new(crate::workspace::host::HostProvider);
+        let (mut f, reviewer, _executor, remote) =
+            looping("review-loop-merged-round", reviewer, executor, provider).await;
+        merging(&mut f, &remote, 3);
+        let (before, _) = crate::git::tests::remote_feature(remote.path()).await;
+        let run = RunId::parse("r-loop-merged-round").unwrap();
+        let asked = || reviewer.requests().len();
+        let report = run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let (after, _) = crate::git::tests::remote_feature(remote.path()).await;
+        assert_ne!(before, after, "round 1 pushed");
+        assert_eq!(asked(), 3, "the reviewer's round 1 only");
+        let outcome = report.outcome.unwrap();
+        assert_eq!(outcome.check_conclusion(), CheckConclusion::Success);
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Finished);
+        assert_eq!(
+            (record.loop_stop.as_deref(), record.loop_rounds),
+            (Some("merged"), Some(1))
+        );
+        let finished = f.writer.finished.lock().unwrap().clone();
+        assert!(
+            finished
+                .iter()
+                .all(|o| o.check_conclusion() == CheckConclusion::Success),
+            "the reviewed commit and the pushed head: {finished:?}"
         );
         assert_no_stage_running(&f.app, &run).await;
     }
