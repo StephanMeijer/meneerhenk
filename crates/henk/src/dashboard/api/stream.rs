@@ -329,6 +329,7 @@ async fn running_now(dashboard: &Dashboard) -> Option<RunningSnapshot> {
         count: count.max(u64::try_from(runs.len()).unwrap_or(u64::MAX)),
         runs: summaries,
         slots: slots(dashboard),
+        sandbox_hosts: dashboard.app.workspace_provider.sandbox_hosts().into(),
     })
 }
 
@@ -394,10 +395,22 @@ async fn follow_running(
 ) {
     let mut every = tokio::time::interval(dashboard.refresh.saturating_mul(6));
     let mut slots_changed = dashboard.coordinator.watch_slots();
+    let mut hosts_changed = dashboard.app.workspace_provider.watch_sandbox_hosts();
     loop {
         tokio::select! {
             Ok(()) = slots_changed.changed() => {
                 if !send(&out, &RunningMessage::Slots(slots(&dashboard)), None).await {
+                    return;
+                }
+            }
+            Some(Ok(())) = async {
+                match hosts_changed.as_mut() {
+                    Some(hosts) => Some(hosts.changed().await),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let now = dashboard.app.workspace_provider.sandbox_hosts().into();
+                if !send(&out, &RunningMessage::SandboxHosts(now), None).await {
                     return;
                 }
             }

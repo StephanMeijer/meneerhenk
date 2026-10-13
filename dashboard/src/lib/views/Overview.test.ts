@@ -222,6 +222,55 @@ describe('Running now', () => {
   });
 });
 
+describe('Sandbox hosts', () => {
+  const line = () => document.querySelector('p.sandbox-hosts')?.textContent ?? null;
+
+  it('shows each host\'s slots from the snapshot and follows them live', async () => {
+    const { connect, sources } = fakeConnect();
+    render(Overview, { me, query: new URLSearchParams(), connect, ...loaders() });
+    await settle();
+    const source = firstOf(sources);
+    source.push('snapshot', {
+      runs: [],
+      count: 0,
+      slots: { limit: 2, in_use: 0, waiting: [] },
+      sandbox_hosts: {
+        hosts: [
+          { id: 'fox', limit: null, in_use: 1 },
+          { id: 'goat', limit: 2, in_use: 1 },
+        ],
+        waiting: 0,
+      },
+    });
+    await settle(1);
+    expect(line()).toBe('Sandbox hosts: fox 1 in use · goat 1 of 2 in use');
+
+    source.push('sandbox_hosts', {
+      hosts: [
+        { id: 'fox', limit: null, in_use: 1 },
+        { id: 'goat', limit: 2, in_use: 2 },
+      ],
+      waiting: 1,
+    });
+    await settle(1);
+    expect(line()).toBe('Sandbox hosts: fox 1 in use · goat 2 of 2 in use · 1 waiting for one');
+  });
+
+  it('shows no line without sandbox hosts', async () => {
+    const { connect, sources } = fakeConnect();
+    render(Overview, { me, query: new URLSearchParams(), connect, ...loaders() });
+    await settle();
+    firstOf(sources).push('snapshot', {
+      runs: [],
+      count: 0,
+      slots: { limit: 2, in_use: 0, waiting: [] },
+      sandbox_hosts: { hosts: [], waiting: 0 },
+    });
+    await settle(1);
+    expect(line()).toBeNull();
+  });
+});
+
 describe('Recent runs', () => {
   it('shows how each run\'s lanes ended, leaving the checks out', async () => {
     const run = {

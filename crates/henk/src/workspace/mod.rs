@@ -475,6 +475,18 @@ pub trait WorkspaceProvider: Send + Sync {
         self.open(source, profile).await
     }
 
+    /// The sandbox hosts behind this provider and what they hold now
+    /// (#403); empty for a backend without them.
+    fn sandbox_hosts(&self) -> SandboxHosts {
+        SandboxHosts::default()
+    }
+
+    /// Fires whenever [`Self::sandbox_hosts`] may have changed; `None` for a
+    /// backend without sandbox hosts.
+    fn watch_sandbox_hosts(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
+
     /// Removes what a process that died left on a backend that outlives it,
     /// or `None` when the backend keeps nothing. Called once, when Henk
     /// starts: from this call on, a workspace being opened waits until the
@@ -482,6 +494,26 @@ pub trait WorkspaceProvider: Send + Sync {
     fn sweep(&self) -> Option<Sweep> {
         None
     }
+}
+
+/// The sandbox hosts and their slots (#403).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxHosts {
+    /// Every host, in id order.
+    pub hosts: Vec<HostSlots>,
+    /// Workspaces waiting for a host with room.
+    pub waiting: usize,
+}
+
+/// One sandbox host's slots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSlots {
+    /// The host's id.
+    pub id: String,
+    /// Its `max_concurrent`; `None` is no limit.
+    pub limit: Option<usize>,
+    /// Workspaces open on it, or being made there.
+    pub in_use: usize,
 }
 
 /// Where a backend says what a run should know while its workspace opens:
@@ -603,6 +635,19 @@ impl WorkspaceProvider for Backends {
                 )),
             },
         }
+    }
+
+    fn sandbox_hosts(&self) -> SandboxHosts {
+        self.ssh
+            .as_ref()
+            .map(WorkspaceProvider::sandbox_hosts)
+            .unwrap_or_default()
+    }
+
+    fn watch_sandbox_hosts(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        self.ssh
+            .as_ref()
+            .and_then(WorkspaceProvider::watch_sandbox_hosts)
     }
 
     fn sweep(&self) -> Option<Sweep> {

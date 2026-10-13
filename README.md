@@ -850,6 +850,10 @@ What changes elsewhere:
   stop the others.
 - **`henk config check`:** lists the hosts with their limit, and which
   profiles keep to which.
+- **Dashboard and health:** the overview's "Running now" shows each host's
+  slots in use against its limit, and how many runs wait for one, live as
+  they change. The health page has a row per host, a warning while a full
+  host keeps runs waiting.
 - **`henk doctor --probe`:** checks each host under its own name and says
   when some are down.
 

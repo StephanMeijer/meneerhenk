@@ -69,6 +69,28 @@ pub(super) fn fixture_with(
     assets: app::Assets,
     edit: impl FnOnce(&mut crate::config::Settings),
 ) -> Fixture {
+    fixture_on(
+        github,
+        assets,
+        edit,
+        Arc::new(crate::workspace::host::HostProvider),
+    )
+}
+
+/// A fixture whose workspaces come from `provider`.
+pub(super) fn fixture_with_provider(
+    github: &str,
+    provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+) -> Fixture {
+    fixture_on(github, app::Assets(&[]), |_| {}, provider)
+}
+
+fn fixture_on(
+    github: &str,
+    assets: app::Assets,
+    edit: impl FnOnce(&mut crate::config::Settings),
+    provider: Arc<dyn crate::workspace::WorkspaceProvider>,
+) -> Fixture {
     let mut settings = Config::parse(&config(github))
         .and_then(Config::into_settings)
         .unwrap_or_else(|e| panic!("{e}"));
@@ -89,7 +111,7 @@ pub(super) fn fixture_with(
         live_runs: crate::liveness::LiveRuns::default(),
         feed,
         cancels: crate::cancel::Cancels::default(),
-        workspace_provider: Arc::new(crate::workspace::host::HostProvider),
+        workspace_provider: provider,
         own_pushes: crate::push::OwnPushes::default(),
         test_writer: None,
         test_session: None,

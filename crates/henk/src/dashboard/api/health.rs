@@ -73,6 +73,7 @@ async fn health_rows(
         "ok".to_owned(),
         reviews_line(&coordinator.slots()),
     ));
+    rows.extend(sandbox_host_rows(&app.workspace_provider.sandbox_hosts()));
     rows.push(workspaces_row(app).await);
     let git = crate::doctor::check_git(settings, None).await;
     rows.push(row(git));
@@ -221,6 +222,32 @@ async fn why_without(app: &App, run: &RunRecord) -> Option<String> {
         })
 }
 
+/// One row per sandbox host (#403): `1 of 2 in use`, or `3 in use` with no
+/// limit, a full host a warning while runs wait for one.
+fn sandbox_host_rows(now: &crate::workspace::SandboxHosts) -> Vec<(String, String, String)> {
+    now.hosts
+        .iter()
+        .map(|host| {
+            let full = host.limit.is_some_and(|limit| host.in_use >= limit);
+            let state = if full && now.waiting > 0 {
+                "warn"
+            } else {
+                "ok"
+            };
+            let used = match host.limit {
+                Some(limit) => format!("{} of {limit} in use", host.in_use),
+                None => format!("{} in use", host.in_use),
+            };
+            let text = if now.waiting > 0 {
+                format!("{used}, {} waiting for a sandbox host", now.waiting)
+            } else {
+                used
+            };
+            (format!("sandbox host {}", host.id), state.to_owned(), text)
+        })
+        .collect()
+}
+
 /// The review slots in words: `2 running, 1 waiting (limit 2)`.
 fn reviews_line(slots: &crate::coordinator::Slots) -> String {
     format!(
@@ -229,4 +256,52 @@ fn reviews_line(slots: &crate::coordinator::Slots) -> String {
         slots.waiting.len(),
         slots.limit
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::workspace::{HostSlots, SandboxHosts};
+
+    #[test]
+    fn each_sandbox_host_has_a_row_and_a_full_one_warns_while_runs_wait() {
+        let host = |id: &str, limit, in_use| HostSlots {
+            id: id.to_owned(),
+            limit,
+            in_use,
+        };
+        let now = SandboxHosts {
+            hosts: vec![host("fox", None, 3), host("goat", Some(2), 2)],
+            waiting: 1,
+        };
+        let row =
+            |id: &str, state: &str, text: &str| (id.to_owned(), state.to_owned(), text.to_owned());
+        assert_eq!(
+            sandbox_host_rows(&now),
+            [
+                row(
+                    "sandbox host fox",
+                    "ok",
+                    "3 in use, 1 waiting for a sandbox host"
+                ),
+                row(
+                    "sandbox host goat",
+                    "warn",
+                    "2 of 2 in use, 1 waiting for a sandbox host"
+                ),
+            ]
+        );
+        let idle = SandboxHosts {
+            hosts: vec![host("goat", Some(2), 2)],
+            waiting: 0,
+        };
+        assert_eq!(
+            sandbox_host_rows(&idle),
+            [row("sandbox host goat", "ok", "2 of 2 in use")],
+            "full, but nobody waits"
+        );
+        assert!(sandbox_host_rows(&SandboxHosts::default()).is_empty());
+    }
 }

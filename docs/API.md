@@ -92,7 +92,11 @@ Who is signed in, the CSRF token their actions send, and the kinds of run
 ### `GET /health`
 
 What `/dashboard/health` shows: configuration and the database, without
-calling a model or an MCP server (that is `henk doctor --probe`).
+calling a model or an MCP server (that is `henk doctor --probe`). With the
+ssh backend there is a `sandbox host <id>` row per host (#403): its slots
+in use (`1 of 2 in use`, or `3 in use` without `max_concurrent`) and how
+many runs wait for a sandbox host, a `warn` while the host is full and
+runs wait.
 
 ```json
 {"checks": [{"name": "database", "state": "ok", "detail": "SQLite at henk.db"}]}
@@ -331,14 +335,16 @@ session ends; this is the conversation until then.
 ### `GET /runs/stream`
 
 What runs now, for the overview: a `snapshot` (`RunningSnapshot`: the
-newest running runs, at most 100, how many run, and the review `slots`)
-on connect and every 30 seconds, a `run` message (`RunSummary`) whenever
-a run of this process starts or ends, and a `progress` message (`run_id`
-with its `sessions` or its `stages` as dots, the other `null`) whenever a
-running run's sessions or stages move on (#225), and a `slots` message
-(`Slots`) whenever a review of this process starts waiting, takes or
-frees a slot, or leaves the queue. `RunningMessage` in
-`types.ts` is the union.
+newest running runs, at most 100, how many run, the review `slots` and
+the `sandbox_hosts`) on connect and every 30 seconds, a `run` message
+(`RunSummary`) whenever a run of this process starts or ends, a
+`progress` message (`run_id` with its `sessions` or its `stages` as dots,
+the other `null`) whenever a running run's sessions or stages move on
+(#225), a `slots` message (`Slots`) whenever a review of this process
+starts waiting, takes or frees a slot, or leaves the queue, and a
+`sandbox_hosts` message (`SandboxHosts`) whenever a workspace takes or
+frees a sandbox host's slot, or a run starts or stops waiting for one
+(#403). `RunningMessage` in `types.ts` is the union.
 
 `slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:
 the reviews waiting for a slot, in the order they will start (#251). Each
@@ -350,6 +356,13 @@ new commit supersedes it and the same commit joins it). A waiting review
 has its run id but no run record until it starts; `POST
 /runs/{id}/cancel` cancels it, and it then ends as cancelled while
 queued. Every `slots` message holds the whole list, so a client replaces
+what it had.
+
+`sandbox_hosts` has `hosts`, each with `id`, `limit` (its
+`max_concurrent`, `null` for no limit) and `in_use` (workspaces open on
+it or being made there), in id order, and `waiting`: how many runs wait
+for a host with room. Without the ssh backend `hosts` is empty and
+`waiting` is 0. Every message holds every host, so a client replaces
 what it had.
 
 ### `GET /stats/overview`
