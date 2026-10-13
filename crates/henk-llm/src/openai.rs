@@ -291,7 +291,7 @@ impl ModelClient for OpenAiClient {
 /// `completion_tokens`; some proxies, and the Responses API, use
 /// `input_tokens` and `output_tokens` instead, with the details beside
 /// them named to match.
-fn decode_usage(usage: &Value) -> Usage {
+pub(crate) fn decode_usage(usage: &Value) -> Usage {
     let count = |keys: [&str; 2]| {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))

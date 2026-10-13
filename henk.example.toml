@@ -70,6 +70,9 @@ write_mcp_server = "gitlab-write"
 # Endpoints: where models are reached and how (#368). One per server or
 # account; any number of the same provider, each with its own id. headers
 # (optional) are sent with every request, for a gateway that wants them.
+# An openai endpoint speaks Chat Completions; api = "responses" calls
+# OpenAI's Responses API instead, which carries a reasoning model's
+# reasoning from turn to turn (#365). See the README.
 [endpoints.proxy]
 provider = "openai"
 base_url = "https://llm3.9xx.nl/v1"
@@ -80,6 +83,12 @@ api_key_env = "LLM3_API_KEY"
 provider = "anthropic"
 base_url = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
+
+# [endpoints.openai]
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# api_key_env = "OPENAI_API_KEY"
+# api = "responses"
 
 # Models: what each model is and on which endpoint. The roles (the
 # reviewer, the executor and the planner) refer to one of these by id.

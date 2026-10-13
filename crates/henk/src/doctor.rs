@@ -524,6 +524,18 @@ async fn check_endpoint(settings: &Settings, id: &str, probe: bool) -> Check {
 }
 
 /// One model on a usable endpoint; with `probe`, one short call.
+/// The output cap of the probe's one prompt: 16 tokens for "ready", or
+/// none, which leaves the model's configured cap. A thinking model spends
+/// its cap on thinking first, and so does a reasoning model on the
+/// Responses API (#365); cut short, it would stop before it answers.
+fn probe_cap(settings: &Settings, model: &crate::config::ModelFileConfig) -> Option<u32> {
+    let responses = settings
+        .endpoints
+        .get(&model.endpoint)
+        .is_some_and(|endpoint| endpoint.api == Some(henk_llm::Api::Responses));
+    (model.effort.is_none() && !responses).then_some(16)
+}
+
 async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
     let name = format!("model {id}");
     let Some(model) = settings.models.get(id) else {
@@ -543,9 +555,7 @@ async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
         messages: vec![henk_llm::ChatMessage::user(
             "Reply with the single word: ready",
         )],
-        // A thinking model spends its cap on thinking first; give it the
-        // configured one rather than cutting it off before it answers.
-        max_tokens: model.effort.is_none().then_some(16),
+        max_tokens: probe_cap(settings, model),
         ..Default::default()
     };
     match tokio::time::timeout(Duration::from_mins(1), client.complete(&request)).await {
@@ -1136,6 +1146,22 @@ mod tests {
             dashboard_client_id("V", None).verdict,
             Verdict::Warn("not set; the dashboard is off".to_owned())
         );
+    }
+
+    #[test]
+    fn the_probe_leaves_a_reasoning_model_its_cap() {
+        let endpoints = |api: &str| {
+            format!(
+                "[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n{api}[models.m]\nendpoint = \"o\"\nmodel = \"x\"\n"
+            )
+        };
+        let cap = |api: &str| {
+            let settings = settings(&endpoints(api));
+            probe_cap(&settings, settings.models.get("m").unwrap())
+        };
+        assert_eq!(cap(""), Some(16), "Chat Completions answers in 16");
+        assert_eq!(cap("api = \"chat_completions\"\n"), Some(16));
+        assert_eq!(cap("api = \"responses\"\n"), None);
     }
 
     #[test]
