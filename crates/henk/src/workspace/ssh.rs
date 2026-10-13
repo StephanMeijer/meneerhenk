@@ -740,15 +740,22 @@ impl WorkspaceProvider for SshPool {
         }
         let archive = packed(source).await?;
         let (mut tried, mut refused) = (Vec::new(), Vec::new());
-        // Opens waiting already go first: this one queues behind them.
-        let mut turn = match self.turnstile.try_lock() {
-            Ok(free) => {
-                drop(free);
-                None
-            }
-            Err(_) => Some(self.turnstile.lock().await),
-        };
+        // When the open began to wait, said once on the run's timeline.
         let mut waited: Option<Instant> = None;
+        let wait = |waited: &mut Option<Instant>| {
+            if waited.is_none() {
+                *waited = Some(Instant::now());
+                notes.say(self.waiting_note(profile));
+            }
+        };
+        // Opens waiting already go first: this one queues behind them, and
+        // says it waits from the start.
+        let mut turn = if self.turnstile.try_lock().is_ok() {
+            None
+        } else {
+            wait(&mut waited);
+            Some(self.turnstile.lock().await)
+        };
         loop {
             // Listening before looking, so a seat given back in between is
             // not missed.
@@ -781,13 +788,15 @@ impl WorkspaceProvider for SshPool {
             }
             if turn.is_none() {
                 // First in line from here on; look again before waiting.
-                turn = Some(self.turnstile.lock().await);
+                turn = Some(if let Ok(first) = self.turnstile.try_lock() {
+                    first
+                } else {
+                    wait(&mut waited);
+                    self.turnstile.lock().await
+                });
                 continue;
             }
-            if waited.is_none() {
-                waited = Some(Instant::now());
-                notes.say(self.waiting_note(profile));
-            }
+            wait(&mut waited);
             freed.await;
         }
     }
@@ -1681,8 +1690,13 @@ pub(crate) mod tests {
         let first = pool.open(source.path(), &Profile::default()).await.unwrap();
         let (early, _said) = opening(&pool, source.path());
         assert!(waits(&early).await);
-        let (late, _said_late) = opening(&pool, source.path());
+        let (late, mut said_late) = opening(&pool, source.path());
         assert!(waits(&late).await);
+        // Queued behind the first waiter, it says it waits from the start.
+        assert_eq!(
+            said_late.try_recv().ok().as_deref(),
+            Some("waiting for a sandbox host: a (1) is at its limit")
+        );
         first.close().await;
         let early = early.await.unwrap().unwrap();
         assert!(waits(&late).await, "the later one waits for the earlier");
