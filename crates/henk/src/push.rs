@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow};
 use henk_domain::allowlist::{Platform, RepoRef};
 use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
+use henk_domain::identity::RequesterId;
 use henk_domain::push::push_refusal;
 use henk_domain::review::CommitSha;
 use henk_domain::run::RunId;
@@ -64,8 +65,9 @@ pub(crate) struct Pusher<'a> {
     pub(crate) writer: Arc<dyn PushWriter>,
     pub(crate) repo: &'a RepoRef,
     pub(crate) run: &'a RunId,
-    /// Who asked, as the commit message names them.
-    pub(crate) requester: &'a str,
+    /// Who asked, by a stable id, when Henk knows (#399): the commit names
+    /// them; with `None` it names no requester at all.
+    pub(crate) requester: Option<&'a RequesterId>,
 }
 
 impl Pusher<'_> {
@@ -118,15 +120,16 @@ impl Pusher<'_> {
         let henk = self.henk_identity(config).await?;
         let policy = config.trailer_policy(self.repo);
         let requester = if policy.requester_coauthor || policy.requester_signoff {
-            self.requester_identity(config).await?
+            self.requester_identity().await?
         } else {
             None
         };
+        let requested_by = self.requester.map(ToString::to_string);
         let message = commit_message(
             subject,
             notes,
             self.run,
-            Some(self.requester),
+            requested_by.as_deref(),
             &henk,
             requester.as_ref(),
             policy,
@@ -234,32 +237,33 @@ impl Pusher<'_> {
     }
 
     /// Who asked, as their trailers name them: their configured name and
-    /// email, or the platform's noreply address of the account their
-    /// `[[people]]` entry gives by id, under its current login. Never a
-    /// name from a comment (§2, §8.3). `None`, noted on the run, when there
-    /// is no account to credit.
-    async fn requester_identity(
-        &self,
-        config: &ExecutorConfig,
-    ) -> anyhow::Result<Option<CommitPerson>> {
-        let committer = self.app.settings.committers.get(&config.requester_id);
-        if let Some(person) = committer.and_then(|c| c.commit_as.clone()) {
+    /// email, or the platform's noreply address of the account they asked
+    /// with or their `[[people]]` entry gives, by id, under its current
+    /// login. Never a name from a comment (§2, §8.3), and never someone
+    /// who did not ask (#399). `None`, noted on the run, when nobody Henk
+    /// knows asked or there is no account to credit.
+    async fn requester_identity(&self) -> anyhow::Result<Option<CommitPerson>> {
+        let platform = self.repo.platform();
+        let Some(requester) = self.requester else {
+            self.note(
+                "nobody Henk knows by id asked for this run; the commit has no requester trailers",
+            )
+            .await;
+            return Ok(None);
+        };
+        let committer = self.app.settings.committer_for(requester, platform);
+        if let Some(person) = committer.as_ref().and_then(|c| c.commit_as.clone()) {
             return Ok(Some(person));
         }
-        let platform = self.repo.platform();
         let account = committer.and_then(|c| match platform {
             Platform::GitHub => c.github_id,
             Platform::GitLab => c.gitlab_id,
         });
         let Some(id) = account else {
-            let note = format!(
-                "requester {} has no {platform} account id in [[people]]; the commit has no requester trailers",
-                config.requester_id
-            );
-            info!("{note}");
-            if let Err(error) = self.app.store.event(self.run, "info", &note).await {
-                warn!(%error, "could not record the event");
-            }
+            self.note(&format!(
+                "requester {requester} has no {platform} account Henk knows; the commit has no requester trailers"
+            ))
+            .await;
             return Ok(None);
         };
         let login = self
@@ -275,6 +279,14 @@ impl Pusher<'_> {
         Ok(Some(
             CommitPerson::new(&login, email).context("the requester's commit name")?,
         ))
+    }
+
+    /// A note on the run's timeline, and in the log.
+    async fn note(&self, note: &str) {
+        info!("{note}");
+        if let Err(error) = self.app.store.event(self.run, "info", note).await {
+            warn!(%error, "could not record the event");
+        }
     }
 }
 

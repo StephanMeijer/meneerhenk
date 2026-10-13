@@ -25,6 +25,7 @@ use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::commit::FIX_SUBJECT;
 use henk_domain::diff::ReviewDiff;
+use henk_domain::identity::RequesterId;
 use henk_domain::push::push_refusal;
 use henk_domain::review::{CommitSha, SessionName, SessionOutcome, SessionResult};
 use henk_domain::review_loop::{LoopStop, LoopVerdict};
@@ -66,6 +67,9 @@ pub(crate) struct LoopTarget<'a> {
     pub(crate) target: &'a ReviewTarget,
     pub(crate) commit: &'a CommitSha,
     pub(crate) run: &'a RunId,
+    /// Who asked, when Henk knows them by a stable id: the commits name
+    /// them, and nobody else (#399).
+    pub(crate) requester: Option<&'a RequesterId>,
     /// The last commit the loop pushed, set the moment the push is done, so
     /// however the review then ends, the pull request's new head gets its
     /// check.
@@ -222,7 +226,6 @@ struct Rounds<'a> {
     /// Why the reviewer reviews alone, if it does (#307).
     alone: Option<String>,
     writer: Arc<dyn PushWriter>,
-    requester: String,
     /// The round under way, or the last one.
     round: u32,
     /// The commits pushed, in order.
@@ -329,7 +332,6 @@ impl<'a> Rounds<'a> {
             fixing,
             handoff,
             writer,
-            requester: format!("discord:{}", address.requester_id),
             round: 0,
             pushed: Vec::new(),
             deadline: tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs),
@@ -742,7 +744,7 @@ impl<'a> Rounds<'a> {
             writer: Arc::clone(&self.writer),
             repo: &self.on.target.repo,
             run: self.on.run,
-            requester: &self.requester,
+            requester: self.on.requester,
         };
         let name = format!("henk-loop-{}-push-{}", self.on.run, self.round);
         // Asked again for each push: a loop can outlast the token it

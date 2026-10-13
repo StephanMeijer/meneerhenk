@@ -356,7 +356,7 @@ sequenceDiagram
     L->>P: checkout
     P->>G: fresh clone_at head, credential via env only
     L->>P: commit_and_push(changeset)
-    P->>W: user_login of the requester's configured id, for the noreply address
+    P->>W: user_login of the requester who asked, by id, for the noreply address
     P->>W: pull_facts again: head unchanged, push_refusal: fork, default, protected, closed
     P->>G: apply the changeset, exactly its files changed
     P->>G: commit with Henk-Run, Requested-by and the trailers

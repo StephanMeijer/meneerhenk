@@ -381,11 +381,6 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
     let app = Arc::new(App::build(settings, None).await?);
     liveness::reap_orphans(&app).await;
     interrupt_on_ctrl_c(app.shutdown.clone());
-    let requester = app
-        .settings
-        .planning
-        .as_ref()
-        .map(|p| p.requester_id.to_string());
     let single = targets.len() == 1;
     let jobs: Vec<(String, henk_platform::ReviewTarget, henk_domain::run::RunId)> = targets
         .into_iter()
@@ -405,7 +400,8 @@ async fn cmd_review(config: &Path, urls: &[String], commit: Option<String>) -> a
             target,
             commit: commit.clone(),
             trigger: "cli".to_owned(),
-            requester: requester.clone(),
+            // The CLI names nobody: its commits credit no requester (#399).
+            requester: None,
             acknowledge: None,
             run: Some(run.clone()),
             submitted_at: None,
