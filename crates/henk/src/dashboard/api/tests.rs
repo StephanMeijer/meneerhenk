@@ -25,7 +25,7 @@ use super::types;
 use crate::dashboard::auth::CSRF_HEADER;
 use crate::dashboard::session::Session;
 use crate::dashboard::tests::{
-    ALLOWED, Fixture, fixture, fixture_with, outcomes_of, seed, signed_in_as,
+    ALLOWED, Fixture, fixture, fixture_with, fixture_with_provider, outcomes_of, seed, signed_in_as,
 };
 
 const ORIGIN: &str = "https://henk.example";
@@ -2496,6 +2496,51 @@ async fn the_running_stream_sends_the_slots_when_they_change_not_only_in_snapsho
     .await
     .expect("a slots message after the review freed its slot");
     assert!(freed.data["limit"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn the_running_stream_sends_the_sandbox_hosts_when_a_workspace_takes_or_frees_a_slot() {
+    use crate::workspace::WorkspaceProvider as _;
+    let runner = crate::workspace::remote::tests::LocalRunner::new("henk-stream-hosts");
+    let pool = Arc::new(crate::workspace::ssh::SshPool::with_limited_runners(vec![
+        (
+            "goat".to_owned(),
+            Arc::clone(&runner) as Arc<dyn crate::workspace::remote::Runner>,
+            Some(2),
+        ),
+    ]));
+    let f = fixture_with_provider("https://127.0.0.1:9", Arc::clone(&pool) as _);
+    let (cookie, _) = viewer(&f);
+    let mut events = stream(&f, "/dashboard/api/v1/runs/stream", &cookie, None).await;
+    let snapshot = events.next().await.unwrap();
+    assert_eq!(snapshot.event, "snapshot");
+    let hosts = |in_use: u64| json!({"hosts": [{"id": "goat", "limit": 2, "in_use": in_use}], "waiting": 0});
+    assert_eq!(snapshot.data["sandbox_hosts"], hosts(0));
+
+    // A workspace opened on the host takes a slot, and closing it frees
+    // the slot: the stream says both without a snapshot.
+    let source = crate::workspace::contract::source("henk-stream-hosts-src");
+    let workspace = pool
+        .open(source.path(), &henk_domain::workspace::Profile::default())
+        .await
+        .unwrap();
+    assert_eq!(sandbox_hosts_where(&mut events, &hosts(1)).await, hosts(1));
+    workspace.close().await;
+    assert_eq!(sandbox_hosts_where(&mut events, &hosts(0)).await, hosts(0));
+}
+
+/// The next `sandbox_hosts` message on `events` that equals `wanted`.
+async fn sandbox_hosts_where(events: &mut EventStream, wanted: &Value) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let message = events.next().await.unwrap();
+            if message.event == "sandbox_hosts" && &message.data == wanted {
+                return message.data;
+            }
+        }
+    })
+    .await
+    .expect("the sandbox_hosts message")
 }
 
 /// The next `slots` message on `events` that `wanted` accepts.
