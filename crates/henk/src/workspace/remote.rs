@@ -71,21 +71,37 @@ impl Reply {
         }
     }
 
-    /// Why the request did not succeed, never empty (#339): what it wrote
-    /// on stderr, else what the backend said, else how it ended, with the
-    /// end of stdout when stderr had nothing.
-    pub(crate) fn why(&self) -> String {
-        let stderr = String::from_utf8_lossy(&self.stderr).trim().to_owned();
-        if !stderr.is_empty() {
-            return stderr;
+    /// Like [`Reply::ok`], for a request whose stdout is diagnostic and
+    /// never file content: the failure carries the end of stdout when
+    /// stderr had nothing.
+    pub(crate) fn ok_with_output(self, what: &str) -> Result<Self, WorkspaceError> {
+        if self.code == Some(0) {
+            Ok(self)
+        } else {
+            Err(WorkspaceError::Backend(format!(
+                "{what} failed: {}",
+                self.why_with_output()
+            )))
         }
-        let ended = match (&self.detail, self.gave_up, self.code) {
-            (Some(detail), _, _) if !detail.trim().is_empty() => detail.trim().to_owned(),
-            (_, true, _) => "no answer in time".to_owned(),
-            (_, false, None) => {
-                "it ended without an exit status: killed, or the connection dropped".to_owned()
-            }
-            (_, false, Some(code)) => format!("exit {code}, nothing on stderr"),
+    }
+
+    /// Why the request did not succeed, never empty (#339): what it wrote
+    /// on stderr, else what the backend said, else how it ended. Stdout is
+    /// left out: on a read or an export it is file content, and this text
+    /// reaches the log and the run's timeline.
+    pub(crate) fn why(&self) -> String {
+        match self.stderr_or_ended() {
+            Ok(stderr) => stderr,
+            Err(ended) => ended,
+        }
+    }
+
+    /// [`Reply::why`], with the end of stdout when stderr had nothing. Only
+    /// for requests whose stdout is diagnostic.
+    pub(crate) fn why_with_output(&self) -> String {
+        let ended = match self.stderr_or_ended() {
+            Ok(stderr) => return stderr,
+            Err(ended) => ended,
         };
         let stdout = String::from_utf8_lossy(&self.stdout);
         let stdout = stdout.trim();
@@ -99,6 +115,23 @@ impl Reply {
         let tail = stdout.get(start..).unwrap_or_default();
         let cut = if start > 0 { "…" } else { "" };
         format!("{ended}; it printed: {cut}{tail}")
+    }
+
+    /// `Ok` with stderr when it said something, else `Err` with how the
+    /// request ended.
+    fn stderr_or_ended(&self) -> Result<String, String> {
+        let stderr = String::from_utf8_lossy(&self.stderr).trim().to_owned();
+        if !stderr.is_empty() {
+            return Ok(stderr);
+        }
+        Err(match (&self.detail, self.gave_up, self.code) {
+            (Some(detail), _, _) if !detail.trim().is_empty() => detail.trim().to_owned(),
+            (_, true, _) => "no answer in time".to_owned(),
+            (_, false, None) => {
+                "it ended without an exit status: killed, or the connection dropped".to_owned()
+            }
+            (_, false, Some(code)) => format!("exit {code}, nothing on stderr"),
+        })
     }
 }
 
@@ -709,7 +742,7 @@ impl Workspace for RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("recording the tree after setup")?;
+            .ok_with_output("recording the tree after setup")?;
         Ok(())
     }
 
@@ -788,7 +821,7 @@ impl RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("making the workspace")?;
+            .ok_with_output("making the workspace")?;
         String::from_utf8_lossy(&created.stdout)
             .trim()
             .clone_into(&mut workspace.work);
@@ -801,7 +834,7 @@ impl RemoteWorkspace {
                 REQUEST_WAIT,
             )
             .await?
-            .ok("importing the checkout")?;
+            .ok_with_output("importing the checkout")?;
         Ok(workspace)
     }
 }
@@ -959,14 +992,35 @@ pub(crate) mod tests {
         );
         assert_eq!(
             failed(reply(Some(1), "partial output\nthen it stopped\n", "")),
-            "the workspace failed: listing files failed: exit 1, nothing on stderr; it printed: partial output\nthen it stopped"
+            "the workspace failed: listing files failed: exit 1, nothing on stderr"
+        );
+        let with_output = |reply: Reply| reply.ok_with_output("making the workspace");
+        assert_eq!(
+            with_output(reply(Some(1), "partial output\nthen it stopped\n", ""))
+                .unwrap_err()
+                .to_string(),
+            "the workspace failed: making the workspace failed: exit 1, nothing on stderr; it printed: partial output\nthen it stopped"
         );
         let long = "x".repeat(1000);
-        let said = failed(reply(Some(1), &long, ""));
+        let said = with_output(reply(Some(1), &long, ""))
+            .unwrap_err()
+            .to_string();
         assert!(
             said.ends_with(&format!("it printed: …{}", "x".repeat(300))),
             "{said}"
         );
+    }
+
+    #[test]
+    fn a_failed_read_does_not_repeat_the_file() {
+        let secret = "API_KEY=hunter2\n";
+        let said = reply(Some(1), secret, "").why();
+        assert!(!said.contains("hunter2"), "{said}");
+        let said = reply(Some(1), secret, "")
+            .ok("reading a changed file")
+            .unwrap_err()
+            .to_string();
+        assert!(!said.contains("hunter2"), "{said}");
     }
 
     #[test]
