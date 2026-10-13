@@ -360,6 +360,26 @@ limit: number | null,
  */
 in_use: number, };
 
+export type MoveBody = { 
+/**
+ * Its new place, 1 being the next to start; past the end is last.
+ */
+position: number, };
+
+export type Moved = { 
+/**
+ * The run.
+ */
+run_id: string, 
+/**
+ * Where it was, from 1.
+ */
+from: number, 
+/**
+ * Where it is now, from 1.
+ */
+to: number, };
+
 export type WaitingReview = { 
 /**
  * The run it will be; cancel it with `POST /runs/{id}/cancel`.

@@ -56,5 +56,9 @@
     <path d="M8 3v10M3 8h10" />
   {:else if name === 'info'}
     <circle cx="8" cy="8" r="5.5" /><path d="M8 7.5v3.5M8 5v.2" />
+  {:else if name === 'arrow-up'}
+    <path d="M8 13V3M4 7l4-4 4 4" />
+  {:else if name === 'arrow-down'}
+    <path d="M8 3v10M4 9l4 4 4-4" />
   {/if}
 </svg>

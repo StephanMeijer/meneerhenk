@@ -1199,14 +1199,15 @@ such as Claude Code can work with Henk:
   `POST /review`, `/plan` and `/execute` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
-- `cancel_run`;
+- `cancel_run`, and `move_queued_run`, which moves a review waiting for a
+  slot to another place in the queue (`list_queued_runs` says what waits);
 - `list_runs`, `get_run`, `get_run_events`, `list_tool_calls`,
   `get_transcript`, `get_event`: what the dashboard shows, as JSON;
 - `health`.
 
 Each client has its own token, named in the configuration and kept in an
 environment variable; `scope = "read"` may only read, `"write"` may also
-start and cancel. What a client starts or cancels is asked by
+start, cancel and move. What a client starts, cancels or moves is asked by
 `mcp:<token name>`, on the event and the run, as the dashboard records
 `github:<user id>`. A request without a valid token gets 401 before any MCP
 handling; with the server off or no token set, `/mcp` answers 503. Requests

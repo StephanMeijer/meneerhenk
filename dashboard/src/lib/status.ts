@@ -24,7 +24,9 @@ export type IconName =
   | 'copy'
   | 'menu'
   | 'plus'
-  | 'info';
+  | 'info'
+  | 'arrow-up'
+  | 'arrow-down';
 
 export interface Look {
   tone: Tone;

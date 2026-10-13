@@ -52,7 +52,7 @@ tokens (README, "MCP server"); the tools answer with the types below.
 | `bad_request` | 400 | A bad id, filter, cursor or body |
 | `unsupported_media_type` | 415 | An action whose body is not JSON |
 | `not_found` | 404 | No such run, event, transcript or route |
-| `conflict` | 409 | Cancelling a run that is not running here |
+| `conflict` | 409 | Cancelling a run that is not running here; moving a review that is not waiting for a slot here |
 | `store` | 500 | The run store failed; the log has the detail |
 
 ### Paging
@@ -353,9 +353,10 @@ has `run_id`, `kind` (`review`), `platform`, `repo`, `target`,
 `target_url`, `commit`, `trigger`, `requester`, `since` (when it was
 requested), `position` (from 1) and `reason` (`no_slot`: every slot is
 taken; a review never waits behind another of the same pull request, as a
-new commit supersedes it and the same commit joins it). A waiting review
-has its run id but no run record until it starts; `POST
-/runs/{id}/cancel` cancels it, and it then ends as cancelled while
+new commit supersedes it, in its place in the queue, and the same commit
+joins it). A waiting review has its run id but no run record until it
+starts; `POST /runs/{id}/queue` moves it to another place (#401), and
+`POST /runs/{id}/cancel` cancels it, and it then ends as cancelled while
 queued. Every `slots` message holds the whole list, so a client replaces
 what it had.
 
@@ -503,3 +504,15 @@ Cancels a running run, as the dashboard's cancel button does. The body is
 `{}`. Answers `202` with `{"run_id": "r-..."}`, or `409 conflict` when the
 run is not running in this process. The request is recorded as an event
 either way.
+
+### `POST /runs/{id}/queue`
+
+Moves a review waiting for a slot to another place in the queue (#401), as
+the dashboard's queue does when a row is dragged or moved to the top or
+bottom. The body is `{"position": 1}`: 1 is the next to start, and a
+position past the end is the last. Answers `200` with `{"run_id": "r-...",
+"from": 3, "to": 1}`, `400` for a position of 0, or `409 conflict` when
+the run is not a review waiting for a slot in this process. The request is
+recorded as an event (`queue_moved`) either way, on the run's requests,
+since a waiting review has no run record yet; every viewer's `slots`
+message then shows the new order.

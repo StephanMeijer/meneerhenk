@@ -9,7 +9,7 @@ use henk_domain::queue::{Decision, decide};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::RunId;
 use henk_platform::{IssueTarget, ReviewHandle, ReviewTarget};
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -20,6 +20,7 @@ use crate::plan::{PlanRequest, run_plan};
 use crate::review::{
     ReviewRequest, report_cancelled_while_queued, report_interrupted_while_queued, run_review,
 };
+use crate::slot_queue::{NotWaiting, Slot, SlotQueue};
 
 /// One pull or merge request, as the coordinator tells them apart. The
 /// repository path is lowercase: neither platform's paths are
@@ -179,21 +180,23 @@ pub(crate) async fn queue_check(app: &App, request: &ReviewRequest) -> Option<Re
 }
 
 /// Waits for a review slot while the pull request shows the review queued
-/// (#262). It joins the slot queue before it asks the platform to show the
-/// check queued, so a slow platform costs it no place: reviews start in the
-/// order they came, as [`Coordinator::slots`] says. A cancel ends the wait
-/// at once, not once a slot frees. Whatever ends it, the queued check is in
-/// `request` before this returns, so it closes. `None` when cancelled.
+/// (#262). The review is in the slot queue from when it was submitted, so
+/// a slow platform costs it no place: reviews start in the queue's order,
+/// as [`Coordinator::slots`] says, which a colleague may change (#401). A
+/// cancel ends the wait at once, not once a slot frees. Whatever ends it,
+/// the queued check is in `request` before this returns, so it closes.
+/// `None` when cancelled.
 async fn wait_for_slot(
     app: &App,
-    slots: &Arc<Semaphore>,
+    slots: &Arc<SlotQueue>,
+    run: &RunId,
     cancel: &CancellationToken,
     request: &mut ReviewRequest,
-) -> Option<Result<OwnedSemaphorePermit, AcquireError>> {
+) -> Option<Slot> {
     let (waited, queued_check) = {
         // Boxed so a cancelled review leaves the queue before the platform
         // answers.
-        let mut acquire = Box::pin(Arc::clone(slots).acquire_owned());
+        let mut acquire = Box::pin(slots.wait(run));
         let mut queue = std::pin::pin!(queue_check(app, request));
         let mut queued_check = None;
         let mut asked = false;
@@ -270,7 +273,8 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
 pub struct Coordinator {
     app: Arc<App>,
     active: Arc<Mutex<HashMap<Key, Active>>>,
-    review_slots: Arc<Semaphore>,
+    /// The review slots, and the order reviews wait for them in (#401).
+    review_slots: Arc<SlotQueue>,
     generation: Mutex<u64>,
     /// Marked whenever [`Coordinator::slots`] may read differently, so the
     /// overview's stream need not wait for its next snapshot.
@@ -287,13 +291,16 @@ impl Coordinator {
     /// Builds a coordinator over the shared application.
     #[must_use]
     pub fn new(app: Arc<App>) -> Self {
-        let slots = app.settings.review.max_concurrent.max(1);
+        let slots_changed = Arc::new(watch::Sender::new(()));
         Self {
+            review_slots: SlotQueue::new(
+                app.settings.review.max_concurrent,
+                Arc::clone(&slots_changed),
+            ),
             app,
             active: Arc::new(Mutex::new(HashMap::new())),
-            review_slots: Arc::new(Semaphore::new(slots)),
             generation: Mutex::new(0),
-            slots_changed: Arc::new(watch::Sender::new(())),
+            slots_changed,
         }
     }
 
@@ -334,30 +341,29 @@ impl Coordinator {
     /// The review slots and what waits for one.
     #[must_use]
     pub fn slots(&self) -> Slots {
-        let limit = self.app.settings.review.max_concurrent.max(1);
-        let in_use = limit.saturating_sub(self.review_slots.available_permits());
-        // In the order they were taken. The slot semaphore is fair, so that
-        // is the order they start in, short of two requests within the same
-        // scheduler tick asking for a slot the other way round.
-        let mut queued: Vec<(u64, Waiting)> = self.active.lock().map_or_else(
+        let (limit, in_use) = self.review_slots.usage();
+        // In the queue's order: the order they start in (#401).
+        let order = self.review_slots.order();
+        let mut waiting: Vec<Waiting> = self.active.lock().map_or_else(
             |_| Vec::new(),
             |active| {
-                active
+                order
                     .iter()
-                    .filter(|(_, a)| !a.started.load(std::sync::atomic::Ordering::Relaxed))
-                    .map(|(key, a)| (a.generation, waiting(key, a)))
+                    .filter_map(|run| {
+                        active
+                            .iter()
+                            .find(|(_, a)| {
+                                a.run == *run
+                                    && !a.started.load(std::sync::atomic::Ordering::Relaxed)
+                            })
+                            .map(|(key, a)| waiting(key, a))
+                    })
                     .collect()
             },
         );
-        queued.sort_by_key(|(generation, _)| *generation);
-        let waiting = queued
-            .into_iter()
-            .enumerate()
-            .map(|(at, (_, entry))| Waiting {
-                position: at + 1,
-                ..entry
-            })
-            .collect();
+        for (at, entry) in waiting.iter_mut().enumerate() {
+            entry.position = at + 1;
+        }
         Slots {
             limit,
             in_use,
@@ -367,8 +373,8 @@ impl Coordinator {
 
     /// Takes a review slot as a review would, so a test can fill them.
     #[cfg(test)]
-    pub(crate) fn take_a_slot(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.review_slots).try_acquire_owned().ok()
+    pub(crate) fn take_a_slot(&self) -> Option<Slot> {
+        self.review_slots.take_any()
     }
 
     /// Wakes when a review starts waiting, takes or frees a slot, or leaves
@@ -413,6 +419,9 @@ impl Coordinator {
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
                         warn!(repo = %request.target.repo.path(), number = key.number, old = %old.commit.short(), new = %commit.short(), "superseding a running review");
+                        // A review still waiting hands its place in the
+                        // queue to the one that replaces it (#401).
+                        self.review_slots.replace(&old.run, &run);
                         // The old run learns which run replaced it (#231).
                         if !self.app.cancels.supersede(&old.run, &run) {
                             old.cancel.cancel();
@@ -440,6 +449,8 @@ impl Coordinator {
             );
             (decision, cancel, started)
         };
+        // In line from now: the queue's order is the order of the requests.
+        self.review_slots.join(&run);
         self.slots_changed.send_replace(());
 
         let app = Arc::clone(&self.app);
@@ -453,28 +464,19 @@ impl Coordinator {
             ..request
         };
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
+        let queued = run.clone();
         tokio::spawn(async move {
             let _cancellable = cancellable;
             let mut request = request;
-            // A free slot starts the review at once, as before. Otherwise
-            // the pull request shows it queued while it waits (#262).
-            let permit = match Arc::clone(&slots).try_acquire_owned() {
-                Ok(permit) => Some(permit),
-                Err(tokio::sync::TryAcquireError::Closed) => return,
-                Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    let waited = wait_for_slot(&app, &slots, &cancel, &mut request).await;
-                    match waited {
-                        None => None,
-                        Some(Ok(permit)) => Some(permit),
-                        Some(Err(_)) => {
-                            // The slots closed under it: its queued check
-                            // still closes (#262).
-                            ended_while_queued(&app, &request).await;
-                            return;
-                        }
-                    }
-                }
+            // A free slot with nobody before it starts the review at once,
+            // as before. Otherwise the pull request shows it queued while it
+            // waits (#262).
+            let permit = match slots.try_take(&queued) {
+                Some(slot) => Some(slot),
+                None => wait_for_slot(&app, &slots, &queued, &cancel, &mut request).await,
             };
+            // Out of the queue however the wait ended.
+            slots.leave(&queued);
             started.store(true, std::sync::atomic::Ordering::Relaxed);
             slots_changed.send_replace(());
             if cancel.is_cancelled() {
@@ -499,8 +501,32 @@ impl Coordinator {
         if let Ok(mut active) = self.active.lock() {
             active.retain(|_, a| a.run != *run);
         }
+        self.review_slots.leave(run);
         self.slots_changed.send_replace(());
         true
+    }
+
+    /// Moves a review waiting for a slot to `position` in the queue, 1
+    /// being the next to start, on behalf of a colleague (#401). Returns
+    /// where it was and where it is now.
+    ///
+    /// # Errors
+    ///
+    /// [`NotWaiting`] when the run is not a review waiting here: it
+    /// started, ended, or another process has it.
+    pub fn move_queued(&self, run: &RunId, position: usize) -> Result<(usize, usize), NotWaiting> {
+        let waiting = self.active.lock().is_ok_and(|active| {
+            active
+                .values()
+                .any(|a| a.run == *run && !a.started.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        if !waiting {
+            return Err(NotWaiting);
+        }
+        let moved = self.review_slots.move_to(run, position)?;
+        info!(run = %run, from = moved.0, to = moved.1, "a waiting review moved in the queue");
+        self.slots_changed.send_replace(());
+        Ok(moved)
     }
 
     /// Starts an execute run in the background and returns its run id

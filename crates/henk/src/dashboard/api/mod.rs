@@ -167,6 +167,7 @@ pub fn routes(dashboard: Arc<Dashboard>) -> Router {
         .route("/runs/{id}/tool-calls", get(runs::tool_calls))
         .route("/runs/{id}/transcripts/{session}", get(runs::transcript))
         .route("/runs/{id}/cancel", post(runs::cancel))
+        .route("/runs/{id}/queue", post(runs::move_queued))
         .route(
             "/runs/{id}/sessions/{session}/stream",
             get(session_stream::session_stream),

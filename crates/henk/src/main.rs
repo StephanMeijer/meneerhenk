@@ -45,6 +45,7 @@ mod runs;
 mod server;
 mod skill_tools;
 mod skills;
+mod slot_queue;
 mod stages;
 mod urls;
 mod web_fetch;

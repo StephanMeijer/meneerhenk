@@ -965,6 +965,27 @@ pub struct Started {
     pub event_id: String,
 }
 
+/// What `POST /runs/{id}/queue` takes: where the waiting review goes
+/// (#401).
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct MoveBody {
+    /// Its new place, 1 being the next to start; past the end is last.
+    pub position: u64,
+}
+
+/// A waiting review moved in the queue (#401).
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct Moved {
+    /// The run.
+    pub run_id: String,
+    /// Where it was, from 1.
+    pub from: u64,
+    /// Where it is now, from 1.
+    pub to: u64,
+}
+
 /// A cancel was sent to this run.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]

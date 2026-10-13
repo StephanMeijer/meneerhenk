@@ -17,9 +17,9 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use super::types::{
-    Cancelled, Draft, EventSummary, Finding, Page, Round, RunCount, RunDetail, RunEvent,
-    RunSummary, Session, SessionDot, Stage, StageDot, StartRequest, Started, ToolCall,
-    ToolUsageRow, Transcript, TranscriptRef,
+    Cancelled, Draft, EventSummary, Finding, MoveBody, Moved, Page, Round, RunCount, RunDetail,
+    RunEvent, RunSummary, Session, SessionDot, Slots, Stage, StageDot, StartRequest, Started,
+    ToolCall, ToolUsageRow, Transcript, TranscriptRef, WaitingReview,
 };
 use super::{ApiError, ApiQuery, ApiResult, cursor, limit, read_cursor, read_time};
 use crate::app::App;
@@ -469,7 +469,20 @@ pub(crate) async fn cancel_run(
 ) -> Result<Cancelled, ApiError> {
     let run = RunId::parse(id).map_err(|_| ApiError::bad_request("That is not a run id."))?;
     let cancelled = coordinator.cancel(&run, who.to_owned());
-    record_cancel(app, &run, who, source, cancelled).await;
+    let (outcome, detail) = if cancelled {
+        ("cancelled", format!("cancel sent to {run}"))
+    } else {
+        ("ignored", format!("{run} is not running here"))
+    };
+    record_action(
+        app,
+        &run,
+        ("cancel_requested", source),
+        who,
+        outcome,
+        detail,
+    )
+    .await;
     if cancelled {
         info!(run = %run, requester = %who, source, "cancelled through the API");
         Ok(Cancelled {
@@ -482,6 +495,77 @@ pub(crate) async fn cancel_run(
             "That run is not running here: it ended, or another Henk process runs it.",
         ))
     }
+}
+
+/// The review slots and the reviews waiting for one, in the order they
+/// will start: what the overview shows and MCP's `list_queued_runs` says.
+pub(crate) fn queue_of(app: &App, coordinator: &Coordinator) -> Slots {
+    let now = coordinator.slots();
+    let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    Slots {
+        limit: count(now.limit),
+        in_use: count(now.in_use),
+        waiting: now
+            .waiting
+            .into_iter()
+            .map(|w| WaitingReview::from_waiting(&app.settings, w))
+            .collect(),
+    }
+}
+
+/// `POST /runs/{id}/queue`: moves a review waiting for a slot to another
+/// place in the queue (#401), as the dashboard's queue does. The request is
+/// recorded as an event either way.
+pub async fn move_queued(
+    State(dashboard): State<Arc<Dashboard>>,
+    Path(id): Path<String>,
+    act: ApiAct<MoveBody>,
+) -> Result<Json<Moved>, ApiError> {
+    let who = requester(act.session.github_id);
+    let moved = move_queued_run(
+        &dashboard.app,
+        &dashboard.coordinator,
+        (id, act.body.position),
+        &who,
+        "dashboard",
+    )
+    .await?;
+    Ok(Json(moved))
+}
+
+/// Moves waiting review `id` to `position` for `who`, as
+/// `POST /runs/{id}/queue` and the MCP server's `move_queued_run` do. The
+/// request is recorded as an event from `source` either way: a waiting
+/// review has no run record yet, and the event is on its page once it has.
+pub(crate) async fn move_queued_run(
+    app: &App,
+    coordinator: &Coordinator,
+    (id, position): (String, u64),
+    who: &str,
+    source: &str,
+) -> Result<Moved, ApiError> {
+    let run = RunId::parse(id).map_err(|_| ApiError::bad_request("That is not a run id."))?;
+    let Some(position) = usize::try_from(position).ok().filter(|p| *p >= 1) else {
+        return Err(ApiError::bad_request("Position 1 is the next to start."));
+    };
+    let place = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let Ok((from, to)) = coordinator.move_queued(&run, position) else {
+        let detail = format!("{run} is not waiting for a slot here");
+        record_action(app, &run, ("queue_moved", source), who, "ignored", detail).await;
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "That review is not waiting for a slot here: it started, ended, or another Henk process has it.",
+        ));
+    };
+    let detail = format!("moved from position {from} to {to}");
+    record_action(app, &run, ("queue_moved", source), who, "moved", detail).await;
+    info!(run = %run, requester = %who, source, from, to, "moved in the queue through the API");
+    Ok(Moved {
+        run_id: run.as_str().to_owned(),
+        from: place(from),
+        to: place(to),
+    })
 }
 
 const KINDS: &[(&str, RunKind)] = &[
@@ -509,15 +593,24 @@ fn requester(github_id: u64) -> String {
     format!("github:{github_id}")
 }
 
-/// Records a cancel request from `source` and what came of it. A failure
-/// is logged; the cancel itself stands.
-async fn record_cancel(app: &App, run: &RunId, who: &str, source: &str, cancelled: bool) {
+/// Records a request of `kind` from `source` about `run`, and what came of
+/// it: a cancel (#69) or a move in the queue (#401). It goes on the run's
+/// requests, which need no run record yet. A failure is logged; the action
+/// itself stands.
+async fn record_action(
+    app: &App,
+    run: &RunId,
+    (kind, source): (&str, &str),
+    who: &str,
+    outcome: &str,
+    detail: String,
+) {
     let store = &app.store;
     let event = InboundEvent {
         id: new_event_id(),
         received_at: now_rfc3339(),
         source: source.to_owned(),
-        kind: "cancel_requested".to_owned(),
+        kind: kind.to_owned(),
         repo: None,
         target: None,
         payload: None,
@@ -526,12 +619,8 @@ async fn record_cancel(app: &App, run: &RunId, who: &str, source: &str, cancelle
     let outcome = OutcomeRecord {
         event_id: event.id.clone(),
         listener: source.to_owned(),
-        outcome: if cancelled { "cancelled" } else { "ignored" }.to_owned(),
-        detail: if cancelled {
-            format!("cancel sent to {run}")
-        } else {
-            format!("{run} is not running here")
-        },
+        outcome: outcome.to_owned(),
+        detail,
         run_id: Some(run.as_str().to_owned()),
         at: String::new(),
     };
@@ -540,6 +629,6 @@ async fn record_cancel(app: &App, run: &RunId, who: &str, source: &str, cancelle
         Err(error) => Err(error),
     };
     if let Err(error) = recorded {
-        warn!(%error, run = %run, "could not record a cancel request");
+        warn!(%error, run = %run, kind, "could not record a request about a run");
     }
 }
