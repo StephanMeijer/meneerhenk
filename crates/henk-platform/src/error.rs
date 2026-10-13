@@ -83,7 +83,12 @@ impl PlatformError {
                 retry_after,
                 ..
             } => *status >= 500 || *status == 429 || (*status == 403 && retry_after.is_some()),
-            Self::Transport(error) => error.is_timeout() || error.is_connect(),
+            // A connection that dropped after it was made (reset, closed by
+            // the peer mid-message) is a request or body error, not a
+            // connect error.
+            Self::Transport(error) => {
+                error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+            }
             // GitLab, through its MCP server: the server reports GitLab's
             // own status in its error text, as a failed tool result or as
             // the call's error.

@@ -428,3 +428,34 @@ async fn a_mint_waiting_to_try_again_holds_up_no_other_installation() {
     let token = other.expect("333 waited for 222's backoff").unwrap();
     assert_eq!(secrecy::ExposeSecret::expose_secret(&token), "ghs_alice");
 }
+
+#[tokio::test]
+async fn a_connection_that_drops_without_an_answer_is_tried_again() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // First connection: read the request, close without a response.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 4096];
+        let _ = socket.read(&mut buffer).await;
+        drop(socket);
+        // Second connection: answer.
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = socket.read(&mut buffer).await;
+        let body = r#"{"ok":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        let _ = socket.shutdown().await;
+    });
+    let api = GitHubApi::new(
+        &format!("http://{address}"),
+        GitHubAuth::token("t".to_owned().into()),
+    )
+    .unwrap()
+    .with_retry_policy(FAST);
+    assert_eq!(api.get("/x").await.unwrap()["ok"], true);
+}
