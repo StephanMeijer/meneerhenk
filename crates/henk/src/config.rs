@@ -1332,9 +1332,7 @@ impl SshConfig {
             Some(ssh) => {
                 ssh.validate()?;
                 let ids: Vec<String> = ssh.hosts().into_iter().map(|h| h.id).collect();
-                let profiles =
-                    std::iter::once(("[workspace]", &workspace.default)).chain(workspace.named());
-                for (name, profile) in profiles {
+                for (name, profile) in workspace.named() {
                     if let Some(unknown) = profile.hosts.iter().find(|h| !ids.contains(h)) {
                         return Err(ConfigError::Workspace(format!(
                             "workspace profile {name}: hosts names {unknown:?}, which is not a sandbox host ({})",
@@ -2596,9 +2594,7 @@ impl Settings {
                     host.user, host.host, host.port, host.key_path_env
                 );
             }
-            let profiles = std::iter::once(("[workspace]", &self.workspace.default))
-                .chain(self.workspace.named());
-            for (name, profile) in profiles {
+            for (name, profile) in self.workspace.named() {
                 if profile.backend == BackendKind::Ssh && !profile.hosts.is_empty() {
                     let _ = writeln!(
                         out,
@@ -4208,6 +4204,32 @@ github_owners = ["docspec"]
             "[workspace.ssh.hosts.goat]\nhost = \"g\"\nhost_key = \"nope\"\n",
             "",
             "hosts.goat.host_key is not an OpenSSH public key line",
+        );
+    }
+
+    #[test]
+    fn a_default_profile_with_hosts_is_described_once_and_named_default() {
+        let settings = pool(
+            &pooled("goat", ""),
+            "backend = \"ssh\"\nhosts = [\"goat\"]\n",
+        )
+        .unwrap();
+        let text = settings.describe();
+        assert_eq!(text.matches("uses sandbox hosts goat").count(), 1, "{text}");
+        assert!(
+            text.contains("  profile default uses sandbox hosts goat"),
+            "{text}"
+        );
+
+        let error = pool(
+            &pooled("goat", ""),
+            "backend = \"ssh\"\nhosts = [\"fox\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("workspace profile default: hosts names \"fox\""),
+            "{error}"
         );
     }
 
