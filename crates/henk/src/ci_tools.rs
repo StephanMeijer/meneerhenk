@@ -434,6 +434,51 @@ fn tail(text: &str, lines: usize, cut: bool, cap: usize) -> String {
     out
 }
 
+/// Marks a cut of a line's start or end, where the match is kept.
+const CUT_LEAD: &str = "[line cut] ";
+const CUT_TRAIL: &str = " [line cut]";
+
+/// Where the lowercase `needle` first occurs in `line`, ignoring case, as a
+/// byte offset into `line`.
+fn match_offset(line: &str, needle: &str) -> Option<usize> {
+    let lower = line.to_lowercase();
+    let at = lower.find(needle)?;
+    if lower.len() == line.len() {
+        return Some(at);
+    }
+    // Lowercasing changed some lengths: go by characters.
+    let chars = lower[..at].chars().count();
+    line.char_indices().nth(chars).map(|(i, _)| i)
+}
+
+/// `line`, or when it is longer than `max` bytes, a window of it around byte
+/// `at`, with each cut end marked.
+fn around(line: &str, at: usize, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_owned();
+    }
+    let room = max.saturating_sub(CUT_LEAD.len() + CUT_TRAIL.len());
+    let mut begin = at
+        .saturating_sub(room / 4)
+        .min(line.len().saturating_sub(room));
+    while !line.is_char_boundary(begin) {
+        begin += 1;
+    }
+    let mut end = (begin + room).min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::new();
+    if begin > 0 {
+        out.push_str(CUT_LEAD);
+    }
+    out.push_str(&line[begin..end]);
+    if end < line.len() {
+        out.push_str(CUT_TRAIL);
+    }
+    out
+}
+
 /// The lines of `text` containing `needle`, case-insensitive, with
 /// [`GREP_CONTEXT`] lines around each, under `cap` bytes. A group larger
 /// than the cap is cut, not dropped, when it is the first.
@@ -468,7 +513,10 @@ fn grep_lines(text: &str, needle: &str, cap: usize) -> String {
             .unwrap_or_default()
             .iter()
             .map(|line| {
-                let mut line = shorten(line, line_cap);
+                let mut line = match match_offset(line, &needle) {
+                    Some(at) => around(line, at, line_cap),
+                    None => shorten(line, line_cap),
+                };
                 line.push('\n');
                 line
             })
@@ -885,7 +933,18 @@ pub(crate) mod tests {
         let long = format!("error {}", "x".repeat(100_000));
         let one = grep_lines(&format!("a\n{long}\nb\n"), "error", OUTPUT_CHARS);
         assert!(one.len() <= OUTPUT_CHARS, "{}", one.len());
-        assert!(one.contains("line shortened") && !one.contains("left out"));
+        assert!(one.contains("error xxx"), "the match survives the cut");
+        assert!(one.contains("[line cut]") && !one.contains("left out"));
+        // A match in the middle or at the end of a long line survives too.
+        let middle = format!("{}ERROR here{}", "a".repeat(50_000), "b".repeat(50_000));
+        let end = format!("{}error", "c".repeat(100_000));
+        let found = grep_lines(&format!("{middle}\n{end}\n"), "error", OUTPUT_CHARS);
+        assert!(found.contains("ERROR here"), "{}", found.len());
+        assert!(found.contains("cccerror"));
+        assert!(found.len() <= OUTPUT_CHARS);
+        // A wide character at the cut stays whole.
+        let wide = format!("{}error{}", "é".repeat(30_000), "é".repeat(30_000));
+        assert!(grep_lines(&wide, "error", OUTPUT_CHARS).contains("éerroré"));
         // Many matches in a row join into one group larger than the cap.
         let many: String = (0..5000)
             .map(|n| format!("error {n}\n"))
