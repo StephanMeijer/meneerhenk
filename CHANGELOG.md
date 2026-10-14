@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.0...v0.4.1) - 2026-10-13
+
+### Added
+
+- *(queue)* a waiting review can be moved to any place in the queue, by the API, MCP and the dashboard
+
+### Fixed
+
+- *(review)* a merged pull request ends the review as success, and no model session starts
+
+### Other
+
+- Merge pull request #408 from StephanMeijer/feat/queue-order
+
 ## [0.4.0](https://github.com/StephanMeijer/meneerhenk/compare/v0.3.1...v0.4.0) - 2026-10-13
 
 ### Added
