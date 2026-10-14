@@ -87,7 +87,8 @@ impl GitLabWriter {
     pub(crate) fn rest(&self) -> Result<&GitLabRest, PlatformError> {
         self.rest.as_ref().ok_or_else(|| {
             PlatformError::Auth(
-                "pushing to GitLab needs the GitLab token, which is not set".to_owned(),
+                "pushing to GitLab, and reading its CI, needs the GitLab token, which is not set"
+                    .to_owned(),
             )
         })
     }

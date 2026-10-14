@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod app;
+pub mod ci;
 pub mod issues;
 pub mod push;
 pub mod writer;
