@@ -21,7 +21,8 @@ impl std::fmt::Display for CiJobId {
 /// Where a job is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CiStatus {
-    /// Waiting to start: queued, pending, or waiting for someone.
+    /// Waiting to start on its own: queued, pending, or waiting for a
+    /// resource. A job that needs a person to start it is not this.
     Queued,
     /// Running.
     InProgress,
@@ -54,6 +55,8 @@ pub enum CiConclusion {
     Skipped,
     /// It ran out of time.
     TimedOut,
+    /// It failed, and its pipeline allows that (GitLab `allow_failure`).
+    AllowedFailure,
     /// Neither passed nor failed: neutral, or a conclusion Henk does not know.
     Neutral,
 }
@@ -68,6 +71,7 @@ impl CiConclusion {
             Self::Cancelled => "cancelled",
             Self::Skipped => "skipped",
             Self::TimedOut => "timed out",
+            Self::AllowedFailure => "failed, allowed to fail",
             Self::Neutral => "neutral",
         }
     }

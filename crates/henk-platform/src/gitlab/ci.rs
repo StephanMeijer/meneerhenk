@@ -19,15 +19,18 @@ fn text(value: &Value, key: &str) -> Option<String> {
 }
 
 /// A job's status as where it is and how it ended.
-fn status(status: &str) -> (CiStatus, Option<CiConclusion>) {
+fn status(status: &str, allow_failure: bool) -> (CiStatus, Option<CiConclusion>) {
     match status {
         "running" => (CiStatus::InProgress, None),
         "success" => (CiStatus::Completed, Some(CiConclusion::Success)),
+        "failed" if allow_failure => (CiStatus::Completed, Some(CiConclusion::AllowedFailure)),
         "failed" => (CiStatus::Completed, Some(CiConclusion::Failure)),
         "canceled" | "canceling" => (CiStatus::Completed, Some(CiConclusion::Cancelled)),
-        "skipped" => (CiStatus::Completed, Some(CiConclusion::Skipped)),
-        // created, pending, preparing, scheduled, manual,
-        // waiting_for_resource, waiting_for_callback
+        // A manual job waits for a person, not for the pipeline: it will
+        // not start on its own, so it is not "still running".
+        "skipped" | "manual" => (CiStatus::Completed, Some(CiConclusion::Skipped)),
+        // created, pending, preparing, scheduled, waiting_for_resource,
+        // waiting_for_callback
         _ => (CiStatus::Queued, None),
     }
 }
@@ -35,7 +38,14 @@ fn status(status: &str) -> (CiStatus, Option<CiConclusion>) {
 fn job(job: &Value, pipeline: u64) -> Option<CiJob> {
     let id = job.get("id").and_then(Value::as_u64)?;
     let name = text(job, "name")?;
-    let (status, conclusion) = status(job.get("status").and_then(Value::as_str).unwrap_or(""));
+    let allow_failure = job
+        .get("allow_failure")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (status, conclusion) = status(
+        job.get("status").and_then(Value::as_str).unwrap_or(""),
+        allow_failure,
+    );
     let workflow = match text(job, "stage") {
         Some(stage) => format!("pipeline {pipeline}, stage {stage}"),
         None => format!("pipeline {pipeline}"),
@@ -127,6 +137,31 @@ mod tests {
         assert_eq!(failed.conclusion, Some(CiConclusion::Failure));
         assert_eq!(failed.workflow.as_deref(), Some("pipeline 4, stage test"));
         let manual = job(&json!({"id": 10, "name": "deploy", "status": "manual"}), 4).unwrap();
-        assert_eq!((manual.status, manual.conclusion), (CiStatus::Queued, None));
+        assert_eq!(
+            (manual.status, manual.conclusion),
+            (CiStatus::Completed, Some(CiConclusion::Skipped)),
+            "a manual job waits for a person, not for the pipeline"
+        );
+        let pending = job(&json!({"id": 11, "name": "build", "status": "pending"}), 4).unwrap();
+        assert_eq!(
+            (pending.status, pending.conclusion),
+            (CiStatus::Queued, None)
+        );
+    }
+
+    #[test]
+    fn a_failure_the_pipeline_allows_is_not_a_failure() {
+        let allowed = job(
+            &json!({"id": 12, "name": "lint", "status": "failed", "allow_failure": true}),
+            4,
+        )
+        .unwrap();
+        assert_eq!(allowed.conclusion, Some(CiConclusion::AllowedFailure));
+        let blocking = job(
+            &json!({"id": 13, "name": "test", "status": "failed", "allow_failure": false}),
+            4,
+        )
+        .unwrap();
+        assert_eq!(blocking.conclusion, Some(CiConclusion::Failure));
     }
 }
