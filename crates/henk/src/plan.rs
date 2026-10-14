@@ -917,6 +917,7 @@ model = "r"
                 test_session: Some(session),
                 test_push_writer: source,
                 test_issue_writer: Some(Arc::clone(&tracker) as Arc<dyn IssueWriter>),
+                test_ci_reader: None,
             },
             tracker,
             model,

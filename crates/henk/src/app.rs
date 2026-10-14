@@ -11,7 +11,7 @@ use henk_mcp::{McpServerConfig, McpSession, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter, Installations};
 use henk_platform::gitlab::{GitLabRest, GitLabWriter};
 use henk_platform::push::PushWriter;
-use henk_platform::{IssueWriter, PlatformWriter};
+use henk_platform::{CiReader, IssueWriter, PlatformWriter};
 use henk_store::{PgStore, RunStore, SqliteStore};
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,9 @@ pub struct App {
     /// Tests: the tracker `issue_writer` returns for every platform.
     #[cfg(test)]
     pub test_issue_writer: Option<Arc<dyn IssueWriter>>,
+    /// Tests: what `ci_reader` returns for every platform.
+    #[cfg(test)]
+    pub test_ci_reader: Option<Arc<dyn CiReader>>,
 }
 
 impl std::fmt::Debug for App {
@@ -278,6 +281,8 @@ impl App {
             test_push_writer: None,
             #[cfg(test)]
             test_issue_writer: None,
+            #[cfg(test)]
+            test_ci_reader: None,
         })
     }
 
@@ -416,6 +421,31 @@ impl App {
                 .gitlab
                 .clone()
                 .map(|w| w as Arc<dyn IssueWriter>)
+                .ok_or_else(|| anyhow!("GitLab is not configured")),
+        }
+    }
+
+    /// What reads the CI of `repo`'s pull requests (#420). On GitLab
+    /// without its token every read says so.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform is not configured.
+    pub fn ci_reader(&self, repo: &RepoRef) -> anyhow::Result<Arc<dyn CiReader>> {
+        #[cfg(test)]
+        if let Some(reader) = &self.test_ci_reader {
+            return Ok(Arc::clone(reader));
+        }
+        match repo.platform() {
+            henk_domain::allowlist::Platform::GitHub => self
+                .github
+                .as_ref()
+                .map(|w| w.for_repository(repo) as Arc<dyn CiReader>)
+                .ok_or_else(|| anyhow!("GitHub is not configured")),
+            henk_domain::allowlist::Platform::GitLab => self
+                .gitlab
+                .clone()
+                .map(|w| w as Arc<dyn CiReader>)
                 .ok_or_else(|| anyhow!("GitLab is not configured")),
         }
     }

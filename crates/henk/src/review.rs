@@ -1118,6 +1118,7 @@ requester_id = 3
                 test_session: Some(session),
                 test_push_writer: source,
                 test_issue_writer: None,
+                test_ci_reader: None,
             },
             writer,
             model,
@@ -4861,6 +4862,97 @@ requester_id = 3
             "{calls:?}"
         );
         assert_eq!((peek.inner.opened(), peek.inner.live()), (1, 0));
+    }
+
+    /// The reviewer reads the pull request's CI (#420): the opening tallies
+    /// it, and a failed job's log is one call away.
+    #[tokio::test]
+    async fn the_reviewer_reads_the_pull_requests_ci() {
+        let reviewer = ScriptedClient::new(
+            "r",
+            [
+                call("list_ci_jobs", serde_json::json!({})),
+                call(
+                    "get_ci_job_log",
+                    serde_json::json!({"job_id": "11", "grep": "error"}),
+                ),
+                finish_round(),
+                say("Nothing."),
+            ],
+        );
+        let (mut f, reviewer, _, _remote) = looping(
+            "henk-loop-ci",
+            reviewer,
+            ScriptedClient::new("f", []),
+            peeking(&[]) as Arc<dyn crate::workspace::WorkspaceProvider>,
+        )
+        .await;
+        let mut ci = crate::ci_tools::tests::fake();
+        let jobs = ci.jobs.remove(crate::ci_tools::tests::HEAD).unwrap();
+        ci.jobs.insert("*".to_owned(), jobs);
+        f.app.test_ci_reader = Some(Arc::new(ci));
+        let run = RunId::parse("r-loop-ci").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let (names, results, _) = seen(&reviewer);
+        for tool in ["list_ci_jobs", "get_ci_job_log", "get_ci_job_annotations"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        let opening = texts(&reviewer.requests()[0]).into_iter().next().unwrap();
+        assert!(
+            opening.contains("CI: 2 passed, 1 failed (test), 1 running."),
+            "{opening}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.contains("- 11 | test (CI) | failure")),
+            "{results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.contains("error[E0308]: mismatched types")),
+            "{results:?}"
+        );
+    }
+
+    /// `[roles.reviewer] tools` may leave the CI out: no tools, no tally.
+    #[tokio::test]
+    async fn a_reviewer_without_the_ci_tools_is_told_nothing_of_ci() {
+        let reviewer = ScriptedClient::new("r", [finish_round(), say("Nothing.")]);
+        let (mut f, reviewer, _, _remote) = looping(
+            "henk-loop-no-ci",
+            reviewer,
+            ScriptedClient::new("f", []),
+            peeking(&[]) as Arc<dyn crate::workspace::WorkspaceProvider>,
+        )
+        .await;
+        let mut ci = crate::ci_tools::tests::fake();
+        let jobs = ci.jobs.remove(crate::ci_tools::tests::HEAD).unwrap();
+        ci.jobs.insert("*".to_owned(), jobs);
+        f.app.test_ci_reader = Some(Arc::new(ci));
+        f.app.settings.roles.reviewer.as_mut().unwrap().tools = Some(
+            [
+                "list_changed_files",
+                "get_file_diff",
+                "report_finding",
+                "finish_round",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        );
+        let run = RunId::parse("r-loop-no-ci").unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        let (names, _, _) = seen(&reviewer);
+        assert!(!names.iter().any(|n| n.contains("ci_job")), "{names:?}");
+        let opening = texts(&reviewer.requests()[0]).into_iter().next().unwrap();
+        assert!(!opening.contains("CI:"), "{opening}");
     }
 
     /// A command the reviewer runs is on the run's timeline, as

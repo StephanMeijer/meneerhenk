@@ -29,10 +29,14 @@ const WEB_FETCH: &str = "web_fetch";
 /// Loading one of the skills the role lists.
 const LOAD_SKILL: &str = "load_skill";
 
-/// What only the reviewer has: the diff and its side of both handoffs.
+/// What only the reviewer has: the diff, the pull request's CI (#420) and
+/// its side of both handoffs.
 const REVIEWER: &[&str] = &[
     "list_changed_files",
     "get_file_diff",
+    "list_ci_jobs",
+    "get_ci_job_log",
+    "get_ci_job_annotations",
     "report_finding",
     "raise_point",
     "finish_round",
@@ -467,6 +471,29 @@ mod tests {
             "{removed}"
         );
         assert!(crate::text::is_in_style(&removed), "{removed}");
+    }
+
+    #[test]
+    fn the_reviewer_reads_ci_by_default_and_may_leave_it_out() {
+        for tool in ["list_ci_jobs", "get_ci_job_log", "get_ci_job_annotations"] {
+            assert!(
+                Role::Reviewer.default_tools().contains(&tool.to_owned()),
+                "{tool}"
+            );
+            assert!(
+                !Role::Executor.allows(tool),
+                "{tool}: not the executor's yet"
+            );
+            assert!(!Role::Planner.allows(tool), "{tool}");
+        }
+        let without = Role::Reviewer
+            .narrow(Some(&tools(&[
+                "get_file_diff",
+                "report_finding",
+                "finish_round",
+            ])))
+            .unwrap();
+        assert!(!without.contains(&"list_ci_jobs".to_owned()));
     }
 
     #[test]
