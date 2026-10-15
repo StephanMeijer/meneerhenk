@@ -1,6 +1,6 @@
 # 0001: The run store on one implementation over sea-orm
 
-Status: proposed; it is decided when this pull request is merged.
+Status: proposed; it is decided when this pull request is merged. The paragraph on `henk-store` in `ARCHITECTURE.md` points here and says "proposed"; change it in the same pull request that changes this status.
 Date: 2026-10-16. Issues: #598 (the move), #601 (this spike).
 
 ## The question
@@ -20,7 +20,7 @@ The runner-up is **a thin layer of our own** (no new dependency; it passes the w
 
 ## What was tried
 
-Four candidates went through the same gates. Three were ported far enough to run the golden fixtures of #612 (`crates/henk-store/tests/golden.rs`), on SQLite and, by hand, on PostgreSQL 17.11.
+Four candidates went through the same gates. Three were ported far enough to run the golden fixtures of #612 (`crates/henk-store/tests/golden.rs`), on SQLite and, by hand, on PostgreSQL 17.11. The goldens come from #612 and are not on this tree: `golden.rs` exists only on `test/store-golden-fixtures` and the spike branches built on it, so #612 must be merged before the goldens can be run from main.
 
 | | diesel | sqlx 0.9 (`Any` driver) | **sea-orm 2.0** | thin layer of our own |
 |---|---|---|---|---|
@@ -62,7 +62,7 @@ One `Store` over a seam (`Value`, `Row`, `Dialect`, `Db`), `rusqlite` on a small
 
 ### Why sea-orm
 
-The gates leave three survivors. The rule set before the spike was: fewest raw SQL fragments and per-dialect migration steps first, then fewest new crates and the smallest compile-time increase, then least code. By the first criterion sea-orm wins by a wide margin, and it is the one that is an ORM layer in the sense #598 asked for: the SQL for the two databases is generated from one description instead of kept as text with placeholders translated by hand, so a query that passes on SQLite in CI has the same shape on PostgreSQL. By the second it is last, by a lot in crates and in cold build time (24 s against 10 s, a build that CI pays for in every job), and the maintainers have said a dependency is acceptable. The third is a draw that does not matter.
+The gates leave three survivors. The rule set before the spike was: fewest raw SQL fragments and per-dialect migration steps first, then fewest new crates and the smallest compile-time increase, then least code. By the first criterion sea-orm wins by a wide margin, and it is the one that is an ORM layer in the sense #598 asked for: the SQL for the two databases is generated from one description instead of kept as text with placeholders translated by hand, so a query the builder generates has the same shape on both. That holds for builder-generated queries only. The three raw fragments are written per dialect, they are the SQL most likely to differ between the two databases, and the builder does not cover them: CI on SQLite never runs the PostgreSQL side of them, and only the manual PostgreSQL run below does. Nor is the evidence even: the sea-orm port is half done (30 of about 60 methods) and the thin layer is the only candidate that passes the whole conformance suite on both databases, so the line estimate for the full sea-orm trait is a guess. By the second it is last, by a lot in crates and in cold build time (24 s against 10 s, a build that CI pays for in every job), and the maintainers have said a dependency is acceptable. The third is a draw that does not matter.
 
 ## What would change this
 
@@ -128,7 +128,7 @@ HENK_TEST_DATABASE_URL='postgres://postgres:henk-ci@127.0.0.1:55436/postgres?ssl
   cargo test -p henk-store --all-features --locked -- --ignored
 ```
 
-The goldens of #612 and the conformance suite's PostgreSQL scenarios are the checks. The spike ran them on PostgreSQL 17.11 (`postgres:17-alpine`). With one implementation the PostgreSQL scenarios stay as `#[ignore]`d twins.
+The goldens of #612 and the conformance suite's PostgreSQL scenarios are the checks. Until #612 is merged, only the conformance suite is on this tree, and the command above runs just that. The spike ran them on PostgreSQL 17.11 (`postgres:17-alpine`). With one implementation the PostgreSQL scenarios stay as `#[ignore]`d twins.
 
 ## What changes in the sub-issues
 
@@ -141,10 +141,10 @@ The split stays: #604 (migrations), #605 (the `Store` type and the runs), #606 a
 
 ## Risks left
 
-- A SQLite-only CI can pass where PostgreSQL fails (concurrent writers, `RETURNING`, collation, integer width). The hand check above is the cover, and the builder's one description per query is the reason to expect it to hold.
+- A SQLite-only CI can pass where PostgreSQL fails (concurrent writers, `RETURNING`, collation, integer width). The hand check above is the cover. The builder's one description per query lowers the risk only for the queries it generates; the three raw fragments are per dialect and have only the hand check.
 - The cold build of `henk-store` and the Docker image get heavier (24 s against 10 s on this machine, 108 more crates to audit with `cargo deny`).
 - The goldens are tied to the table layout through `seed.sql`; a migration that changes a table changes the seed in the same pull request.
 
 ## Evidence
 
-The branches are throwaway and are deleted when #608 merges: `spike/store-sea-orm` (4687fa8), `spike/store-sqlx` (856efd9), `spike/store-thin` (4907319), all based on `test/store-golden-fixtures` (#612). Each can be checked with `cargo test -p henk-store --locked --test golden` and, with `HENK_TEST_DATABASE_URL` set, `-- --ignored`. The probes for the gates (a scratch crate per candidate with the repo's `deny.toml`) and the timing script are described in the pull request that adds this record.
+The branches are throwaway and are deleted when #608 merges: `spike/store-sea-orm` (4687fa8), `spike/store-sqlx` (856efd9), `spike/store-thin` (4907319), all based on `test/store-golden-fixtures` (#612). The commands below work only on those branches, not on main until #612 is merged. Each can be checked with `cargo test -p henk-store --locked --test golden` and, with `HENK_TEST_DATABASE_URL` set, `-- --ignored`. The probes for the gates (a scratch crate per candidate with the repo's `deny.toml`) and the timing script are described in the pull request that adds this record.

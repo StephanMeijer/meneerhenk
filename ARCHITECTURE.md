@@ -138,10 +138,10 @@ flowchart TB
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
 
-`henk-store` has two implementations today. The decision to replace them with
+`henk-store` has two implementations today. The proposal to replace them with
 one over sea-orm, and why, is in
 [`docs/decisions/0001-run-store-layer.md`](docs/decisions/0001-run-store-layer.md)
-(#598).
+(#598); its status is proposed, and this paragraph changes when that does.
 
 ## 3. A review, end to end
 
