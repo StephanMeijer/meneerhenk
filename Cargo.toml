@@ -40,8 +40,6 @@ hmac = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 ring = "0.17"
 rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
 secrecy = "0.10"
@@ -60,6 +58,9 @@ k8s-openapi = { version = "0.28", default-features = false, features = ["std", "
 # sees it, and matched with it on the host backend. Already in the lockfile
 # through wiremock, a dev-dependency, so it adds no new crate.
 regex = { version = "1.13", default-features = false, features = ["std", "unicode", "perf"] }
+# The run store layer under evaluation (#601): SQLite and PostgreSQL behind one
+# API, no query macros (so no database at build time), rustls on ring.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "any", "sqlite", "postgres", "migrate", "tls-rustls-ring-native-roots"] }
 serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0"
 sha2 = "0.11"

@@ -4,13 +4,13 @@
 //! callers hold; [`SqliteStore`] keeps records in one local file and
 //! [`PgStore`] in a `PostgreSQL` database.
 
+mod candidate;
 mod postgres;
-mod sqlite;
 mod store;
 mod types;
 
 pub use postgres::{PgStore, describe_url};
-pub use sqlite::SqliteStore;
+pub use candidate::Candidate;
 pub use store::RunStore;
 pub use types::{
     DayCounts, DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey,

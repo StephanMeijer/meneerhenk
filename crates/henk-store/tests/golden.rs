@@ -42,9 +42,10 @@ use std::path::{Path, PathBuf};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    EventFilter, EventKey, OutcomeFilter, Page, PgStore, RunFilter, RunKey, RunRecord, RunStatus,
-    RunStore, SessionRole, SqliteStore, ToolCallFilter, ToolCallKey,
+    Candidate, EventFilter, EventKey, OutcomeFilter, Page, PgStore, RunFilter, RunKey, RunRecord,
+    RunStatus, RunStore, SessionRole, ToolCallFilter, ToolCallKey,
 };
+use sqlx::{AnyConnection, AssertSqlSafe, Connection as _, Row as _};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -500,16 +501,27 @@ async fn report(store: &dyn RunStore) -> Vec<(&'static str, String)> {
 /// Compares `report` with the files of `database`, or writes them when
 /// `HENK_BLESS` is set.
 fn check(database: &str, report: &[(&str, String)]) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden")
-        .join(database);
+    check_from(database, report, &[]);
+}
+
+/// [`check`], but a file named in `elsewhere` is compared with the same file
+/// of another database's directory: `(name, database)`. For the one place
+/// the two stores differ today (see the header) where the store under test
+/// does what the other one does.
+fn check_from(database: &str, report: &[(&str, String)], elsewhere: &[(&str, &str)]) {
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let dir = golden.join(database);
     let bless = std::env::var_os("HENK_BLESS").is_some();
     if bless {
         std::fs::create_dir_all(&dir).unwrap();
     }
     let mut stale = Vec::new();
     for (name, text) in report {
-        let path = dir.join(format!("{name}.txt"));
+        let from = elsewhere
+            .iter()
+            .find(|(file, _)| file == name)
+            .map_or(dir.clone(), |(_, other)| golden.join(other));
+        let path = from.join(format!("{name}.txt"));
         if bless {
             std::fs::write(&path, text).unwrap();
             continue;
@@ -545,13 +557,21 @@ fn check(database: &str, report: &[(&str, String)]) {
     );
 }
 
+/// A second connection to the file, of sqlx's own, behind the store's back.
+async fn sqlite_connection(path: &Path) -> AnyConnection {
+    sqlx::any::install_default_drivers();
+    AnyConnection::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap()
+}
+
 struct SqliteSeeder(PathBuf);
 
 impl Seeder for SqliteSeeder {
     async fn execute(&self, sql: &str) {
-        rusqlite::Connection::open(&self.0)
-            .unwrap()
-            .execute_batch(sql)
+        sqlx::raw_sql(AssertSqlSafe(sql.to_owned()))
+            .execute(&mut sqlite_connection(&self.0).await)
+            .await
             .unwrap();
     }
 }
@@ -581,23 +601,28 @@ impl Drop for File {
 #[tokio::test]
 async fn sqlite_returns_what_the_goldens_say() {
     let file = File::new();
-    drop(SqliteStore::open(&file.0).unwrap());
+    drop(Candidate::open(&file.0).await.unwrap());
     SqliteSeeder(file.0.clone()).execute(SEED).await;
-    let store = SqliteStore::open(&file.0).unwrap();
-    check("sqlite", &report(&store).await);
+    let store = Candidate::open(&file.0).await.unwrap();
+    check_from("sqlite", &report(&store).await, SQLITE_INBOUND_BY_INSTANT);
 }
+
+/// This store lists inbound events by instant on SQLite too, as PostgreSQL
+/// does, so that file is compared with the PostgreSQL golden (the header
+/// says why the two differ today).
+const SQLITE_INBOUND_BY_INSTANT: &[(&str, &str)] = &[("inbound_events", "postgres")];
 
 #[tokio::test]
 async fn the_seed_is_the_same_rows_whichever_way_it_is_read() {
     // The goldens are only as good as their seed: every table it fills has
     // rows, and a second read of the same file gives the same report.
     let file = File::new();
-    drop(SqliteStore::open(&file.0).unwrap());
+    drop(Candidate::open(&file.0).await.unwrap());
     SqliteSeeder(file.0.clone()).execute(SEED).await;
-    let first = report(&SqliteStore::open(&file.0).unwrap()).await;
-    let second = report(&SqliteStore::open(&file.0).unwrap()).await;
+    let first = report(&Candidate::open(&file.0).await.unwrap()).await;
+    let second = report(&Candidate::open(&file.0).await.unwrap()).await;
     assert_eq!(first, second);
-    let connection = rusqlite::Connection::open(&file.0).unwrap();
+    let mut connection = sqlite_connection(&file.0).await;
     for table in [
         "runs",
         "sessions",
@@ -612,11 +637,179 @@ async fn the_seed_is_the_same_rows_whichever_way_it_is_read() {
         "event_outcomes",
         "run_children",
     ] {
-        let rows: i64 = connection
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap();
+        let rows: i64 = sqlx::query(AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
+            .get(0);
         assert!(rows > 0, "the seed puts nothing in {table}");
     }
+}
+
+/// The 20 SQLite migrations of the previous store, in order: what a database
+/// at `PRAGMA user_version = 20` went through.
+const LEGACY_SQLITE: [&str; 20] = [
+    include_str!("../migrations/sqlite/001_initial.sql"),
+    include_str!("../migrations/sqlite/002_inbound_events.sql"),
+    include_str!("../migrations/sqlite/003_run_liveness.sql"),
+    include_str!("../migrations/sqlite/004_dashboard.sql"),
+    include_str!("../migrations/sqlite/005_prune_events.sql"),
+    include_str!("../migrations/sqlite/006_event_requester.sql"),
+    include_str!("../migrations/sqlite/007_tool_calls.sql"),
+    include_str!("../migrations/sqlite/008_transcripts.sql"),
+    include_str!("../migrations/sqlite/009_drafts.sql"),
+    include_str!("../migrations/sqlite/010_superseded_by.sql"),
+    include_str!("../migrations/sqlite/011_stages.sql"),
+    include_str!("../migrations/sqlite/012_stats.sql"),
+    include_str!("../migrations/sqlite/013_run_instant.sql"),
+    include_str!("../migrations/sqlite/014_loop.sql"),
+    include_str!("../migrations/sqlite/015_lane_cache.sql"),
+    include_str!("../migrations/sqlite/016_sessions.sql"),
+    include_str!("../migrations/sqlite/017_rounds.sql"),
+    include_str!("../migrations/sqlite/018_reasoning_tokens.sql"),
+    include_str!("../migrations/sqlite/019_tool_names.sql"),
+    include_str!("../migrations/sqlite/020_run_children.sql"),
+];
+
+/// A database file the previous store would have left: its 20 migrations
+/// run in order and `user_version` set to 20, as rusqlite_migration does.
+async fn legacy_sqlite(path: &Path) {
+    let mut connection = sqlite_connection(path).await;
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    for sql in LEGACY_SQLITE {
+        sqlx::raw_sql(sql).execute(&mut connection).await.unwrap();
+    }
+    sqlx::query("PRAGMA user_version = 20")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+}
+
+/// The versions sqlx's migrator recorded in `_sqlx_migrations`, and how long
+/// each took (-1 for a step it recorded without running).
+async fn recorded_steps(path: &Path) -> Vec<(i64, i64)> {
+    sqlx::query("SELECT version, execution_time FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&mut sqlite_connection(path).await)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+#[tokio::test]
+async fn sqlite_adopts_a_database_the_previous_migrations_made() {
+    let file = File::new();
+    legacy_sqlite(&file.0).await;
+    SqliteSeeder(file.0.clone()).execute(SEED).await;
+    // Opening adopts it: the steps it already has are recorded, not run.
+    let store = Candidate::open(&file.0).await.unwrap();
+    check_from("sqlite", &report(&store).await, SQLITE_INBOUND_BY_INSTANT);
+    let steps = recorded_steps(&file.0).await;
+    assert_eq!(steps.iter().map(|s| s.0).collect::<Vec<_>>(), [1, 2, 3]);
+    assert!(
+        steps.iter().all(|s| s.1 == -1),
+        "recorded without running: {steps:?}"
+    );
+    // The old bookkeeping is left as it was.
+    let version: i64 = sqlx::query("PRAGMA user_version")
+        .fetch_one(&mut sqlite_connection(&file.0).await)
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(version, 20);
+    // And opening it again changes nothing.
+    drop(store);
+    let again = Candidate::open(&file.0).await.unwrap();
+    check_from("sqlite", &report(&again).await, SQLITE_INBOUND_BY_INSTANT);
+    assert_eq!(recorded_steps(&file.0).await, steps);
+}
+
+/// The database `SqliteStore` made at schema 020 and filled with the seed
+/// (`HENK_FIXTURE_SQLITE_020` names it; it is copied first).
+#[tokio::test]
+#[ignore = "needs HENK_FIXTURE_SQLITE_020"]
+async fn sqlite_adopts_the_fixture_the_previous_store_made() {
+    let fixture = std::env::var("HENK_FIXTURE_SQLITE_020").expect("HENK_FIXTURE_SQLITE_020");
+    let file = File::new();
+    std::fs::copy(fixture, &file.0).unwrap();
+    let store = Candidate::open(&file.0).await.unwrap();
+    check_from("sqlite", &report(&store).await, SQLITE_INBOUND_BY_INSTANT);
+    let steps = recorded_steps(&file.0).await;
+    assert_eq!(steps, [(1, -1), (2, -1), (3, -1)]);
+}
+
+/// A database older than the one the steps restate is refused with a
+/// message, not half-adopted.
+#[tokio::test]
+async fn sqlite_refuses_a_database_at_another_version() {
+    let file = File::new();
+    legacy_sqlite(&file.0).await;
+    sqlx::query("PRAGMA user_version = 19")
+        .execute(&mut sqlite_connection(&file.0).await)
+        .await
+        .unwrap();
+    let error = Candidate::open(&file.0).await.unwrap_err();
+    assert!(error.to_string().contains("schema version 19"), "{error}");
+}
+
+/// What the tables look like: each one's columns and its indexes' names.
+async fn sqlite_shape(path: &Path) -> Vec<String> {
+    let mut connection = sqlite_connection(path).await;
+    let tables: Vec<String> = sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table'
+         AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_sqlx%' ESCAPE '\\' ORDER BY name",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row.get(0))
+    .collect();
+    let mut shape = Vec::new();
+    for table in tables {
+        let columns = sqlx::query(AssertSqlSafe(format!(
+            "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{table}') ORDER BY cid"
+        )))
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        for row in columns {
+            shape.push(format!(
+                "{table}.{} {} notnull={} default={:?} pk={}",
+                row.get::<String, _>(0),
+                row.get::<String, _>(1),
+                row.get::<i64, _>(2),
+                row.get::<Option<String>, _>(3),
+                row.get::<i64, _>(4),
+            ));
+        }
+        let indexes = sqlx::query(AssertSqlSafe(format!(
+            "SELECT name FROM pragma_index_list('{table}') WHERE origin = 'c' ORDER BY name"
+        )))
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        for row in indexes {
+            shape.push(format!("{table} index {}", row.get::<String, _>(0)));
+        }
+    }
+    shape
+}
+
+/// A database made fresh has the schema of one the 20 migrations made: the
+/// three steps restate the history, they do not change it.
+#[tokio::test]
+async fn the_steps_make_the_schema_the_20_migrations_make() {
+    let (old, new) = (File::new(), File::new());
+    legacy_sqlite(&old.0).await;
+    drop(Candidate::open(&new.0).await.unwrap());
+    let (old, new) = (sqlite_shape(&old.0).await, sqlite_shape(&new.0).await);
+    assert!(old.len() > 100, "{}", old.len());
+    assert_eq!(old, new);
 }
 
 /// `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server. Every test gets
@@ -702,8 +895,108 @@ mod postgres {
     async fn postgres_returns_what_the_goldens_say() {
         let schema = schema().await;
         // Connecting migrates; then the rows go in behind the store's back.
-        let store = PgStore::connect(&schema.url).await.unwrap();
+        let store = Candidate::connect(&schema.url).await.unwrap();
         PgSeeder(schema.url.clone()).execute(SEED).await;
         check("postgres", &report(&store).await);
+    }
+
+    /// A query on the schema's own connection, as text.
+    async fn texts(url: &str, sql: &str) -> Vec<String> {
+        client(url)
+            .await
+            .unwrap()
+            .query(sql, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect()
+    }
+
+    /// The schema the previous store makes (`PgStore::connect` migrates
+    /// 001 to 016 and records them in `henk_schema_migrations`) is adopted:
+    /// recognised, not rebuilt, rows kept, and what it reads is unchanged.
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn postgres_adopts_a_schema_the_previous_store_made() {
+        let schema = schema().await;
+        let old = PgStore::connect(&schema.url).await.unwrap();
+        PgSeeder(schema.url.clone()).execute(SEED).await;
+        // The oids of the tables: a rebuilt table has a new one.
+        let oids = "SELECT string_agg(relname || ':' || oid::text, ',' ORDER BY relname)
+                    FROM pg_class WHERE relnamespace = current_schema()::regnamespace
+                    AND relkind = 'r' AND relname <> '_sqlx_migrations'";
+        let before = texts(&schema.url, oids).await;
+        drop(old);
+
+        let store = Candidate::connect(&schema.url).await.unwrap();
+        check("postgres", &report(&store).await);
+        assert_eq!(texts(&schema.url, oids).await, before, "no table rebuilt");
+        // sqlx recorded steps 1 and 3 (PostgreSQL has no step 2) without
+        // running them, and the old table is left alone at 16.
+        let steps = texts(
+            &schema.url,
+            "SELECT string_agg(version || ':' || execution_time, ',' ORDER BY version)
+             FROM _sqlx_migrations",
+        )
+        .await;
+        assert_eq!(steps, ["1:-1,3:-1"]);
+        let old = texts(
+            &schema.url,
+            "SELECT max(version)::text FROM henk_schema_migrations",
+        )
+        .await;
+        assert_eq!(old, ["16"]);
+        // Connecting again changes nothing.
+        drop(store);
+        let again = Candidate::connect(&schema.url).await.unwrap();
+        check("postgres", &report(&again).await);
+    }
+
+    /// What the tables look like: columns with their types, defaults and
+    /// nullability, and the definition of each index, without the schema.
+    async fn shape(url: &str, name: &str) -> Vec<String> {
+        let mut shape = texts(
+            url,
+            "SELECT table_name || '.' || column_name || ' ' || data_type || ' '
+                    || is_nullable || ' ' || coalesce(column_default, '-') || ' ' || is_identity
+             FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name NOT IN ('_sqlx_migrations', 'henk_schema_migrations')
+             ORDER BY table_name, ordinal_position",
+        )
+        .await;
+        shape.extend(
+            texts(
+                url,
+                "SELECT replace(indexdef, current_schema() || '.', '') FROM pg_indexes
+                 WHERE schemaname = current_schema() AND tablename NOT IN ('_sqlx_migrations', 'henk_schema_migrations')
+                 ORDER BY indexname",
+            )
+            .await,
+        );
+        assert!(shape.len() > 100, "{name}: {}", shape.len());
+        shape
+    }
+
+    /// A schema made fresh has what one the 16 migrations made has.
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn the_steps_make_the_schema_the_16_migrations_make() {
+        let (old, new) = (schema().await, schema().await);
+        drop(PgStore::connect(&old.url).await.unwrap());
+        drop(Candidate::connect(&new.url).await.unwrap());
+        let (old, new) = (shape(&old.url, "old").await, shape(&new.url, "new").await);
+        // One difference is known: the previous migrations renamed `lanes`
+        // to `sessions`, and PostgreSQL keeps the primary key's index name.
+        let old: Vec<String> = old
+            .iter()
+            .map(|line| line.replace("lanes_pkey", "sessions_pkey"))
+            .collect();
+        let only = |a: &[String], b: &[String]| -> Vec<String> {
+            a.iter().filter(|line| !b.contains(line)).cloned().collect()
+        };
+        assert_eq!(only(&old, &new), Vec::<String>::new(), "only in the old");
+        assert_eq!(only(&new, &old), Vec::<String>::new(), "only in the new");
+        assert_eq!(old.len(), new.len());
     }
 }
