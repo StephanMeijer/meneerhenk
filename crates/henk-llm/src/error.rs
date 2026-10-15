@@ -107,9 +107,6 @@ pub(crate) fn truncate_body(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_owned();
     }
-    let mut end = LIMIT;
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = body.floor_char_boundary(LIMIT);
     format!("{}...", body.get(..end).unwrap_or_default())
 }

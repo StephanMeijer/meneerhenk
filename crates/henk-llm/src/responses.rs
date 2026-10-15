@@ -157,15 +157,11 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
                         "content": [{"type": "output_text", "text": text}],
                     })),
                     Block::ToolCall(call) => {
-                        let arguments = match &call.arguments {
-                            ToolArguments::Parsed(value) => value.to_string(),
-                            ToolArguments::Malformed(raw) => raw.clone(),
-                        };
                         out.push(json!({
                             "type": "function_call",
                             "call_id": call.id,
                             "name": call.name,
-                            "arguments": arguments,
+                            "arguments": call.arguments.text(),
                         }));
                     }
                     Block::Opaque(_) | Block::Text(_) | Block::ToolResult(_) => {}
@@ -311,16 +307,7 @@ fn decode_call(item: &Value) -> Result<ToolCall, LlmError> {
         .and_then(Value::as_str)
         .ok_or_else(|| LlmError::Decode(format!("function call {name} without call_id")))?
         .to_owned();
-    let arguments = match item.get("arguments") {
-        Some(Value::String(raw)) if raw.trim().is_empty() => ToolArguments::Parsed(json!({})),
-        Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).map_or_else(
-            |_| ToolArguments::Malformed(raw.clone()),
-            ToolArguments::Parsed,
-        ),
-        Some(Value::Object(map)) => ToolArguments::Parsed(Value::Object(map.clone())),
-        Some(Value::Null) | None => ToolArguments::Parsed(json!({})),
-        Some(other) => ToolArguments::Malformed(other.to_string()),
-    };
+    let arguments = ToolArguments::from_wire(item.get("arguments"));
     Ok(ToolCall {
         id,
         name,

@@ -741,10 +741,7 @@ fn called_event(
         turn,
         name: shown.to_owned(),
         origin: origin.to_owned(),
-        arguments: match &call.arguments {
-            ToolArguments::Parsed(value) => value.to_string(),
-            ToolArguments::Malformed(raw) => raw.clone(),
-        },
+        arguments: call.arguments.text().into_owned(),
         outcome,
         elapsed,
         result_chars,

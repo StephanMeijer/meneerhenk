@@ -137,14 +137,10 @@ fn encode_message(message: &ChatMessage, out: &mut Vec<Value>) {
             let calls: Vec<Value> = message
                 .tool_calls()
                 .map(|call| {
-                    let arguments = match &call.arguments {
-                        ToolArguments::Parsed(value) => value.to_string(),
-                        ToolArguments::Malformed(raw) => raw.clone(),
-                    };
                     json!({
                         "id": call.id,
                         "type": "function",
-                        "function": {"name": call.name, "arguments": arguments},
+                        "function": {"name": call.name, "arguments": call.arguments.text()},
                     })
                 })
                 .collect();
@@ -220,20 +216,7 @@ pub fn decode(response: &Value) -> Result<Completion, LlmError> {
                 .get("id")
                 .and_then(Value::as_str)
                 .map_or_else(|| synthetic_id(index), str::to_owned);
-            let arguments = match function.get("arguments") {
-                // Proxies and some models send "" for a tool without
-                // parameters; that is an empty object, not malformed JSON.
-                Some(Value::String(raw)) if raw.trim().is_empty() => {
-                    ToolArguments::Parsed(json!({}))
-                }
-                Some(Value::String(raw)) => serde_json::from_str::<Value>(raw).map_or_else(
-                    |_| ToolArguments::Malformed(raw.clone()),
-                    ToolArguments::Parsed,
-                ),
-                Some(Value::Object(map)) => ToolArguments::Parsed(Value::Object(map.clone())),
-                Some(Value::Null) | None => ToolArguments::Parsed(json!({})),
-                Some(other) => ToolArguments::Malformed(other.to_string()),
-            };
+            let arguments = ToolArguments::from_wire(function.get("arguments"));
             blocks.push(Block::ToolCall(ToolCall {
                 id,
                 name,
