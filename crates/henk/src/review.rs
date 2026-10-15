@@ -1730,6 +1730,181 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// Waits until the review `run` is running.
+    async fn running(app: &App, run: &RunId) {
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(run).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                return;
+            }
+        }
+        panic!("the review never started: {status:?}");
+    }
+
+    /// How an awaited review ended, within ten seconds.
+    async fn ended_with(
+        ended: tokio::sync::oneshot::Receiver<anyhow::Result<ReviewReport>>,
+    ) -> anyhow::Result<ReviewReport> {
+        tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .expect("the review ended in time")
+            .expect("the review told how it ended")
+    }
+
+    /// #536: a caller that waits for a review hears its report, and by then
+    /// the pull request is free for the next one.
+    #[tokio::test]
+    async fn an_awaited_review_reports_how_it_ended_once_it_left_the_queue() {
+        let model = ScriptedClient::new("scripted", converge());
+        let Fixture {
+            app,
+            head,
+            remote: _remote,
+            ..
+        } = fixture("henk-await-ok", DIFF, model).await;
+        let app = Arc::new(app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+
+        let (decision, run, ended) = coordinator.submit_review_awaited(request(&placeholder), head);
+        assert_eq!(decision, henk_domain::queue::Decision::Start);
+        let report = ended_with(ended).await.unwrap();
+        assert_eq!(report.run, run);
+        assert_eq!(
+            report.outcome.unwrap().check_conclusion(),
+            CheckConclusion::Success
+        );
+        assert_eq!(coordinator.tracked_reviews(), 0, "told after it left");
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_cancelled_by_a_person_is_told_who() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let Fixture {
+            app,
+            head,
+            remote: _remote,
+            ..
+        } = fixture("henk-await-cancel", DIFF, model).await;
+        let app = Arc::new(app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+
+        let (_, run, ended) = coordinator.submit_review_awaited(request(&placeholder), head);
+        running(&app, &run).await;
+        assert!(coordinator.cancel(&run, "github:1234".to_owned()));
+        let error = ended_with(ended).await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CancelledBy>().map(|c| c.0.as_str()),
+            Some("github:1234"),
+            "{error:#}"
+        );
+        app.shutdown.cancel();
+    }
+
+    /// A review that never got a slot is told how it ended as well, and
+    /// still leaves its run and its queued check behind as before.
+    #[tokio::test]
+    async fn an_awaited_review_cancelled_while_it_waits_for_a_slot_is_told_who() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-await-queued", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, first) = coordinator.submit_review(request(&placeholder), commit.clone());
+        running(&app, &first).await;
+
+        let mut other = request(&placeholder);
+        other.target.number = 8;
+        let (decision, queued, ended) = coordinator.submit_review_awaited(other, commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Start);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            app.store.run(&queued).await.unwrap().is_none(),
+            "the second review waits for the slot"
+        );
+
+        assert!(coordinator.cancel(&queued, "github:1234".to_owned()));
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<CancelledBy>(), "{error:#}");
+        let record = app.store.run(&queued).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_replaced_by_a_newer_commit_is_told_it_was_superseded() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let Fixture {
+            app, head, remote, ..
+        } = fixture("henk-await-supersede", DIFF, model).await;
+        let app = Arc::new(app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, old, ended) = coordinator.submit_review_awaited(request(&placeholder), head);
+        running(&app, &old).await;
+
+        // A real newer commit, so the review of it can check it out.
+        let remote = remote.as_ref().unwrap().path();
+        move_branch(remote, "henk-await-supersede").await;
+        let (newer, _) = crate::git::tests::remote_feature(remote).await;
+        let newer = CommitSha::parse(&newer).unwrap();
+        let (decision, _) = coordinator.submit_review(request(&placeholder), newer);
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<Superseded>(), "{error:#}");
+        app.shutdown.cancel();
+    }
+
+    /// A request for the commit already under review joins that run, which
+    /// is another run's to report: nobody here waits for it.
+    #[tokio::test]
+    async fn an_awaited_review_of_the_commit_under_review_joins_it_and_hears_nothing() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let Fixture {
+            app,
+            head,
+            remote: _remote,
+            ..
+        } = fixture("henk-await-join", DIFF, model).await;
+        let app = Arc::new(app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, run) = coordinator.submit_review(request(&placeholder), head.clone());
+        running(&app, &run).await;
+
+        let (decision, joined, ended) =
+            coordinator.submit_review_awaited(request(&placeholder), head);
+        assert_eq!(decision, henk_domain::queue::Decision::Join);
+        assert_eq!(joined, run, "named, so the caller can follow it");
+        assert!(ended.await.is_err(), "the receiver is closed");
+        assert!(coordinator.cancel(&run, "github:1234".to_owned()));
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_stopped_by_a_shutdown_is_told_it_was_interrupted() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let Fixture {
+            app,
+            head,
+            remote: _remote,
+            ..
+        } = fixture("henk-await-shutdown", DIFF, model).await;
+        let app = Arc::new(app);
+        let coordinator = crate::coordinator::Coordinator::new(Arc::clone(&app));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, run, ended) = coordinator.submit_review_awaited(request(&placeholder), head);
+        running(&app, &run).await;
+
+        app.shutdown.cancel();
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<Interrupted>(), "{error:#}");
+    }
+
     /// Waits, up to four seconds, until `ready` holds.
     async fn until(what: &str, ready: impl Fn() -> bool) {
         for _ in 0..400 {

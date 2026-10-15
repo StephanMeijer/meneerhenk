@@ -10,7 +10,7 @@ use henk_domain::queue::{Decision, Priority, Work, decide};
 use henk_domain::review::{CommitSha, ReviewOutcome};
 use henk_domain::run::{RunId, RunKind};
 use henk_platform::{IssueTarget, ReviewHandle, ReviewTarget};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -20,7 +20,8 @@ use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
 use crate::rebase::{RebaseRequest, run_rebase};
 use crate::review::{
-    ReviewRequest, report_cancelled_while_queued, report_interrupted_while_queued, run_review,
+    CancelledBy, Interrupted, ReviewReport, ReviewRequest, Superseded,
+    report_cancelled_while_queued, report_interrupted_while_queued, run_review,
 };
 use crate::slot_queue::{NotWaiting, Slot, SlotQueue};
 
@@ -331,16 +332,13 @@ async fn wait_for_slot(
 /// superseded by a newer commit, or stopped with Henk. Its queued check,
 /// if it has one, is closed so nothing stays queued (#262). One stopped
 /// with Henk is recorded as an interrupted run, so the next start resumes
-/// it (#160).
-async fn ended_while_queued(app: &App, request: &ReviewRequest) {
-    let Some(run) = request.run.as_ref() else {
-        return;
-    };
+/// it (#160). Returns how it ended, as `run_review` would have said it.
+async fn ended_while_queued(app: &App, run: &RunId, request: &ReviewRequest) -> anyhow::Error {
     if let Some(by) = app.cancels.cancelled_by(run) {
         if let Err(error) = report_cancelled_while_queued(app, request, &by).await {
             warn!(%error, "could not record the cancelled review");
         }
-        return;
+        return CancelledBy(by).into();
     }
     if app.cancels.superseded_by(run).is_none() && app.shutdown.is_cancelled() {
         // Henk stops: the run is recorded as interrupted, so the next
@@ -348,11 +346,18 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
         if let Err(error) = report_interrupted_while_queued(app, request).await {
             warn!(%error, "could not record the interrupted review");
         }
-        return;
+        return Interrupted.into();
     }
+    let superseded =
+        app.cancels.superseded_for_rebase(run) || app.cancels.superseded_by(run).is_some();
+    let ended: anyhow::Error = if superseded {
+        Superseded.into()
+    } else {
+        Interrupted.into()
+    };
     let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
         info!("review stopped before it started");
-        return;
+        return ended;
     };
     let outcome = if app.cancels.superseded_for_rebase(run) {
         info!("review superseded by a rebase before it started");
@@ -376,6 +381,7 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
         }
         Err(error) => warn!(%error, "could not close the queued check"),
     }
+    ended
 }
 
 /// Starts and tracks background runs.
@@ -595,16 +601,46 @@ impl Coordinator {
     /// Returns the decision and the run it concerns: the new run, the one
     /// joined, or the one that will start after a rebase.
     pub fn submit_review(&self, request: ReviewRequest, commit: CommitSha) -> (Decision, RunId) {
-        self.submit_review_as(request, commit, new_run_id())
+        self.submit_review_as(request, commit, new_run_id(), None)
+    }
+
+    /// [`Self::submit_review`] for a caller that waits for the review to
+    /// end. The receiver gets how the run ended, as `run_review` returns it
+    /// (an error downcasts to `Superseded`, `CancelledBy`, `Interrupted` or
+    /// `NotReviewable`), once the run has left the queue and freed its slot.
+    ///
+    /// It answers only when the decision is `Start` or `Supersede`. On
+    /// `Join` and `After` the review is another run's, which nobody here
+    /// waits on: the receiver is closed and the run id names that run. A
+    /// closed receiver after `Start` means the coordinator refused or the
+    /// run's task died, and nothing says how it ended.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the ticket run waits on its review (#536)")
+    )]
+    pub fn submit_review_awaited(
+        &self,
+        request: ReviewRequest,
+        commit: CommitSha,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<ReviewReport>>,
+    ) {
+        let (tell, ended) = oneshot::channel();
+        let (decision, run) = self.submit_review_as(request, commit, new_run_id(), Some(tell));
+        (decision, run, ended)
     }
 
     /// [`Self::submit_review`] as `run`: a review held for a rebase keeps
-    /// the run id it was given then.
+    /// the run id it was given then. `tell` hears how the run ended, when
+    /// this call starts one.
     fn submit_review_as(
         &self,
         request: ReviewRequest,
         commit: CommitSha,
         run: RunId,
+        tell: Option<oneshot::Sender<anyhow::Result<ReviewReport>>>,
     ) -> (Decision, RunId) {
         let key = Key::of(&request.target);
         let generation = self.next_generation();
@@ -698,15 +734,24 @@ impl Coordinator {
             slots.leave(&queued);
             started.store(true, std::sync::atomic::Ordering::Relaxed);
             slots_changed.send_replace(());
-            if cancel.is_cancelled() {
-                ended_while_queued(&app, &request).await;
-            } else if let Err(error) = run_review(&app, request, cancel).await {
-                warn!(%error, "review ended with an error");
-            }
+            let result = if cancel.is_cancelled() {
+                Err(ended_while_queued(&app, &queued, &request).await)
+            } else {
+                let result = run_review(&app, request, cancel).await;
+                if let Err(error) = &result {
+                    warn!(%error, "review ended with an error");
+                }
+                result
+            };
             drop(permit);
             // Not ended before the run it replaced has.
             ended(predecessor.as_ref()).await;
             leave(&active, &key, generation, &slots_changed);
+            // Told last: whoever waits may ask for the next review of the
+            // pull request, which then finds this one gone.
+            if let Some(tell) = tell {
+                let _ = tell.send(result);
+            }
         });
         (decision, run)
     }
@@ -938,7 +983,7 @@ impl Coordinator {
                 }
             }
             (None, Some(waited)) => {
-                self.submit_review_as(waited.request, waited.commit, waited.run);
+                self.submit_review_as(waited.request, waited.commit, waited.run, None);
             }
             (None, None) => {}
         }
