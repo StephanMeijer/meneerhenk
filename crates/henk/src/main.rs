@@ -37,6 +37,7 @@ mod plan_tools;
 mod plan_workspace;
 mod prune;
 mod push;
+mod rebase;
 mod recorder;
 mod resume;
 mod review;

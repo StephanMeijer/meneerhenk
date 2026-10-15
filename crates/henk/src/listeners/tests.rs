@@ -22,7 +22,9 @@ use henk_events::{
 use henk_store::RunStore;
 
 use super::testing::{FakeWriter, FakeWriters};
-use super::{ExecuteListener, MentionListener, PlanListener, ReviewListener, Writers};
+use super::{
+    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, Writers,
+};
 use crate::app::App;
 use crate::config::Config;
 use crate::coordinator::Coordinator;
@@ -76,6 +78,10 @@ impl Harness {
             Arc::new(StoreRecorder(Arc::clone(&app.store))),
             vec![
                 Arc::new(ReviewListener::new(
+                    Arc::clone(&coordinator),
+                    Arc::clone(&writers),
+                )),
+                Arc::new(RebaseListener::new(
                     Arc::clone(&coordinator),
                     Arc::clone(&writers),
                 )),
@@ -247,7 +253,7 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
     let outcomes = h.store.outcomes(&out.id).await.unwrap();
-    assert_eq!(outcomes.len(), 4);
+    assert_eq!(outcomes.len(), 5, "one per listener");
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
     assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
@@ -555,4 +561,63 @@ async fn an_execute_request_starts_an_execute_run_where_execution_is_configured(
     assert!(matches!(outside.of("execute"), Handled::Ignored(r) if r.contains("allowlist")));
     let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
     assert_eq!(recorded.kind, "execute_requested");
+}
+
+/// #579: `@meneer-henk rebase` starts a rebase where the executor is
+/// configured, and is neither a review command nor a mention; a direct
+/// request does too, on the allowlist only.
+#[tokio::test]
+async fn a_rebase_command_or_request_starts_a_rebase_and_nothing_else() {
+    let h = Harness::new().await;
+    let off = h
+        .deliver(comment("@meneer-henk rebase", person("alice")))
+        .await;
+    assert!(
+        matches!(off.of("rebase"), Handled::Ignored(r) if r == "rebasing needs [roles.executor]"),
+        "{:?}",
+        off.by_listener
+    );
+
+    // App::build reads the model's key: PATH is set wherever tests run.
+    let executor = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\n[models.m]\nendpoint = \"m\"\nmodel = \"m\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    let h = Harness::configured(
+        FakeWriter {
+            head: SHA.to_owned(),
+            ..FakeWriter::default()
+        },
+        &format!("{CONFIG}{executor}"),
+    )
+    .await;
+    let out = h
+        .deliver(comment("@meneer-henk rebase", person("alice")))
+        .await;
+    assert!(
+        matches!(out.of("rebase"), Handled::Started(_)),
+        "{:?}",
+        out.by_listener
+    );
+    assert!(matches!(out.of("review"), Handled::Ignored(r) if r.contains("not a review command")));
+    assert!(matches!(out.of("mention"), Handled::Ignored(r) if r.contains("rebase command")));
+
+    let review = h
+        .deliver(comment("@meneer-henk review", person("alice")))
+        .await;
+    assert!(matches!(review.of("rebase"), Handled::Ignored(r) if r == "not a rebase command"));
+
+    let request = |path: &str| EventKind::RebaseRequested {
+        target: ReviewTarget {
+            repo: repo(path),
+            number: 7,
+        },
+        requester: Some("github:523".into()),
+    };
+    let direct = h.deliver(request("docspec/app")).await;
+    assert!(matches!(direct.of("rebase"), Handled::Started(_)));
+    for other in ["review", "plan", "execute", "mention"] {
+        assert!(matches!(direct.of(other), Handled::Ignored(_)), "{other}");
+    }
+    let outside = h.deliver(request("evil/app")).await;
+    assert!(matches!(outside.of("rebase"), Handled::Ignored(r) if r.contains("allowlist")));
+    let recorded = h.store.inbound_event(&direct.id).await.unwrap().unwrap();
+    assert_eq!(recorded.kind, "rebase_requested");
 }

@@ -572,10 +572,16 @@ mod tests {
 
     #[test]
     fn a_rebase_request_is_the_handle_and_rebase_only() {
-        assert!(is_rebase_request(Platform::GitHub, "  @Meneer-Henk rebase\n"));
+        assert!(is_rebase_request(
+            Platform::GitHub,
+            "  @Meneer-Henk rebase\n"
+        ));
         assert!(is_rebase_request(Platform::GitLab, "@meneerhenk rebase"));
         assert!(!is_rebase_request(Platform::GitLab, "@meneer-henk rebase"));
-        assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk rebase please"));
+        assert!(!is_rebase_request(
+            Platform::GitHub,
+            "@meneer-henk rebase please"
+        ));
         assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk review"));
     }
 

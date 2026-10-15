@@ -208,6 +208,7 @@ async fn me(State(dashboard): State<Arc<Dashboard>>, ApiViewer(viewer): ApiViewe
         ("review", settings.review.r#loop.is_some()),
         ("plan", settings.planning.is_some()),
         ("execute", settings.execution.is_some()),
+        ("rebase", settings.roles.executor.is_some()),
     ]
     .into_iter()
     .filter(|(_, on)| *on)

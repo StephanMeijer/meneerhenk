@@ -2,7 +2,7 @@
   import { ApiError, startRun } from '$lib/api/client';
   import type { StartRequest, Started } from '$lib/api/types';
   import { eventPath, navigate } from '$lib/router';
-  import { checkUrl, type Start } from '$lib/targets';
+  import { checkUrl, needs, type Start } from '$lib/targets';
   import Icon from '$lib/ui/Icon.svelte';
 
   /** What the start dialog holds (#230). `start`, `go` and `reload` are
@@ -31,8 +31,18 @@
       label: 'Take an issue to a pull request',
       line: 'The executor makes the change on a new branch, Henk opens the pull request and reviews it.',
     },
+    {
+      kind: 'rebase',
+      label: 'Rebase a pull request',
+      line: 'Henk replays it onto its base branch, has the executor resolve conflicts, pushes with a lease and reviews it.',
+    },
   ];
-  const BUTTONS: Record<Start, string> = { review: 'Start review', plan: 'Start plan', execute: 'Take it on' };
+  const BUTTONS: Record<Start, string> = {
+    review: 'Start review',
+    plan: 'Start plan',
+    execute: 'Take it on',
+    rebase: 'Rebase it',
+  };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
   let kind: Start = $state('review');
@@ -63,7 +73,7 @@
         kind,
         url: url.trim(),
         commit: kind === 'review' && commit.trim() !== '' ? commit.trim() : null,
-        note: kind !== 'review' && note.trim() !== '' ? note.trim() : null,
+        note: (kind === 'plan' || kind === 'execute') && note.trim() !== '' ? note.trim() : null,
       });
       go(eventPath(started.event_id));
     } catch (error) {
@@ -90,7 +100,7 @@
   </fieldset>
 
   <label class="field">
-    <span>{kind === 'review' ? 'Pull request URL' : 'Issue URL'}</span>
+    <span>{needs(kind) === 'pull' ? 'Pull request URL' : 'Issue URL'}</span>
     <input
       name="url"
       required
@@ -98,7 +108,7 @@
       bind:value={url}
       aria-invalid={!fits}
       aria-describedby="start-url-check"
-      placeholder={kind === 'review' ? 'https://github.com/owner/name/pull/7' : 'https://github.com/owner/name/issues/52'}
+      placeholder={needs(kind) === 'pull' ? 'https://github.com/owner/name/pull/7' : 'https://github.com/owner/name/issues/52'}
     >
     <span id="start-url-check" class="check" aria-live="polite">
       {#if check !== null && 'ok' in check}
@@ -114,7 +124,7 @@
       <span>Commit <span class="muted">optional</span></span>
       <input name="commit" autocomplete="off" bind:value={commit} placeholder="default: the head">
     </label>
-  {:else}
+  {:else if kind !== 'rebase'}
     <label class="field">
       <span>Note <span class="muted">optional, Henk reads it with the issue</span></span>
       <textarea name="note" rows="3" bind:value={note}></textarea>

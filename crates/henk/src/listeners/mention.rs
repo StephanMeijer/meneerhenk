@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use henk_domain::allowlist::Platform;
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
-use henk_domain::review::{is_review_request, mentions_henk};
+use henk_domain::review::{is_rebase_request, is_review_request, mentions_henk};
 use henk_events::{CommentKind, Event, EventKind, Handled, Listener};
 use henk_platform::ReviewTarget;
 use tracing::{info, instrument, warn};
@@ -54,6 +54,10 @@ impl Listener for MentionListener {
         // A review command is a command, not a mention: the review listener takes it.
         if is_review_request(platform, body) {
             return Handled::Ignored("a review command, not a mention".to_owned());
+        }
+        // So is a rebase command: the rebase listener takes it (#579).
+        if is_rebase_request(platform, body) {
+            return Handled::Ignored("a rebase command, not a mention".to_owned());
         }
         if !mentions_henk(platform, body) {
             return Handled::Ignored("does not mention Henk".to_owned());

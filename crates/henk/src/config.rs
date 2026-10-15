@@ -1031,9 +1031,10 @@ pub struct ExecutorConfig {
     /// The trailers of every commit, unless a repository says otherwise.
     #[serde(default)]
     pub trailers: TrailerConfig,
-    /// Trailer settings per repository, by `owner/name`.
+    /// Settings per repository, by `owner/name`: its trailers, and
+    /// whether Henk rebases its pull requests.
     #[serde(default)]
-    pub repositories: BTreeMap<String, TrailerConfig>,
+    pub repositories: BTreeMap<String, ExecutorRepositoryConfig>,
 }
 
 /// A name and email to commit as.
@@ -1066,6 +1067,33 @@ pub struct TrailerConfig {
     pub requester_signoff: Option<bool>,
 }
 
+/// What one repository changes about the executor's pushes: its trailers
+/// (as [`TrailerConfig`]), and whether Henk rebases its pull requests
+/// (#579).
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutorRepositoryConfig {
+    /// See [`TrailerConfig::henk_signoff`].
+    pub henk_signoff: Option<bool>,
+    /// See [`TrailerConfig::requester_coauthor`].
+    pub requester_coauthor: Option<bool>,
+    /// See [`TrailerConfig::requester_signoff`].
+    pub requester_signoff: Option<bool>,
+    /// Whether Henk rebases this repository's pull requests onto their
+    /// base branch. Default on.
+    pub rebase: Option<bool>,
+}
+
+impl ExecutorRepositoryConfig {
+    fn trailers(self) -> TrailerConfig {
+        TrailerConfig {
+            henk_signoff: self.henk_signoff,
+            requester_coauthor: self.requester_coauthor,
+            requester_signoff: self.requester_signoff,
+        }
+    }
+}
+
 impl TrailerConfig {
     fn over(self, base: TrailerPolicy) -> TrailerPolicy {
         TrailerPolicy {
@@ -1089,10 +1117,25 @@ impl ExecutorConfig {
     #[must_use]
     pub fn trailer_policy(&self, repo: &RepoRef) -> TrailerPolicy {
         let base = self.trailers.over(TrailerPolicy::default());
+        self.repository(repo)
+            .map_or(base, |config| config.trailers().over(base))
+    }
+
+    /// Whether Henk rebases `repo`'s pull requests (#579): yes, unless its
+    /// `[roles.executor.repositories]` entry says `rebase = false`.
+    #[must_use]
+    pub fn rebases(&self, repo: &RepoRef) -> bool {
+        self.repository(repo)
+            .and_then(|config| config.rebase)
+            .unwrap_or(true)
+    }
+
+    /// `repo`'s entry in `[roles.executor.repositories]`, if it has one.
+    fn repository(&self, repo: &RepoRef) -> Option<ExecutorRepositoryConfig> {
         self.repositories
             .iter()
             .find(|(key, _)| key.trim().eq_ignore_ascii_case(&repo.path()))
-            .map_or(base, |(_, config)| config.over(base))
+            .map(|(_, config)| *config)
     }
 
     /// Who Henk commits as when configured; `None` for the App's account.
@@ -2923,7 +2966,12 @@ impl Settings {
                 .or_else(|_| RepoRef::parse(Platform::GitLab, key))
             {
                 let policy = address.trailer_policy(&repo);
-                let _ = writeln!(out, "  {key}: {}", describe_policy(policy));
+                let rebase = if address.rebases(&repo) {
+                    ""
+                } else {
+                    "; not rebased"
+                };
+                let _ = writeln!(out, "  {key}: {}{rebase}", describe_policy(policy));
             }
         }
     }
@@ -3843,6 +3891,30 @@ github_owners = ["docspec"]
                 planner.timeout_secs(Role::Planner)
             ),
             (80, 1200)
+        );
+    }
+
+    #[test]
+    fn rebasing_is_on_unless_a_repository_turns_it_off() {
+        let settings = address(
+            "",
+            "[roles.executor.repositories.\"docspec/kept\"]\nrebase = false\nrequester_signoff = true\n",
+        )
+        .unwrap();
+        let config = settings.roles.executor.as_ref().unwrap();
+        let kept = RepoRef::parse(Platform::GitHub, "DocSpec/Kept").unwrap();
+        let other = RepoRef::parse(Platform::GitHub, "docspec/other").unwrap();
+        assert!(!config.rebases(&kept));
+        assert!(config.rebases(&other));
+        assert!(config.trailer_policy(&kept).requester_signoff);
+        let described = settings.describe();
+        assert!(
+            described.contains("  docspec/kept: ") && described.contains("; not rebased"),
+            "{described}"
+        );
+        assert!(
+            address("", "[roles.executor.trailers]\nrebase = false\n").is_err(),
+            "rebasing is per repository, not a trailer"
         );
     }
 

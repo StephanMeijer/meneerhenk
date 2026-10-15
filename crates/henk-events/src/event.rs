@@ -163,6 +163,15 @@ pub enum EventKind {
         /// Who asked, as a stable id.
         requester: Option<String>,
     },
+    /// A pull/merge request was asked to be rebased onto its base branch
+    /// (#579): API, dashboard or MCP. A comment asking for it is a
+    /// [`EventKind::Comment`].
+    RebaseRequested {
+        /// The pull/merge request.
+        target: ReviewTarget,
+        /// Who asked, as a stable id.
+        requester: Option<String>,
+    },
     /// A delivery of a kind no parser models. The payload is on the event.
     Unmodelled {
         /// The platform's name for the event.
@@ -182,6 +191,7 @@ impl EventKind {
             Self::ReviewRequested { .. } => "review_requested",
             Self::PlanRequested { .. } => "plan_requested",
             Self::ExecuteRequested { .. } => "execute_requested",
+            Self::RebaseRequested { .. } => "rebase_requested",
             Self::Unmodelled { .. } => "unmodelled",
             Self::Ignored(_) => "ignored",
         }
@@ -194,7 +204,9 @@ impl EventKind {
             Self::PullRequest { repo, number, .. } | Self::Comment { repo, number, .. } => {
                 Some((repo, *number))
             }
-            Self::ReviewRequested { target, .. } => Some((&target.repo, target.number)),
+            Self::ReviewRequested { target, .. } | Self::RebaseRequested { target, .. } => {
+                Some((&target.repo, target.number))
+            }
             Self::PlanRequested { target, .. } | Self::ExecuteRequested { target, .. } => {
                 Some((&target.repo, target.number))
             }

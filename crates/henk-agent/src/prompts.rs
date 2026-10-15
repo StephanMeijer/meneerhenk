@@ -43,6 +43,12 @@ pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 /// (#400), are filled in.
 pub const EXECUTE: &str = include_str!("../prompts/execute.md");
 
+/// Instructions for the executor resolving a rebase's conflicts (#579).
+/// `{{ref}}`, `{{repo}}`, `{{base}}`, `{{commit}}` (the subject of the
+/// commit being replayed), `{{files}}` (the conflicted files, one per line)
+/// and `{{edit_tool}}` are filled in.
+pub const REBASE: &str = include_str!("../prompts/rebase.md");
+
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
 pub const SKILLS: &str = include_str!("../prompts/skills.md");
@@ -94,6 +100,10 @@ mod tests {
         assert!(henk_domain::text::is_in_style(LOOP_EXECUTOR));
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
         assert!(henk_domain::text::is_in_style(EXECUTE));
+        assert!(henk_domain::text::is_in_style(REBASE));
+        for placeholder in ["{{base}}", "{{files}}", "{{edit_tool}}", "`write_file`"] {
+            assert!(REBASE.contains(placeholder), "{placeholder}");
+        }
         for tool in ["edit_file", "propose_pull_request"] {
             assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");
         }
