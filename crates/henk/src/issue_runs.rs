@@ -1,14 +1,17 @@
 //! How a run about an issue ends when it does not end well: a plan (§4)
-//! or an execute run (§4a). A person's cancel gets one comment saying who;
-//! a shutdown posts nothing; a failure gets one comment with the run link.
-//! Every one of them ends the run's stages and records it.
+//! or an execute run (§4a); and a rebase, which is about a pull request
+//! (§3.6). A person's cancel gets one comment saying who; a shutdown posts
+//! nothing; a failure gets one comment with the run link. Every one of
+//! them ends the run's stages and records it.
 
 use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow};
 use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::run::RunId;
-use henk_platform::{IssueInfo, IssueTarget, IssueWriter};
+use henk_platform::{
+    IssueInfo, IssueTarget, IssueWriter, PlatformError, PlatformWriter, ReviewTarget,
+};
 use henk_store::{RunStatus, StageState};
 use tracing::{error, info, warn};
 
@@ -37,11 +40,52 @@ pub(crate) async fn open_issue(
     Ok(issue)
 }
 
-/// One issue run, for its ending.
-pub(crate) struct OnIssue<'a> {
-    pub(crate) app: &'a App,
+/// Where a run's ending is said: the issue or pull request it is about.
+#[async_trait::async_trait]
+pub(crate) trait Thread: Send + Sync {
+    /// Posts `body` there.
+    async fn comment(&self, body: &str) -> Result<(), PlatformError>;
+}
+
+/// An issue, through the issue writer.
+#[derive(Clone, Copy)]
+pub(crate) struct IssueThread<'a> {
     pub(crate) writer: &'a Arc<dyn IssueWriter>,
     pub(crate) target: &'a IssueTarget,
+}
+
+#[async_trait::async_trait]
+impl Thread for IssueThread<'_> {
+    async fn comment(&self, body: &str) -> Result<(), PlatformError> {
+        self.writer.comment(self.target, body).await.map(|_| ())
+    }
+}
+
+/// A pull or merge request's conversation, through the platform writer.
+#[derive(Clone, Copy)]
+pub(crate) struct PullThread<'a> {
+    pub(crate) writer: &'a Arc<dyn PlatformWriter>,
+    pub(crate) target: &'a ReviewTarget,
+}
+
+#[async_trait::async_trait]
+impl Thread for PullThread<'_> {
+    async fn comment(&self, body: &str) -> Result<(), PlatformError> {
+        self.writer
+            .post_comment(self.target, body)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// One issue run, for its ending.
+pub(crate) type OnIssue<'a> = OnRun<'a, IssueThread<'a>>;
+
+/// One run, for its ending, said on `thread`.
+pub(crate) struct OnRun<'a, T> {
+    pub(crate) app: &'a App,
+    /// Where it is said.
+    pub(crate) thread: T,
     pub(crate) run: &'a RunId,
     pub(crate) link: &'a str,
     /// The model, for the comment's marker.
@@ -50,7 +94,7 @@ pub(crate) struct OnIssue<'a> {
     pub(crate) what: &'static str,
 }
 
-impl OnIssue<'_> {
+impl<T: Thread> OnRun<'_, T> {
     fn marker(&self, kind: MarkerKind) -> Marker {
         Marker {
             run: self.run.clone(),
@@ -59,6 +103,17 @@ impl OnIssue<'_> {
             kind: Some(kind),
             checked_by: None,
             withdrawn: None,
+        }
+    }
+
+    /// Says `text` on the thread, with the run link under it. A failure to
+    /// post is logged; the run's ending does not depend on it.
+    pub(crate) async fn post(&self, text: &str) {
+        let body = self
+            .marker(MarkerKind::Reply)
+            .attach(&format!("{text}\n\nRun: {}", self.link));
+        if let Err(post_error) = self.thread.comment(&body).await {
+            error!(%post_error, "could not post how the {} ended", self.what);
         }
     }
 
@@ -86,7 +141,7 @@ impl OnIssue<'_> {
         let body = self
             .marker(MarkerKind::Reply)
             .attach(&crate::cancel::cancelled_notice(by, self.link));
-        if let Err(post_error) = self.writer.comment(self.target, &body).await {
+        if let Err(post_error) = self.thread.comment(&body).await {
             error!(%post_error, "could not post that the run was cancelled");
         }
         let cancelled = format!("cancelled by {by}");
@@ -135,7 +190,7 @@ impl OnIssue<'_> {
         let body = self
             .marker(MarkerKind::Failure)
             .attach(&format!("{comment}\n\nRun: {}", self.link));
-        if let Err(post_error) = self.writer.comment(self.target, &body).await {
+        if let Err(post_error) = self.thread.comment(&body).await {
             error!(%post_error, "could not post the failure comment");
         }
         let store = &*self.app.store;

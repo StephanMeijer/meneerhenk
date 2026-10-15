@@ -37,7 +37,7 @@ use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
-use crate::issue_runs::{OnIssue, open_issue};
+use crate::issue_runs::{IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
 use crate::push::{PushTo, Pusher, stop_if_cancelled};
 use crate::review::ReviewRequest;
@@ -172,8 +172,10 @@ pub async fn run_execute(
     let result = work.run(&cancel).await;
     let on_issue = OnIssue {
         app,
-        writer: &issues,
-        target: &request.target,
+        thread: IssueThread {
+            writer: &issues,
+            target: &request.target,
+        },
         run: &run,
         link: &link,
         model: &model_name,
