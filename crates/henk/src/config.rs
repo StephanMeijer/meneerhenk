@@ -879,6 +879,55 @@ pub struct RolesConfig {
     pub executor: Option<ExecutorConfig>,
 }
 
+impl RolesConfig {
+    /// The configured roles, in the order planner, reviewer, executor,
+    /// each read the same way whatever section it came from.
+    fn configured(&self) -> impl Iterator<Item = RoleView<'_>> {
+        let planner = self
+            .planner
+            .as_ref()
+            .map(|r| RoleView::of(Role::Planner, r));
+        let reviewer = self
+            .reviewer
+            .as_ref()
+            .map(|r| RoleView::of(Role::Reviewer, r));
+        let executor = self.executor.as_ref().map(|r| RoleView {
+            role: Role::Executor,
+            model: &r.model,
+            tools: r.tools.as_deref(),
+            skills: &r.skills,
+            max_turns: r.max_turns,
+            timeout_secs: r.timeout_secs,
+        });
+        [planner, reviewer, executor].into_iter().flatten()
+    }
+}
+
+/// What every role has in common: the part validation and `config check`
+/// look at, with the limits' defaults already filled in.
+struct RoleView<'a> {
+    role: Role,
+    model: &'a String,
+    /// The configured tools, unchecked; absent for the role's defaults.
+    tools: Option<&'a [String]>,
+    skills: &'a [SkillName],
+    max_turns: u32,
+    timeout_secs: u64,
+}
+
+impl<'a> RoleView<'a> {
+    fn of(role: Role, config: &'a RoleConfig) -> Self {
+        Self {
+            role,
+            model: &config.model,
+            tools: config.tools.as_deref(),
+            skills: &config.skills,
+            max_turns: config.max_turns(role),
+            timeout_secs: config.timeout_secs(role),
+        }
+    }
+}
+
 /// One role's agent: its model, tools, skills and limits.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1977,39 +2026,15 @@ fn validate_roles(
     team_leads: &[DiscordUserId],
     allowlist: &Allowlist,
 ) -> Result<(), ConfigError> {
-    let agents = [
-        roles.planner.as_ref().map(|r| {
-            (
-                Role::Planner,
-                &r.model,
-                r.tools.as_deref(),
-                &r.skills,
-                r.max_turns(Role::Planner),
-                r.timeout_secs(Role::Planner),
-            )
-        }),
-        roles.reviewer.as_ref().map(|r| {
-            (
-                Role::Reviewer,
-                &r.model,
-                r.tools.as_deref(),
-                &r.skills,
-                r.max_turns(Role::Reviewer),
-                r.timeout_secs(Role::Reviewer),
-            )
-        }),
-        roles.executor.as_ref().map(|r| {
-            (
-                Role::Executor,
-                &r.model,
-                r.tools.as_deref(),
-                &r.skills,
-                r.max_turns,
-                r.timeout_secs,
-            )
-        }),
-    ];
-    for (role, model, tools, skills, max_turns, timeout_secs) in agents.into_iter().flatten() {
+    for RoleView {
+        role,
+        model,
+        tools,
+        skills,
+        max_turns,
+        timeout_secs,
+    } in roles.configured()
+    {
         if !models.contains_key(model) {
             return Err(ConfigError::UnknownModel {
                 what: format!("roles.{role}"),
@@ -2381,18 +2406,10 @@ fn validate_skill_references(dir: Option<&str>, roles: &RolesConfig) -> Result<(
     if dir.is_some() {
         return Ok(());
     }
-    let listing = [
-        roles.planner.as_ref().map(|r| ("planner", &r.skills)),
-        roles.reviewer.as_ref().map(|r| ("reviewer", &r.skills)),
-        roles.executor.as_ref().map(|r| ("executor", &r.skills)),
-    ];
-    if let Some((role, _)) = listing
-        .into_iter()
-        .flatten()
-        .find(|(_, skills)| !skills.is_empty())
-    {
+    if let Some(with_skills) = roles.configured().find(|r| !r.skills.is_empty()) {
         return Err(ConfigError::Skill(format!(
-            "roles.{role} lists skills, but there is no [skills] section to load them from"
+            "roles.{} lists skills, but there is no [skills] section to load them from",
+            with_skills.role
         )));
     }
     Ok(())
@@ -2838,39 +2855,16 @@ impl Settings {
     /// One line per configured role: its model, limits, tools when they
     /// differ from the defaults, skills, and whether it reaches the web.
     fn describe_roles(&self, out: &mut String) {
-        let roles = [
-            self.roles.planner.as_ref().map(|r| {
-                (
-                    Role::Planner,
-                    &r.model,
-                    r.max_turns(Role::Planner),
-                    r.timeout_secs(Role::Planner),
-                    r.tools(Role::Planner),
-                    &r.skills,
-                )
-            }),
-            self.roles.reviewer.as_ref().map(|r| {
-                (
-                    Role::Reviewer,
-                    &r.model,
-                    r.max_turns(Role::Reviewer),
-                    r.timeout_secs(Role::Reviewer),
-                    r.tools(Role::Reviewer),
-                    &r.skills,
-                )
-            }),
-            self.roles.executor.as_ref().map(|r| {
-                (
-                    Role::Executor,
-                    &r.model,
-                    r.max_turns,
-                    r.timeout_secs,
-                    r.tools(),
-                    &r.skills,
-                )
-            }),
-        ];
-        for (role, model, turns, secs, tools, skills) in roles.into_iter().flatten() {
+        for RoleView {
+            role,
+            model,
+            tools,
+            skills,
+            max_turns: turns,
+            timeout_secs: secs,
+        } in self.roles.configured()
+        {
+            let tools = granted(role, tools);
             let mut line = format!(
                 "{:<17}model {model}; {turns} turns, {secs}s a turn",
                 format!("Role {role}:")
@@ -3046,14 +3040,9 @@ impl Settings {
     /// The declared models no role uses: allowed, but worth a word.
     #[must_use]
     pub fn unused_models(&self) -> Vec<&str> {
-        let roles = &self.roles;
         self.models
             .keys()
-            .filter(|id| {
-                roles.planner.as_ref().is_none_or(|r| &r.model != *id)
-                    && roles.reviewer.as_ref().is_none_or(|r| &r.model != *id)
-                    && roles.executor.as_ref().is_none_or(|r| &r.model != *id)
-            })
+            .filter(|id| self.roles.configured().all(|r| r.model != *id))
             .map(String::as_str)
             .collect()
     }
