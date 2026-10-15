@@ -52,7 +52,7 @@ tokens (README, "MCP server"); the tools answer with the types below.
 | `bad_request` | 400 | A bad id, filter, cursor or body |
 | `unsupported_media_type` | 415 | An action whose body is not JSON |
 | `not_found` | 404 | No such run, event, transcript or route |
-| `conflict` | 409 | Cancelling a run that is not running here; moving a review that is not waiting for a slot here |
+| `conflict` | 409 | Cancelling a run that is not running here; moving a run that is not waiting for a slot here |
 | `store` | 500 | The run store failed; the log has the detail |
 
 ### Paging
@@ -349,13 +349,18 @@ frees a sandbox host's slot, or a run starts or stops waiting for one
 (#403). `RunningMessage` in `types.ts` is the union.
 
 `slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:
-the reviews waiting for a slot, in the order they will start (#251). Each
-has `run_id`, `kind` (`review`), `platform`, `repo`, `target`,
-`target_url`, `commit`, `trigger`, `requester`, `since` (when it was
-requested), `position` (from 1) and `reason` (`no_slot`: every slot is
-taken; a review never waits behind another of the same pull request, as a
-new commit supersedes it, in its place in the queue, and the same commit
-joins it). A waiting review has its run id but no run record until it
+the reviews and rebases waiting for a slot, in the order they will start
+(#251), then the reviews waiting for a rebase of their pull request
+(#580). Each has `run_id`, `kind` (`review` or `rebase`), `priority`
+(`rebase` waits ahead of every `review`), `platform`, `repo`, `target`,
+`target_url`, `commit` (`null` for a rebase), `trigger`, `requester`,
+`since` (when it was requested), `position` (from 1), `reason` and
+`waits_for`. `reason` is `no_slot` (every slot is taken, or a rebase waits
+ahead) or `after_rebase` (a rebase of its pull request comes first;
+`waits_for` is its run id). Only one run works on a pull request at a
+time: a new commit supersedes a waiting review in its place in the queue,
+the same commit joins it, and a rebase supersedes it and moves up to where
+rebases wait. A waiting run has its run id but no run record until it
 starts; `POST /runs/{id}/queue` moves it to another place (#401), and
 `POST /runs/{id}/cancel` cancels it, and it then ends as cancelled while
 queued. Every `slots` message holds the whole list, so a client replaces
@@ -512,9 +517,12 @@ either way.
 Moves a review waiting for a slot to another place in the queue (#401), as
 the dashboard's queue does when a row is dragged or moved to the top or
 bottom. The body is `{"position": 1}`: 1 is the next to start, and a
-position past the end is the last. Answers `200` with `{"run_id": "r-...",
-"from": 3, "to": 1}`, `400` for a position of 0, or `409 conflict` when
-the run is not a review waiting for a slot in this process. The request is
+position past the end is the last. A run moves only among runs of its
+priority (#580): a review never ahead of a waiting rebase, nor a rebase
+behind a review; `to` says where it went. Answers `200` with `{"run_id":
+"r-...", "from": 3, "to": 1}`, `400` for a position of 0, or `409
+conflict` when the run is not waiting for a slot in this process (a
+review waiting for a rebase cannot move). The request is
 recorded as an event (`queue_moved`) either way, on the run's requests,
 since a waiting review has no run record yet; every viewer's `slots`
 message then shows the new order.
