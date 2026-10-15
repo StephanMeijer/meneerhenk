@@ -320,8 +320,9 @@ impl Parser<'_> {
 /// Applies an update's hunks to the text of `path`, each after the
 /// previous one. A hunk without an anchor must match exactly one place; a
 /// hunk with one takes the first match after its anchor, which itself must
-/// match exactly one place. The text keeps whether it
-/// ended with a newline.
+/// match exactly one place. The text keeps whether it ended with a
+/// newline, and the ending of every line the patch leaves alone, `\r\n` or
+/// `\n`. Lines a hunk adds get the ending most lines have.
 ///
 /// # Errors
 ///
@@ -329,7 +330,8 @@ impl Parser<'_> {
 /// does not match exactly one place.
 pub fn apply(path: &WorkspacePath, text: &str, hunks: &[Hunk]) -> Result<String, PatchError> {
     let ends_with_newline = text.is_empty() || text.ends_with('\n');
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let dominant = dominant_ending(text);
+    let (mut lines, mut endings) = split_lines(text);
     let mut replacements = Vec::new();
     let mut cursor = 0;
     for (index, hunk) in hunks.iter().enumerate() {
@@ -368,17 +370,91 @@ pub fn apply(path: &WorkspacePath, text: &str, hunks: &[Hunk]) -> Result<String,
                 many => return Err(ambiguous(many.len())),
             }
         };
-        replacements.push((start, hunk.old.len(), hunk.new.clone()));
+        replacements.push((start, hunk));
         cursor = start + hunk.old.len();
     }
-    for (start, length, new) in replacements.into_iter().rev() {
-        lines.splice(start..start + length, new);
+    for (start, hunk) in replacements.into_iter().rev() {
+        let end = start + hunk.old.len();
+        let kept = endings.get(start..end).unwrap_or_default();
+        let new_endings = endings_after(kept, hunk, dominant);
+        lines.splice(start..end, hunk.new.iter().cloned());
+        endings.splice(start..end, new_endings);
     }
-    let mut out = lines.join("\n");
-    if ends_with_newline && !out.is_empty() {
-        out.push('\n');
+    // Only the last line may lack a line ending, and only if the text did.
+    let last = lines.len().saturating_sub(1);
+    for (at, ending) in endings.iter_mut().enumerate() {
+        if at == last && !ends_with_newline {
+            *ending = "";
+        } else if ending.is_empty() {
+            *ending = dominant;
+        }
     }
-    Ok(out)
+    Ok(lines
+        .iter()
+        .zip(&endings)
+        .flat_map(|(line, ending)| [line.as_str(), *ending])
+        .collect())
+}
+
+/// The line ending added lines get: `\r\n` when most of the text's lines
+/// end with it, `\n` otherwise.
+fn dominant_ending(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    if crlf * 2 > text.matches('\n').count() {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// The lines of `text` without their endings, and each line's ending
+/// (empty for a last line without one).
+fn split_lines(text: &str) -> (Vec<String>, Vec<&'static str>) {
+    text.split_inclusive('\n')
+        .map(|piece| {
+            if let Some(line) = piece.strip_suffix("\r\n") {
+                (line.to_owned(), "\r\n")
+            } else if let Some(line) = piece.strip_suffix('\n') {
+                (line.to_owned(), "\n")
+            } else {
+                (piece.to_owned(), "")
+            }
+        })
+        .unzip()
+}
+
+/// The endings of a hunk's new lines. Lines the hunk leaves as they were,
+/// at its start and end, keep their own ending; the others get `dominant`.
+fn endings_after(
+    old_endings: &[&'static str],
+    hunk: &Hunk,
+    dominant: &'static str,
+) -> Vec<&'static str> {
+    let (old, new) = (&hunk.old, &hunk.new);
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(old.len().min(new.len()).saturating_sub(prefix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    (0..new.len())
+        .map(|at| {
+            let from_end = new.len().saturating_sub(at);
+            let source = if at < prefix {
+                Some(at)
+            } else if from_end <= suffix {
+                old.len().checked_sub(from_end)
+            } else {
+                None
+            };
+            source
+                .and_then(|index| old_endings.get(index))
+                .copied()
+                .unwrap_or(dominant)
+        })
+        .collect()
 }
 
 /// Where `needle` starts in `lines` at or after `from`; with `at_end`,
@@ -505,6 +581,34 @@ mod tests {
     fn a_file_without_a_final_newline_keeps_it_that_way() {
         let hunks = update("*** Begin Patch\n*** Update File: a\n-b\n+c\n*** End Patch");
         assert_eq!(apply(&path("a"), "a\nb", &hunks).unwrap(), "a\nc");
+        let more = update("*** Begin Patch\n*** Update File: a\n b\n+c\n*** End Patch");
+        assert_eq!(apply(&path("a"), "a\nb", &more).unwrap(), "a\nb\nc");
+    }
+
+    #[test]
+    fn line_endings_survive_a_patch() {
+        let hunks =
+            update("*** Begin Patch\n*** Update File: a\n a\n-b\n+x\n+y\n d\n*** End Patch");
+        // A CRLF file stays CRLF, added lines included.
+        assert_eq!(
+            apply(&path("a"), "a\r\nb\r\nd\r\ne\r\n", &hunks).unwrap(),
+            "a\r\nx\r\ny\r\nd\r\ne\r\n"
+        );
+        // A mixed file keeps the ending of each line left alone; added
+        // lines take the ending most lines have (here the tie goes to LF).
+        assert_eq!(
+            apply(&path("a"), "a\nb\r\nd\r\ne\n", &hunks).unwrap(),
+            "a\nx\ny\nd\r\ne\n"
+        );
+        assert_eq!(
+            apply(&path("a"), "a\r\nb\r\nd\r\ne\n", &hunks).unwrap(),
+            "a\r\nx\r\ny\r\nd\r\ne\n"
+        );
+        // No final newline, in CRLF.
+        assert_eq!(
+            apply(&path("a"), "a\r\nb\r\nd", &hunks).unwrap(),
+            "a\r\nx\r\ny\r\nd"
+        );
     }
 
     #[test]
