@@ -3419,6 +3419,14 @@ requester_id = 3
             self.0.remove(path).await
         }
 
+        async fn rename(
+            &self,
+            from: &henk_domain::path::WorkspacePath,
+            to: &henk_domain::path::WorkspacePath,
+        ) -> Result<(), crate::workspace::WorkspaceError> {
+            self.0.rename(from, to).await
+        }
+
         async fn list(
             &self,
             dir: &henk_domain::path::WorkspacePath,
@@ -4531,6 +4539,14 @@ requester_id = 3
             path: &henk_domain::path::WorkspacePath,
         ) -> Result<(), crate::workspace::WorkspaceError> {
             self.inner.remove(path).await
+        }
+
+        async fn rename(
+            &self,
+            from: &henk_domain::path::WorkspacePath,
+            to: &henk_domain::path::WorkspacePath,
+        ) -> Result<(), crate::workspace::WorkspaceError> {
+            self.inner.rename(from, to).await
         }
 
         async fn list(

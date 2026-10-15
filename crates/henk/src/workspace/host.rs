@@ -444,6 +444,34 @@ impl Workspace for HostWorkspace {
         std::fs::remove_file(&target).map_err(io(path))
     }
 
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let root = self.root()?;
+        let source = root.join(from.as_str());
+        let parent = source
+            .parent()
+            .ok_or_else(|| WorkspaceError::Refused(format!("{from} has no directory")))?;
+        let real = parent
+            .canonicalize()
+            .map_err(|_| WorkspaceError::NotFound(from.to_string()))?;
+        inside(&root, &real, from)?;
+        let meta = source
+            .symlink_metadata()
+            .map_err(|_| WorkspaceError::NotFound(from.to_string()))?;
+        if meta.file_type().is_symlink() {
+            return Err(WorkspaceError::Refused(format!(
+                "{from} is a symbolic link; edit what it points to"
+            )));
+        }
+        if meta.is_dir() {
+            return Err(WorkspaceError::Refused(format!("{from} is a directory")));
+        }
+        if root.join(to.as_str()).symlink_metadata().is_ok() {
+            return Err(WorkspaceError::Refused(format!("{to} already exists")));
+        }
+        let target = self.writable(to)?;
+        std::fs::rename(&source, &target).map_err(io(from))
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

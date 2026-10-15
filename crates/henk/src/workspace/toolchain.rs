@@ -87,6 +87,10 @@ impl Workspace for Mise {
         self.inner.remove(path).await
     }
 
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.rename(from, to).await
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

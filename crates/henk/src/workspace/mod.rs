@@ -389,6 +389,17 @@ pub trait Workspace: Send + Sync {
     /// directory, or the removal fails.
     async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError>;
 
+    /// Moves the file `from` to `to`, which must not exist, making its
+    /// directories when needed. The file keeps its content and its mode, so
+    /// an executable stays executable. A symbolic link and a directory are
+    /// refused (#561).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError`] when a path is refused, `from` is missing,
+    /// a link or a directory, `to` exists, or the move fails.
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError>;
+
     /// The files under `dir`, sorted, at most `cap`; with `only`, just
     /// the paths it matches, counted before the cap. `.git` is left out and
     /// symbolic links are not followed.
@@ -805,6 +816,10 @@ impl Workspace for NoExport {
         self.inner.remove(path).await
     }
 
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.rename(from, to).await
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,
@@ -932,6 +947,10 @@ impl Workspace for Metered {
 
     async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
         self.inner.remove(path).await
+    }
+
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.rename(from, to).await
     }
 
     async fn list(

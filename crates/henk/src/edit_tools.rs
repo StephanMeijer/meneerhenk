@@ -106,6 +106,18 @@ impl EditContext {
         self.record(path)
     }
 
+    /// Moves `from` to `to` within the limits and records both. The file
+    /// keeps its mode.
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), String> {
+        self.may_change([from, to])?;
+        self.workspace
+            .rename(from, to)
+            .await
+            .map_err(|e| format!("cannot move {from} to {to}: {e}"))?;
+        self.record(from)?;
+        self.record(to)
+    }
+
     /// Whether `path` is a file; an error for anything that cannot be one
     /// to add or move to, such as a directory.
     async fn exists(&self, path: &WorkspacePath) -> Result<bool, String> {
@@ -238,6 +250,8 @@ impl Tool for WriteFile {
 enum Step {
     Write(WorkspacePath, String),
     Remove(WorkspacePath),
+    /// A move that keeps the file's mode; the new text is written after it.
+    Move(WorkspacePath, WorkspacePath),
 }
 
 impl ApplyPatch {
@@ -274,8 +288,8 @@ impl ApplyPatch {
                         if ctx.exists(to).await? {
                             return Err(format!("{to} already exists; cannot move {path} there"));
                         }
+                        steps.push(Step::Move(path.clone(), to.clone()));
                         steps.push(Step::Write(to.clone(), new));
-                        steps.push(Step::Remove(path.clone()));
                         done.push(format!("moved {path} to {to}"));
                     } else {
                         steps.push(Step::Write(path.clone(), new));
@@ -289,8 +303,9 @@ impl ApplyPatch {
                 EditContext::may_hold(path, content.len())?;
             }
         }
-        ctx.may_change(steps.iter().map(|step| match step {
-            Step::Write(path, _) | Step::Remove(path) => path,
+        ctx.may_change(steps.iter().flat_map(|step| match step {
+            Step::Write(path, _) | Step::Remove(path) => vec![path],
+            Step::Move(from, to) => vec![from, to],
         }))?;
         Ok((steps, done))
     }
@@ -322,6 +337,7 @@ impl Tool for ApplyPatch {
             let result = match step {
                 Step::Write(path, content) => self.0.write(path, content.as_bytes()).await,
                 Step::Remove(path) => self.0.remove(path).await,
+                Step::Move(from, to) => self.0.rename(from, to).await,
             };
             if let Err(error) = result {
                 return ToolOutput::error(format!(
@@ -570,6 +586,54 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_moved_executable_stays_executable() {
+        let dir = crate::workspace::contract::source("henk-tools-patch-mode");
+        let provider = FakeProvider::default();
+        let workspace = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
+        let ctx = Arc::new(EditContext {
+            workspace,
+            command_timeout: Duration::from_secs(5),
+            max_changed_files: 10,
+            bash: false,
+            edit_format: EditFormat::Patch,
+            state: Mutex::default(),
+        });
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": "*** Begin Patch\n*** Update File: run.sh\n*** Move to: bin/run.sh\n-echo run\n+echo moved\n*** End Patch"}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(out.content, "Moved run.sh to bin/run.sh.");
+        assert_eq!(content(&ctx, "bin/run.sh").await, "#!/bin/sh\necho moved\n");
+        let mut changes: Vec<_> = ctx
+            .workspace
+            .export()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.raw.path, c.raw.mode, c.raw.deleted))
+            .collect();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            changes,
+            [
+                (
+                    "bin/run.sh".to_owned(),
+                    henk_domain::workspace::FileMode::Executable,
+                    false
+                ),
+                (
+                    "run.sh".to_owned(),
+                    henk_domain::workspace::FileMode::Executable,
+                    true
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_refused_patch_changes_nothing() {
         let (_provider, plain) = workspace("henk-tools-patch-refused").await;
         let ctx = patching(&plain, 10).await;
@@ -642,6 +706,14 @@ pub(crate) mod tests {
 
         async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
             self.inner.remove(path).await
+        }
+
+        async fn rename(
+            &self,
+            from: &WorkspacePath,
+            to: &WorkspacePath,
+        ) -> Result<(), WorkspaceError> {
+            self.inner.rename(from, to).await
         }
 
         async fn list(
