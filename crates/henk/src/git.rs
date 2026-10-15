@@ -656,6 +656,57 @@ impl Checkout {
         Ok(())
     }
 
+    /// The unified diff of `changes` against the commit checked out, for a
+    /// reviewer who reads what an agent changed before anything is pushed
+    /// (#535). The tree is first put back to that commit, so each call
+    /// shows the whole changeset and not what is new since the last one.
+    /// New files, deletions, renames and mode changes are in it, binary
+    /// files as a line saying they differ.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when a change cannot be applied or git fails.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the requirements review reads it in the next commit (#535)"
+        )
+    )]
+    pub async fn diff_of(&self, changes: &[Change]) -> Result<String, GitError> {
+        run(
+            self.path(),
+            &["reset", "--quiet", "--hard", "HEAD"],
+            None,
+            None,
+        )
+        .await?;
+        run(
+            self.path(),
+            &["clean", "--quiet", "--force", "-d"],
+            None,
+            None,
+        )
+        .await?;
+        self.apply(changes)?;
+        run(self.path(), &["add", "--all"], None, None).await?;
+        run(
+            self.path(),
+            &[
+                "diff",
+                "--cached",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                "HEAD",
+            ],
+            None,
+            None,
+        )
+        .await
+    }
+
     /// The paths changed in the working tree, added and deleted ones too.
     ///
     /// # Errors
@@ -1589,6 +1640,111 @@ pub(crate) mod tests {
             "{refused:?}"
         );
         assert!(!outside.path().join("x").exists());
+    }
+
+    #[tokio::test]
+    async fn the_diff_of_a_changeset_holds_every_kind_of_change_and_starts_over_each_call() {
+        use henk_domain::diff::{FileStatus, ReviewDiff};
+        use henk_domain::path::WorkspacePath;
+
+        let (remote, head) = bare_remote("henk-git-diff").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let checkout = Checkout::clone_at(
+            ScratchDir::new("henk-git-diff-work").unwrap(),
+            &url,
+            "feature",
+            &head,
+            None,
+        )
+        .await
+        .unwrap();
+        let write = |path: &str, content: &[u8], executable: bool| Change {
+            path: WorkspacePath::parse(path).unwrap(),
+            kind: ChangeKind::Write {
+                content: content.to_vec(),
+                executable,
+            },
+        };
+        let diff = |text: &str| ReviewDiff::from_unified(text);
+        let status = |diff: &ReviewDiff, path: &str| {
+            diff.files()
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.status)
+        };
+
+        // Modified, new, an executable, a file with a space and a non-ASCII
+        // name, and a binary one.
+        let first = checkout
+            .diff_of(&[
+                write("src/a.rs", b"fn main() {\n    let x = 2;\n}\n", false),
+                write("src/csv.rs", b"pub fn export() {}\n", false),
+                write("tools/run.sh", b"#!/bin/sh\n", true),
+                write("docs/a b.md", b"# Notes\n", false),
+                write("docs/caf\u{e9}.md", b"# Caf\xc3\xa9\n", false),
+                write("assets/logo.bin", &[0, 159, 146, 150, 0, 1, 2], false),
+            ])
+            .await
+            .unwrap();
+        let parsed = diff(&first);
+        assert_eq!(
+            status(&parsed, "src/a.rs"),
+            Some(FileStatus::Modified),
+            "{first}"
+        );
+        for added in [
+            "src/csv.rs",
+            "tools/run.sh",
+            "docs/a b.md",
+            "docs/caf\u{e9}.md",
+            "assets/logo.bin",
+        ] {
+            assert_eq!(
+                status(&parsed, added),
+                Some(FileStatus::Added),
+                "{added}: {first}"
+            );
+        }
+        assert!(first.contains("new file mode 100755"), "{first}");
+        assert!(first.contains("-    let x = 1;"), "{first}");
+        assert!(first.contains("+    let x = 2;"), "{first}");
+        assert!(first.contains("Binary files"), "{first}");
+
+        // A second call shows its own changeset alone: a deletion, and a
+        // rename (same content under a new name).
+        let second = checkout
+            .diff_of(&[
+                Change {
+                    path: WorkspacePath::parse("src/a.rs").unwrap(),
+                    kind: ChangeKind::Delete,
+                },
+                write("src/main.rs", b"fn main() {\n    let x = 1;\n}\n", false),
+            ])
+            .await
+            .unwrap();
+        let parsed = diff(&second);
+        assert_eq!(parsed.files().len(), 1, "{second}");
+        assert_eq!(
+            status(&parsed, "src/main.rs"),
+            Some(FileStatus::Renamed),
+            "{second}"
+        );
+        assert!(!second.contains("csv.rs"), "{second}");
+
+        // Deleted outright, and nothing changed at all.
+        let deleted = checkout
+            .diff_of(&[Change {
+                path: WorkspacePath::parse("src/a.rs").unwrap(),
+                kind: ChangeKind::Delete,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            status(&diff(&deleted), "src/a.rs"),
+            Some(FileStatus::Removed),
+            "{deleted}"
+        );
+        assert_eq!(checkout.diff_of(&[]).await.unwrap(), "");
     }
 
     #[test]
