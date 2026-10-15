@@ -127,10 +127,18 @@ timeout_secs = 300
 # model, and an OpenAI-compatible server may not take the parameter at all:
 # set effort only where the endpoint supports it. A refusal names the
 # setting; leave effort out to send nothing.
+#
+# edit_format says how the model edits files as the executor: "replace"
+# (edit_file, exact text that occurs once) or "patch" (apply_patch, the
+# Codex patch format GPT-family models are trained on). Left out, a model
+# whose name starts with gpt or codex, or is o3, o4-mini and the like, gets
+# "patch" and any other "replace". An executor whose tools list names
+# edit_file but not apply_patch needs edit_format = "replace" on a GPT model.
 # [models.gpt]
 # endpoint = "openai"
 # model = "gpt-5.6"
 # effort = "medium"
+# edit_format = "patch"
 # max_tokens = 16384
 # timeout_secs = 300
 
