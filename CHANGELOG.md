@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.4...v0.4.5) - 2026-10-15
+
+### Added
+
+- *(config)* an [autonomous] section turns on ticket runs ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- *(store)* link a run to the runs it started ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- *(domain)* the ticket run kind and its plan, execute and review stages ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- *(executor)* apply_patch for GPT-family models, chosen by edit_format ([#561](https://github.com/StephanMeijer/meneerhenk/pull/561))
+
+### Other
+
+- Merge pull request #578 from StephanMeijer/feat/apply-patch
+- Merge pull request #588 from StephanMeijer/feat/ticket-awaited-review
+- Merge pull request #590 from StephanMeijer/feat/ticket-kind
+
 ## [0.4.4](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.3...v0.4.4) - 2026-10-15
 
 ### Added
