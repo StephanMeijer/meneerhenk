@@ -1,8 +1,10 @@
 //! The read tools of the review loop's sessions (#284): the changed files
-//! and their diffs, numbered, from the diff the review fetched once.
+//! and their diffs, numbered, from the diff the review fetched once. A
+//! requirements review (#535) swaps in the diff of the executor's changes
+//! as they stand each round.
 
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use henk_agent::{Tool, ToolOutput};
 use henk_domain::diff::ReviewDiff;
@@ -11,15 +13,34 @@ use serde_json::{Value, json};
 
 /// The diff of a review as the read tools serve it.
 pub struct DiffFiles {
-    /// The diff.
-    pub diff: Arc<ReviewDiff>,
+    diff: Mutex<Arc<ReviewDiff>>,
 }
 
 impl DiffFiles {
     /// Serves `diff`.
     #[must_use]
     pub fn new(diff: Arc<ReviewDiff>) -> Self {
-        Self { diff }
+        Self {
+            diff: Mutex::new(diff),
+        }
+    }
+
+    /// The diff now served.
+    #[must_use]
+    pub fn current(&self) -> Arc<ReviewDiff> {
+        match self.diff.lock() {
+            Ok(diff) => Arc::clone(&diff),
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    /// Serves `diff` from now on: a session keeps its tools across rounds,
+    /// and the changes it reads move between them.
+    pub fn set(&self, diff: Arc<ReviewDiff>) {
+        match self.diff.lock() {
+            Ok(mut served) => *served = diff,
+            Err(poisoned) => *poisoned.into_inner() = diff,
+        }
     }
 }
 
@@ -37,7 +58,7 @@ impl Tool for ListChangedFiles {
     }
 
     async fn call(&self, _: Value) -> ToolOutput {
-        ToolOutput::ok(self.0.diff.render_list())
+        ToolOutput::ok(self.0.current().render_list())
     }
 }
 
@@ -97,7 +118,8 @@ impl Tool for GetFileDiff {
 /// The diffs of `paths`, in order, under a header each, until `cap`
 /// characters; unknown paths get a note. An error when no path is part of the change.
 fn render_files(files: &DiffFiles, paths: &[&str], cap: usize) -> Result<String, String> {
-    let diff = &files.diff;
+    let served = files.current();
+    let diff = &served;
     let mut out = String::new();
     let mut unknown = Vec::new();
     let mut left_out = Vec::new();
@@ -202,6 +224,21 @@ diff --git a/README.md b/README.md
             .await;
         assert!(missing.is_error);
         assert!(missing.content.contains("README.md"));
+    }
+
+    #[tokio::test]
+    async fn the_tools_serve_the_diff_they_were_last_given() {
+        let files = Arc::new(DiffFiles::new(Arc::new(ReviewDiff::from_unified(DIFF))));
+        let list = ListChangedFiles(Arc::clone(&files));
+        assert!(!list.call(json!({})).await.is_error);
+        assert!(list.call(json!({})).await.content.contains("src/"));
+
+        files.set(Arc::new(ReviewDiff::from_unified("")));
+        assert_eq!(list.call(json!({})).await.content, "The diff is empty.");
+        let diff = GetFileDiff(Arc::clone(&files))
+            .call(json!({"path": "src/lib.rs"}))
+            .await;
+        assert!(diff.is_error, "{diff:?}");
     }
 
     #[tokio::test]

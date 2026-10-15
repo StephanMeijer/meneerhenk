@@ -44,6 +44,15 @@ pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 /// (#400), and `{{edit_tool}}` are filled in.
 pub const EXECUTE: &str = include_str!("../prompts/execute.md");
 
+/// Appended to the executor's instructions when a reviewer checks its
+/// changes against the issue before the pull request is opened (#535).
+pub const EXECUTE_REQUIREMENTS: &str = include_str!("../prompts/execute_requirements.md");
+
+/// Instructions for the reviewer who checks an executor's changes against
+/// the issue and its plan before the pull request is opened (#535).
+/// `{{ref}}` and `{{repo}}` are filled in.
+pub const REQUIREMENTS_REVIEWER: &str = include_str!("../prompts/requirements_reviewer.md");
+
 /// Instructions for the executor resolving a rebase's conflicts (#579).
 /// `{{ref}}`, `{{repo}}`, `{{base}}`, `{{commit}}` (the subject of the
 /// commit being replayed), `{{files}}` (the conflicted files, one per line)
@@ -102,6 +111,20 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
         assert!(henk_domain::text::is_in_style(EXECUTE));
         assert!(henk_domain::text::is_in_style(REBASE));
+        assert!(henk_domain::text::is_in_style(EXECUTE_REQUIREMENTS));
+        assert!(henk_domain::text::is_in_style(REQUIREMENTS_REVIEWER));
+        for tool in ["raise_point", "finish_round", "reopens", "get_file_diff"] {
+            assert!(
+                REQUIREMENTS_REVIEWER.contains(&format!("`{tool}`")),
+                "{tool}"
+            );
+        }
+        for tool in ["answer_point", "propose_pull_request"] {
+            assert!(
+                EXECUTE_REQUIREMENTS.contains(&format!("`{tool}`")),
+                "{tool}"
+            );
+        }
         for placeholder in ["{{base}}", "{{files}}", "{{edit_tool}}", "`write_file`"] {
             assert!(REBASE.contains(placeholder), "{placeholder}");
         }

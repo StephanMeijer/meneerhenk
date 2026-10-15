@@ -691,7 +691,7 @@ async fn plan_session(
 /// A session's limits per turn: its role's turns and time, and its prompt
 /// cache's lifetime, long when its partner's round may outlast the short
 /// one (#330).
-fn role_limits(
+pub(crate) fn role_limits(
     app: &App,
     config: &crate::config::RoleConfig,
     role: Role,

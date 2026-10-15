@@ -666,13 +666,6 @@ impl Checkout {
     /// # Errors
     ///
     /// Returns [`GitError`] when a change cannot be applied or git fails.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the requirements review reads it in the next commit (#535)"
-        )
-    )]
     pub async fn diff_of(&self, changes: &[Change]) -> Result<String, GitError> {
         run(
             self.path(),

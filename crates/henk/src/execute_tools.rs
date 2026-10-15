@@ -28,6 +28,10 @@ pub struct Proposal {
     pub left_out: String,
     /// How to commit the changes (#400); one commit when `None`.
     pub commits: Option<Vec<CommitProposal>>,
+    /// How the requirements review ended (#535), for the pull request's
+    /// body. Henk's code fills it in after the executor proposed; the
+    /// executor does not write it, and it is empty when there was no review.
+    pub requirements: String,
 }
 
 /// Where the proposal waits for Henk's code.
@@ -108,6 +112,7 @@ impl Tool for ProposePullRequest {
             summary,
             left_out,
             commits,
+            requirements: String::new(),
         });
         ToolOutput::ok(
             "Proposed. Henk commits, pushes and opens the pull request. End your turn now.",
@@ -167,6 +172,7 @@ mod tests {
                 summary: "Runs export as CSV.".to_owned(),
                 left_out: String::new(),
                 commits: None,
+                requirements: String::new(),
             })
         );
     }
