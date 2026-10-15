@@ -5742,7 +5742,7 @@ requester_id = 3
         let (f, executor, remote, run) = two_file_fix(
             "loop-split",
             serde_json::json!([
-                {"files": ["src/a.rs"], "subject": "fix(a): make x 3", "body": "The caller divides by it.\n\nFixes f1."},
+                {"files": ["src/a.rs"], "subject": "fix(a): make x 3", "body": "The caller divides by it.\n\nThree is the smallest value it accepts."},
                 {"files": ["docs/x.md"], "subject": "docs: say why x is 3"}
             ]),
         )
@@ -5758,7 +5758,9 @@ requester_id = 3
             commits,
             [
                 format!("docs: say why x is 3\n\n{trailers}"),
-                format!("fix(a): make x 3\n\nThe caller divides by it.\n\nFixes f1.\n\n{trailers}"),
+                format!(
+                    "fix(a): make x 3\n\nThe caller divides by it.\n\nThree is the smallest value it accepts.\n\n{trailers}"
+                ),
                 "Seed".to_owned(),
             ]
         );
@@ -5786,9 +5788,103 @@ requester_id = 3
             crate::git::tests::remote_commits(remote.path(), "feature", 2, "%s%n%b").await;
         assert_eq!(commits.len(), 2, "{commits:?}");
         assert!(
-            commits[0].starts_with("Fix review findings f1\n- review loop round 1\n"),
+            commits[0].starts_with("Fix review findings\n- review loop round 1\n"),
             "{commits:?}"
         );
+        let events: Vec<String> = f
+            .app
+            .store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("proposed no commits for round 1")),
+            "{events:?}"
+        );
+    }
+
+    /// Whether `text` names the finding `id` as a word of its own.
+    fn names(text: &str, id: &str) -> bool {
+        text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|word| word.eq_ignore_ascii_case(id))
+    }
+
+    /// The proposal of `two_file_fix`, whose first commit has `body`.
+    fn two_commits(body: &str) -> serde_json::Value {
+        serde_json::json!([
+            {"files": ["src/a.rs"], "subject": "fix(a): make x 3", "body": body},
+            {"files": ["docs/x.md"], "subject": "docs: say why x is 3"}
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_names_a_finding_goes_back_to_the_executor_and_the_reworded_one_is_pushed()
+     {
+        let name = "loop-names-then-words";
+        let mut script =
+            fixes_f1_in_two_files(&two_commits("The caller divides by it.\n\nFixes f1."));
+        // After the refusal the executor rewords and proposes again.
+        script.insert(
+            4,
+            call(
+                "propose_commits",
+                serde_json::json!({ "commits": two_commits("The caller divides by it.") }),
+            ),
+        );
+        let (f, _, executor, remote) = looping(
+            name,
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", script),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+
+        // The executor was told, in words it can act on, in the same round.
+        let said = format!("{:?}", executor.requests());
+        assert!(
+            said.contains("Not proposed: commit 1 names the finding f1 in its body"),
+            "{said}"
+        );
+        let commits = crate::git::tests::remote_commits(remote.path(), "feature", 3, "%B").await;
+        let trailers = "Henk-Run: r-loop-names-then-words\n\
+                        Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>";
+        assert_eq!(
+            commits,
+            [
+                format!("docs: say why x is 3\n\n{trailers}"),
+                format!("fix(a): make x 3\n\nThe caller divides by it.\n\n{trailers}"),
+                "Seed".to_owned(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_executor_that_keeps_naming_a_finding_leaves_one_plain_commit_with_no_id_in_it() {
+        let (f, executor, remote, run) = two_file_fix(
+            "loop-names-always",
+            two_commits("The caller divides by it.\n\nFixes f1."),
+        )
+        .await;
+        let said = format!("{:?}", executor.requests());
+        assert!(said.contains("names the finding f1"), "{said}");
+        let commits = crate::git::tests::remote_commits(remote.path(), "feature", 2, "%B").await;
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        let message = &commits[0];
+        assert!(
+            message.starts_with("Fix review findings\n\n- review loop round 1\n\nHenk-Run: "),
+            "{message}"
+        );
+        // Subject and body, and the trailers, carry no finding of the run.
+        assert!(!names(message, "f1"), "{message}");
         let events: Vec<String> = f
             .app
             .store
@@ -5837,7 +5933,7 @@ requester_id = 3
             crate::git::tests::remote_commits(remote.path(), "feature", 2, "%s%n%b").await;
         assert_eq!(commits.len(), 2, "{commits:?}");
         assert!(
-            commits[0].starts_with("Fix review findings f1\n- review loop round 1\n"),
+            commits[0].starts_with("Fix review findings\n- review loop round 1\n"),
             "{commits:?}"
         );
         let events: Vec<String> = f

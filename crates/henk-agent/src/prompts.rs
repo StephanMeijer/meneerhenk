@@ -109,6 +109,10 @@ mod tests {
             assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");
         }
         assert!(LOOP_EXECUTOR.contains("`{{edit_tool}}`"));
+        // A commit message carries no finding id (#585): the prompt does not
+        // suggest one and says one is refused.
+        assert!(!LOOP_EXECUTOR.contains("Fixes f"), "{LOOP_EXECUTOR}");
+        assert!(LOOP_EXECUTOR.contains("Name no finding id"));
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER_WORKSPACE));
         for tool in ["raise_point", "finish_round", "reopens"] {
             assert!(PLAN_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
