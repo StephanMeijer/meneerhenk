@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.5...v0.4.6) - 2026-10-15
+
+### Added
+
+- *(execute)* the roles' tools for a requirements review, and its section in the pull request body ([#535](https://github.com/StephanMeijer/meneerhenk/pull/535))
+
+### Other
+
+- *(plan)* the point tools and their draft kind can be about an execute run's changes ([#535](https://github.com/StephanMeijer/meneerhenk/pull/535))
+
 ## [0.4.5](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.4...v0.4.5) - 2026-10-15
 
 ### Added
