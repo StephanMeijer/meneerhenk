@@ -3108,19 +3108,17 @@ mod thin_sqlite {
         .await;
     }
 
-    /// Eight tasks write fifty runs each into one file, through one store
-    /// and through two stores on the same file (two processes' worth of
-    /// connections): none is refused with "database is locked".
-    #[tokio::test]
-    async fn concurrent_writers_are_not_refused_as_locked() {
+    /// Eight tasks write fifty runs (and an event each) into one file through
+    /// `stores` stores opened on it, each store its own pool of connections:
+    /// none is refused with "database is locked".
+    async fn writers(stores: usize) {
         let file = File::new();
-        let stores = [
-            Arc::new(ThinStore::open(&file.0).unwrap()),
-            Arc::new(ThinStore::open(&file.0).unwrap()),
-        ];
+        let stores: Vec<_> = (0..stores)
+            .map(|_| Arc::new(ThinStore::open(&file.0).unwrap()))
+            .collect();
         let mut tasks = Vec::new();
         for task in 0..8 {
-            let store = Arc::clone(&stores[task % 2]);
+            let store = Arc::clone(&stores[task % stores.len()]);
             tasks.push(tokio::spawn(async move {
                 for n in 0..50 {
                     let run = super::new_run(&format!("r-{task}-{n}"));
@@ -3135,6 +3133,16 @@ mod thin_sqlite {
         }
         let count = stores[0].count_runs(&RunFilter::default()).await.unwrap();
         assert_eq!(count, 400);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_on_one_store_are_not_refused_as_locked() {
+        writers(1).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_on_two_stores_are_not_refused_as_locked() {
+        writers(2).await;
     }
 
     /// Reads and writes at once: the readers see whole rows, never an error.
