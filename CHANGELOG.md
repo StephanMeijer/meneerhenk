@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.1...v0.4.2) - 2026-10-15
+
+### Added
+
+- *(executor)* commit in the repository's convention ([#400](https://github.com/StephanMeijer/meneerhenk/pull/400))
+- *(config)* effort on OpenAI models, shown with how it is sent ([#366](https://github.com/StephanMeijer/meneerhenk/pull/366))
+- *(review)* the reviewer reads the pull request's CI ([#420](https://github.com/StephanMeijer/meneerhenk/pull/420))
+- *(llm)* reasoning effort for OpenAI models ([#366](https://github.com/StephanMeijer/meneerhenk/pull/366))
+- *(platform)* read a pull request's CI: its jobs, a job's log and annotations ([#420](https://github.com/StephanMeijer/meneerhenk/pull/420))
+
+### Other
+
+- Merge pull request #441 from StephanMeijer/refactor/small-std-helpers
+- Merge pull request #440 from StephanMeijer/refactor/review-queued-endings
+- Merge pull request #438 from StephanMeijer/refactor/config-role-views
+- Merge pull request #436 from StephanMeijer/refactor/plan-finish-and-tools
+- Fix review findings
+- Merge pull request #432 from StephanMeijer/feat/openai-effort
+- Fix review findings
+- Fix review findings
+- *(llm)* one place for tool arguments as text and from the wire
+- *(mcp)* truncate names with String::truncate
+- Merge pull request #435 from StephanMeijer/refactor/llm-tool-arguments
+- *(session)* end_events records repeat firings and derives failure itself
+- *(events)* borrow GitLab object_attributes instead of cloning
+- *(platform)* GitHub calls the percent-encoder by its own name
+- *(platform)* truncate with str::floor_char_boundary
+- *(platform)* share GitLab's number and text readers
+- *(platform)* one percent-encoder for GitLab path segments and GitHub query values
+- *(platform)* one helper for a GitHub answer's body or status error
+- Fix review findings
+- *(store)* share stored-value checks and empty-time defaults
+
 ## [0.4.1](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.0...v0.4.1) - 2026-10-13
 
 ### Added
