@@ -22,9 +22,9 @@ use crate::types::{
     RawRun, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
     SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days,
-    platform_parse, platform_str, round_record, session_dots, session_endings, session_role,
-    session_status, stage_dots, stage_records, status_str, to_i64, to_u64,
+    TranscriptSummary, attach_outcomes, draft_verdict, event_id, kind_str, merge_days,
+    platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
+    session_role, session_status, stage_dots, stage_records, to_i64, to_u32, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -207,14 +207,6 @@ fn now() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
-/// A stored turn count, refused when it is not one.
-fn turns(value: i64) -> Result<u32, StoreError> {
-    u32::try_from(value).map_err(|_| StoreError::Corrupt {
-        column: "transcripts.turns",
-        value: value.to_string(),
-    })
-}
-
 fn text(at: OffsetDateTime) -> String {
     at.format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
@@ -284,16 +276,19 @@ struct RunParams<'a> {
 
 impl<'a> RunParams<'a> {
     fn of(filter: &'a RunFilter) -> Result<Self, StoreError> {
-        let time =
-            |column, value: Option<&String>| value.map(|v| parse_time(column, v)).transpose();
+        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
         Ok(Self {
             kind: filter.kind.map(kind_str),
-            status: filter.status.map(status_str),
+            status: filter.status.map(RunStatus::as_str),
             platform: filter.platform.map(platform_str),
             target: filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
-            since: time("since", filter.since.as_ref())?,
-            until: time("until", filter.until.as_ref())?,
-            before_at: time("started_at", filter.before.as_ref().map(|k| &k.started_at))?,
+            since,
+            until,
+            before_at: filter
+                .before
+                .as_ref()
+                .map(|k| parse_time("started_at", &k.started_at))
+                .transpose()?,
             before_id: filter.before.as_ref().map(|k| k.id.as_str()),
         })
     }
@@ -330,11 +325,7 @@ fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
 }
 
 fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
-    let id: String = row.try_get(0)?;
-    let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
-        column: "inbound_events.id",
-        value: id,
-    })?;
+    let id = event_id(row.try_get(0)?)?;
     let target: Option<i64> = row.try_get(5)?;
     Ok(InboundEvent {
         id,
@@ -946,10 +937,7 @@ impl RunStore for PgStore {
                     model: row.try_get(3)?,
                     kind: row.try_get(4)?,
                     path: row.try_get(5)?,
-                    line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
-                        column: "drafts.line",
-                        value: line.to_string(),
-                    })?,
+                    line: to_u32("drafts.line", line)?,
                     target: row.try_get(7)?,
                     body: row.try_get(8)?,
                     decision,
@@ -963,11 +951,7 @@ impl RunStore for PgStore {
         run: &RunId,
         transcript: &TranscriptRecord,
     ) -> Result<(), StoreError> {
-        let at = if transcript.at.is_empty() {
-            now()
-        } else {
-            parse_time("transcripts.recorded_at", &transcript.at)?
-        };
+        let at = parse_time("transcripts.recorded_at", &transcript.at)?;
         self.client()
             .await?
             .execute(
@@ -1077,7 +1061,7 @@ impl RunStore for PgStore {
                     session: row.try_get(1)?,
                     model: row.try_get(2)?,
                     stop: row.try_get(3)?,
-                    turns: turns(row.try_get(4)?)?,
+                    turns: to_u32("transcripts.turns", row.try_get(4)?)?,
                     bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
                 })
             })
@@ -1104,7 +1088,7 @@ impl RunStore for PgStore {
                     session: row.try_get(1)?,
                     model: row.try_get(2)?,
                     stop: row.try_get(3)?,
-                    turns: turns(row.try_get(4)?)?,
+                    turns: to_u32("transcripts.turns", row.try_get(4)?)?,
                     bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
                     body: row.try_get(6)?,
                 })
@@ -1113,11 +1097,7 @@ impl RunStore for PgStore {
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
-        let at = if call.at.is_empty() {
-            now()
-        } else {
-            parse_time("tool_calls.at", &call.at)?
-        };
+        let at = parse_time("tool_calls.at", &call.at)?;
         let number = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         self.client()
             .await?
@@ -1159,10 +1139,7 @@ impl RunStore for PgStore {
                     at: text(row.try_get(0)?),
                     session: row.try_get(1)?,
                     model: row.try_get(2)?,
-                    turn: u32::try_from(turn).map_err(|_| StoreError::Corrupt {
-                        column: "tool_calls.turn",
-                        value: turn.to_string(),
-                    })?,
+                    turn: to_u32("tool_calls.turn", turn)?,
                     tool: row.try_get(4)?,
                     origin: row.try_get(5)?,
                     outcome: row.try_get(6)?,
@@ -1265,22 +1242,13 @@ impl RunStore for PgStore {
                     run_id: row.try_get(1)?,
                     repo: row.try_get(2)?,
                     target: to_u64("runs.target", target)?,
-                    platform: platform_parse(&platform).ok_or_else(|| StoreError::Corrupt {
-                        column: "runs.platform",
-                        value: platform.clone(),
-                    })?,
-                    kind: kind_parse(&kind).ok_or_else(|| StoreError::Corrupt {
-                        column: "runs.kind",
-                        value: kind.clone(),
-                    })?,
+                    platform: run_platform(platform)?,
+                    kind: run_kind(kind)?,
                     call: ToolCallRecord {
                         at: text(row.try_get(5)?),
                         session: row.try_get(6)?,
                         model: row.try_get(7)?,
-                        turn: u32::try_from(turn).map_err(|_| StoreError::Corrupt {
-                            column: "tool_calls.turn",
-                            value: turn.to_string(),
-                        })?,
+                        turn: to_u32("tool_calls.turn", turn)?,
                         tool: row.try_get(9)?,
                         origin: row.try_get(10)?,
                         outcome: row.try_get(11)?,
@@ -1311,10 +1279,7 @@ impl RunStore for PgStore {
                     at: text(row.try_get(0)?),
                     session: row.try_get(1)?,
                     path: row.try_get(2)?,
-                    line: u32::try_from(line).map_err(|_| StoreError::Corrupt {
-                        column: "findings.line",
-                        value: line.to_string(),
-                    })?,
+                    line: to_u32("findings.line", line)?,
                     comment_id: row.try_get(4)?,
                     action: row.try_get(5)?,
                 })

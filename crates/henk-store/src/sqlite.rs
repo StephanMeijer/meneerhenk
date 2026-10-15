@@ -19,9 +19,9 @@ use crate::types::{
     RawRun, RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
     SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, kind_parse, kind_str, merge_days, now,
-    platform_parse, platform_str, round_record, session_dots, session_endings, session_role,
-    session_status, stage_dots, stage_records, status_str, to_i64, to_u64,
+    TranscriptSummary, attach_outcomes, draft_verdict, event_id, kind_str, merge_days, now,
+    platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
+    session_role, session_status, stage_dots, stage_records, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -504,11 +504,7 @@ impl RunStore for SqliteStore {
     }
 
     async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
-        let at = if draft.at.is_empty() {
-            now()
-        } else {
-            draft.at.clone()
-        };
+        let at = at_or_now(&draft.at);
         self.with(|c| {
             c.execute(
                 "INSERT INTO drafts (run_id, draft, session, model, kind, path, line, target, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
@@ -535,11 +531,7 @@ impl RunStore for SqliteStore {
         draft: &str,
         decision: &DraftDecision,
     ) -> Result<(), StoreError> {
-        let at = if decision.at.is_empty() {
-            now()
-        } else {
-            decision.at.clone()
-        };
+        let at = at_or_now(&decision.at);
         self.with(|c| {
             c.execute(
                 "UPDATE drafts SET verdict = ?3, checker = ?4, reason = ?5, same_as = ?6, comment_id = ?7, decided_at = ?8 WHERE run_id = ?1 AND draft = ?2",
@@ -620,11 +612,7 @@ impl RunStore for SqliteStore {
         run: &RunId,
         transcript: &TranscriptRecord,
     ) -> Result<(), StoreError> {
-        let at = if transcript.at.is_empty() {
-            now()
-        } else {
-            transcript.at.clone()
-        };
+        let at = at_or_now(&transcript.at);
         self.with(|c| {
             c.execute(
                 "INSERT INTO transcripts (run_id, session, model, stop, turns, bytes, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -644,11 +632,7 @@ impl RunStore for SqliteStore {
     }
 
     async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
-        let at = if round.started_at.is_empty() {
-            now()
-        } else {
-            round.started_at.clone()
-        };
+        let at = at_or_now(&round.started_at);
         let handover_len = to_i64("session_rounds.handover_len", round.handover_len)?;
         self.with(|c| {
             c.execute(
@@ -752,11 +736,7 @@ impl RunStore for SqliteStore {
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
-        let at = if call.at.is_empty() {
-            now()
-        } else {
-            call.at.clone()
-        };
+        let at = at_or_now(&call.at);
         let number = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         self.with(|c| {
             c.execute(
@@ -972,7 +952,7 @@ impl RunStore for SqliteStore {
                     outcome.outcome,
                     outcome.detail,
                     outcome.run_id,
-                    if outcome.at.is_empty() { now() } else { outcome.at.clone() },
+                    at_or_now(&outcome.at),
                 ],
             )?;
             Ok(())
@@ -1068,10 +1048,7 @@ impl RunStore for SqliteStore {
         })?;
         let mut events = Vec::new();
         for id in ids {
-            let id = EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
-                column: "inbound_events.id",
-                value: id,
-            })?;
+            let id = event_id(id)?;
             if let Some(event) = self.inbound_event(&id).await? {
                 events.push(event);
             }
@@ -1085,7 +1062,7 @@ impl RunStore for SqliteStore {
         page: Page,
     ) -> Result<Vec<RunRecord>, StoreError> {
         let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(status_str);
+        let status = filter.status.map(RunStatus::as_str);
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
         let (before_at, before_id) = run_key(filter)?;
@@ -1212,7 +1189,7 @@ impl RunStore for SqliteStore {
 
     async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
         let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(status_str);
+        let status = filter.status.map(RunStatus::as_str);
         let platform = filter.platform.map(platform_str);
         let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
         let (before_at, before_id) = run_key(filter)?;
@@ -1326,10 +1303,7 @@ fn raw_inbound(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawInbound> {
 
 impl RawInbound {
     fn into_event(self) -> Result<InboundEvent, StoreError> {
-        let id = EventId::parse(self.id.clone()).map_err(|_| StoreError::Corrupt {
-            column: "inbound_events.id",
-            value: self.id,
-        })?;
+        let id = event_id(self.id)?;
         Ok(InboundEvent {
             id,
             received_at: self.received_at,
@@ -1377,6 +1351,11 @@ const ORPHANED: &str = concat!(
 
 /// The order of a run listing: newest first as a time, then by id.
 const RUN_ORDER: &str = concat!(instant_of!("started_at"), " DESC, id DESC");
+
+/// A caller-supplied time, as given; empty means now.
+fn at_or_now(at: &str) -> String {
+    if at.is_empty() { now() } else { at.to_owned() }
+}
 
 /// The time bounds of a tool call count or listing, as [`instant`]s.
 fn window(
@@ -1541,14 +1520,8 @@ impl CallRow {
             run_id: self.run_id,
             repo: self.repo,
             target: to_u64("runs.target", self.target)?,
-            platform: platform_parse(&self.platform).ok_or_else(|| StoreError::Corrupt {
-                column: "runs.platform",
-                value: self.platform.clone(),
-            })?,
-            kind: kind_parse(&self.kind).ok_or_else(|| StoreError::Corrupt {
-                column: "runs.kind",
-                value: self.kind.clone(),
-            })?,
+            platform: run_platform(self.platform)?,
+            kind: run_kind(self.kind)?,
             call: self.call,
             transcript_kept: self.transcript_kept,
         })
@@ -1579,17 +1552,7 @@ fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
 
 /// The time bounds of a run listing, as [`instant`]s.
 fn run_window(filter: &RunFilter) -> Result<(Option<String>, Option<String>), StoreError> {
-    let since = filter
-        .since
-        .as_deref()
-        .map(|v| instant("since", v))
-        .transpose()?;
-    let until = filter
-        .until
-        .as_deref()
-        .map(|v| instant("until", v))
-        .transpose()?;
-    Ok((since, until))
+    window(filter.since.as_deref(), filter.until.as_deref())
 }
 
 /// The keyset of a run listing, as two parameters: the time as an
