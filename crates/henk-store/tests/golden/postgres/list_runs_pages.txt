@@ -1,0 +1,42 @@
+== every run, newest first
+(15 rows)
+RunRecord { id: RunId("r-015"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa5"), requester: None, trigger: "synchronize", status: Failed, started_at: "2026-10-04T00:00:00Z", finished_at: Some("2026-10-04T00:01:00Z"), link: "https://henk.example/runs/r-015", summary: None, error: Some("the model refused"), heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-014"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa4"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-03T23:59:59Z", finished_at: Some("2026-10-04T00:05:00Z"), link: "https://henk.example/runs/r-014", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-04T00:04:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-013"), kind: Review, platform: GitHub, repo: "other/repo", target: 1, commit: Some("fffffff1"), requester: None, trigger: "opened", status: Cancelled, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:00:30Z"), link: "https://henk.example/runs/r-013", summary: None, error: Some("Cancelled from the dashboard."), heartbeat_at: Some("2026-10-03T08:00:20Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-012"), kind: Review, platform: GitLab, repo: "9xxlab/tools/cli", target: 3, commit: Some("eeeeeee1"), requester: None, trigger: "update", status: Finished, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:10:00Z"), link: "https://henk.example/runs/r-012", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-03T08:09:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-011"), kind: Review, platform: GitHub, repo: "o/r", target: 10, commit: Some("ddddddd1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-02T12:00:00Z", finished_at: None, link: "https://henk.example/runs/r-011", summary: None, error: None, heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-010"), kind: Ticket, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Running, started_at: "2026-10-02T11:00:00Z", finished_at: None, link: "https://henk.example/runs/r-010", summary: None, error: None, heartbeat_at: Some("2026-10-02T11:00:05Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-009"), kind: Rebase, platform: GitHub, repo: "o/r", target: 12, commit: Some("ccccccc1"), requester: None, trigger: "rebase command", status: Finished, started_at: "2026-10-02T10:00:00Z", finished_at: Some("2026-10-02T10:03:00Z"), link: "https://henk.example/runs/r-009", summary: Some("rebased onto main"), error: None, heartbeat_at: Some("2026-10-02T10:02:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-008"), kind: Execute, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-02T09:30:00Z", finished_at: Some("2026-10-02T09:50:00Z"), link: "https://henk.example/runs/r-008", summary: Some("pull request #12 opened: https://github.com/o/r/pull/12"), error: None, heartbeat_at: Some("2026-10-02T09:49:00Z"), check_id: None, superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(1) }
+RunRecord { id: RunId("r-007"), kind: Plan, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-02T09:00:00Z", finished_at: Some("2026-10-02T09:20:00Z"), link: "https://henk.example/runs/r-007", summary: Some("plan written"), error: None, heartbeat_at: Some("2026-10-02T09:19:00Z"), check_id: None, superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(3) }
+RunRecord { id: RunId("r-006"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb3"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-01T10:00:02Z", finished_at: Some("2026-10-01T10:09:00Z"), link: "https://henk.example/runs/r-006", summary: Some("one finding"), error: None, heartbeat_at: Some("2026-10-01T10:08:00Z"), check_id: Some("chk-6"), superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-005"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb2"), requester: None, trigger: "synchronize", status: Superseded, started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:00:02Z"), link: "https://henk.example/runs/r-005", summary: None, error: Some("Superseded by a newer commit."), heartbeat_at: None, check_id: Some("chk-5"), superseded_by: Some(RunId("r-006")), loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-003"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa3"), requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-01T10:00:00.4Z", finished_at: Some("2026-10-01T10:20:00Z"), link: "https://henk.example/runs/r-003", summary: Some("clean after two rounds"), error: None, heartbeat_at: Some("2026-10-01T10:19:00Z"), check_id: Some("chk-3"), superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(2) }
+RunRecord { id: RunId("r-004"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-01T10:00:00.123457Z", finished_at: None, link: "https://henk.example/runs/r-004", summary: None, error: None, heartbeat_at: Some("2026-10-01T10:00:30Z"), check_id: Some("chk-4"), superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-002"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa2"), requester: Some("github:42"), trigger: "synchronize", status: Failed, started_at: "2026-10-01T10:00:00Z", finished_at: Some("2026-10-01T10:02:00Z"), link: "https://henk.example/runs/r-002", summary: None, error: Some("the model gave up"), heartbeat_at: Some("2026-10-01T10:01:30Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-001"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa1"), requester: None, trigger: "opened", status: Finished, started_at: "2026-10-01T10:00:00Z", finished_at: Some("2026-10-01T10:05:00Z"), link: "https://henk.example/runs/r-001", summary: Some("two findings"), error: None, heartbeat_at: Some("2026-10-01T10:04:00Z"), check_id: Some("chk-1"), superseded_by: None, loop_stop: None, loop_rounds: None }
+== limit 4, offset 0
+(4 runs)
+r-015 2026-10-04T00:00:00Z Failed
+r-014 2026-10-03T23:59:59Z Finished
+r-013 2026-10-03T08:00:00Z Cancelled
+r-012 2026-10-03T08:00:00Z Finished
+== limit 4, offset 4
+(4 runs)
+r-011 2026-10-02T12:00:00Z Running
+r-010 2026-10-02T11:00:00Z Running
+r-009 2026-10-02T10:00:00Z Finished
+r-008 2026-10-02T09:30:00Z Finished
+== limit 4, offset 8
+(4 runs)
+r-007 2026-10-02T09:00:00Z Finished
+r-006 2026-10-01T10:00:02Z Finished
+r-005 2026-10-01T10:00:01Z Superseded
+r-003 2026-10-01T10:00:00.4Z Finished
+== limit 4, offset 12
+(3 runs)
+r-004 2026-10-01T10:00:00.123457Z Running
+r-002 2026-10-01T10:00:00Z Failed
+r-001 2026-10-01T10:00:00Z Finished
+== limit 4, offset 16
+(0 runs)

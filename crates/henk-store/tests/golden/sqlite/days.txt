@@ -1,0 +1,13 @@
+== days since 2026-10-01T00:00:00Z
+(4 rows)
+DayCounts { day: "2026-10-01", runs: 6, finished: 3, failed: 1, findings_posted: 2, drafts: 3 }
+DayCounts { day: "2026-10-02", runs: 5, finished: 3, failed: 0, findings_posted: 0, drafts: 0 }
+DayCounts { day: "2026-10-03", runs: 3, finished: 2, failed: 0, findings_posted: 0, drafts: 0 }
+DayCounts { day: "2026-10-04", runs: 1, finished: 0, failed: 1, findings_posted: 0, drafts: 0 }
+== days since 2026-10-03T00:00:00Z
+(2 rows)
+DayCounts { day: "2026-10-03", runs: 3, finished: 2, failed: 0, findings_posted: 0, drafts: 0 }
+DayCounts { day: "2026-10-04", runs: 1, finished: 0, failed: 1, findings_posted: 0, drafts: 0 }
+== days since 2026-10-04T00:00:00Z
+(1 rows)
+DayCounts { day: "2026-10-04", runs: 1, finished: 0, failed: 1, findings_posted: 0, drafts: 0 }

@@ -1,0 +1,33 @@
+== the newest review of each pull request since 2026-10-01T00:00:00Z
+(5 rows)
+RunRecord { id: RunId("r-006"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb3"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-01T10:00:02Z", finished_at: Some("2026-10-01T10:09:00Z"), link: "https://henk.example/runs/r-006", summary: Some("one finding"), error: None, heartbeat_at: Some("2026-10-01T10:08:00Z"), check_id: Some("chk-6"), superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-011"), kind: Review, platform: GitHub, repo: "o/r", target: 10, commit: Some("ddddddd1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-02T12:00:00Z", finished_at: None, link: "https://henk.example/runs/r-011", summary: None, error: None, heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-012"), kind: Review, platform: GitLab, repo: "9xxlab/tools/cli", target: 3, commit: Some("eeeeeee1"), requester: None, trigger: "update", status: Finished, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:10:00Z"), link: "https://henk.example/runs/r-012", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-03T08:09:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-013"), kind: Review, platform: GitHub, repo: "other/repo", target: 1, commit: Some("fffffff1"), requester: None, trigger: "opened", status: Cancelled, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:00:30Z"), link: "https://henk.example/runs/r-013", summary: None, error: Some("Cancelled from the dashboard."), heartbeat_at: Some("2026-10-03T08:00:20Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-015"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa5"), requester: None, trigger: "synchronize", status: Failed, started_at: "2026-10-04T00:00:00Z", finished_at: Some("2026-10-04T00:01:00Z"), link: "https://henk.example/runs/r-015", summary: None, error: Some("the model refused"), heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+== the newest review of each pull request since 2026-10-01T10:00:01Z
+(5 rows)
+RunRecord { id: RunId("r-006"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb3"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-01T10:00:02Z", finished_at: Some("2026-10-01T10:09:00Z"), link: "https://henk.example/runs/r-006", summary: Some("one finding"), error: None, heartbeat_at: Some("2026-10-01T10:08:00Z"), check_id: Some("chk-6"), superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-011"), kind: Review, platform: GitHub, repo: "o/r", target: 10, commit: Some("ddddddd1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-02T12:00:00Z", finished_at: None, link: "https://henk.example/runs/r-011", summary: None, error: None, heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-012"), kind: Review, platform: GitLab, repo: "9xxlab/tools/cli", target: 3, commit: Some("eeeeeee1"), requester: None, trigger: "update", status: Finished, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:10:00Z"), link: "https://henk.example/runs/r-012", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-03T08:09:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-013"), kind: Review, platform: GitHub, repo: "other/repo", target: 1, commit: Some("fffffff1"), requester: None, trigger: "opened", status: Cancelled, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:00:30Z"), link: "https://henk.example/runs/r-013", summary: None, error: Some("Cancelled from the dashboard."), heartbeat_at: Some("2026-10-03T08:00:20Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-015"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa5"), requester: None, trigger: "synchronize", status: Failed, started_at: "2026-10-04T00:00:00Z", finished_at: Some("2026-10-04T00:01:00Z"), link: "https://henk.example/runs/r-015", summary: None, error: Some("the model refused"), heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+== the newest review of each pull request since 2026-10-03T00:00:00Z
+(3 rows)
+RunRecord { id: RunId("r-012"), kind: Review, platform: GitLab, repo: "9xxlab/tools/cli", target: 3, commit: Some("eeeeeee1"), requester: None, trigger: "update", status: Finished, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:10:00Z"), link: "https://henk.example/runs/r-012", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-03T08:09:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-013"), kind: Review, platform: GitHub, repo: "other/repo", target: 1, commit: Some("fffffff1"), requester: None, trigger: "opened", status: Cancelled, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:00:30Z"), link: "https://henk.example/runs/r-013", summary: None, error: Some("Cancelled from the dashboard."), heartbeat_at: Some("2026-10-03T08:00:20Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+RunRecord { id: RunId("r-015"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa5"), requester: None, trigger: "synchronize", status: Failed, started_at: "2026-10-04T00:00:00Z", finished_at: Some("2026-10-04T00:01:00Z"), link: "https://henk.example/runs/r-015", summary: None, error: Some("the model refused"), heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+== the newest review of each pull request since 2026-10-05T00:00:00Z
+(0 rows)
+== running runs with no heartbeat since 2026-10-01T10:00:10Z
+(1 runs)
+r-011 2026-10-02T12:00:00Z Running
+== running runs with no heartbeat since 2026-10-02T11:00:00Z
+(2 runs)
+r-004 2026-10-01T10:00:00.123456789Z Running
+r-011 2026-10-02T12:00:00Z Running
+== running runs with no heartbeat since 2026-10-02T11:00:10Z
+(3 runs)
+r-004 2026-10-01T10:00:00.123456789Z Running
+r-010 2026-10-02T11:00:00Z Running
+r-011 2026-10-02T12:00:00Z Running
