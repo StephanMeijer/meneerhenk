@@ -418,8 +418,9 @@ pub(crate) fn publish_start(
     who: &str,
     hosts: &crate::urls::Hosts,
 ) -> Result<Started, ApiError> {
-    let kind = Start::parse(&request.kind)
-        .ok_or_else(|| ApiError::bad_request("kind is one of review, plan, execute."))?;
+    let kind = Start::parse(&request.kind).ok_or_else(|| {
+        ApiError::bad_request("kind is one of review, plan, execute, rebase, ticket.")
+    })?;
     let given =
         |value: Option<&String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
     let commit = given(request.commit.as_ref());

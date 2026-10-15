@@ -13,6 +13,7 @@ pub mod rebase;
 pub mod review;
 #[cfg(test)]
 mod tests;
+pub mod ticket;
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub use mention::MentionListener;
 pub use plan::PlanListener;
 pub use rebase::RebaseListener;
 pub use review::ReviewListener;
+pub use ticket::TicketListener;
 
 /// Where listeners get a platform writer. The application implements it;
 /// tests substitute a fake.
