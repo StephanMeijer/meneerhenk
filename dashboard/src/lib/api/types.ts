@@ -386,9 +386,13 @@ export type WaitingReview = {
  */
 run_id: string, 
 /**
- * `review`; plans join the queue with #79.
+ * `review` or `rebase`; plans join the queue with #79.
  */
 kind: string, 
+/**
+ * `rebase` waits ahead of every `review` (#580); a move keeps it so.
+ */
+priority: string, 
 /**
  * `github` or `gitlab`.
  */
@@ -406,9 +410,9 @@ target: number,
  */
 target_url: string | null, 
 /**
- * The commit it will review.
+ * The commit it will review; `null` for a rebase.
  */
-commit: string, 
+commit: string | null, 
 /**
  * What started it.
  */
@@ -426,9 +430,14 @@ since: string,
  */
 position: number, 
 /**
- * Why it waits: `no_slot`, every review slot is taken.
+ * Why it waits: `no_slot`, every slot is taken or a rebase waits
+ * ahead; `after_rebase`, a rebase of its pull request comes first.
  */
-reason: string, };
+reason: string, 
+/**
+ * The rebase it waits for, with `after_rebase`.
+ */
+waits_for: string | null, };
 
 export type OverviewStats = { 
 /**

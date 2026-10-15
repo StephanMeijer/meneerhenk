@@ -15,7 +15,9 @@
    * are the run ids "Running now" lists: a review that just took its slot
    * may be there a moment before the next `slots` message drops it here.
    * A colleague may move one to another place (#401): by dragging its row,
-   * or with "Move to top" and "Move to bottom". The list keeps the server's
+   * or with "Move to top" and "Move to bottom", but only among runs of its
+   * priority: a rebase waits ahead of every review (#580), and a review
+   * waiting for a rebase does not move at all. The list keeps the server's
    * order: the `slots` message after a move redraws it for everyone.
    * `cancel`, `move` and `now` are replaced in the tests. */
   let {
@@ -43,8 +45,17 @@
   let moving: string | null = $state(null);
   let dragged: string | null = $state(null);
   let over: string | null = $state(null);
-  /** The last place in the whole queue, rows "Running now" shows included. */
-  let last = $derived(slots?.waiting.length ?? 0);
+  /** Whether an entry waits for a slot, and so may move. */
+  const movable = (entry: WaitingReview): boolean => entry.reason === 'no_slot';
+
+  /** The first and last places an entry may move to: those of its
+   * priority, rows "Running now" shows included. */
+  function places(entry: WaitingReview): [number, number] {
+    const peers = (slots?.waiting ?? [])
+      .filter((e) => movable(e) && e.priority === entry.priority)
+      .map((e) => e.position);
+    return [Math.min(...peers, entry.position), Math.max(...peers, entry.position)];
+  }
 
   async function moveTo(entry: WaitingReview, position: number): Promise<void> {
     if (position === entry.position) return;
@@ -64,12 +75,16 @@
     const entry = queued.find((e) => e.run_id === dragged);
     dragged = null;
     over = null;
-    if (entry !== undefined) void moveTo(entry, target.position);
+    if (entry === undefined || !movable(entry) || !movable(target)) return;
+    if (entry.priority === target.priority) void moveTo(entry, target.position);
   }
 
   function why(entry: WaitingReview): string {
     if (entry.reason === 'no_slot' && slots !== null) {
       return `no free slot (${slots.in_use} of ${slots.limit} in use)`;
+    }
+    if (entry.reason === 'after_rebase') {
+      return entry.waits_for === null ? 'after the rebase' : `after the rebase ${entry.waits_for}`;
     }
     return entry.reason.replaceAll('_', ' ');
   }
@@ -102,7 +117,7 @@
     <ol class="queued">
       {#each queued as entry (entry.run_id)}
         <li
-          draggable="true"
+          draggable={movable(entry)}
           class:dragged={dragged === entry.run_id}
           class:over={over === entry.run_id && dragged !== entry.run_id}
           ondragstart={(event) => {
@@ -137,7 +152,7 @@
             {:else}
               {about(entry.repo, entry.target)}
             {/if}
-            <Commit sha={entry.commit} />
+            {#if entry.commit !== null}<Commit sha={entry.commit} />{/if}
           </span>
           <span class="trigger">{entry.trigger}{#if entry.requester}<span class="sub who">{entry.requester}</span>{/if}</span>
           <span class="when">
@@ -146,14 +161,14 @@
           </span>
           <span class="why muted">{why(entry)}</span>
           <span class="actions">
-            {#if entry.position > 1}
-              <button type="button" aria-label="Move {entry.run_id} to the top" onclick={() => moveTo(entry, 1)}
+            {#if movable(entry) && entry.position > places(entry)[0]}
+              <button type="button" aria-label="Move {entry.run_id} to the top" onclick={() => moveTo(entry, places(entry)[0])}
                 disabled={moving === entry.run_id}>
                 <Icon name="arrow-up" />Move to top
               </button>
             {/if}
-            {#if entry.position < last}
-              <button type="button" aria-label="Move {entry.run_id} to the bottom" onclick={() => moveTo(entry, last)}
+            {#if movable(entry) && entry.position < places(entry)[1]}
+              <button type="button" aria-label="Move {entry.run_id} to the bottom" onclick={() => moveTo(entry, places(entry)[1])}
                 disabled={moving === entry.run_id}>
                 <Icon name="arrow-down" />Move to bottom
               </button>

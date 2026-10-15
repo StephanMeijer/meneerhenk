@@ -35,7 +35,8 @@ impl ReviewListener {
     fn submit(&self, request: ReviewRequest, commit: henk_domain::review::CommitSha) -> Handled {
         let (decision, run) = self.coordinator.submit_review(request, commit);
         match decision {
-            Decision::Start => Handled::Started(run),
+            // A review held for a rebase starts later, as this run.
+            Decision::Start | Decision::After => Handled::Started(run),
             Decision::Join => Handled::Joined(run),
             Decision::Supersede => Handled::Superseded(run),
         }

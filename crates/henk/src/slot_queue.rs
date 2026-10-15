@@ -1,11 +1,13 @@
-//! The review slots and the order reviews wait for them in (#401): a
-//! limit, the slots in use, and the runs waiting, first to start first. A
-//! waiting run can be moved to any place; a superseding commit takes the
-//! place of the review it replaces.
+//! The slots for runs on pull requests and the order runs wait for them in
+//! (#401, #580): a limit, the slots in use, and the runs waiting, first to
+//! start first. A higher priority waits ahead of a lower one: a rebase
+//! ahead of every review. Within its priority a waiting run can be moved
+//! to any place; a superseding run takes the place of the one it replaces.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use henk_domain::queue::Priority;
 use henk_domain::run::RunId;
 use tokio::sync::{Notify, watch};
 
@@ -21,7 +23,36 @@ pub(crate) struct SlotQueue {
 struct State {
     limit: usize,
     in_use: usize,
-    waiting: VecDeque<RunId>,
+    /// Sorted by priority, highest first; within one, in arrival order.
+    waiting: VecDeque<(RunId, Priority)>,
+}
+
+impl State {
+    fn place_of(&self, run: &RunId) -> Option<usize> {
+        self.waiting.iter().position(|(waiting, _)| waiting == run)
+    }
+
+    /// Puts `run` behind every run of its priority or higher.
+    fn insert(&mut self, run: RunId, priority: Priority) {
+        let at = self
+            .waiting
+            .iter()
+            .position(|(_, waiting)| *waiting < priority)
+            .unwrap_or(self.waiting.len());
+        self.waiting.insert(at, (run, priority));
+    }
+
+    /// The places runs of `priority` may take, from the first to one past
+    /// the last.
+    fn band(&self, priority: Priority) -> (usize, usize) {
+        let start = self
+            .waiting
+            .iter()
+            .take_while(|(_, p)| *p > priority)
+            .count();
+        let len = self.waiting.iter().filter(|(_, p)| *p == priority).count();
+        (start, start + len)
+    }
 }
 
 /// A run that is not waiting for a slot here: it started, ended, or
@@ -72,13 +103,14 @@ impl SlotQueue {
         })
     }
 
-    /// Puts `run` at the back of the queue, unless it is in it already
-    /// (a superseding commit put it in its predecessor's place).
-    pub(crate) fn join(&self, run: &RunId) {
+    /// Puts `run` behind every run waiting at its priority or higher,
+    /// unless it is in the queue already (a superseding run put it in its
+    /// predecessor's place).
+    pub(crate) fn join(&self, run: &RunId, priority: Priority) {
         if let Ok(mut state) = self.state.lock()
-            && !state.waiting.contains(run)
+            && state.place_of(run).is_none()
         {
-            state.waiting.push_back(run.clone());
+            state.insert(run.clone(), priority);
         }
         self.changed.send_replace(());
     }
@@ -87,9 +119,10 @@ impl SlotQueue {
     pub(crate) fn try_take(self: &Arc<Self>, run: &RunId) -> Option<Slot> {
         let taken = {
             let mut state = self.state.lock().ok()?;
-            let first = state.waiting.front().is_none_or(|front| front == run);
+            let front = state.waiting.front().map(|(front, _)| front);
+            let first = front.is_none_or(|front| front == run);
             if first && state.in_use < state.limit {
-                if state.waiting.front() == Some(run) {
+                if front == Some(run) {
                     state.waiting.pop_front();
                 }
                 state.in_use += 1;
@@ -134,7 +167,7 @@ impl SlotQueue {
     pub(crate) fn leave(&self, run: &RunId) {
         let left = self.state.lock().is_ok_and(|mut state| {
             let before = state.waiting.len();
-            state.waiting.retain(|waiting| waiting != run);
+            state.waiting.retain(|(waiting, _)| waiting != run);
             state.waiting.len() != before
         });
         if left {
@@ -143,17 +176,21 @@ impl SlotQueue {
         }
     }
 
-    /// Puts `new` in the place `old` waits in; false when `old` is not
-    /// waiting.
-    pub(crate) fn replace(&self, old: &RunId, new: &RunId) -> bool {
+    /// Puts `new` in the place `old` waits in, or, at another priority,
+    /// where that priority waits; false when `old` is not waiting.
+    pub(crate) fn replace(&self, old: &RunId, new: &RunId, priority: Priority) -> bool {
         let replaced = self.state.lock().is_ok_and(|mut state| {
-            match state.waiting.iter_mut().find(|waiting| *waiting == old) {
-                Some(place) => {
-                    *place = new.clone();
-                    true
+            let Some(at) = state.place_of(old) else {
+                return false;
+            };
+            match state.waiting.get_mut(at) {
+                Some(place) if place.1 == priority => place.0 = new.clone(),
+                _ => {
+                    state.waiting.remove(at);
+                    state.insert(new.clone(), priority);
                 }
-                None => false,
             }
+            true
         });
         if replaced {
             self.changed.send_replace(());
@@ -161,9 +198,10 @@ impl SlotQueue {
         replaced
     }
 
-    /// Moves `run` to `position` in the queue, 1 being the next to start;
-    /// a position past the end is the last. Returns where it was and where
-    /// it is now.
+    /// Moves `run` to `position` in the queue, 1 being the next to start,
+    /// but never out of its priority: a review stays behind every waiting
+    /// rebase. A position past its priority's places is the nearest one.
+    /// Returns where it was and where it is now.
     ///
     /// # Errors
     ///
@@ -175,13 +213,10 @@ impl SlotQueue {
     ) -> Result<(usize, usize), NotWaiting> {
         let moved = {
             let mut state = self.state.lock().map_err(|_| NotWaiting)?;
-            let from = state
-                .waiting
-                .iter()
-                .position(|waiting| waiting == run)
-                .ok_or(NotWaiting)?;
+            let from = state.place_of(run).ok_or(NotWaiting)?;
             let entry = state.waiting.remove(from).ok_or(NotWaiting)?;
-            let to = position.max(1).min(state.waiting.len() + 1) - 1;
+            let (first, end) = state.band(entry.1);
+            let to = (position.max(1) - 1).clamp(first, end);
             state.waiting.insert(to, entry);
             (from + 1, to + 1)
         };
@@ -202,7 +237,7 @@ impl SlotQueue {
     pub(crate) fn order(&self) -> Vec<RunId> {
         self.state.lock().map_or_else(
             |_| Vec::new(),
-            |state| state.waiting.iter().cloned().collect(),
+            |state| state.waiting.iter().map(|(run, _)| run.clone()).collect(),
         )
     }
 
@@ -242,7 +277,7 @@ mod tests {
         let q = queue(1);
         let held = q.take_any().unwrap();
         for n in 1..=3 {
-            q.join(&run(n));
+            q.join(&run(n), Priority::Review);
         }
         assert_eq!(q.order(), [run(1), run(2), run(3)]);
         assert_eq!(q.move_to(&run(3), 1), Ok((3, 1)));
@@ -272,8 +307,8 @@ mod tests {
     async fn a_move_past_the_end_is_last_and_a_run_not_waiting_cannot_move() {
         let q = queue(1);
         let _held = q.take_any().unwrap();
-        q.join(&run(1));
-        q.join(&run(2));
+        q.join(&run(1), Priority::Review);
+        q.join(&run(2), Priority::Review);
         assert_eq!(q.move_to(&run(1), 9), Ok((1, 2)));
         assert_eq!(q.move_to(&run(1), 0), Ok((2, 1)), "0 is read as the first");
         assert_eq!(q.move_to(&run(7), 1), Err(NotWaiting));
@@ -283,7 +318,7 @@ mod tests {
     async fn a_wait_dropped_or_a_replaced_run_leaves_no_one_behind() {
         let q = queue(1);
         let held = q.take_any().unwrap();
-        q.join(&run(1));
+        q.join(&run(1), Priority::Review);
         let waiting = {
             let q = Arc::clone(&q);
             tokio::spawn(async move { q.wait(&run(1)).await })
@@ -293,13 +328,44 @@ mod tests {
         waiting.abort();
         let _ = waiting.await;
         assert!(q.order().is_empty(), "a dropped wait leaves the queue");
-        q.join(&run(2));
-        q.join(&run(3));
-        assert!(q.replace(&run(2), &run(4)));
+        q.join(&run(2), Priority::Review);
+        q.join(&run(3), Priority::Review);
+        assert!(q.replace(&run(2), &run(4), Priority::Review));
         assert_eq!(q.order(), [run(4), run(3)], "in the place it replaced");
         q.leave(&run(2));
         assert_eq!(q.order(), [run(4), run(3)], "the old one is gone already");
         drop(held);
+        assert!(q.try_take(&run(4)).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_rebase_waits_ahead_of_every_review_and_a_move_keeps_it_there() {
+        let q = queue(1);
+        let held = q.take_any().unwrap();
+        q.join(&run(1), Priority::Review);
+        q.join(&run(2), Priority::Review);
+        q.join(&run(3), Priority::Rebase);
+        q.join(&run(4), Priority::Rebase);
+        assert_eq!(
+            q.order(),
+            [run(3), run(4), run(1), run(2)],
+            "rebases first, in arrival order"
+        );
+        assert_eq!(q.move_to(&run(2), 1), Ok((4, 3)), "not ahead of a rebase");
+        assert_eq!(q.move_to(&run(4), 9), Ok((2, 2)), "not behind a review");
+        assert_eq!(q.move_to(&run(4), 1), Ok((2, 1)));
+        assert_eq!(q.order(), [run(4), run(3), run(2), run(1)]);
+        assert!(q.replace(&run(1), &run(5), Priority::Rebase));
+        assert_eq!(
+            q.order(),
+            [run(4), run(3), run(5), run(2)],
+            "a rebase replacing a review moves up"
+        );
+        drop(held);
+        assert!(
+            q.try_take(&run(2)).is_none(),
+            "a review waits for the rebases"
+        );
         assert!(q.try_take(&run(4)).is_some());
     }
 }

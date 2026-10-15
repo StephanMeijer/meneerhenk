@@ -4,7 +4,7 @@
 //! ends as `Cancelled` and says so in one comment, instead of reading the
 //! cancellation as a supersede, a shutdown or its own failure. A review
 //! superseded by a review of a newer commit learns here which run replaced
-//! it (#231).
+//! it (#231), and whether that run is a rebase (#580).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -21,6 +21,8 @@ struct Entry {
     token: CancellationToken,
     by: Option<String>,
     superseded_by: Option<RunId>,
+    /// The run that replaced it is a rebase, not a review (#580).
+    by_rebase: bool,
 }
 
 impl Cancels {
@@ -36,6 +38,7 @@ impl Cancels {
                     token,
                     by: None,
                     superseded_by: None,
+                    by_rebase: false,
                 },
             );
         Registered {
@@ -61,14 +64,37 @@ impl Cancels {
     /// Cancels `run` because `by`, a review of a newer commit, replaces it.
     /// False when `run` is not registered here.
     pub fn supersede(&self, run: &RunId, by: &RunId) -> bool {
+        self.superseded(run, by, false)
+    }
+
+    /// Cancels `run` because `by`, a rebase of its pull request, replaces
+    /// the commit it reviews (#580). False when `run` is not registered here.
+    pub fn supersede_for_rebase(&self, run: &RunId, by: &RunId) -> bool {
+        self.superseded(run, by, true)
+    }
+
+    fn superseded(&self, run: &RunId, by: &RunId, by_rebase: bool) -> bool {
         let mut runs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(entry) = runs.get_mut(run) else {
             return false;
         };
         // Set before the token fires, so the run sees it.
-        entry.superseded_by.get_or_insert_with(|| by.clone());
+        if entry.superseded_by.is_none() {
+            entry.superseded_by = Some(by.clone());
+            entry.by_rebase = by_rebase;
+        }
         entry.token.cancel();
         true
+    }
+
+    /// Whether a rebase superseded `run` (#580).
+    #[must_use]
+    pub fn superseded_for_rebase(&self, run: &RunId) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(run)
+            .is_some_and(|entry| entry.superseded_by.is_some() && entry.by_rebase)
     }
 
     /// The run that replaced `run`, when it was superseded.

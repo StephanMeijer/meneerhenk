@@ -391,7 +391,11 @@ async fn a_resumed_review_is_of_the_current_head_and_names_the_interrupted_run()
     assert_eq!(slots.waiting.len(), 1);
     let waiting = &slots.waiting[0];
     assert_eq!(waiting.run, run);
-    assert_eq!(waiting.commit.as_str(), SHA, "the current head");
+    assert_eq!(
+        waiting.commit.as_ref().map(CommitSha::as_str),
+        Some(SHA),
+        "the current head"
+    );
     assert_eq!(waiting.trigger, "resumed after interrupted run r-old");
     assert_eq!(waiting.requester.as_deref(), Some("alice"));
     let recorded = h.store.inbound_event(&id).await.unwrap().unwrap();

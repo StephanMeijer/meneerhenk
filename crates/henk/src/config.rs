@@ -596,7 +596,7 @@ pub struct ReviewConfig {
     /// Turns, counted from the end, whose tool results are never stubbed.
     #[serde(default = "default_keep_recent_turns")]
     pub keep_recent_turns: u32,
-    /// Reviews running at once.
+    /// Reviews and rebases running at once (#580).
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
     /// Whether GitHub draft pull requests are reviewed (open question 1).

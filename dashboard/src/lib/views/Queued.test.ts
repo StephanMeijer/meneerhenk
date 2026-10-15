@@ -126,6 +126,38 @@ describe('Queued', () => {
     expect(move).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a rebase ahead of every review and a review waiting for one in place (#580)', async () => {
+    const move = vi.fn((id: string, position: number) => Promise.resolve({ run_id: id, from: 3, to: position }));
+    const rebasing = {
+      limit: 1,
+      in_use: 1,
+      waiting: [
+        waitingReview('r-rebase', 7, 1, { kind: 'rebase', priority: 'rebase', commit: null }),
+        waitingReview('r-a', 8, 2),
+        waitingReview('r-b', 9, 3),
+        waitingReview('r-held', 7, 4, { reason: 'after_rebase', waits_for: 'r-rebase' }),
+      ],
+    };
+    render(Queued, { slots: rebasing, move, now: () => NOW });
+    await settle();
+    const rows = [...document.querySelectorAll('ol.queued > li')];
+    expect(rowText(rows[0]).slice(0, 3)).toEqual(['1', 'r-rebase rebase', 'docspec/app #7']);
+    expect(rows[3]?.querySelector('.why')?.textContent).toBe('after the rebase r-rebase');
+    expect(labelled('Move r-rebase to the bottom'), 'not behind a review').toBeNull();
+    expect(labelled('Move r-a to the top'), 'not ahead of the rebase').toBeNull();
+    expect(labelled('Move r-held to the top'), 'it waits for the rebase').toBeNull();
+    expect(rows[3]?.getAttribute('draggable')).toBe('false');
+    labelled('Move r-b to the top')?.click();
+    await settle();
+    expect(move).toHaveBeenLastCalledWith('r-b', 2);
+    const fire = (row: Element | undefined, type: string) =>
+      row?.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+    fire(rows[2], 'dragstart');
+    fire(rows[0], 'drop');
+    await settle();
+    expect(move, 'a review dropped on a rebase moves nowhere').toHaveBeenCalledTimes(1);
+  });
+
   it('says why a move did not go through', async () => {
     const move = vi.fn(() =>
       Promise.reject(new ApiError(409, 'conflict', 'That review is not waiting for a slot here.')),

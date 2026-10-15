@@ -320,6 +320,14 @@ impl ReviewOutcome {
         Self::stopped_as(commit, Stopped::Superseded, None)
     }
 
+    /// The outcome of a review stopped because a rebase of the pull request
+    /// replaces the commit it reviewed (#580).
+    #[must_use]
+    pub fn superseded_by_rebase(commit: CommitSha) -> Self {
+        let by = "a rebase onto the base branch".to_owned();
+        Self::stopped_as(commit, Stopped::Superseded, Some(by))
+    }
+
     /// The outcome of a review a person or an MCP client cancelled; `via`
     /// says where from ("from the dashboard", "over MCP"), or is empty.
     #[must_use]
@@ -415,7 +423,10 @@ impl ReviewOutcome {
     #[must_use]
     pub fn headline(&self) -> String {
         match self.stopped {
-            Some(Stopped::Superseded) => return "Superseded by a newer commit.".to_owned(),
+            Some(Stopped::Superseded) => {
+                let by = self.not_reviewed.as_deref().unwrap_or("a newer commit");
+                return format!("Superseded by {by}.");
+            }
             Some(Stopped::Interrupted) => return "Review interrupted.".to_owned(),
             Some(Stopped::Cancelled) => {
                 return match &self.not_reviewed {
@@ -699,6 +710,13 @@ mod tests {
         assert_eq!(superseded.check_conclusion(), CheckConclusion::Neutral);
         assert_eq!(superseded.headline(), "Superseded by a newer commit.");
         assert!(crate::text::is_in_style(&superseded.summary()));
+        let rebased = ReviewOutcome::superseded_by_rebase(outcome(&[], 0).commit);
+        assert_eq!(rebased.check_conclusion(), CheckConclusion::Neutral);
+        assert_eq!(
+            rebased.headline(),
+            "Superseded by a rebase onto the base branch."
+        );
+        assert!(crate::text::is_in_style(&rebased.summary()));
     }
 
     #[test]

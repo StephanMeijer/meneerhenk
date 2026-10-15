@@ -248,10 +248,22 @@ fn sandbox_host_rows(now: &crate::workspace::SandboxHosts) -> Vec<(String, Strin
         .collect()
 }
 
-/// The review slots in words: `2 running, 1 waiting (limit 2)`.
+/// The slots in words: `2 running, 1 waiting (limit 2)`, and how many of
+/// the waiting are rebases, which start first (#580): `2 running, 3
+/// waiting, 1 rebase first (limit 2)`.
 fn reviews_line(slots: &crate::coordinator::Slots) -> String {
+    let rebases = slots
+        .waiting
+        .iter()
+        .filter(|w| w.priority == henk_domain::queue::Priority::Rebase)
+        .count();
+    let first = match rebases {
+        0 => String::new(),
+        1 => ", 1 rebase first".to_owned(),
+        n => format!(", {n} rebases first"),
+    };
     format!(
-        "{} running, {} waiting (limit {})",
+        "{} running, {} waiting{first} (limit {})",
         slots.in_use,
         slots.waiting.len(),
         slots.limit
@@ -264,6 +276,43 @@ mod tests {
 
     use super::*;
     use crate::workspace::{HostSlots, SandboxHosts};
+
+    #[test]
+    fn the_reviews_row_counts_the_rebases_that_start_first() {
+        use henk_domain::queue::Priority;
+        use henk_domain::run::{RunId, RunKind};
+
+        use crate::coordinator::{Reason, Slots, Waiting};
+
+        let waiting = |priority, kind| Waiting {
+            run: RunId::parse("r-20261015-00000001").unwrap(),
+            kind,
+            priority,
+            platform: henk_domain::allowlist::Platform::GitHub,
+            repo: "o/r".to_owned(),
+            number: 7,
+            commit: None,
+            trigger: "asked".to_owned(),
+            requester: None,
+            since: time::OffsetDateTime::UNIX_EPOCH,
+            position: 1,
+            reason: Reason::NoSlot,
+            waits_for: None,
+        };
+        let mut slots = Slots {
+            limit: 2,
+            in_use: 2,
+            waiting: vec![waiting(Priority::Review, RunKind::Review)],
+        };
+        assert_eq!(reviews_line(&slots), "2 running, 1 waiting (limit 2)");
+        slots
+            .waiting
+            .insert(0, waiting(Priority::Rebase, RunKind::Rebase));
+        assert_eq!(
+            reviews_line(&slots),
+            "2 running, 2 waiting, 1 rebase first (limit 2)"
+        );
+    }
 
     #[test]
     fn each_sandbox_host_has_a_row_and_a_full_one_warns_while_runs_wait() {
