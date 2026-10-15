@@ -376,10 +376,27 @@ Henk then:
    plan in it (§4), as material, changes the code and runs the repository's
    own checks, in one conversation. It ends by proposing the pull request:
    what it changed, which checks it ran, and what it left out and why.
-3. **Checks the change** as for a review loop's round (§3.5): only the
+3. **Has the changes checked against the issue** (#535), when
+   `[roles.reviewer]` is configured and `[execution] requirements_max_rounds`
+   (3 by default; 0 turns it off) is above 0. The reviewer reads the
+   changes where they stand in the executor's workspace, as a diff Henk
+   makes of them and with read tools that cannot write, and raises a point
+   for each gap between them and what the issue and its plan ask: an
+   acceptance criterion not met, a step skipped, something out of scope
+   done, something needed missing. Code style and CI are the pull request's
+   review, not this. The executor answers each point (`taken`, after it
+   changed the code, or `rejected`, with its reason), revises in the same
+   conversation and proposes again; the reviewer checks again and may
+   contest a rejection once. It is the planner and reviewer pairing (§4)
+   with the executor in the planner's place. It ends when the reviewer
+   raises nothing more, or at `requirements_max_rounds` rounds, or when a
+   session breaks off, the run's time runs out or the changes cannot be
+   read. Only the first lets the run go on. Every point and answer is kept
+   with the run, with why and after how many rounds it stopped.
+4. **Checks the change** as for a review loop's round (§3.5): only the
    changeset leaves the workspace, within the same limits. Henk runs no
    checks of his own; the pull request's CI decides.
-4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
+5. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
    configurable) with the commits the executor proposed, checked and
    trailered as for a round (§3.5), or with one commit, "Resolve #N:
    <title>", when it proposed none that hold. Every commit carries the
@@ -387,16 +404,19 @@ Henk then:
    is never pushed over: the run picks the name before the session, and
    when origin has it, takes `-2`, `-3` and on. With ten names taken it
    stops before the session and says so on the issue.
-5. **Opens a pull request** of that branch into the default branch, ready
+6. **Opens a pull request** of that branch into the default branch, ready
    for review. Its description closes the issue and says what was done and
-   what was left out, with the run link.
-6. **Has it reviewed.** Henk asks for a review of the new pull request, a
+   what was left out, how the requirements review went when there was one,
+   and the run link.
+7. **Has it reviewed.** Henk asks for a review of the new pull request, a
    run of its own with fresh sessions: the reviewer and the executor take
    turns on it as on any pull request (§3.2).
 
 **Every execute run ends.** Either the pull request is open, or one comment
-on the issue says why there is none (nothing changed, the branch exists),
-with a link to the run. A cancel says so on the issue; a
+on the issue says why there is none (nothing changed, the branch exists,
+the requirements review did not accept the changes, with the points still
+open), with a link to the run. A review that is not satisfied in time
+discards the executor's work: nothing is pushed. A cancel says so on the issue; a
 run that does not finish within its time limit has failed.
 
 ---
@@ -816,6 +836,14 @@ surprising reading of the earlier wording; veto any that is wrong.
   a finding of the run is refused and the executor rewords it; the
   fallback commit is "Fix review findings" without ids. The `Henk-Run`
   trailer stays.
+
+- §4a: before the pull request is opened, a reviewer checks an execute
+  run's changes against the issue and its plan, and the executor revises
+  in the same conversation (#535). On whenever `[roles.reviewer]` is set,
+  up to `[execution] requirements_max_rounds` rounds (3), 0 for off. A
+  review that is not satisfied opens no pull request. Its verdict is
+  stored with the run as the points of a plan review are, and is in the
+  pull request's description.
 
 - §3.1, §3.6: one run per pull request at a time, of any kind (#580). A
   rebase waits for a slot ahead of every review, supersedes a review of

@@ -833,6 +833,16 @@ the planner's answer as the verdict (`taken`, `rejected` or `unsettled`).
 `runs.loop_stop` and `loop_rounds` say why and after how many rounds its
 review stopped.
 
+An execute run with a requirements review (#535) records the same way: a
+`sessions` row for the executor and one for the reviewer, the reviewer's
+points as `drafts` with the kind `requirement_point` and the executor's
+answer as the verdict, and `loop_stop` and `loop_rounds`. `execute_review.rs`
+is the pairing: the plan pairing's points, tools and stops with the
+executor answering. The reviewer reads the executor's workspace through
+tools that cannot write, and a diff that Henk makes with `Checkout::diff_of`
+from the exported changeset, applied to his own checkout of the default
+branch each round.
+
 A review records one `sessions` row per session (the reviewer and the
 executor), its stages, and in `drafts` every finding the reviewer reported,
 with the kind `loop_finding`, and the verdict it ended with: `fixed` with the

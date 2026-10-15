@@ -18,6 +18,7 @@ mod diff_tools;
 mod doctor;
 mod edit_tools;
 mod execute;
+mod execute_review;
 mod execute_tools;
 mod git;
 mod hooks;

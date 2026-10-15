@@ -925,6 +925,22 @@ pub struct ExecutionConfig {
     /// `henk/329-the-executor-takes-an-issue`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+    /// Rounds the requirements review takes at most (#535): before the pull
+    /// request is opened, the reviewer checks the executor's changes against
+    /// the issue and its plan, and the executor revises. It is on whenever
+    /// `[roles.reviewer]` is set; 0 turns it off.
+    #[serde(default = "default_requirements_max_rounds")]
+    pub requirements_max_rounds: u32,
+}
+
+impl ExecutionConfig {
+    /// Whether an execute run has its changes checked against the issue by
+    /// the reviewer (#535): it needs the reviewer role and at least one
+    /// round.
+    #[must_use]
+    pub fn reviews_requirements(&self, roles: &RolesConfig) -> bool {
+        self.requirements_max_rounds > 0 && roles.reviewer.is_some()
+    }
 }
 
 /// Autonomous ticket runs (#536): one action takes an issue through a plan,
@@ -1781,6 +1797,9 @@ fn default_branch_prefix() -> String {
 fn default_plan_max_rounds() -> u32 {
     3
 }
+fn default_requirements_max_rounds() -> u32 {
+    3
+}
 fn default_plan_run_timeout_secs() -> u64 {
     3600
 }
@@ -2468,6 +2487,34 @@ fn validate_execution(execution: &ExecutionConfig, roles: &RolesConfig) -> Resul
             "execution.run_timeout_secs must be at least 1".to_owned(),
         ));
     }
+    validate_requirements_review(execution, roles)
+}
+
+/// The requirements review (#535) pairs the reviewer with the executor, who
+/// hand points and answers to each other: a reviewer without `raise_point`
+/// would let the changes through unchecked, and an executor without
+/// `answer_point` could never answer a point.
+fn validate_requirements_review(
+    execution: &ExecutionConfig,
+    roles: &RolesConfig,
+) -> Result<(), ConfigError> {
+    if !execution.reviews_requirements(roles) {
+        return Ok(());
+    }
+    let sides = [
+        roles
+            .reviewer
+            .as_ref()
+            .map(|r| (Role::Reviewer, r.tools(Role::Reviewer))),
+        roles.executor.as_ref().map(|r| (Role::Executor, r.tools())),
+    ];
+    for (role, granted) in sides.into_iter().flatten() {
+        if let Some(tool) = role.missing_requirements_handoff(&granted) {
+            return Err(ConfigError::Role(format!(
+                "[roles.{role}] tools leave out {tool}, which the requirements review of [execution] needs: add {tool} to tools, or set requirements_max_rounds = 0 to turn the review off"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -3030,6 +3077,18 @@ impl Settings {
                 "Execution:       executor takes issues to pull requests on {}<issue>-<title>; {}s each",
                 execution.branch_prefix, execution.run_timeout_secs
             );
+            if execution.reviews_requirements(&self.roles) {
+                let _ = writeln!(
+                    out,
+                    "Requirements:    the reviewer checks the executor's changes against the issue before the pull request; up to {} rounds",
+                    execution.requirements_max_rounds
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "Requirements:    off (the executor's changes are not checked before the pull request; needs [roles.reviewer] and requirements_max_rounds above 0)"
+                );
+            }
         }
         if let Some(autonomous) = &self.autonomous {
             let _ = writeln!(
@@ -3987,6 +4046,91 @@ github_owners = ["docspec"]
             out.contains("Execution:       executor takes issues to pull requests on bots/henk/<issue>-<title>; 3600s each"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_requirements_review_is_on_with_a_reviewer_and_needs_its_handoff_tools() {
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let settings = |extra: &str| {
+            Config::parse(&format!("{MINIMAL}{models}{extra}")).and_then(Config::into_settings)
+        };
+        let executor = "[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+        let reviewer = "[roles.reviewer]\nmodel = \"m\"\n";
+        let describe = |settings: &Settings| {
+            let mut out = String::new();
+            settings.describe_agents(&mut out);
+            out
+        };
+
+        // Without a reviewer role there is nothing to check the changes with.
+        let alone = settings(&format!("[execution]\n{executor}")).unwrap();
+        let execution = alone.execution.as_ref().unwrap();
+        assert_eq!(execution.requirements_max_rounds, 3);
+        assert!(!execution.reviews_requirements(&alone.roles));
+        assert!(
+            describe(&alone).contains("Requirements:    off"),
+            "{}",
+            describe(&alone)
+        );
+
+        // With one it is on, 3 rounds by default.
+        let paired = settings(&format!("[execution]\n{executor}{reviewer}")).unwrap();
+        let execution = paired.execution.as_ref().unwrap();
+        assert!(execution.reviews_requirements(&paired.roles));
+        assert!(
+            describe(&paired).contains("Requirements:    the reviewer checks the executor's changes against the issue before the pull request; up to 3 rounds"),
+            "{}",
+            describe(&paired)
+        );
+
+        // 0 rounds turns it off, and then no tool is needed.
+        let off = settings(&format!(
+            "[execution]\nrequirements_max_rounds = 0\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\ntools = [\"read_file\"]\n{reviewer}"
+        ))
+        .unwrap();
+        assert!(
+            !off.execution
+                .as_ref()
+                .unwrap()
+                .reviews_requirements(&off.roles)
+        );
+
+        // An explicit tool list that leaves out a side of the hand-off is
+        // refused, with the two ways out.
+        for (role, tools, missing) in [
+            (
+                "executor",
+                "tools = [\"read_file\", \"propose_pull_request\"]\nrequester_id = 3\n",
+                "answer_point",
+            ),
+            (
+                "reviewer",
+                "tools = [\"read_file\", \"raise_point\"]\n",
+                "finish_round",
+            ),
+        ] {
+            let (executor, reviewer) = if role == "executor" {
+                (
+                    format!("[roles.executor]\nmodel = \"m\"\n{tools}"),
+                    reviewer.to_owned(),
+                )
+            } else {
+                (
+                    executor.to_owned(),
+                    format!("[roles.reviewer]\nmodel = \"m\"\n{tools}"),
+                )
+            };
+            let error = settings(&format!("[execution]\n{executor}{reviewer}")).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "[roles.{role}] tools leave out {missing}, which the requirements review of [execution] needs"
+                )),
+                "{message}"
+            );
+            assert!(message.contains("requirements_max_rounds = 0"), "{message}");
+            assert!(henk_domain::text::is_in_style(&message), "{message}");
+        }
     }
 
     #[test]

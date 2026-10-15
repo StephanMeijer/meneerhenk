@@ -34,11 +34,13 @@ use crate::cancel::Cancelled;
 use crate::commit_tools::{RECENT_COMMITS, recent_commits_text};
 use crate::config::{EditFormat, ExecutionConfig, ExecutorConfig, ModelFileConfig};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
+use crate::execute_review::{self, Parts};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
 use crate::issue_runs::{IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
+use crate::plan_review_tools::{AnswerPoint, ListPoints, PlanHandoff};
 use crate::push::{PushTo, Pusher, stop_if_cancelled};
 use crate::review::ReviewRequest;
 use crate::roles::equip_and_grant;
@@ -112,7 +114,7 @@ impl std::fmt::Display for NoPullRequest {
 
 impl std::error::Error for NoPullRequest {}
 
-fn no_pull(why: impl Into<String>) -> anyhow::Error {
+pub(crate) fn no_pull(why: impl Into<String>) -> anyhow::Error {
     NoPullRequest(why.into()).into()
 }
 
@@ -206,6 +208,21 @@ pub async fn run_execute(
             };
             Err(on_issue.failed(&comment, &reason).await)
         }
+    }
+}
+
+/// Whether the executor's session ended in a way a pull request can come
+/// from. `timeout_secs` is the run's time limit.
+pub(crate) fn session_result(stop: StopCause, timeout_secs: u64) -> anyhow::Result<()> {
+    match stop {
+        StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
+        StopCause::Timeout => Err(anyhow!("the time limit of {timeout_secs}s was reached")),
+        StopCause::Cancelled => Err(Cancelled.into()),
+        StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
+        StopCause::Refused(why) => Err(anyhow!("the model declined the work ({why})")),
+        StopCause::Stuck { tool, .. } => Err(anyhow!(
+            "the model kept repeating {tool} with the same arguments"
+        )),
     }
 }
 
@@ -380,17 +397,36 @@ impl Work<'_> {
             state: Mutex::new(EditState::default()),
         });
         let proposed: Proposed = Arc::default();
-        let session = format!("executor, {}", self.model.model());
-        stages::mark(store, run, Stage::Session, StageState::Running, session).await;
-        let spec = self.session(&editing, &proposed, &reference, (branch, recent));
-        let outcome = run_session(store, run, spec, cancel.clone()).await;
-        self.session_result(outcome.stop)?;
-        stages::mark(store, run, Stage::Session, StageState::Done, "proposed").await;
-        let proposal = proposed
-            .lock()
-            .ok()
-            .and_then(|p| p.clone())
-            .ok_or_else(|| no_pull("the executor ended without proposing a pull request"))?;
+        let handoff = self.requirements_handoff()?;
+        let spec = self.session(
+            &editing,
+            &proposed,
+            &reference,
+            (branch, recent),
+            handoff.as_ref(),
+        );
+        let proposal = match handoff {
+            Some(handoff) => {
+                let parts = Parts {
+                    app: self.app,
+                    run,
+                    execution: self.execution,
+                    executor: self.executor,
+                    issue: self.issue,
+                    reference: &reference,
+                    repo: &repo.path(),
+                    base,
+                    writer,
+                    workspace,
+                    proposed: &proposed,
+                    spec,
+                    handoff,
+                    deadline: self.deadline,
+                };
+                execute_review::run(parts, cancel).await?
+            }
+            None => self.propose_alone(spec, &proposed, cancel).await?,
+        };
 
         stages::mark(store, run, Stage::Commit, StageState::Running, "").await;
         let changes = self.checked(workspace, &editing, &proposal).await?;
@@ -469,7 +505,7 @@ impl Work<'_> {
             &reference,
             &proposal.summary,
             &proposal.left_out,
-            "",
+            &proposal.requirements,
             self.link,
         );
         let pull = NewPull {
@@ -522,14 +558,56 @@ impl Work<'_> {
         }]
     }
 
+    /// The executor's one session, from the issue to its proposal, when no
+    /// reviewer checks its changes.
+    async fn propose_alone(
+        &self,
+        spec: SessionSpec,
+        proposed: &Proposed,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<Proposal> {
+        let (store, run) = (&*self.app.store, self.run);
+        let session = format!("executor, {}", self.model.model());
+        stages::mark(store, run, Stage::Session, StageState::Running, session).await;
+        let outcome = run_session(store, run, spec, cancel.clone()).await;
+        session_result(outcome.stop, self.execution.run_timeout_secs)?;
+        stages::mark(store, run, Stage::Session, StageState::Done, "proposed").await;
+        proposed
+            .lock()
+            .ok()
+            .and_then(|p| p.clone())
+            .ok_or_else(|| no_pull("the executor ended without proposing a pull request"))
+    }
+
+    /// The hand-off of the requirements review (#535), when this run has
+    /// one: a reviewer role is configured and the rounds are not set to 0.
+    fn requirements_handoff(&self) -> anyhow::Result<Option<Arc<PlanHandoff>>> {
+        let settings = &self.app.settings;
+        if !self.execution.reviews_requirements(&settings.roles) {
+            return Ok(None);
+        }
+        let Some(reviewer) = &settings.roles.reviewer else {
+            return Ok(None);
+        };
+        let model = self.app.model(&reviewer.model)?;
+        Ok(Some(Arc::new(PlanHandoff::for_changes(
+            self.run.clone(),
+            Arc::clone(&self.app.store),
+            model.model().to_owned(),
+        ))))
+    }
+
     /// The executor's session: one conversation from the issue to its
-    /// proposal, with a fixed prompt and tools (#321).
+    /// proposal, with a fixed prompt and tools (#321). With a requirements
+    /// review (#535) it also answers the reviewer's points, and the
+    /// review runs it in rounds.
     fn session(
         &self,
         editing: &Arc<EditContext>,
         proposed: &Proposed,
         reference: &str,
         (branch, recent): (&str, &[String]),
+        handoff: Option<&Arc<PlanHandoff>>,
     ) -> SessionSpec {
         let repo = self.request.target.repo.path();
         let mut system = format!(
@@ -550,11 +628,18 @@ impl Work<'_> {
         if editing.bash {
             system = format!("{system}\n\n{}", prompts::EXECUTOR_BASH);
         }
+        if handoff.is_some() {
+            system = format!("{system}\n\n{}", prompts::EXECUTE_REQUIREMENTS);
+        }
         let mut tools = edit_tools(editing);
         tools.add(ProposePullRequest {
             proposed: Arc::clone(proposed),
             workspace: Arc::clone(&editing.workspace),
         });
+        if let Some(handoff) = handoff {
+            tools.add(ListPoints(Arc::clone(handoff)));
+            tools.add(AnswerPoint(Arc::clone(handoff)));
+        }
         let tools = equip_and_grant(
             Role::Executor,
             &mut system,
@@ -590,23 +675,6 @@ impl Work<'_> {
             },
             continuation: Some(propose_continuation(Arc::clone(proposed))),
             turn_warning: None,
-        }
-    }
-
-    /// Whether the session ended in a way a pull request can come from.
-    fn session_result(&self, stop: StopCause) -> anyhow::Result<()> {
-        match stop {
-            StopCause::EndTurn | StopCause::MaxTurns => Ok(()),
-            StopCause::Timeout => Err(anyhow!(
-                "the time limit of {}s was reached",
-                self.execution.run_timeout_secs
-            )),
-            StopCause::Cancelled => Err(Cancelled.into()),
-            StopCause::ModelError(error) => Err(anyhow!("model error: {error}")),
-            StopCause::Refused(why) => Err(anyhow!("the model declined the work ({why})")),
-            StopCause::Stuck { tool, .. } => Err(anyhow!(
-                "the model kept repeating {tool} with the same arguments"
-            )),
         }
     }
 
@@ -1354,6 +1422,441 @@ requester_id = 3
                 .iter()
                 .any(|s| s.stage == henk_store::Stage::Checkout && s.state == StageState::Done),
             "{stages:?}"
+        );
+    }
+
+    // The requirements review (#535).
+
+    /// [`CONFIG`]'s reviewer role, on a scripted model of its own.
+    const REVIEWER: &str = r#"
+[models.r]
+endpoint = "m"
+model = "scripted-reviewer"
+[roles.reviewer]
+model = "r"
+"#;
+
+    /// An app whose executor follows `executor` and whose reviewer follows
+    /// `reviewer`, with the review allowed `rounds` rounds.
+    async fn reviewed(
+        name: &str,
+        rounds: u32,
+        executor: Vec<Completion>,
+        reviewer: Vec<Completion>,
+    ) -> (Fixture, Arc<ScriptedClient>) {
+        let mut f = fixture_on(&format!("{CONFIG}{REVIEWER}"), name, executor).await;
+        f.app
+            .settings
+            .execution
+            .as_mut()
+            .unwrap()
+            .requirements_max_rounds = rounds;
+        let model = Arc::new(ScriptedClient::new(
+            "scripted-reviewer",
+            reviewer.into_iter().map(Ok),
+        ));
+        f.app
+            .models
+            .insert("r".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
+        (f, model)
+    }
+
+    fn raise() -> Completion {
+        call(
+            "raise_point",
+            json!({
+                "about": "criterion 2",
+                "claim": "the export has no header row",
+                "why": "the issue asks for a header row"
+            }),
+        )
+    }
+
+    fn finish_round() -> Completion {
+        call("finish_round", json!({}))
+    }
+
+    fn answer(how: &str, reason: &str) -> Completion {
+        call(
+            "answer_point",
+            json!({"point": "p1", "answer": how, "reason": reason}),
+        )
+    }
+
+    fn write_header() -> Completion {
+        call(
+            "write_file",
+            json!({"path": "src/csv.rs", "content": "pub fn export() { /* header row */ }\n"}),
+        )
+    }
+
+    fn propose_again() -> Completion {
+        call(
+            "propose_pull_request",
+            json!({"summary": "Runs export as CSV with a header row.", "left_out": ""}),
+        )
+    }
+
+    /// Everything the model was sent, as one string.
+    fn sent(model: &ScriptedClient) -> String {
+        format!("{:?}", model.requests())
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_with_nothing_to_raise_lets_the_pull_request_open_with_the_changes_in_its_view()
+     {
+        let (f, reviewer) = reviewed(
+            "henk-exec-req-ok",
+            3,
+            vec![write_csv(), propose(), done()],
+            vec![
+                call("list_changed_files", json!({})),
+                call("get_file_diff", json!({"path": "src/csv.rs"})),
+                finish_round(),
+                done(),
+            ],
+        )
+        .await;
+        let report = run_execute(&f.app, request("r-exec-req-ok"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.pull.target.number, 12);
+
+        // The reviewer read the executor's unpushed changes as a diff.
+        let read = sent(&reviewer);
+        assert!(read.contains("src/csv.rs"), "{read}");
+        assert!(read.contains("+pub fn export() {}"), "{read}");
+        let first = &reviewer.requests()[0];
+        let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
+        for tool in ["get_file_diff", "read_file", "raise_point", "finish_round"] {
+            assert!(tools.contains(&tool), "{tool} in {tools:?}");
+        }
+        for tool in ["write_file", "edit_file", "bash", "propose_pull_request"] {
+            assert!(!tools.contains(&tool), "{tool} in {tools:?}");
+        }
+        // The executor was told it is reviewed, and can answer.
+        let executor = &f.model.requests()[0];
+        assert!(
+            executor
+                .system
+                .as_deref()
+                .unwrap()
+                .contains("Your changes are checked against the issue"),
+        );
+        assert!(
+            executor
+                .tools
+                .iter()
+                .any(|t| t.name.as_str() == "answer_point"),
+            "the executor answers points"
+        );
+
+        let opened = f.hub.opened.lock().unwrap().clone();
+        let body = &opened[0].body;
+        assert!(body.contains("## Requirements review"), "{body}");
+        assert!(body.contains("in 1 round and raised no point."), "{body}");
+        let run = record(&f, "r-exec-req-ok").await;
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.loop_stop.as_deref(), Some("converged"));
+        assert_eq!(run.loop_rounds, Some(1));
+        assert!(f.app.store.drafts(&run.id).await.unwrap().is_empty());
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        assert_eq!(f.provider.live(), 0, "the workspace is closed");
+        let sessions = f.app.store.sessions(&run.id).await.unwrap();
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["executor", "reviewer"]);
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        let session = stages
+            .iter()
+            .find(|s| s.stage == henk_store::Stage::Session)
+            .unwrap();
+        assert_eq!(session.state, StageState::Done, "{stages:?}");
+        assert_eq!(session.detail, "reviewed in 1 round");
+    }
+
+    #[tokio::test]
+    async fn a_point_the_executor_takes_is_fixed_in_the_same_conversation_before_the_pull_request()
+    {
+        let (f, reviewer) = reviewed(
+            "henk-exec-req-round",
+            3,
+            vec![
+                write_csv(),
+                propose(),
+                done(),
+                answer("taken", "added the header row"),
+                write_header(),
+                propose_again(),
+                done(),
+            ],
+            vec![raise(), finish_round(), done(), finish_round(), done()],
+        )
+        .await;
+        run_execute(
+            &f.app,
+            request("r-exec-req-round"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        // The pushed change is the revised one, in one pull request.
+        assert_eq!(
+            remote_branch_file(&f.hub.remote, "henk/9-export-runs", "src/csv.rs").await,
+            "pub fn export() { /* header row */ }\n"
+        );
+        let opened = f.hub.opened.lock().unwrap().clone();
+        assert_eq!(opened.len(), 1);
+        let body = &opened[0].body;
+        assert!(
+            body.contains("Runs export as CSV with a header row."),
+            "{body}"
+        );
+        assert!(
+            body.contains("in 2 rounds and raised 1 point: 1 taken, 0 rejected."),
+            "{body}"
+        );
+
+        // The executor's second round is its first conversation resumed
+        // with the point; the reviewer's second shows it the answer.
+        let executor = f.model.requests();
+        assert_eq!(executor.len(), 7, "three calls in round 0, four in round 1");
+        let second = format!("{:?}", executor[3]);
+        assert!(second.contains("Resolve issue #9"), "same conversation");
+        assert!(second.contains("the export has no header row"), "{second}");
+        let again = sent(&reviewer);
+        assert!(again.contains("The executor's answers"), "{again}");
+        assert!(again.contains("added the header row"), "{again}");
+
+        let run = record(&f, "r-exec-req-round").await;
+        assert_eq!(run.loop_stop.as_deref(), Some("converged"));
+        assert_eq!(run.loop_rounds, Some(2));
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        let session = stages
+            .iter()
+            .find(|s| s.stage == henk_store::Stage::Session)
+            .unwrap();
+        assert_eq!(session.state, StageState::Done, "{stages:?}");
+        assert_eq!(session.detail, "reviewed in 2 rounds");
+        let drafts = f.app.store.drafts(&run.id).await.unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].kind, henk_store::REQUIREMENT_POINT_KIND);
+        let decision = drafts[0].decision.as_ref().unwrap();
+        assert_eq!(decision.verdict, henk_store::DraftVerdict::Taken);
+        assert_eq!(decision.checker, "executor");
+    }
+
+    #[tokio::test]
+    async fn a_point_the_executor_rejects_with_a_reason_stands_in_the_pull_request_when_the_reviewer_lets_it_go()
+     {
+        let (f, _) = reviewed(
+            "henk-exec-req-reject",
+            3,
+            vec![
+                write_csv(),
+                propose(),
+                done(),
+                answer(
+                    "rejected",
+                    "the issue asks for a header row only in the JSON export",
+                ),
+                propose_again(),
+                done(),
+            ],
+            vec![raise(), finish_round(), done(), finish_round(), done()],
+        )
+        .await;
+        run_execute(
+            &f.app,
+            request("r-exec-req-reject"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let opened = f.hub.opened.lock().unwrap().clone();
+        let body = &opened[0].body;
+        assert!(
+            body.contains("raised 1 point: 0 taken, 1 rejected."),
+            "{body}"
+        );
+        assert!(
+            body.contains("- Rejected, criterion 2 (the export has no header row): the issue asks for a header row only in the JSON export"),
+            "{body}"
+        );
+        assert!(henk_domain::text::is_in_style(body), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_who_is_not_satisfied_in_time_ends_the_run_with_no_pull_request_and_a_comment()
+     {
+        let (f, _) = reviewed(
+            "henk-exec-req-limit",
+            1,
+            vec![
+                write_csv(),
+                propose(),
+                done(),
+                answer("rejected", "the issue does not ask for it"),
+                propose_again(),
+                done(),
+            ],
+            vec![raise(), finish_round(), done()],
+        )
+        .await;
+        let error = run_execute(
+            &f.app,
+            request("r-exec-req-limit"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("the requirements review did not accept the changes"),
+            "{why}"
+        );
+        assert!(why.contains("max_rounds (1)"), "{why}");
+
+        // Nothing was pushed or opened; the issue hears why, once.
+        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
+        assert!(f.hub.opened.lock().unwrap().is_empty());
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert!(
+            comments[0].contains("I opened no pull request for this issue"),
+            "{comments:?}"
+        );
+        assert!(comments[0].contains("Points still open"), "{comments:?}");
+        assert!(
+            comments[0].contains("the export has no header row"),
+            "{comments:?}"
+        );
+        assert!(
+            comments[0].contains("/runs/r-exec-req-limit"),
+            "{comments:?}"
+        );
+        let run = record(&f, "r-exec-req-limit").await;
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.loop_stop.as_deref(), Some("max_rounds"));
+        assert_eq!(run.loop_rounds, Some(1));
+        assert_eq!(f.provider.live(), 0, "the workspace is closed");
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_who_never_finishes_its_round_ends_the_run_with_no_pull_request() {
+        // It ends its turn without finish_round, and again after each of
+        // the two nudges.
+        let (f, _) = reviewed(
+            "henk-exec-req-silent",
+            3,
+            vec![write_csv(), propose(), done()],
+            vec![done(), done(), done()],
+        )
+        .await;
+        let error = run_execute(
+            &f.app,
+            request("r-exec-req-silent"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(why.contains("the reviewer did not finish round 1"), "{why}");
+        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
+        let run = record(&f, "r-exec-req-silent").await;
+        assert_eq!(run.loop_stop.as_deref(), Some("session_failed"));
+    }
+
+    #[tokio::test]
+    async fn an_executor_that_changes_nothing_is_not_reviewed() {
+        let (f, reviewer) =
+            reviewed("henk-exec-req-nothing", 3, vec![propose(), done()], vec![]).await;
+        let error = run_execute(
+            &f.app,
+            request("r-exec-req-nothing"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(why.contains("the executor changed nothing"), "{why}");
+        assert!(
+            reviewer.requests().is_empty(),
+            "the reviewer is not paid for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancel_during_the_review_pushes_and_opens_nothing() {
+        let (f, _) = reviewed(
+            "henk-exec-req-cancel",
+            3,
+            vec![write_csv(), propose(), done()],
+            vec![],
+        )
+        .await;
+        let slow = Arc::new(
+            ScriptedClient::new("scripted-reviewer", [Ok(finish_round()), Ok(done())])
+                .with_delay(Duration::from_secs(30)),
+        );
+        let mut f = f;
+        f.app
+            .models
+            .insert("r".to_owned(), Arc::clone(&slow) as Arc<dyn ModelClient>);
+        let cancel = CancellationToken::new();
+        let (result, ()) = tokio::join!(
+            run_execute(&f.app, request("r-exec-req-cancel"), cancel.clone()),
+            async {
+                while slow.requests().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                cancel.cancel();
+            }
+        );
+        let error = result.unwrap_err();
+        assert_eq!(error.to_string(), "execution failed: cancelled");
+        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
+        assert!(f.hub.opened.lock().unwrap().is_empty());
+        assert_eq!(f.provider.live(), 0, "the workspace is closed");
+        let run = record(&f, "r-exec-req-cancel").await;
+        assert_eq!(run.loop_stop.as_deref(), Some("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn without_rounds_or_without_a_reviewer_the_run_is_what_it_was() {
+        // A reviewer role, with the rounds set to 0.
+        let (f, reviewer) = reviewed(
+            "henk-exec-req-off",
+            0,
+            vec![write_csv(), propose(), done()],
+            vec![],
+        )
+        .await;
+        run_execute(&f.app, request("r-exec-req-off"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(reviewer.requests().is_empty());
+        let body = f.hub.opened.lock().unwrap()[0].body.clone();
+        assert!(!body.contains("Requirements review"), "{body}");
+        let system = f.model.requests()[0].system.clone().unwrap();
+        assert!(!system.contains("checked against the issue"), "{system}");
+        assert!(
+            !f.model.requests()[0]
+                .tools
+                .iter()
+                .any(|t| t.name.as_str() == "answer_point")
+        );
+        assert_eq!(record(&f, "r-exec-req-off").await.loop_stop, None);
+
+        // No reviewer role at all: [`CONFIG`] as it is.
+        let f = fixture("henk-exec-req-none", vec![write_csv(), propose(), done()]).await;
+        assert!(
+            !f.app
+                .settings
+                .execution
+                .as_ref()
+                .unwrap()
+                .reviews_requirements(&f.app.settings.roles)
         );
     }
 }

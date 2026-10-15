@@ -256,23 +256,7 @@ impl Pairing<'_> {
     /// Why the pairing stops when a session's round did not end its turn:
     /// a cancel, a time or turn limit, a model error or refusal.
     fn broke_off(&self, who: &str, round: &RoundOutcome) -> Option<PlanStop> {
-        let which = self.round;
-        let why = match &round.stop {
-            StopCause::EndTurn => return None,
-            StopCause::Cancelled => return Some(PlanStop::Cancelled),
-            StopCause::Timeout => {
-                return Some(PlanStop::Timeout(format!(
-                    "the {who} reached its time limit in round {which}"
-                )));
-            }
-            StopCause::MaxTurns => "reached its turn limit".to_owned(),
-            StopCause::ModelError(error) => format!("failed: {error}"),
-            StopCause::Refused(why) => format!("declined ({why})"),
-            StopCause::Stuck { tool, .. } => format!("kept repeating {tool}"),
-        };
-        Some(PlanStop::SessionFailed(format!(
-            "the {who} {why} in round {which}"
-        )))
+        broke_off(who, self.round, round)
     }
 
     /// Ends both sessions' records, whichever ran.
@@ -281,6 +265,28 @@ impl Pairing<'_> {
         self.planner.finish(store, run).await;
         self.reviewer.finish(store, run).await;
     }
+}
+
+/// Why a pairing stops when `who`'s round number `which` did not end its
+/// turn: a cancel, a time or turn limit, a model error or refusal. The
+/// requirements review of an execute run (#535) stops the same ways.
+pub(crate) fn broke_off(who: &str, which: u32, round: &RoundOutcome) -> Option<PlanStop> {
+    let why = match &round.stop {
+        StopCause::EndTurn => return None,
+        StopCause::Cancelled => return Some(PlanStop::Cancelled),
+        StopCause::Timeout => {
+            return Some(PlanStop::Timeout(format!(
+                "the {who} reached its time limit in round {which}"
+            )));
+        }
+        StopCause::MaxTurns => "reached its turn limit".to_owned(),
+        StopCause::ModelError(error) => format!("failed: {error}"),
+        StopCause::Refused(why) => format!("declined ({why})"),
+        StopCause::Stuck { tool, .. } => format!("kept repeating {tool}"),
+    };
+    Some(PlanStop::SessionFailed(format!(
+        "the {who} {why} in round {which}"
+    )))
 }
 
 /// The reviewer's `{{workspace}}`: its copy of the repository, or none.

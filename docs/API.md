@@ -177,8 +177,10 @@ One run with everything the run record holds about it:
   `plan_point`, with `path` the part of the plan the point is about, `line`
   0, `target` the rejected point it contests if any, and the planner's
   `decision`: `taken`, `rejected`, or `unsettled` when the review ended
-  first (#328). Reviews made by lanes hold the lanes' drafts and the
-  fact-check's decisions instead (#189);
+  first (#328). An execute run's requirements review has the same shape
+  with `kind` `requirement_point`, and the executor's `decision`: `taken`,
+  `rejected`, or `unsettled` (#535). Reviews made by lanes hold the lanes'
+  drafts and the fact-check's decisions instead (#189);
 - `transcripts`: the sessions whose conversation is kept (#191);
 - `tool_usage`: calls per session and tool (#190);
 - `events`: the timeline;

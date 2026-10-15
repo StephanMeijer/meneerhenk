@@ -85,13 +85,6 @@ impl PlanHandoff {
 
     /// A handoff for an execute run's changes with no points yet (#535).
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the requirements review starts it in a later pull request (#535)"
-        )
-    )]
     pub fn for_changes(run: RunId, store: Arc<dyn RunStore>, reviewer_model: String) -> Self {
         Self::about(Subject::Changes, run, store, reviewer_model)
     }
