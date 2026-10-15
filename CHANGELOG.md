@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.6...v0.4.7) - 2026-10-15
+
+### Added
+
+- *(platform)* the open pull requests of a base that are behind it ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+
+### Fixed
+
+- *(review)* the commits of a review loop carry no finding ids ([#585](https://github.com/StephanMeijer/meneerhenk/pull/585))
+
+### Other
+
+- Merge pull request #599 from StephanMeijer/fix/commit-no-finding-ids
+
 ## [0.4.6](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.5...v0.4.6) - 2026-10-15
 
 ### Added
