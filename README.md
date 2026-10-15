@@ -168,7 +168,7 @@ OpenBao.
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
-| `HENK_API_TOKEN` | `POST /review`, `POST /plan` |
+| `HENK_API_TOKEN` | `POST /review`, `/plan`, `/execute`, `/rebase` |
 | `HENK_DASHBOARD_CLIENT_ID`, `HENK_DASHBOARD_CLIENT_SECRET` | The GitHub OAuth App the dashboard signs in with |
 | `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
@@ -709,7 +709,8 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
-`POST /plan {"url", "note"?}` and `POST /execute {"url", "note"?}` with
+`POST /plan {"url", "note"?}`, `POST /execute {"url", "note"?}` and
+`POST /rebase {"url"}` with
 `Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
 
@@ -877,6 +878,33 @@ requester with no account on the run's platform gets no trailers of their
 own, and the run notes why. Trailer values come only from ids
 and configuration, never from a display name or a comment (spec §2, §8.3);
 `config check` refuses a malformed name or email.
+
+### Rebasing a pull request
+
+When main moves, a pull request falls behind. Comment `@meneer-henk rebase`
+on it (GitLab: `@meneerhenk rebase`), or start a rebase from the dashboard,
+MCP `start_rebase` or `POST /rebase {"url"}`, and Henk replays its commits
+onto its base branch (spec §3.6, #579). Authors are kept; Henk is the
+committer, as he commits elsewhere. When a commit stops on conflicts, the
+executor resolves them in a workspace with its edit tools; Henk takes back
+only changes to the conflicted files and only when no conflict marker
+(`<<<<<<<`, `>>>>>>>`) is left. Anything else, a session that fails, or
+more than ten commits that conflict stops the rebase, and nothing is
+pushed. A rebase may take 30 minutes.
+
+The rebased branch is the one push Henk forces, and only with a lease: it
+replaces the branch only while it is still at the head Henk read, so a
+commit someone pushed meanwhile makes the push fail and is never lost. The
+same rules as every push apply first: never a fork, the default branch, a
+protected branch, or a closed or merged pull request. Henk then says on the
+pull request what he rebased (or that it was already up to date, or why he
+could not), and asks for a review of the rebased commits himself, since
+the platform's event about his own push is dropped as his own.
+
+Rebasing needs `[roles.executor]` and is on for every repository; turn it
+off for one with `rebase = false` in its
+`[roles.executor.repositories."owner/name"]` entry. `henk config check`
+says which repositories are not rebased.
 
 ### Sandbox host
 
@@ -1184,10 +1212,11 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
 - a form that starts what this Henk is configured for: a review, a plan,
-  or an issue taken to a pull request (#329); and a button that cancels a
-  running one.
+  an issue taken to a pull request (#329), or a rebase (#579); and a
+  button that cancels a running one.
 
-Starting works exactly like `POST /review`, `/plan` and `/execute`: the
+Starting works exactly like `POST /review`, `/plan`, `/execute` and
+`/rebase`: the
 request becomes an event, the listeners apply the allowlist and every
 refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
@@ -1249,8 +1278,8 @@ cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
 With `[mcp_server] enabled = true` and at least one token, `henk serve` also
 serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
 such as Claude Code can work with Henk:
-- `start_review`, `start_plan`, `start_execute`: start work, exactly as
-  `POST /review`, `/plan` and `/execute` do. The request becomes an event,
+- `start_review`, `start_plan`, `start_execute`, `start_rebase`: start
+  work, exactly as `POST /review`, `/plan`, `/execute` and `/rebase` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
 - `cancel_run`, and `move_queued_run`, which moves a review waiting for a

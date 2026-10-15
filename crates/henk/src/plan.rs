@@ -21,7 +21,7 @@ use tracing::{info, instrument, warn};
 use crate::app::App;
 use crate::cancel::Cancelled;
 use crate::ids::new_run_id;
-use crate::issue_runs::{OnIssue, open_issue};
+use crate::issue_runs::{IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
 use crate::plan_pairing::{IssueMaterial, Pairing, reviewer_workspace};
 use crate::plan_review_tools::{
@@ -135,8 +135,10 @@ pub async fn run_plan(
 
     let on_issue = OnIssue {
         app,
-        writer: &writer,
-        target: &request.target,
+        thread: IssueThread {
+            writer: &writer,
+            target: &request.target,
+        },
         run: &run,
         link: &link,
         model: &context.model,
@@ -176,8 +178,7 @@ async fn finish_plan(
 ) -> anyhow::Result<PlanReport> {
     let OnIssue {
         app,
-        writer,
-        target,
+        thread: IssueThread { writer, target },
         run,
         link,
         ..

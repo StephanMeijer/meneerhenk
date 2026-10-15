@@ -17,6 +17,7 @@ use crate::app::App;
 use crate::execute::{ExecuteRequest, run_execute};
 use crate::ids::new_run_id;
 use crate::plan::{PlanRequest, run_plan};
+use crate::rebase::{RebaseRequest, run_rebase};
 use crate::review::{
     ReviewRequest, report_cancelled_while_queued, report_interrupted_while_queued, run_review,
 };
@@ -561,6 +562,44 @@ impl Coordinator {
                     coordinator.submit_review(report.review(requester), commit);
                 }
                 Err(error) => warn!(%error, "execute run ended with an error"),
+            }
+        });
+        run
+    }
+
+    /// Starts a rebase of a pull request onto its base branch in the
+    /// background and returns its run id (#579). When it pushes, the
+    /// rebased head is reviewed in a run of its own: Henk asks for that
+    /// review himself, since the platform's event about his own push is
+    /// dropped as his own (§8.1).
+    pub fn submit_rebase(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> RunId {
+        let run = new_run_id();
+        let request = RebaseRequest {
+            target,
+            trigger,
+            run: Some(run.clone()),
+            requester: requester.clone(),
+        };
+        let coordinator = Arc::clone(self);
+        let cancel = self.app.shutdown.child_token();
+        let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
+        tokio::spawn(async move {
+            let report = run_rebase(&coordinator.app, request, cancel).await;
+            drop(cancellable);
+            match report {
+                Ok(report) => {
+                    if let Some(review) = report.review(requester)
+                        && let Some(commit) = review.commit.clone()
+                    {
+                        coordinator.submit_review(review, commit);
+                    }
+                }
+                Err(error) => warn!(%error, "rebase ended with an error"),
             }
         });
         run

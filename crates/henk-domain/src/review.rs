@@ -101,6 +101,19 @@ pub const fn handle(platform: Platform) -> &'static str {
 /// mention (§3.4), not a request.
 #[must_use]
 pub fn is_review_request(platform: Platform, body: &str) -> bool {
+    is_command(platform, body, "review")
+}
+
+/// Whether a comment asks Henk to rebase the pull request onto its base
+/// branch (§3.6, #579): its whole text is `@meneer-henk rebase` (GitLab:
+/// `@meneerhenk rebase`), read as [`is_review_request`] reads its command.
+#[must_use]
+pub fn is_rebase_request(platform: Platform, body: &str) -> bool {
+    is_command(platform, body, "rebase")
+}
+
+/// Whether a comment's whole text is Henk's handle and then `command`.
+fn is_command(platform: Platform, body: &str, command: &str) -> bool {
     let mut words = body.split_whitespace();
     let (Some(first), Some(second), None) = (words.next(), words.next(), words.next()) else {
         return false;
@@ -108,7 +121,7 @@ pub fn is_review_request(platform: Platform, body: &str) -> bool {
     first
         .strip_prefix('@')
         .is_some_and(|login| login.eq_ignore_ascii_case(handle(platform)))
-        && second == "review"
+        && second == command
 }
 
 /// Whether a comment mentions Henk on a platform (§3.4).
@@ -554,6 +567,22 @@ mod tests {
         ));
         assert!(!is_review_request(Platform::GitHub, "@meneer-henk"));
         assert!(!is_review_request(Platform::GitHub, "review"));
+        assert!(!is_review_request(Platform::GitHub, "@meneer-henk rebase"));
+    }
+
+    #[test]
+    fn a_rebase_request_is_the_handle_and_rebase_only() {
+        assert!(is_rebase_request(
+            Platform::GitHub,
+            "  @Meneer-Henk rebase\n"
+        ));
+        assert!(is_rebase_request(Platform::GitLab, "@meneerhenk rebase"));
+        assert!(!is_rebase_request(Platform::GitLab, "@meneer-henk rebase"));
+        assert!(!is_rebase_request(
+            Platform::GitHub,
+            "@meneer-henk rebase please"
+        ));
+        assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk review"));
     }
 
     #[test]

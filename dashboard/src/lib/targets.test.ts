@@ -55,6 +55,10 @@ describe('checkUrl', () => {
     expect(checkUrl('review', 'https://gitlab.com/g/p/-/merge_requests/5')).toEqual({ ok: 'merge request g/p #5' });
     expect(checkUrl('plan', 'https://github.com/docspec/api/issues/52')).toEqual({ ok: 'issue docspec/api #52' });
     expect(checkUrl('execute', 'https://gitlab.com/g/p/-/issues/4')).toEqual({ ok: 'issue g/p #4' });
+    expect(checkUrl('rebase', 'https://github.com/docspec/app/pull/7')).toEqual({ ok: 'pull request docspec/app #7' });
+    expect(checkUrl('rebase', 'https://github.com/docspec/app/issues/7')).toEqual({
+      problem: 'This is an issue. A rebase needs a pull request URL.',
+    });
   });
 
   it('says why when it does not', () => {

@@ -60,6 +60,28 @@ describe('StartForm', () => {
     });
   });
 
+  it('rebases a pull request, with neither a commit nor a note (#579)', async () => {
+    const start = vi.fn(() => Promise.resolve({ event_id: 'e-11' }));
+    render(StartForm, { startable: ['review', 'rebase'], start, go: vi.fn() });
+    await settle();
+    choose('rebase');
+    await settle(1);
+    expect(label()).toBe('Pull request URL');
+    expect(button()?.textContent).toBe('Rebase it');
+    expect(document.querySelector('textarea[name=note]')).toBeNull();
+    expect(document.querySelector('input[name=commit]')).toBeNull();
+    fill('url', 'https://github.com/docspec/app/pull/3');
+    await settle(1);
+    document.querySelector('form')?.requestSubmit();
+    await settle();
+    expect(start).toHaveBeenCalledWith({
+      kind: 'rebase',
+      url: 'https://github.com/docspec/app/pull/3',
+      commit: null,
+      note: null,
+    });
+  });
+
   it('says what the URL names, and why it does not fit, as you type', async () => {
     render(StartForm, { startable: ['review', 'plan'], start: vi.fn(), go: vi.fn() });
     await settle();

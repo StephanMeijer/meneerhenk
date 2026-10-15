@@ -106,6 +106,7 @@ impl PushWriter for GitLabWriter {
             },
             head,
             remote,
+            base_ref: text(&mr, "target_branch"),
         })
     }
 

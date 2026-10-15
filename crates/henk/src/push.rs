@@ -7,7 +7,9 @@
 //! still be allowed to push; a new branch must carry the configured prefix,
 //! must not be the default branch and must not exist yet. The checkout must
 //! change exactly the changeset's files, and a cancel stops it up to the
-//! last moment. Nothing is ever forced.
+//! last moment. Nothing is forced, except a rebase (#579), and that only
+//! with a lease on the head Henk read: a commit pushed meanwhile is never
+//! lost.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -189,6 +191,45 @@ impl Pusher<'_> {
         checkout.push(branch).await.context("pushing")?;
         info!(commits = shas.len(), files = changes.len(), "pushed");
         Ok(shas)
+    }
+
+    /// Pushes a rebased checkout over the pull request's branch (#579),
+    /// after the same checks as any push to it: still open, not merged,
+    /// still Henk's to push to, and still at `read.head`. Git's lease on
+    /// `read.head` holds that last check up to the push itself. Returns the
+    /// new head. It is not in [`App::own_pushes`]: Henk asks for its review
+    /// himself.
+    pub(crate) async fn push_rebased(
+        &self,
+        checkout: &Checkout,
+        target: &ReviewTarget,
+        read: &PullFacts,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<String> {
+        let to = PushTo::Pull {
+            target,
+            facts: read,
+        };
+        let branch = self.may_push(checkout, &to).await?;
+        stop_if_cancelled(cancel)?;
+        checkout
+            .push_with_lease(branch, &read.head)
+            .await
+            .context("pushing the rebased branch")?;
+        checkout.head().await.context("reading the rebased head")
+    }
+
+    /// Who Henk commits as: what a rebase names as the committer of the
+    /// commits it replays (#579).
+    pub(crate) async fn committer(&self) -> anyhow::Result<CommitIdentity> {
+        let Some(config) = self.app.settings.roles.executor.as_ref() else {
+            return Err(anyhow!("rebasing needs [roles.executor]"));
+        };
+        let henk = self.henk_identity(config).await?;
+        Ok(CommitIdentity {
+            name: henk.name().to_owned(),
+            email: henk.email().to_string(),
+        })
     }
 
     /// The branch Henk pushes to, once it is sure he may.

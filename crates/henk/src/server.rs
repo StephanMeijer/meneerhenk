@@ -24,7 +24,9 @@ use crate::app::{App, env_var};
 use crate::coordinator::Coordinator;
 use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
-use crate::listeners::{ExecuteListener, MentionListener, PlanListener, ReviewListener, Writers};
+use crate::listeners::{
+    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, Writers,
+};
 use crate::pages;
 use crate::recorder::StoreRecorder;
 
@@ -141,6 +143,10 @@ pub fn compose_with_secrets(
         Arc::new(StoreRecorder(Arc::clone(&app.store))),
         vec![
             Arc::new(ReviewListener::new(
+                Arc::clone(&coordinator),
+                Arc::clone(&writers),
+            )),
+            Arc::new(RebaseListener::new(
                 Arc::clone(&coordinator),
                 Arc::clone(&writers),
             )),
@@ -706,7 +712,7 @@ github_owners = ["docspec"]
             .to_owned();
         assert_eq!(
             wait_for_outcomes(&app, &event).await,
-            4,
+            5,
             "every listener recorded an outcome"
         );
         let recorded = app
@@ -983,7 +989,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 5);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1007,7 +1013,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 4);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 5);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())

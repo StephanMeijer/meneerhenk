@@ -83,7 +83,8 @@ pub enum GitError {
         /// What is there.
         found: String,
     },
-    /// The push was refused as not a fast-forward.
+    /// The push was refused as not a fast-forward, or a rebase's lease
+    /// no longer held (#579).
     #[error("the push was refused: the branch moved since Henk read it")]
     Rejected,
     /// A change could not be applied to the checkout.
@@ -93,6 +94,22 @@ pub enum GitError {
         path: String,
         /// Why not.
         why: String,
+    },
+}
+
+/// Where a rebase stands after a step (#579).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseStep {
+    /// The base is already in the branch: there is nothing to replay.
+    UpToDate,
+    /// Every commit was replayed onto the base.
+    Done,
+    /// Replaying a commit stopped on conflicts.
+    Conflict {
+        /// The subject of the commit being replayed.
+        commit: String,
+        /// The files with conflicts, as git lists them.
+        files: Vec<String>,
     },
 }
 
@@ -266,6 +283,254 @@ impl Checkout {
             });
         }
         Ok(checkout)
+    }
+
+    /// Clones `branch` of `remote` into `dir` with its whole history but
+    /// no file contents until they are needed (`--filter=blob:none`), checks
+    /// that its head is `expected`, and fetches `base` beside it as
+    /// `refs/remotes/origin/<base>`: what a rebase onto `base` needs (#579).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when the clone or fetch fails or the head moved.
+    pub async fn clone_for_rebase(
+        dir: ScratchDir,
+        remote: &str,
+        branch: &str,
+        expected: &CommitSha,
+        base: &str,
+        credential: Option<GitCredential>,
+    ) -> Result<Self, GitError> {
+        let checkout = Self { dir, credential };
+        run(
+            checkout.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--no-tags",
+                "--single-branch",
+                "--branch",
+                branch,
+                remote,
+                ".",
+            ],
+            checkout.credential.as_ref(),
+            None,
+        )
+        .await?;
+        let found = checkout.head().await?;
+        if !found.eq_ignore_ascii_case(expected.as_str()) {
+            return Err(GitError::HeadMoved {
+                expected: expected.as_str().to_owned(),
+                found,
+            });
+        }
+        let refspec = format!("+refs/heads/{base}:{}", upstream(base));
+        run(
+            checkout.path(),
+            &[
+                "fetch",
+                "--quiet",
+                "--filter=blob:none",
+                "--no-tags",
+                "origin",
+                &refspec,
+            ],
+            checkout.credential.as_ref(),
+            None,
+        )
+        .await?;
+        Ok(checkout)
+    }
+
+    /// Replays the branch's commits onto `base` as fetched by
+    /// [`Checkout::clone_for_rebase`]. Authors are kept; `identity` is the
+    /// committer. Hooks do not run and nothing is signed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when git fails other than on a conflict, or
+    /// when a conflict has no markers to resolve: a file deleted, renamed
+    /// or added on one side only, or a binary file.
+    pub async fn rebase(
+        &self,
+        identity: &CommitIdentity,
+        base: &str,
+    ) -> Result<RebaseStep, GitError> {
+        let upstream = upstream(base);
+        if self.is_ancestor(&upstream).await? {
+            return Ok(RebaseStep::UpToDate);
+        }
+        self.rebase_step(identity, &["rebase", "--no-autosquash", &upstream])
+            .await
+    }
+
+    /// Stages the resolved `files` and goes on replaying. A commit that the
+    /// resolution left empty is dropped, as git drops one that was already
+    /// in the base.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when git fails other than on a conflict, or
+    /// on a conflict that cannot be resolved by editing markers.
+    pub async fn rebase_continue(
+        &self,
+        identity: &CommitIdentity,
+        files: &[String],
+    ) -> Result<RebaseStep, GitError> {
+        let mut listed = files.join("\0");
+        listed.push('\0');
+        run(
+            self.path(),
+            &[
+                "--literal-pathspecs",
+                "add",
+                "--all",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            None,
+            Some(&listed),
+        )
+        .await?;
+        let staged = run(
+            self.path(),
+            &["diff", "--cached", "--name-only"],
+            None,
+            None,
+        )
+        .await?;
+        let next = if staged.trim().is_empty() {
+            "--skip"
+        } else {
+            "--continue"
+        };
+        self.rebase_step(identity, &["rebase", next]).await
+    }
+
+    /// Stops a rebase and puts the branch back as it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when git cannot.
+    pub async fn rebase_abort(&self) -> Result<(), GitError> {
+        run(self.path(), &["rebase", "--abort"], None, None).await?;
+        Ok(())
+    }
+
+    /// How many commits the branch has that `base` does not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when git cannot say.
+    pub async fn commits_ahead(&self, base: &str) -> Result<usize, GitError> {
+        let range = format!("{}..HEAD", upstream(base));
+        let count = run(self.path(), &["rev-list", "--count", &range], None, None).await?;
+        Ok(count.trim().parse().unwrap_or(0))
+    }
+
+    /// Of `files`, those that still hold a conflict marker line.
+    #[must_use]
+    pub fn still_conflicted(&self, files: &[String]) -> Vec<String> {
+        files
+            .iter()
+            .filter(|file| {
+                std::fs::read(self.path().join(file)).is_ok_and(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .lines()
+                        .any(is_conflict_marker)
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether `commit` is already in the branch.
+    async fn is_ancestor(&self, commit: &str) -> Result<bool, GitError> {
+        let status = git_command(
+            self.path(),
+            &["merge-base", "--is-ancestor", commit, "HEAD"],
+            None,
+        )
+        .status()
+        .await?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::Failed {
+                command: "merge-base".to_owned(),
+                stderr: format!("cannot compare {commit} with HEAD ({status})"),
+            }),
+        }
+    }
+
+    /// Runs one rebase command as `identity`: done, or stopped on the
+    /// conflicts it lists. Missing file contents are fetched on the way,
+    /// so it has the credential.
+    async fn rebase_step(
+        &self,
+        identity: &CommitIdentity,
+        args: &[&str],
+    ) -> Result<RebaseStep, GitError> {
+        let name = format!("user.name={}", identity.name);
+        let email = format!("user.email={}", identity.email);
+        let mut full = vec![
+            "-c",
+            &name,
+            "-c",
+            &email,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgSign=false",
+            "-c",
+            "core.editor=true",
+        ];
+        full.extend_from_slice(args);
+        let Err(error) = run(self.path(), &full, self.credential.as_ref(), None).await else {
+            return Ok(RebaseStep::Done);
+        };
+        let listed = run(self.path(), &["ls-files", "--unmerged", "-z"], None, None).await?;
+        let unmerged = unmerged_stages(&listed);
+        if unmerged.is_empty() {
+            return Err(error);
+        }
+        for (file, stages) in &unmerged {
+            // Stage 2 is the base's side, 3 the branch's: a file changed
+            // on both sides. Anything else is added, deleted or renamed on
+            // one side, and no marker says what is right.
+            if !(stages.contains(&2) && stages.contains(&3)) {
+                return Err(GitError::Failed {
+                    command: "rebase".to_owned(),
+                    stderr: format!(
+                        "{file} was deleted, renamed or added on one side only; \
+                         that conflict needs a human"
+                    ),
+                });
+            }
+            // Git writes no markers into a binary file.
+            if self.still_conflicted(std::slice::from_ref(file)).is_empty() {
+                return Err(GitError::Failed {
+                    command: "rebase".to_owned(),
+                    stderr: format!(
+                        "{file} conflicts without conflict markers (a binary file?); \
+                         that conflict needs a human"
+                    ),
+                });
+            }
+        }
+        let files: Vec<String> = unmerged.into_iter().map(|(file, _)| file).collect();
+        let commit = run(
+            self.path(),
+            &["log", "-1", "--format=%s", "REBASE_HEAD"],
+            None,
+            None,
+        )
+        .await
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+        Ok(RebaseStep::Conflict { commit, files })
     }
 
     /// Fetches exactly `commit` of `remote` into `dir` and checks it out,
@@ -549,6 +814,61 @@ impl Checkout {
         .await?;
         Ok(())
     }
+
+    /// Pushes the rebased head to `branch` in place of `old`, the head Henk
+    /// read before the rebase (#579): forced, but only while the branch is
+    /// still at `old`, so a commit pushed meanwhile is never lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError::Rejected`] when the branch is no longer at
+    /// `old`, or another [`GitError`] when the push fails.
+    pub async fn push_with_lease(&self, branch: &str, old: &CommitSha) -> Result<(), GitError> {
+        let lease = format!("--force-with-lease=refs/heads/{branch}:{}", old.as_str());
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        run(
+            self.path(),
+            &["push", "--quiet", "--no-verify", &lease, "origin", &refspec],
+            self.credential.as_ref(),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// Where a fetched base branch is kept in a checkout.
+fn upstream(base: &str) -> String {
+    format!("refs/remotes/origin/{base}")
+}
+
+/// The unmerged files in the output of `git ls-files --unmerged -z`, each
+/// with the index stages it has, in the order git lists them.
+fn unmerged_stages(listing: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+        // `<mode> <object> <stage>\t<path>`
+        let Some((meta, path)) = entry.split_once('\t') else {
+            continue;
+        };
+        let Some(stage) = meta.rsplit(' ').next().and_then(|s| s.parse::<u8>().ok()) else {
+            continue;
+        };
+        match files.last_mut() {
+            Some((last, stages)) if last == path => stages.push(stage),
+            _ => files.push((path.to_owned(), vec![stage])),
+        }
+    }
+    files
+}
+
+/// Whether a line is one git writes around a conflict. A bare `=======`
+/// is left out: it is also a Markdown heading underline.
+fn is_conflict_marker(line: &str) -> bool {
+    ["<<<<<<<", ">>>>>>>", "|||||||"].iter().any(|marker| {
+        line.strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    })
 }
 
 #[cfg(test)]
@@ -602,6 +922,245 @@ pub(crate) mod tests {
         .await
         .unwrap();
         (remote, CommitSha::parse(&head).unwrap())
+    }
+
+    /// A bare repository whose `feature` branched off `main` and changed
+    /// `src/b.rs`, after which `main` changed `src/a.rs`; with `clash`,
+    /// `feature` changed the same line of `src/a.rs` too. The head of
+    /// `feature` is returned.
+    pub(crate) async fn diverged_remote(name: &str, clash: bool) -> (ScratchDir, CommitSha) {
+        let remote = ScratchDir::new(&format!("{name}-remote")).unwrap();
+        let seed = ScratchDir::new(&format!("{name}-seed")).unwrap();
+        let s = seed.path().to_path_buf();
+        let git = |args: Vec<String>| {
+            let s = s.clone();
+            async move {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                run(&s, &args, None, None).await.unwrap()
+            }
+        };
+        let words = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        run(
+            remote.path(),
+            &["init", "--quiet", "--bare", "--initial-branch=main"],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        git(words("init --quiet --initial-branch=main")).await;
+        let seeded = Checkout {
+            dir: seed,
+            credential: None,
+        };
+        let author = CommitIdentity {
+            name: "Seed".to_owned(),
+            email: "seed@example.com".to_owned(),
+        };
+        std::fs::create_dir_all(s.join("src")).unwrap();
+        std::fs::write(s.join("src/a.rs"), "let x = 1;\n").unwrap();
+        seeded.commit(&author, "Seed\n").await.unwrap();
+        git(words("checkout --quiet -b feature")).await;
+        std::fs::write(s.join("src/b.rs"), "let y = 2;\n").unwrap();
+        if clash {
+            std::fs::write(s.join("src/a.rs"), "let x = 3;\n").unwrap();
+        }
+        let head = seeded.commit(&author, "Add b\n").await.unwrap();
+        git(words("checkout --quiet main")).await;
+        std::fs::write(s.join("src/a.rs"), "let x = 2;\n").unwrap();
+        seeded.commit(&author, "Change a\n").await.unwrap();
+        let url = remote.path().to_string_lossy().into_owned();
+        for branch in ["main", "feature"] {
+            git(vec![
+                "push".to_owned(),
+                "--quiet".to_owned(),
+                url.clone(),
+                format!("refs/heads/{branch}:refs/heads/{branch}"),
+            ])
+            .await;
+        }
+        (remote, CommitSha::parse(&head).unwrap())
+    }
+
+    async fn rebase_checkout(name: &str, remote: &ScratchDir, head: &CommitSha) -> Checkout {
+        Checkout::clone_for_rebase(
+            ScratchDir::new(name).unwrap(),
+            &remote.path().to_string_lossy(),
+            "feature",
+            head,
+            "main",
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn henk() -> CommitIdentity {
+        CommitIdentity {
+            name: "Henk".to_owned(),
+            email: "henk@example.com".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_behind_its_base_is_rebased_and_pushed_with_a_lease() {
+        let (remote, head) = diverged_remote("git-rebase-clean", false).await;
+        let checkout = rebase_checkout("git-rebase-clean-co", &remote, &head).await;
+        assert_eq!(
+            checkout.rebase(&henk(), "main").await.unwrap(),
+            RebaseStep::Done
+        );
+        assert_eq!(checkout.commits_ahead("main").await.unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("src/a.rs")).unwrap(),
+            "let x = 2;\n"
+        );
+        checkout.push_with_lease("feature", &head).await.unwrap();
+        let log = remote_branch_log(remote.path(), "feature", "%an %cn %s").await;
+        assert_eq!(log.trim(), "Seed Henk Add b", "the author is kept");
+        assert_eq!(
+            checkout.rebase(&henk(), "main").await.unwrap(),
+            RebaseStep::UpToDate
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lease_refuses_a_branch_that_moved() {
+        let (remote, head) = diverged_remote("git-rebase-lease", false).await;
+        let checkout = rebase_checkout("git-rebase-lease-co", &remote, &head).await;
+        checkout.rebase(&henk(), "main").await.unwrap();
+        let other = rebase_checkout("git-rebase-lease-other", &remote, &head).await;
+        std::fs::write(other.path().join("c.txt"), "theirs\n").unwrap();
+        other.commit(&henk(), "Theirs\n").await.unwrap();
+        other.push("feature").await.unwrap();
+        assert!(matches!(
+            checkout.push_with_lease("feature", &head).await,
+            Err(GitError::Rejected)
+        ));
+        let log = remote_branch_log(remote.path(), "feature", "%s").await;
+        assert_eq!(log.trim(), "Theirs", "their commit is still there");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_stops_the_rebase_until_it_is_resolved() {
+        let (remote, head) = diverged_remote("git-rebase-conflict", true).await;
+        let checkout = rebase_checkout("git-rebase-conflict-co", &remote, &head).await;
+        let step = checkout.rebase(&henk(), "main").await.unwrap();
+        let files = vec!["src/a.rs".to_owned()];
+        assert_eq!(
+            step,
+            RebaseStep::Conflict {
+                commit: "Add b".to_owned(),
+                files: files.clone()
+            }
+        );
+        assert_eq!(checkout.still_conflicted(&files), files);
+        std::fs::write(checkout.path().join("src/a.rs"), "let x = 3;\n").unwrap();
+        assert!(checkout.still_conflicted(&files).is_empty());
+        assert_eq!(
+            checkout.rebase_continue(&henk(), &files).await.unwrap(),
+            RebaseStep::Done
+        );
+        assert_eq!(checkout.commits_ahead("main").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_without_markers_is_not_left_to_the_executor() {
+        // Modify/delete: the branch edits src/a.rs, the base deletes it.
+        let (remote, head) = diverged_remote("git-rebase-deleted", true).await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let other = ScratchDir::new("git-rebase-deleted-other").unwrap();
+        run(other.path(), &["clone", "--quiet", &url, "."], None, None)
+            .await
+            .unwrap();
+        let other = Checkout {
+            dir: other,
+            credential: None,
+        };
+        run(other.path(), &["rm", "--quiet", "src/a.rs"], None, None)
+            .await
+            .unwrap();
+        other.commit(&henk(), "Delete a\n").await.unwrap();
+        other.push("main").await.unwrap();
+        let checkout = rebase_checkout("git-rebase-deleted-co", &remote, &head).await;
+        let error = checkout.rebase(&henk(), "main").await.unwrap_err();
+        assert!(error.to_string().contains("src/a.rs"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_binary_conflict_is_not_left_to_the_executor() {
+        let (remote, head) = diverged_remote("git-rebase-binary", false).await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let other = ScratchDir::new("git-rebase-binary-other").unwrap();
+        run(other.path(), &["clone", "--quiet", &url, "."], None, None)
+            .await
+            .unwrap();
+        let other = Checkout {
+            dir: other,
+            credential: None,
+        };
+        std::fs::write(other.path().join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+        other.commit(&henk(), "Add blob\n").await.unwrap();
+        other.push("main").await.unwrap();
+        // The branch adds the same path with other bytes.
+        let branch = ScratchDir::new("git-rebase-binary-branch").unwrap();
+        run(
+            branch.path(),
+            &["clone", "--quiet", "--branch", "feature", &url, "."],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let branch = Checkout {
+            dir: branch,
+            credential: None,
+        };
+        std::fs::write(branch.path().join("blob.bin"), [0u8, 9, 8, 7]).unwrap();
+        branch.commit(&henk(), "Branch blob\n").await.unwrap();
+        let moved = branch.head().await.unwrap();
+        branch.push("feature").await.unwrap();
+        let _ = head;
+        let checkout = rebase_checkout(
+            "git-rebase-binary-co",
+            &remote,
+            &CommitSha::parse(&moved).unwrap(),
+        )
+        .await;
+        let error = checkout.rebase(&henk(), "main").await.unwrap_err();
+        assert!(error.to_string().contains("blob.bin"), "{error}");
+    }
+
+    #[test]
+    fn unmerged_files_are_listed_with_their_stages() {
+        let listing = "100644 aaa 1\ta.rs\x00100644 bbb 2\ta.rs\x00100644 ccc 3\ta.rs\x00\
+                       100644 ddd 2\tb with space.rs\x00";
+        assert_eq!(
+            unmerged_stages(listing),
+            vec![
+                ("a.rs".to_owned(), vec![1, 2, 3]),
+                ("b with space.rs".to_owned(), vec![2]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_aborted_rebase_leaves_the_branch_as_it_was() {
+        let (remote, head) = diverged_remote("git-rebase-abort", true).await;
+        let checkout = rebase_checkout("git-rebase-abort-co", &remote, &head).await;
+        checkout.rebase(&henk(), "main").await.unwrap();
+        checkout.rebase_abort().await.unwrap();
+        assert_eq!(checkout.head().await.unwrap(), head.as_str());
+    }
+
+    #[test]
+    fn conflict_markers_are_told_from_heading_underlines() {
+        for line in ["<<<<<<< HEAD", ">>>>>>> abc (Add b)", "|||||||", "<<<<<<<"] {
+            assert!(is_conflict_marker(line), "{line}");
+        }
+        for line in ["=======", "<<<<<<<<", "a <<<<<<< b", "Title"] {
+            assert!(!is_conflict_marker(line), "{line}");
+        }
     }
 
     /// Two scratch directories with one name get their own paths, both

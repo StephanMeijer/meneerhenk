@@ -20,6 +20,9 @@ pub struct PullFacts {
     pub head: CommitSha,
     /// The clone URL of the head repository.
     pub remote: String,
+    /// The branch it would merge into, what a rebase replays it onto
+    /// (#579).
+    pub base_ref: String,
 }
 
 /// A repository's default branch as it is now: what a planner's workspace

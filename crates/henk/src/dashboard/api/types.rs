@@ -49,7 +49,7 @@ pub struct Page<T> {
 pub struct RunSummary {
     /// Its id.
     pub id: String,
-    /// `review`, `plan`, `address`, `discord_turn` or `mail_reply`.
+    /// `review`, `plan`, `execute`, `rebase`, `address`, `discord_turn` or `mail_reply`.
     pub kind: String,
     /// `github` or `gitlab`.
     pub platform: String,
@@ -1019,6 +1019,7 @@ pub fn kind_name(kind: RunKind) -> &'static str {
         RunKind::Review => "review",
         RunKind::Plan => "plan",
         RunKind::Execute => "execute",
+        RunKind::Rebase => "rebase",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
         RunKind::Address => "address",

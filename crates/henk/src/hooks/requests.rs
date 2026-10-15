@@ -17,16 +17,20 @@ pub enum Start {
     Plan,
     /// An issue taken to a pull request (#329).
     Execute,
+    /// A pull/merge request rebased onto its base branch (#579).
+    Rebase,
 }
 
 impl Start {
-    /// The kind named in a form or path: `review`, `plan` or `execute`.
+    /// The kind named in a form or path: `review`, `plan`, `execute` or
+    /// `rebase`.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "review" => Some(Self::Review),
             "plan" => Some(Self::Plan),
             "execute" => Some(Self::Execute),
+            "rebase" => Some(Self::Rebase),
             _ => None,
         }
     }
@@ -58,7 +62,7 @@ pub fn start_event(
                 .map_err(|e| e.to_string())?,
             requester,
         },
-        Start::Plan | Start::Execute if commit.is_some() => {
+        Start::Plan | Start::Execute | Start::Rebase if commit.is_some() => {
             return Err("only a review takes a commit".to_owned());
         }
         Start::Plan => EventKind::PlanRequested {
@@ -71,6 +75,59 @@ pub fn start_event(
             note,
             requester,
         },
+        Start::Rebase => EventKind::RebaseRequested {
+            target: parse_pull_request_url(url, hosts).map_err(|e| e.to_string())?,
+            requester,
+        },
     };
     Ok(new_event(source, kind, None))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// #579: a rebase is asked for by a pull request's address, and takes
+    /// no commit.
+    #[test]
+    fn a_rebase_names_a_pull_request() {
+        let hosts = Hosts::new(Some("github.com"), None);
+        assert_eq!(Start::parse("rebase"), Some(Start::Rebase));
+        let event = start_event(
+            Start::Rebase,
+            "https://github.com/o/r/pull/7",
+            None,
+            None,
+            EventSource::Api { requester: None },
+            Some("github:1".to_owned()),
+            &hosts,
+        )
+        .unwrap();
+        assert!(
+            matches!(&event.kind, EventKind::RebaseRequested { target, requester } if target.number == 7 && requester.as_deref() == Some("github:1"))
+        );
+        for (url, commit) in [
+            ("https://github.com/o/r/issues/7", None),
+            (
+                "https://github.com/o/r/pull/7",
+                Some("0123456789abcdef0123456789abcdef01234567"),
+            ),
+        ] {
+            assert!(
+                start_event(
+                    Start::Rebase,
+                    url,
+                    commit,
+                    None,
+                    EventSource::Api { requester: None },
+                    None,
+                    &hosts
+                )
+                .is_err(),
+                "{url} {commit:?}"
+            );
+        }
+    }
 }

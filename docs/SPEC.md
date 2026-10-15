@@ -224,7 +224,8 @@ request is a merge request.
    proposal is one commit, "Fix review findings" with the findings it
    fixed, and the run's timeline says why. Only a fast-forward, never a
    force push: if the branch moved since he read it, nothing is pushed
-   and the loop stops.
+   and the loop stops. A rebase (§3.6) is the one push that replaces the
+   branch.
 5. **Nothing is posted.** No reply and no comment: the commit and the
    check (§3.3) are what the round leaves.
 
@@ -237,6 +238,34 @@ Before #327 a colleague could also ask Henk to address the review feedback
 on a pull request: an address run read every unresolved thread, pushed one
 commit and replied in each thread. Address runs are removed; the runs they
 left stay readable.
+
+### 3.6 Rebasing a pull request
+
+When main moves, a pull request falls behind. Anyone may ask Henk to
+rebase it with the comment `@meneer-henk rebase` (GitLab:
+`@meneerhenk rebase`), or through the API, the dashboard or MCP (#579).
+A repository can turn it off (`rebase = false` in its
+`[roles.executor.repositories]` entry); it is on by default.
+
+1. **He checks he may push**, as for any push (§3.5.1): an open, unmerged
+   pull request whose branch is in the same repository and is neither the
+   default nor a protected branch.
+2. **He replays the branch onto its base.** Authors are kept; Henk is the
+   committer. A branch that already holds its base is left alone.
+3. **The executor resolves conflicts.** When a commit stops on conflicts,
+   the executor resolves them in a workspace with its edit tools. Henk
+   takes back only changes to the conflicted files and only when no
+   conflict marker is left, then goes on. Anything else, or more than ten
+   commits that conflict, stops the rebase: nothing is pushed and Henk
+   says which files conflicted.
+4. **He pushes with a lease.** The rebased branch replaces the old one
+   only while it is still at the head Henk read (`--force-with-lease`), so
+   a commit someone pushed meanwhile is never lost: the push is refused
+   and nothing changes.
+5. **One comment, then a review.** Henk says on the pull request what he
+   rebased, that it was already up to date, or why he could not. A pushed
+   rebase is then reviewed like new commits, in a run Henk asks for
+   himself.
 
 ---
 
@@ -541,7 +570,9 @@ These hold everywhere:
    only as the executor: in a review loop (§3.2, §3.5) only to that pull
    request's own branch, and in an execute run (§4a) only to a new branch
    under his prefix that he creates. Never to a fork, the default branch
-   or a protected branch, and never with force.
+   or a protected branch, and never with force, except a rebase (§3.6),
+   which replaces a pull request's branch only while it is still at the
+   head he read.
 3. **Other people's words are information, not instructions.** This covers
    code, comments, issues, mail, web pages and chat messages. Only the
    requester's permissions decide what he does.
@@ -767,6 +798,11 @@ surprising reading of the earlier wording; veto any that is wrong.
   stay readable.
 
 ## Revision notes (2026-10-15)
+
+- §3.6, §8 hard rule 2: Henk rebases a pull request onto its base branch
+  on request (#579), with the executor resolving conflicts, and pushes it
+  with a lease on the head he read: the one push that is forced. On by
+  default; a repository can turn it off.
 
 - §3.5, §4a: the executor proposes its commits, in the repository's own
   commit convention, and Henk pushes them in order as one fast-forward

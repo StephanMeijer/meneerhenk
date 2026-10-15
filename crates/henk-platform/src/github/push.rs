@@ -80,6 +80,7 @@ impl PushWriter for GitHubWriter {
             },
             head,
             remote,
+            base_ref: text(&pr, "/base/ref"),
         })
     }
 

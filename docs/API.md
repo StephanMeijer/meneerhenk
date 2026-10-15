@@ -83,10 +83,11 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 
 Who is signed in, the CSRF token their actions send, and the kinds of run
 `POST /runs` can start here, as configured: `review` with `[review.loop]`,
-`plan` with `[planning]` and `execute` with `[execution]` (#329).
+`plan` with `[planning]`, `execute` with `[execution]` (#329) and
+`rebase` with `[roles.executor]` (#579).
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute"]}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute", "rebase"]}
 ```
 
 ### `GET /health`
@@ -109,7 +110,7 @@ Runs, newest first, each with its `sessions` (`name`, `role`, `status`) and
 
 | Query | Meaning |
 |---|---|
-| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `address` (runs from before #327), `discord_turn` or `mail_reply` |
+| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `rebase` (a pull request rebased onto its base branch, #579), `address` (runs from before #327), `discord_turn` or `mail_reply` |
 | `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
@@ -485,7 +486,7 @@ kept) and its outcomes.
 
 ### `POST /runs`
 
-Starts a review, a plan or an execute run, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
+Starts a review, a plan, an execute run or a rebase, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
 apply the allowlist and every refusal. Read the event to see what came of
 it.
 
@@ -493,9 +494,10 @@ it.
 {"kind": "review", "url": "https://github.com/o/r/pull/7", "commit": "abc1234"}
 ```
 
-`kind` is `review`, `plan` or `execute`. `url` is a pull request for a
-review and an issue for the others. `commit` (reviews) and `note` (plans
-and execute runs) are optional.
+`kind` is `review`, `plan`, `execute` or `rebase`. `url` is a pull
+request for a review or a rebase and an issue for the others. `commit`
+(reviews) and `note` (plans and execute runs) are optional; a rebase takes
+neither.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
 ### `POST /runs/{id}/cancel`

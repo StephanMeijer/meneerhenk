@@ -60,6 +60,13 @@ pub(crate) struct StartReview {
     commit: Option<String>,
 }
 
+/// A pull or merge request to rebase.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(crate) struct StartRebase {
+    /// The pull or merge request's web address.
+    url: String,
+}
+
 /// A plan to start.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct StartWithNote {
@@ -89,7 +96,7 @@ pub(crate) struct QueueMove {
 /// What `list_runs` takes. Every filter is optional.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ListRuns {
-    /// `review`, `plan`, `address`, `discord_turn` or `mail_reply`.
+    /// `review`, `plan`, `execute`, `rebase`, `address`, `discord_turn` or `mail_reply`.
     kind: Option<String>,
     /// `running`, `finished`, `failed`, `cancelled` or `superseded`.
     status: Option<String>,
@@ -285,6 +292,23 @@ impl HenkMcp {
             url: input.url,
             commit: None,
             note: input.note,
+        };
+        self.start(&parts, &request).await
+    }
+
+    #[tool(
+        description = "Rebase a GitHub pull request or GitLab merge request onto its base branch, as POST /rebase does: Henk replays its commits, has the executor resolve any conflict, pushes with a lease so no one's commit is lost, and then reviews the rebased commits. Answers the event id, and the run id once the run started."
+    )]
+    async fn start_rebase(
+        &self,
+        Parameters(input): Parameters<StartRebase>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = StartRequest {
+            kind: "rebase".to_owned(),
+            url: input.url,
+            commit: None,
+            note: None,
         };
         self.start(&parts, &request).await
     }

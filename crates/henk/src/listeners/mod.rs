@@ -1,5 +1,5 @@
-//! What reacts to events: reviews, greetings, plans and execute runs (§3.1,
-//! §3.4, §4, §4a).
+//! What reacts to events: reviews, greetings, plans, execute runs and
+//! rebases (§3.1, §3.4, §4, §4a, §3.6).
 //!
 //! Each listener decides on its own whether an event concerns it, and says
 //! so in its outcome. The rules every listener applies first live in
@@ -9,6 +9,7 @@ pub mod execute;
 pub mod filter;
 pub mod mention;
 pub mod plan;
+pub mod rebase;
 pub mod review;
 #[cfg(test)]
 mod tests;
@@ -21,6 +22,7 @@ use henk_platform::PlatformWriter;
 pub use execute::ExecuteListener;
 pub use mention::MentionListener;
 pub use plan::PlanListener;
+pub use rebase::RebaseListener;
 pub use review::ReviewListener;
 
 /// Where listeners get a platform writer. The application implements it;
