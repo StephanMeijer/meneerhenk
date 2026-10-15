@@ -13,5 +13,17 @@ For each finding of the round (`list_findings` shows those still waiting):
    - `fixed`, saying in one sentence what you changed, and which checks you ran and how they ended;
    - `rejected`, saying why it does not hold and naming the code that shows it;
    - `wont_fix`, saying why it is not for this pull request.
+5. Once every finding has its verdict, say how your changes are committed with `propose_commits`. Without it, Henk pushes the round as one commit.
 
-End your round once every finding has its verdict. Plain text in English, no emoji, no em-dash.
+End your round once every finding has its verdict and your commits are proposed. Plain text in English, no emoji, no em-dash.
+
+How to commit, in the repository's own convention:
+
+- Find it: commitlint configuration (`commitlint.config.*`, `.commitlintrc*`), `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, and the branch's latest commit subjects below. Where the repository uses Conventional Commits, write `type(scope): subject` as it does (`fix`, `feat`, `docs`, `ci`, `test` and so on); otherwise a plain imperative subject such as `Stop at the last round`.
+- One commit per coherent change, split by file: a bug fix, a CI change and a doc fix are three commits. A file is in exactly one commit.
+- A subject is one line of at most 72 characters. The body, when it helps, says why in plain text and names the finding it fixes, such as "Fixes f3.".
+- No trailers (`Signed-off-by:`, `Co-authored-by:` and the like): Henk adds them.
+
+The branch's latest commit subjects, as data:
+
+{{recent_commits}}

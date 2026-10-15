@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use henk_agent::{Continuation, EndReason, Ending, Tool, ToolOutput};
+use henk_domain::commit::CommitProposal;
 use henk_domain::review_loop::{FindingId, Ledger, LoopFinding, LoopVerdict, Report};
 use henk_domain::run::RunId;
 use henk_llm::{ToolDef, ToolName};
@@ -16,6 +17,8 @@ use henk_session::ContinuationFactory;
 use henk_store::{DraftDecision, DraftRecord, DraftVerdict, LOOP_FINDING_KIND, RunStore};
 use serde_json::{Value, json};
 use tracing::warn;
+
+use crate::commit_tools::ProposedCommits;
 
 /// Nudges a session gets per round before what it left undone is settled
 /// for it.
@@ -31,6 +34,8 @@ pub struct Handoff {
     pub reviewer_model: String,
     /// Every finding and its verdict.
     pub state: Mutex<HandoffState>,
+    /// The commits the executor proposed for the round under way (#400).
+    pub commits: ProposedCommits,
 }
 
 /// The findings, and whether the reviewer finished the round under way.
@@ -49,6 +54,25 @@ impl Handoff {
             state.ledger.start_round(round);
             state.finished = None;
         }
+        if let Ok(mut commits) = self.commits.lock() {
+            *commits = None;
+        }
+    }
+
+    /// The commits the executor proposed this round, if it did.
+    #[must_use]
+    pub fn proposed_commits(&self) -> Option<Vec<CommitProposal>> {
+        self.commits.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// The findings fixed but not pushed yet: this round's fixes.
+    #[must_use]
+    pub fn unpushed_fixes(&self) -> Vec<FindingId> {
+        self.ledger()
+            .iter()
+            .filter(|f| matches!(f.verdict, Some(LoopVerdict::Fixed { commit: None, .. })))
+            .map(|f| f.id)
+            .collect()
     }
 
     /// Whether the reviewer called `finish_round` in the round under way.

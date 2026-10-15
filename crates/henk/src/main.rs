@@ -10,6 +10,7 @@ mod app;
 mod cancel;
 mod ci_tools;
 mod code_tools;
+mod commit_tools;
 mod config;
 mod coordinator;
 mod dashboard;

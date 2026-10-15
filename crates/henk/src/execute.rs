@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, prompts};
+use henk_domain::commit::{PlannedCommit, bullet_body, planned_commits};
 use henk_domain::execute::{branch_candidate, branch_name, commit_subject, pull_body};
 use henk_domain::identity::RequesterId;
 use henk_domain::review::CommitSha;
@@ -30,6 +31,7 @@ use tracing::{info, instrument};
 
 use crate::app::App;
 use crate::cancel::Cancelled;
+use crate::commit_tools::{RECENT_COMMITS, recent_commits_text};
 use crate::config::{ExecutionConfig, ExecutorConfig};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
@@ -258,7 +260,7 @@ impl Work<'_> {
             opened = self.open(&*writer) => opened,
             () = cancel.cancelled() => return Err(Cancelled.into()),
         };
-        let (base, workspace, branch) = match opened {
+        let (base, workspace, branch, recent) = match opened {
             Ok(opened) => opened,
             Err(error) => {
                 let why = format!("{error:#}");
@@ -275,18 +277,21 @@ impl Work<'_> {
             base.default_branch
         );
         stages::mark(store, run, Stage::Checkout, StageState::Done, ready).await;
-        let result = self.work(&writer, &base, &workspace, &branch, cancel).await;
+        let result = self
+            .work(&writer, &base, &workspace, (&branch, &recent), cancel)
+            .await;
         workspace.close().await;
         result
     }
 
-    /// The default branch's head, a workspace on it, set up, and the
-    /// branch the work will go to, chosen before the session so a run
-    /// never works for a branch it cannot push.
+    /// The default branch's head, a workspace on it, set up, the branch
+    /// the work will go to, chosen before the session so a run never works
+    /// for a branch it cannot push, and the branch's latest commit subjects,
+    /// which show its commit convention (#400).
     async fn open(
         &self,
         writer: &dyn PushWriter,
-    ) -> anyhow::Result<(RepoHead, Arc<dyn Workspace>, String)> {
+    ) -> anyhow::Result<(RepoHead, Arc<dyn Workspace>, String, Vec<String>)> {
         let repo = &self.request.target.repo;
         let base = writer
             .repo_head(repo)
@@ -308,10 +313,11 @@ impl Work<'_> {
         .await
         .context("checking out the default branch")?;
         let branch = self.free_branch(&checkout).await?;
+        let recent = checkout.recent_subjects(RECENT_COMMITS).await;
         let profile = self.app.settings.workspace.profile_for(&repo.path());
         let workspace =
             open_prepared(self.app, self.run, &checkout, profile, Some(self.deadline)).await?;
-        Ok((base, workspace, branch))
+        Ok((base, workspace, branch, recent))
     }
 
     /// The first of the issue's branch names that `origin` does not have:
@@ -348,7 +354,7 @@ impl Work<'_> {
         writer: &Arc<dyn PushWriter>,
         base: &RepoHead,
         workspace: &Arc<dyn Workspace>,
-        branch: &str,
+        (branch, recent): (&str, &[String]),
         cancel: &CancellationToken,
     ) -> anyhow::Result<OpenedPullRequest> {
         let (store, run, target) = (&*self.app.store, self.run, &self.request.target);
@@ -368,7 +374,7 @@ impl Work<'_> {
         let proposed: Proposed = Arc::default();
         let session = format!("executor, {}", self.model.model());
         stages::mark(store, run, Stage::Session, StageState::Running, session).await;
-        let spec = self.session(&editing, &proposed, &reference, branch);
+        let spec = self.session(&editing, &proposed, &reference, (branch, recent));
         let outcome = run_session(store, run, spec, cancel.clone()).await;
         self.session_result(outcome.stop)?;
         stages::mark(store, run, Stage::Session, StageState::Done, "proposed").await;
@@ -429,18 +435,21 @@ impl Work<'_> {
             )
             .await?;
         let to = PushTo::NewBranch { branch, base };
-        let subject = commit_subject(&reference, &self.issue.title);
-        let notes = std::slice::from_ref(&proposal.summary);
-        let sha = match pusher
-            .commit_and_push(&checkout, &to, &subject, notes, changes, cancel)
+        let commits = self.commits(&pusher, &reference, proposal, changes).await;
+        let shas = match pusher
+            .commit_and_push(&checkout, &to, &commits, changes, cancel)
             .await
         {
-            Ok(sha) => sha,
+            Ok(shas) => shas,
             Err(error) if crate::cancel::is_cancelled(&error) => return Err(error),
             Err(error) => return Err(no_pull(format!("{error:#}"))),
         };
-        let commit = CommitSha::parse(&sha).context("the pushed commit")?;
-        let on_branch = format!("pushed {} to {branch}", commit.short());
+        let head = shas.last().context("no commit was pushed")?;
+        let commit = CommitSha::parse(head).context("the pushed commit")?;
+        let on_branch = match shas.len() {
+            1 => format!("pushed {} to {branch}", commit.short()),
+            n => format!("pushed {n} commits to {branch}, up to {}", commit.short()),
+        };
         stages::mark(store, run, Stage::Push, StageState::Done, on_branch).await;
 
         stages::mark(store, run, Stage::Publish, StageState::Running, "").await;
@@ -469,6 +478,36 @@ impl Work<'_> {
         })
     }
 
+    /// The commits for `changes`: the executor's, when they hold every
+    /// change once and are in shape, or else one `Resolve #N: title`
+    /// commit, with why on the run's timeline (#400).
+    async fn commits(
+        &self,
+        pusher: &Pusher<'_>,
+        reference: &str,
+        proposal: &Proposal,
+        changes: &[henk_domain::workspace::Change],
+    ) -> Vec<PlannedCommit> {
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        if let Some(proposed) = &proposal.commits {
+            match planned_commits(proposed, &paths) {
+                Ok(planned) => return planned,
+                Err(why) => {
+                    pusher
+                        .note(&format!(
+                            "the executor's commits cannot be made ({why}); its change is pushed as one commit"
+                        ))
+                        .await;
+                }
+            }
+        }
+        vec![PlannedCommit {
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            subject: commit_subject(reference, &self.issue.title),
+            body: bullet_body(std::slice::from_ref(&proposal.summary)),
+        }]
+    }
+
     /// The executor's session: one conversation from the issue to its
     /// proposal, with a fixed prompt and tools (#321).
     fn session(
@@ -476,7 +515,7 @@ impl Work<'_> {
         editing: &Arc<EditContext>,
         proposed: &Proposed,
         reference: &str,
-        branch: &str,
+        (branch, recent): (&str, &[String]),
     ) -> SessionSpec {
         let repo = self.request.target.repo.path();
         let mut system = format!(
@@ -489,6 +528,7 @@ impl Work<'_> {
                     ("repo", &repo),
                     ("branch", branch),
                     ("max_files", &self.executor.max_changed_files.to_string()),
+                    ("recent_commits", &recent_commits_text(recent)),
                 ],
             )
         );
@@ -496,7 +536,10 @@ impl Work<'_> {
             system = format!("{system}\n\n{}", prompts::EXECUTOR_BASH);
         }
         let mut tools = edit_tools(editing);
-        tools.add(ProposePullRequest(Arc::clone(proposed)));
+        tools.add(ProposePullRequest {
+            proposed: Arc::clone(proposed),
+            workspace: Arc::clone(&editing.workspace),
+        });
         let tools = equip_and_grant(
             Role::Executor,
             &mut system,
@@ -600,7 +643,8 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::git::tests::{
-        bare_remote, remote_branch_file, remote_branch_log, remote_branches, remote_feature,
+        bare_remote, remote_branch_file, remote_branch_log, remote_branches, remote_commits,
+        remote_feature,
     };
     use crate::plan_tools::tests::FakeIssueWriter;
     use crate::workspace::fake::FakeProvider;
@@ -930,6 +974,54 @@ requester_id = 3
         assert_eq!(review.commit.as_ref(), Some(&report.pull.commit));
         assert_eq!(review.trigger, "opened by execute run r-exec-1");
         assert!(review.run.is_none(), "a run of its own");
+    }
+
+    #[tokio::test]
+    async fn the_executors_commits_land_on_the_branch_in_order() {
+        let script = vec![
+            write_csv(),
+            call(
+                "write_file",
+                json!({"path": "docs/export.md", "content": "Runs export as CSV.\n"}),
+            ),
+            call(
+                "propose_pull_request",
+                json!({"summary": "Runs export as CSV.", "commits": [
+                    {"files": ["src/csv.rs"], "subject": "feat(runs): export as CSV", "body": "Closes the gap #9 names."},
+                    {"files": ["docs/export.md"], "subject": "docs: describe the CSV export"}
+                ]}),
+            ),
+            done(),
+        ];
+        let f = fixture("henk-exec-split", script).await;
+        let report = run_execute(&f.app, request("r-exec-split"), CancellationToken::new())
+            .await
+            .unwrap();
+        let remote = &f.hub.remote;
+        let commits = remote_commits(remote, "henk/9-export-runs", 3, "%H %s").await;
+        assert_eq!(commits.len(), 3, "{commits:?}");
+        assert_eq!(
+            commits[0],
+            format!(
+                "{} docs: describe the CSV export",
+                report.pull.commit.as_str()
+            )
+        );
+        assert!(
+            commits[1].ends_with(" feat(runs): export as CSV"),
+            "{commits:?}"
+        );
+        let bodies = remote_commits(remote, "henk/9-export-runs", 2, "%B").await;
+        assert!(
+            bodies[1].contains("Closes the gap #9 names.\n\nHenk-Run: r-exec-split"),
+            "{bodies:?}"
+        );
+        assert!(
+            bodies.iter().all(|b| b.contains("Henk-Run: r-exec-split")),
+            "{bodies:?}"
+        );
+        let system = f.model.requests()[0].system.clone().unwrap_or_default();
+        assert!(system.contains("as data:\n\n- Seed"), "{system}");
     }
 
     #[tokio::test]

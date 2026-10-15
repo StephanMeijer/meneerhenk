@@ -33,11 +33,14 @@ pub const PLAN_REVIEWER_NO_WORKSPACE: &str = "Read the code with the platform's 
 pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
 
 /// Instructions for the executor of a review loop (#284). `{{ref}}`,
-/// `{{repo}}` and `{{max_files}}` are filled in.
+/// `{{repo}}`, `{{max_files}}` and `{{recent_commits}}`, the branch's
+/// latest commit subjects (#400), are filled in.
 pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 
 /// Instructions for the executor taking an issue to a pull request (#329).
-/// `{{ref}}`, `{{repo}}`, `{{branch}}` and `{{max_files}}` are filled in.
+/// `{{ref}}`, `{{repo}}`, `{{branch}}`, `{{max_files}}` and
+/// `{{recent_commits}}`, the default branch's latest commit subjects
+/// (#400), are filled in.
 pub const EXECUTE: &str = include_str!("../prompts/execute.md");
 
 /// The skills block appended to an agent's system prompt when it has
@@ -104,9 +107,24 @@ mod tests {
         for tool in ["report_finding", "finish_round", "reopens"] {
             assert!(LOOP_REVIEWER.contains(&format!("`{tool}`")), "{tool}");
         }
-        for tool in ["list_findings", "give_verdict"] {
+        for tool in ["list_findings", "give_verdict", "propose_commits"] {
             assert!(LOOP_EXECUTOR.contains(&format!("`{tool}`")), "{tool}");
         }
+        // Each executor finds the repository's commit convention, groups its
+        // commits and leaves the trailers to Henk (#400).
+        for prompt in [EXECUTE, LOOP_EXECUTOR] {
+            for needle in [
+                "{{recent_commits}}",
+                "`commitlint",
+                "`CONTRIBUTING.md`",
+                "`AGENTS.md`",
+                "Conventional Commits",
+                "No trailers",
+            ] {
+                assert!(prompt.contains(needle), "{needle} in {prompt}");
+            }
+        }
+        assert!(EXECUTE.contains("`commits`"));
         // Henk's own checks are gone; the executor runs the repository's
         // with bash, and says which (#396).
         for prompt in [EXECUTE, LOOP_EXECUTOR, EXECUTOR_BASH] {

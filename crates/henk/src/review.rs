@@ -5263,6 +5263,112 @@ requester_id = 3
         (f, remote, report)
     }
 
+    /// An executor that fixes f1 in `src/a.rs`, notes it in `docs/x.md`,
+    /// and proposes `commits`.
+    fn fixes_f1_in_two_files(
+        commits: &serde_json::Value,
+    ) -> Vec<Result<Completion, henk_llm::LlmError>> {
+        vec![
+            edit("let x = 1;", "let x = 3;"),
+            call(
+                "write_file",
+                serde_json::json!({"path": "docs/x.md", "content": "x is 3.\n"}),
+            ),
+            judge("f1", "fixed", "x is 3 now."),
+            call("propose_commits", serde_json::json!({ "commits": commits })),
+            say("Fixed."),
+        ]
+    }
+
+    /// A loop whose executor fixes f1 in two files and proposes `commits`,
+    /// asked for by nobody Henk knows.
+    async fn two_file_fix(
+        name: &str,
+        commits: serde_json::Value,
+    ) -> (Fixture, Arc<ScriptedClient>, crate::git::ScratchDir, RunId) {
+        let (f, _, executor, remote) = looping(
+            name,
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", fixes_f1_in_two_files(&commits)),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        (f, executor, remote, run)
+    }
+
+    #[tokio::test]
+    async fn the_executor_s_commits_are_pushed_in_order_each_with_henks_trailers() {
+        let (f, executor, remote, run) = two_file_fix(
+            "loop-split",
+            serde_json::json!([
+                {"files": ["src/a.rs"], "subject": "fix(a): make x 3", "body": "The caller divides by it.\n\nFixes f1."},
+                {"files": ["docs/x.md"], "subject": "docs: say why x is 3"}
+            ]),
+        )
+        .await;
+        // The executor was shown the branch's history as its convention.
+        let system = executor.requests()[0].system.clone().unwrap_or_default();
+        assert!(system.contains("as data:\n\n- Seed"), "{system}");
+
+        let commits = crate::git::tests::remote_commits(remote.path(), "feature", 3, "%B").await;
+        let trailers = "Henk-Run: r-loop-split\n\
+                        Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>";
+        assert_eq!(
+            commits,
+            [
+                format!("docs: say why x is 3\n\n{trailers}"),
+                format!("fix(a): make x 3\n\nThe caller divides by it.\n\nFixes f1.\n\n{trailers}"),
+                "Seed".to_owned(),
+            ]
+        );
+        // One push: the round's head is Henk's, and so is the commit under it.
+        let shas = crate::git::tests::remote_commits(remote.path(), "feature", 2, "%H").await;
+        assert!(shas.iter().all(|sha| f.app.own_pushes.has(sha)), "{shas:?}");
+        let findings = loop_findings(&f.app, &run).await;
+        assert_eq!(
+            findings[0].4, shas[0],
+            "f1 is stamped with the round's head"
+        );
+        let report = f.app.store.run(&run).await.unwrap().unwrap();
+        let summary = report.summary.unwrap_or_default();
+        assert!(summary.contains("pushed 2 commits"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn commits_that_miss_a_file_fall_back_to_one_commit_that_names_the_fix() {
+        let (f, _, remote, run) = two_file_fix(
+            "loop-split-refused",
+            serde_json::json!([{"files": ["src/a.rs"], "subject": "fix(a): make x 3"}]),
+        )
+        .await;
+        let commits =
+            crate::git::tests::remote_commits(remote.path(), "feature", 2, "%s%n%b").await;
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert!(
+            commits[0].starts_with("Fix review findings f1\n- review loop round 1\n"),
+            "{commits:?}"
+        );
+        let events: Vec<String> = f
+            .app
+            .store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("proposed no commits for round 1")),
+            "{events:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_repository_that_enables_it_gets_the_requesters_signoff_on_the_executor_s_commit() {
         let (_f, remote, _) = one_fix(

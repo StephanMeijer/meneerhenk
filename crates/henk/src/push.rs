@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
 use henk_domain::allowlist::{Platform, RepoRef};
-use henk_domain::commit::{CommitPerson, Email, commit_message, noreply};
+use henk_domain::commit::{CommitPerson, Email, PlannedCommit, commit_message, noreply};
 use henk_domain::identity::RequesterId;
 use henk_domain::push::push_refusal;
 use henk_domain::review::CommitSha;
@@ -107,19 +107,19 @@ impl Pusher<'_> {
             .await
     }
 
-    /// Applies the changeset to the checkout, commits as Henk with `subject`
-    /// and `notes` in the message, makes sure Henk may push there, and
-    /// pushes. Returns the commit, which is in [`App::own_pushes`] before it
-    /// leaves.
+    /// Applies the changeset to the checkout, commits it as Henk as
+    /// `commits`, in order and each with Henk's trailers (#400), makes sure
+    /// Henk may push there, and pushes them all at once. Returns the
+    /// commits, oldest first, which are in [`App::own_pushes`] before they
+    /// leave.
     pub(crate) async fn commit_and_push(
         &self,
         checkout: &Checkout,
         to: &PushTo<'_>,
-        subject: &str,
-        notes: &[String],
+        commits: &[PlannedCommit],
         changes: &[Change],
         cancel: &CancellationToken,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<Vec<String>> {
         let Some(config) = self.app.settings.roles.executor.as_ref() else {
             return Err(anyhow!("pushing needs [roles.executor]"));
         };
@@ -131,15 +131,6 @@ impl Pusher<'_> {
             None
         };
         let requested_by = self.requester.map(ToString::to_string);
-        let message = commit_message(
-            subject,
-            notes,
-            self.run,
-            requested_by.as_deref(),
-            &henk,
-            requester.as_ref(),
-            policy,
-        );
         let identity = CommitIdentity {
             name: henk.name().to_owned(),
             email: henk.email().to_string(),
@@ -160,18 +151,44 @@ impl Pusher<'_> {
                 expected.len()
             ));
         }
-        let sha = checkout
-            .commit(&identity, &message)
+        let mut shas = Vec::with_capacity(commits.len());
+        for commit in commits {
+            let message = commit_message(
+                &commit.subject,
+                &commit.body,
+                self.run,
+                requested_by.as_deref(),
+                &henk,
+                requester.as_ref(),
+                policy,
+            );
+            let sha = checkout
+                .commit_paths(&identity, &message, &commit.paths)
+                .await
+                .context("committing")?;
+            shas.push(sha);
+        }
+        // The commits hold the whole changeset, and nothing else.
+        let left = checkout
+            .changed_files()
             .await
-            .context("committing")?;
+            .context("listing the changes")?;
+        if !left.is_empty() || shas.is_empty() {
+            return Err(anyhow!(
+                "the commits left {} changed files uncommitted",
+                left.len()
+            ));
+        }
         // The last moment a cancel can still stop the push.
         stop_if_cancelled(cancel)?;
-        // Known before the platform tells anyone, so its event about this
-        // commit finds it (#284).
-        self.app.own_pushes.record(&sha);
+        // Known before the platform tells anyone, so its event about these
+        // commits finds them (#284).
+        for sha in &shas {
+            self.app.own_pushes.record(sha);
+        }
         checkout.push(branch).await.context("pushing")?;
-        info!(commit = %sha, files = changes.len(), "pushed");
-        Ok(sha)
+        info!(commits = shas.len(), files = changes.len(), "pushed");
+        Ok(shas)
     }
 
     /// The branch Henk pushes to, once it is sure he may.
@@ -293,7 +310,7 @@ impl Pusher<'_> {
     }
 
     /// A note on the run's timeline, and in the log.
-    async fn note(&self, note: &str) {
+    pub(crate) async fn note(&self, note: &str) {
         info!("{note}");
         if let Err(error) = self.app.store.event(self.run, "info", note).await {
             warn!(%error, "could not record the event");
