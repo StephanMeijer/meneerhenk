@@ -110,8 +110,8 @@ endpoint = "anthropic"
 model = "claude-sonnet-5-5"
 max_tokens = 16384
 
-# effort: low, medium, high, xhigh or max, and on OpenAI also none and
-# minimal. It sets how much the model thinks; left out, nothing is sent and
+# effort: low, medium, high or xhigh, and max on Anthropic only, or none and
+# minimal on OpenAI only. It sets how much the model thinks; left out, nothing is sent and
 # the model's default applies, which for Claude Opus 5.5 is medium. Calls
 # are not streamed, so a higher effort needs a longer timeout_secs.
 # `henk config check` shows the parameter each model's effort is sent as.

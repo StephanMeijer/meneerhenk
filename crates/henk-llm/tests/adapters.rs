@@ -751,6 +751,39 @@ fn an_effort_the_provider_does_not_take_is_refused_with_what_it_takes() {
     );
 }
 
+#[test]
+fn openai_has_no_max_effort_and_refuses_it_at_load() {
+    let mut cfg = config(Provider::OpenAi, "https://x.test/v1");
+    cfg.effort = Some(Effort::Max);
+    let Err(LlmError::InvalidConfig(why)) = client_for(cfg) else {
+        panic!("max is Anthropic's");
+    };
+    assert_eq!(
+        why,
+        "effort \"max\" is not accepted by provider \"openai\"; accepted: none, minimal, low, medium, high, xhigh"
+    );
+}
+
+#[tokio::test]
+async fn a_400_about_a_reasoning_item_stays_a_bad_request_with_effort_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Item 'rs_1' of type 'reasoning' was provided without its required following item.","param":"input"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(Provider::OpenAi, &format!("{}/v1", server.uri()));
+    cfg.effort = Some(Effort::Low);
+    let error = client_for(cfg)
+        .unwrap()
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::BadRequest { status: 400, .. }));
+}
+
 #[tokio::test]
 async fn a_400_about_reasoning_effort_names_the_setting_and_is_not_retried() {
     let server = MockServer::start().await;

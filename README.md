@@ -230,8 +230,8 @@ reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
 `reviews` check. A configuration from before #309 that still has lanes or
 a fact-check is refused; see "Migrating from lanes" below. `effort` sets how
-much a model thinks: `low`, `medium`, `high`, `xhigh` or `max`, and on
-OpenAI also `none` and `minimal` (#366). It needs a `max_tokens` of 16384
+much a model thinks: `low`, `medium`, `high` or `xhigh`, and `max` on
+Anthropic only, or `none` and `minimal` on OpenAI only (#366). It needs a `max_tokens` of 16384
 or so and a longer `timeout_secs`. Anthropic gets it as
 `output_config.effort`; OpenAI as `reasoning_effort` (Chat Completions) or
 `reasoning.effort` (Responses), and `henk config check` and the

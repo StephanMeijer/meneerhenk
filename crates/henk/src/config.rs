@@ -547,8 +547,8 @@ pub struct ModelFileConfig {
     /// only).
     #[serde(default)]
     pub max_tokens_param: Option<MaxTokensParam>,
-    /// Thinking effort: `low`, `medium`, `high`, `xhigh` or `max`, and on
-    /// OpenAI also `none` and `minimal` (#366). Left out, nothing is sent
+    /// Thinking effort: `low`, `medium`, `high` or `xhigh`, and `max` on
+    /// Anthropic only, or `none` and `minimal` on OpenAI only (#366). Left out, nothing is sent
     /// and the model's own default applies.
     #[serde(default)]
     pub effort: Option<Effort>,

@@ -296,17 +296,19 @@ impl ModelClient for OpenAiClient {
     }
 }
 
-/// A 400 that names the reasoning parameter, on a model that sends effort,
-/// as [`LlmError::EffortRejected`], so the error names the setting (#366).
-/// Any other error is returned as it is.
+/// A 400 that names the effort parameter itself (`reasoning_effort` or
+/// `reasoning.effort`), on a model that sends effort, as
+/// [`LlmError::EffortRejected`], so the error names the setting (#366).
+/// The bare word "reasoning" is not enough: a 400 about a replayed
+/// reasoning item is not the effort's fault. Any other error is returned
+/// as it is.
 pub(crate) fn effort_rejected(error: LlmError, config: &ModelConfig) -> LlmError {
+    let param = effort_param(Provider::OpenAi, config.api);
     match (error, config.effort) {
-        (LlmError::BadRequest { status: 400, body }, Some(effort))
-            if body.contains("reasoning") =>
-        {
+        (LlmError::BadRequest { status: 400, body }, Some(effort)) if body.contains(param) => {
             LlmError::EffortRejected {
                 effort: effort.as_str(),
-                param: effort_param(Provider::OpenAi, config.api),
+                param,
                 status: 400,
                 body,
             }

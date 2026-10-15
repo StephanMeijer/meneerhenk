@@ -147,7 +147,7 @@ async fn a_400_about_reasoning_names_the_effort_setting() {
         .mount(&server)
         .await;
     let mut cfg = config(&format!("{}/v1", server.uri()));
-    cfg.effort = Some(Effort::Max);
+    cfg.effort = Some(Effort::Xhigh);
     let error = client_for(cfg)
         .unwrap()
         .complete(&CompletionRequest::default())
@@ -157,7 +157,7 @@ async fn a_400_about_reasoning_names_the_effort_setting() {
         matches!(
             error,
             LlmError::EffortRejected {
-                effort: "max",
+                effort: "xhigh",
                 param: "reasoning.effort",
                 ..
             }

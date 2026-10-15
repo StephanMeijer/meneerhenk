@@ -137,14 +137,14 @@ impl Effort {
                 Self::Medium,
                 Self::High,
                 Self::Xhigh,
-                Self::Max,
             ],
         }
     }
 
     /// The value sent to `provider`, or `None` when it takes no such level.
-    /// Both providers spell their levels as Henk does today; a provider
-    /// that does not would be mapped here.
+    /// Both providers spell the levels they take as Henk does today (OpenAI
+    /// has no `max`); a provider that spelled one differently would be
+    /// mapped here.
     #[must_use]
     pub fn wire(self, provider: Provider) -> Option<&'static str> {
         Self::accepted(provider)
