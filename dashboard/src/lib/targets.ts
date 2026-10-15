@@ -12,7 +12,7 @@ export interface Target {
 }
 
 /** What can be started, and what each needs. */
-export type Start = 'review' | 'plan' | 'execute' | 'rebase';
+export type Start = 'review' | 'plan' | 'execute' | 'rebase' | 'ticket';
 
 function split(url: string): { host: string; path: string } | null {
   const text = url.trim();
@@ -89,7 +89,7 @@ export function checkUrl(start: Start, url: string): Check {
   }
   if (target.kind !== wanted) {
     return wanted === 'issue'
-      ? { problem: `This is a ${target.platform === 'gitlab' ? 'merge request' : 'pull request'}. ${start === 'plan' ? 'A plan' : 'Taking one to a pull request'} needs an issue URL.` }
+      ? { problem: `This is a ${target.platform === 'gitlab' ? 'merge request' : 'pull request'}. ${start === 'plan' ? 'A plan' : start === 'ticket' ? 'A ticket run' : 'Taking one to a pull request'} needs an issue URL.` }
       : { problem: `This is an issue. ${start === 'rebase' ? 'A rebase' : 'A review'} needs a pull request URL.` };
   }
   return { ok: targetText(target) };
