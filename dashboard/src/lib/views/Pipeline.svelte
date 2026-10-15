@@ -23,6 +23,10 @@
     requested: 'Requested',
     queued: 'Queued',
     started: 'Started',
+    // The stages of a ticket run (#536): the runs it drives.
+    plan: 'Plan',
+    execute: 'Execute',
+    review: 'Review',
     diff: 'Diff',
     checkout: 'Checkout',
     workspace: 'Workspace',

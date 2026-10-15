@@ -79,6 +79,7 @@ macro_rules! for_each_scenario {
             a_superseded_run_names_the_run_that_replaced_it,
             sessions_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
+            a_ticket_run_keeps_its_kind_and_its_stages_in_pipeline_order,
             days_count_runs_findings_and_drafts,
             event_facets_are_the_sources_and_kinds_seen,
             sessions_and_stages_of_many_runs_come_in_one_read,
@@ -1378,6 +1379,57 @@ async fn sessions_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) 
         ]
     );
     assert_eq!(lanes[2].error.as_deref(), Some("rate limited"));
+}
+
+/// #536: a ticket run reads back as one, and its plan, execute and review
+/// stages come back between `started` and `done`, whatever order they were
+/// written in.
+async fn a_ticket_run_keeps_its_kind_and_its_stages_in_pipeline_order(store: &dyn RunStore) {
+    let mut ticket = new_run("r-ticket");
+    ticket.kind = RunKind::Ticket;
+    ticket.commit = None;
+    store.create_run(&ticket).await.unwrap();
+    let run = id("r-ticket");
+    assert_eq!(
+        store.run(&run).await.unwrap().unwrap().kind,
+        RunKind::Ticket
+    );
+    for stage in [
+        Stage::Done,
+        Stage::Review,
+        Stage::Requested,
+        Stage::Plan,
+        Stage::Execute,
+        Stage::Started,
+    ] {
+        store
+            .stage(&run, &StageWrite::now(stage, StageState::Done, "x"))
+            .await
+            .unwrap();
+    }
+    let stages = store.stages(&run).await.unwrap();
+    assert_eq!(
+        stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+        [
+            Stage::Requested,
+            Stage::Started,
+            Stage::Plan,
+            Stage::Execute,
+            Stage::Review,
+            Stage::Done
+        ]
+    );
+    let found = store
+        .list_runs(
+            &RunFilter {
+                kind: Some(RunKind::Ticket),
+                ..RunFilter::default()
+            },
+            Page::new(10, 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1, "the kind filter finds it");
 }
 
 async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunStore) {
