@@ -75,6 +75,7 @@ pub async fn every_backend_does_this(provider: Arc<dyn WorkspaceProvider>, name:
     links_out_of_the_tree_and_into_git_are_refused(&provider, name).await;
     commands_run_with_an_empty_environment_and_limits(&provider, name).await;
     the_changes_are_exported_with_their_modes(&provider, name).await;
+    files_are_removed_and_links_never_followed(&provider, name).await;
     changes_count_from_the_baseline(&provider, name).await;
     a_closed_workspace_is_gone(&provider, name).await;
 }
@@ -618,6 +619,52 @@ async fn the_changes_are_exported_with_their_modes(
         4,
         "exporting twice is fine"
     );
+    ws.close().await;
+}
+
+async fn files_are_removed_and_links_never_followed(
+    provider: &Arc<dyn WorkspaceProvider>,
+    name: &str,
+) {
+    let ws = open(provider, &format!("{name}-remove"), Limits::default()).await;
+    let ran = ws
+        .exec(
+            &sh("ln -s src/a.rs alias.rs && ln -s / escape"),
+            &WorkspacePath::root(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ran.code, Some(0), "{}", ran.output);
+    ws.baseline().await.unwrap();
+
+    ws.remove(&path("alias.rs")).await.unwrap();
+    assert_eq!(
+        ws.read(&path("src/a.rs"), 1024).await.unwrap(),
+        b"fn main() {\n    let x = 1;\n}\n",
+        "removing a link leaves what it points to"
+    );
+    ws.remove(&path("run.sh")).await.unwrap();
+    assert!(matches!(
+        ws.remove(&path("run.sh")).await,
+        Err(WorkspaceError::NotFound(_))
+    ));
+    assert!(matches!(
+        ws.remove(&path("src")).await,
+        Err(WorkspaceError::Refused(_))
+    ));
+    assert!(
+        ws.remove(&path("escape/etc/hostname")).await.is_err(),
+        "nothing is removed through a link out of the tree"
+    );
+
+    let mut changes = ws.export().await.unwrap();
+    changes.sort_by(|a, b| a.raw.path.cmp(&b.raw.path));
+    let seen: Vec<(&str, bool)> = changes
+        .iter()
+        .map(|c| (c.raw.path.as_str(), c.raw.deleted))
+        .collect();
+    assert_eq!(seen, [("alias.rs", true), ("run.sh", true)]);
     ws.close().await;
 }
 

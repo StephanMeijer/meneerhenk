@@ -425,6 +425,25 @@ impl Workspace for HostWorkspace {
         std::fs::write(&target, content).map_err(io(path))
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let root = self.root()?;
+        let target = root.join(path.as_str());
+        let parent = target
+            .parent()
+            .ok_or_else(|| WorkspaceError::Refused(format!("{path} has no directory")))?;
+        let real = parent
+            .canonicalize()
+            .map_err(|_| WorkspaceError::NotFound(path.to_string()))?;
+        inside(&root, &real, path)?;
+        let meta = target
+            .symlink_metadata()
+            .map_err(|_| WorkspaceError::NotFound(path.to_string()))?;
+        if meta.is_dir() {
+            return Err(WorkspaceError::Refused(format!("{path} is a directory")));
+        }
+        std::fs::remove_file(&target).map_err(io(path))
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

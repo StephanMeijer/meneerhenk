@@ -33,14 +33,15 @@ pub const PLAN_REVIEWER_NO_WORKSPACE: &str = "Read the code with the platform's 
 pub const LOOP_REVIEWER: &str = include_str!("../prompts/loop_reviewer.md");
 
 /// Instructions for the executor of a review loop (#284). `{{ref}}`,
-/// `{{repo}}`, `{{max_files}}` and `{{recent_commits}}`, the branch's
-/// latest commit subjects (#400), are filled in.
+/// `{{repo}}`, `{{max_files}}`, `{{recent_commits}}`, the branch's
+/// latest commit subjects (#400), and `{{edit_tool}}`, the tool the model
+/// edits with (#561), are filled in.
 pub const LOOP_EXECUTOR: &str = include_str!("../prompts/loop_executor.md");
 
 /// Instructions for the executor taking an issue to a pull request (#329).
 /// `{{ref}}`, `{{repo}}`, `{{branch}}`, `{{max_files}}` and
 /// `{{recent_commits}}`, the default branch's latest commit subjects
-/// (#400), are filled in.
+/// (#400), and `{{edit_tool}}` are filled in.
 pub const EXECUTE: &str = include_str!("../prompts/execute.md");
 
 /// Instructions for the executor resolving a rebase's conflicts (#579).
@@ -104,9 +105,10 @@ mod tests {
         for placeholder in ["{{base}}", "{{files}}", "{{edit_tool}}", "`write_file`"] {
             assert!(REBASE.contains(placeholder), "{placeholder}");
         }
-        for tool in ["edit_file", "propose_pull_request"] {
+        for tool in ["{{edit_tool}}", "write_file", "propose_pull_request"] {
             assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");
         }
+        assert!(LOOP_EXECUTOR.contains("`{{edit_tool}}`"));
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER_WORKSPACE));
         for tool in ["raise_point", "finish_round", "reopens"] {
             assert!(PLAN_REVIEWER.contains(&format!("`{tool}`")), "{tool}");

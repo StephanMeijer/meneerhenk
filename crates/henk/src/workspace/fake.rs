@@ -222,6 +222,13 @@ impl Workspace for FakeWorkspace {
         Ok(())
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.files()?
+            .remove(path.as_str())
+            .map(|_| ())
+            .ok_or_else(|| WorkspaceError::NotFound(path.to_string()))
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

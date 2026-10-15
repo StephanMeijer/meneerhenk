@@ -380,6 +380,15 @@ pub trait Workspace: Send + Sync {
     /// Returns [`WorkspaceError`] when the path is refused or the write fails.
     async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError>;
 
+    /// Removes a file. A symbolic link is removed itself, never what it
+    /// points to; a directory is refused (#561).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError`] when the path is refused, missing, a
+    /// directory, or the removal fails.
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError>;
+
     /// The files under `dir`, sorted, at most `cap`; with `only`, just
     /// the paths it matches, counted before the cap. `.git` is left out and
     /// symbolic links are not followed.
@@ -792,6 +801,10 @@ impl Workspace for NoExport {
         self.inner.write(path, content).await
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.remove(path).await
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,
@@ -915,6 +928,10 @@ impl Workspace for Metered {
 
     async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
         self.inner.write(path, content).await
+    }
+
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.remove(path).await
     }
 
     async fn list(

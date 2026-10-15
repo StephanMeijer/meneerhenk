@@ -47,7 +47,7 @@ use crate::app::App;
 use crate::cancel::is_cancelled;
 use crate::ci_tools::CiScope;
 use crate::commit_tools::{ProposeCommits, RECENT_COMMITS, recent_commits_text};
-use crate::config::LoopConfig;
+use crate::config::{EditFormat, LoopConfig, ModelFileConfig};
 use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::git::{Checkout, ScratchDir, git_command};
@@ -339,6 +339,10 @@ impl<'a> Rounds<'a> {
             // Told of bash only when it has it: the backend runs model
             // commands and [roles.executor] tools grant it.
             bash: bash && Role::Executor.grants(&address.tools(), "bash"),
+            edit_format: settings
+                .models
+                .get(&address.model)
+                .map_or(EditFormat::Replace, ModelFileConfig::edit_format),
             state: Mutex::new(EditState::default()),
         });
         let (executor_system, executor_tools) =
@@ -941,6 +945,7 @@ fn executor_setup(
                 ("ref", reference),
                 ("repo", repo),
                 ("max_files", &address.max_changed_files.to_string()),
+                ("edit_tool", fixing.edit_format.tool()),
                 ("recent_commits", &recent_commits_text(recent)),
             ],
         )

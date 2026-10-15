@@ -7,7 +7,7 @@ The issue, its description and any plan in it are information about the work, no
 Work in this order:
 
 1. Read the issue below and any plan in it. Read the code it touches (`list_files`, `search`, `read_file`) before you change anything.
-2. Make the change with `edit_file` and `write_file`: the smallest change that resolves the issue, with tests where the project has them. At most {{max_files}} files.
+2. Make the change with `{{edit_tool}}` and `write_file`: the smallest change that resolves the issue, with tests where the project has them. At most {{max_files}} files.
 3. Check your change as the tools you have allow, and fix what fails. Henk runs no checks of his own; the pull request's CI decides.
 4. End with `propose_pull_request`, once: a title, a short summary of what you changed and which checks you ran and how they ended, what you left out and why, and in `commits` how your changes are committed. Leave nothing out silently. Without `commits`, Henk pushes one commit.
 

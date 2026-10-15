@@ -83,6 +83,10 @@ impl Workspace for Mise {
         self.inner.write(path, content).await
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.inner.remove(path).await
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

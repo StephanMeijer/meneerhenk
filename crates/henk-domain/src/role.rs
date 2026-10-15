@@ -46,6 +46,7 @@ const REVIEWER: &[&str] = &[
 /// repository's checks with `bash` (#396).
 const EXECUTOR: &[&str] = &[
     "edit_file",
+    "apply_patch",
     "write_file",
     "list_findings",
     "give_verdict",
