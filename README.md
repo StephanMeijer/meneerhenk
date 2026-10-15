@@ -732,7 +732,8 @@ henk runs show r-20261005-1a2b3c4d --transcript reviewer   # one session's conve
 
 In serve mode everything is an event. Hooks receive and publish; listeners
 decide. GitHub sends `pull_request`, `issue_comment` and
-`pull_request_review_comment`; GitLab sends merge request and note hooks.
+`pull_request_review_comment`, and `push` where Henk rebases by himself;
+GitLab sends merge request and note hooks, and push hooks for the same.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 `POST /plan {"url", "note"?}`, `POST /execute {"url", "note"?}`,
@@ -989,6 +990,27 @@ Rebasing needs `[roles.executor]` and is on for every repository; turn it
 off for one with `rebase = false` in its
 `[roles.executor.repositories."owner/name"]` entry. `henk config check`
 says which repositories are not rebased.
+
+Henk can also rebase his own pull requests by himself when their base
+moves (spec §3.6, #579): the pull requests his execute and ticket runs
+open, on branches under `[execution] branch_prefix`. It is off until a
+repository says so:
+
+```toml
+[roles.executor.repositories."owner/name"]
+rebase_when_behind = true
+```
+
+It needs `[execution]`, and webhook deliveries of pushes: subscribe the
+GitHub App to the **Push** event (no new permission), or tick **Push
+events** on the GitLab webhook. A push to the default branch then makes
+Henk list the open pull requests into it that are behind it, and rebase his
+own, up to 20 per push, each as above. Other people's branches are not
+touched; ask with the comment. A rebase he starts himself says nothing
+when there was nothing to do, says that the base moved when it pushed, and
+when it fails says why and that he will not try again until the branch
+changes (comment `@meneer-henk rebase` to try at once); it also leaves the
+branch alone if somebody pushed since he looked.
 
 ### Sandbox host
 
