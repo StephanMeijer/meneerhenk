@@ -582,7 +582,8 @@ flowchart LR
 The event model (`henk-events`): `Event { id, received_at, source, kind, payload }`,
 `EventSource` (GitHub webhook with delivery id, GitLab webhook, API with
 requester), `EventKind` (pull request change, comment, review requested, plan
-requested, execute requested, ticket requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
+requested, execute requested, ticket requested, rebase requested, a push to the
+default branch (#579), unmodelled, ignored) and `Handled` (ignored, started, joined,
 superseded, greeted, failed with a reason). A webhook kind no parser models is
 `Unmodelled` and still recorded, so a future listener can be written against
 real recordings. Recordings never leave the service.

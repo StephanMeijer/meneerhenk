@@ -5,6 +5,7 @@ use henk_domain::review::CommitSha;
 use serde_json::Value;
 
 use crate::event::{CommentKind, EventKind, PullRequestAction, Sender};
+use crate::push::{Pushed, pushed};
 
 /// Parses a GitLab webhook delivery. `event` is the `X-Gitlab-Event` header.
 #[must_use]
@@ -34,6 +35,29 @@ pub fn parse_gitlab(event: &str, payload: &Value) -> EventKind {
     match kind {
         "merge_request" => parse_gitlab_merge_request(payload, repo, sender),
         "note" => parse_gitlab_note(payload, repo, sender),
+        "push" => {
+            // A push delivery names its user at the top, not in `user`.
+            let login = payload
+                .get("user_username")
+                .and_then(Value::as_str)
+                .unwrap_or(&sender.login)
+                .to_owned();
+            pushed(
+                repo,
+                &Pushed {
+                    git_ref: payload.get("ref").and_then(Value::as_str),
+                    default_branch: payload
+                        .pointer("/project/default_branch")
+                        .and_then(Value::as_str),
+                    after: payload.get("after").and_then(Value::as_str),
+                    deleted: false,
+                },
+                Sender {
+                    login,
+                    is_bot: sender.is_bot,
+                },
+            )
+        }
         other => EventKind::Unmodelled {
             name: other.to_owned(),
         },

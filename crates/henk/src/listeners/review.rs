@@ -201,6 +201,7 @@ impl Listener for ReviewListener {
             | EventKind::ExecuteRequested { .. }
             | EventKind::RebaseRequested { .. }
             | EventKind::TicketRequested { .. }
+            | EventKind::BranchPushed { .. }
             | EventKind::Unmodelled { .. }
             | EventKind::Ignored(_) => Handled::Ignored("not a review event".to_owned()),
         }

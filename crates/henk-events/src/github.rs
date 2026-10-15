@@ -5,6 +5,7 @@ use henk_domain::review::CommitSha;
 use serde_json::Value;
 
 use crate::event::{CommentKind, EventKind, PullRequestAction, Sender};
+use crate::push::{Pushed, pushed};
 
 /// Parses a GitHub webhook delivery. `event` is the `X-GitHub-Event` header.
 #[must_use]
@@ -30,6 +31,21 @@ pub fn parse_github(event: &str, payload: &Value) -> EventKind {
         "pull_request" => parse_pull_request(action, payload, repo, sender),
         "issue_comment" => parse_issue_comment(action, payload, repo, sender),
         "pull_request_review_comment" => parse_review_comment(action, payload, repo, sender),
+        "push" => pushed(
+            repo,
+            &Pushed {
+                git_ref: payload.get("ref").and_then(Value::as_str),
+                default_branch: payload
+                    .pointer("/repository/default_branch")
+                    .and_then(Value::as_str),
+                after: payload.get("after").and_then(Value::as_str),
+                deleted: payload
+                    .get("deleted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+            sender,
+        ),
         other => EventKind::Unmodelled {
             name: other.to_owned(),
         },
@@ -323,10 +339,133 @@ mod tests {
         ));
     }
 
+    /// A GitHub push delivery of `git_ref` that left it at `after`.
+    fn github_push(git_ref: &str, after: &str) -> Value {
+        let mut payload = base();
+        payload["repository"]["default_branch"] = json!("main");
+        payload["ref"] = json!(git_ref);
+        payload["after"] = json!(after);
+        payload["deleted"] = json!(false);
+        payload
+    }
+
+    #[test]
+    fn a_github_push_to_the_default_branch_is_a_branch_pushed() {
+        let event = parse_github("push", &github_push("refs/heads/main", SHA));
+        let EventKind::BranchPushed {
+            repo,
+            branch,
+            head,
+            sender,
+        } = event
+        else {
+            panic!("{event:?}");
+        };
+        assert_eq!(repo.path(), "docspec/app");
+        assert_eq!(branch, "main");
+        assert_eq!(head.as_str(), SHA);
+        assert_eq!(sender.login, "alice");
+        assert_eq!(
+            parse_github("push", &github_push("refs/heads/main", SHA)).name(),
+            "branch_pushed"
+        );
+    }
+
+    #[test]
+    fn a_github_push_that_moves_no_default_branch_is_ignored_with_its_reason() {
+        let zero = "0".repeat(40);
+        let mut deleted = github_push("refs/heads/main", SHA);
+        deleted["deleted"] = json!(true);
+        let mut no_default = github_push("refs/heads/main", SHA);
+        no_default["repository"]["default_branch"] = Value::Null;
+        for (case, payload, says) in [
+            (
+                "another branch",
+                github_push("refs/heads/feature", SHA),
+                "push: feature is not the default branch",
+            ),
+            (
+                "a tag",
+                github_push("refs/tags/v1", SHA),
+                "push: not a branch",
+            ),
+            ("a deleted branch", deleted, "push: main was deleted"),
+            (
+                "an all-zero head",
+                github_push("refs/heads/main", &zero),
+                "push: main was deleted",
+            ),
+            (
+                "no head",
+                github_push("refs/heads/main", "not a sha"),
+                "push without a head commit",
+            ),
+            (
+                "no default branch",
+                no_default,
+                "push: main is not the default branch",
+            ),
+        ] {
+            let event = parse_github("push", &payload);
+            assert_eq!(event, EventKind::Ignored(says.to_owned()), "{case}");
+        }
+        // No repository, no event.
+        assert!(matches!(
+            parse_github("push", &json!({"ref": "refs/heads/main"})),
+            EventKind::Ignored(_)
+        ));
+    }
+
+    /// A GitLab push delivery of `git_ref` that left it at `after`.
+    fn gitlab_push(git_ref: &str, after: &str) -> Value {
+        json!({
+            "object_kind": "push",
+            "ref": git_ref,
+            "after": after,
+            "user_username": "bob",
+            "project": {"path_with_namespace": "group/app", "default_branch": "main"}
+        })
+    }
+
+    #[test]
+    fn a_gitlab_push_to_the_default_branch_is_a_branch_pushed() {
+        let event = parse_gitlab("Push Hook", &gitlab_push("refs/heads/main", SHA));
+        let EventKind::BranchPushed {
+            repo,
+            branch,
+            head,
+            sender,
+        } = event
+        else {
+            panic!("{event:?}");
+        };
+        assert_eq!(repo.path(), "group/app");
+        assert_eq!(branch, "main");
+        assert_eq!(head.as_str(), SHA);
+        // The user is named at the top of a push delivery.
+        assert_eq!(sender.login, "bob");
+
+        assert_eq!(
+            parse_gitlab("Push Hook", &gitlab_push("refs/heads/feature", SHA)),
+            EventKind::Ignored("push: feature is not the default branch".to_owned())
+        );
+        assert_eq!(
+            parse_gitlab("Tag Push Hook", &gitlab_push("refs/tags/v1", SHA)),
+            EventKind::Ignored("push: not a branch".to_owned())
+        );
+        assert_eq!(
+            parse_gitlab(
+                "Push Hook",
+                &gitlab_push("refs/heads/main", &"0".repeat(40))
+            ),
+            EventKind::Ignored("push: main was deleted".to_owned())
+        );
+    }
+
     #[test]
     fn unknown_events_are_unmodelled_and_broken_ones_ignored() {
         assert!(
-            matches!(parse_github("push", &base()), EventKind::Unmodelled { ref name } if name == "push")
+            matches!(parse_github("check_run", &base()), EventKind::Unmodelled { ref name } if name == "check_run")
         );
         assert!(matches!(
             parse_github("pull_request", &json!({})),

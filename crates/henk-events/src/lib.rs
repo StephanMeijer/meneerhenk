@@ -11,6 +11,7 @@ pub mod bus;
 pub mod event;
 pub mod github;
 pub mod gitlab;
+mod push;
 
 pub use bus::{EventBus, EventRecorder, Hook, Listener};
 pub use event::{CommentKind, Event, EventKind, EventSource, Handled, PullRequestAction, Sender};
