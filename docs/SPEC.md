@@ -267,6 +267,14 @@ A repository can turn it off (`rebase = false` in its
    rebase is then reviewed like new commits, in a run Henk asks for
    himself.
 
+A rebase is the only run on its pull request, and it goes first (#580).
+It waits for a slot ahead of every review. A review of the pull request,
+running or waiting, is superseded by it ("Superseded by a rebase onto the
+base branch."), and the rebase starts once that review has ended. A review
+asked for while the rebase runs waits for it: when the rebase pushed, the
+review of the rebased head takes its place; otherwise it starts then. A
+second rebase request joins the first.
+
 ---
 
 ## 4. Planning issues
@@ -798,6 +806,11 @@ surprising reading of the earlier wording; veto any that is wrong.
   stay readable.
 
 ## Revision notes (2026-10-15)
+
+- §3.1, §3.6: one run per pull request at a time, of any kind (#580). A
+  rebase waits for a slot ahead of every review, supersedes a review of
+  its pull request, and a review asked for meanwhile waits for it. A run
+  that replaces another takes a slot only once that one has ended.
 
 - §3.6, §8 hard rule 2: Henk rebases a pull request onto its base branch
   on request (#579), with the executor resolving conflicts, and pushes it

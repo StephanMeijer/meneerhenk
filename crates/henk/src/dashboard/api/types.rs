@@ -176,15 +176,18 @@ impl From<crate::workspace::SandboxHosts> for SandboxHosts {
     }
 }
 
-/// A review waiting for a slot (#251). It has its run id, but no run
+/// A review or rebase waiting for a slot (#251, #580), or a review
+/// waiting for a rebase of its pull request. It has its run id, but no run
 /// record until it starts.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WaitingReview {
     /// The run it will be; cancel it with `POST /runs/{id}/cancel`.
     pub run_id: String,
-    /// `review`; plans join the queue with #79.
+    /// `review` or `rebase`; plans join the queue with #79.
     pub kind: String,
+    /// `rebase` waits ahead of every `review` (#580); a move keeps it so.
+    pub priority: String,
     /// `github` or `gitlab`.
     pub platform: String,
     /// `owner/name`.
@@ -193,8 +196,8 @@ pub struct WaitingReview {
     pub target: u64,
     /// A link to it, when one can be made.
     pub target_url: Option<String>,
-    /// The commit it will review.
-    pub commit: String,
+    /// The commit it will review; `null` for a rebase.
+    pub commit: Option<String>,
     /// What started it.
     pub trigger: String,
     /// Who asked, as a stable id, when someone did.
@@ -203,15 +206,19 @@ pub struct WaitingReview {
     pub since: String,
     /// Its place in the queue, from 1: the order it starts in.
     pub position: u64,
-    /// Why it waits: `no_slot`, every review slot is taken.
+    /// Why it waits: `no_slot`, every slot is taken or a rebase waits
+    /// ahead; `after_rebase`, a rebase of its pull request comes first.
     pub reason: String,
+    /// The rebase it waits for, with `after_rebase`.
+    pub waits_for: Option<String>,
 }
 
 impl WaitingReview {
     pub(super) fn from_waiting(settings: &Settings, waiting: crate::coordinator::Waiting) -> Self {
         Self {
             run_id: waiting.run.as_str().to_owned(),
-            kind: kind_name(RunKind::Review).to_owned(),
+            kind: kind_name(waiting.kind).to_owned(),
+            priority: waiting.priority.as_str().to_owned(),
             platform: match waiting.platform {
                 Platform::GitHub => "github",
                 Platform::GitLab => "gitlab",
@@ -226,7 +233,7 @@ impl WaitingReview {
             ),
             repo: waiting.repo,
             target: waiting.number,
-            commit: waiting.commit.as_str().to_owned(),
+            commit: waiting.commit.map(|c| c.as_str().to_owned()),
             trigger: waiting.trigger,
             requester: waiting.requester,
             since: waiting
@@ -235,6 +242,7 @@ impl WaitingReview {
                 .unwrap_or_default(),
             position: u64::try_from(waiting.position).unwrap_or(u64::MAX),
             reason: waiting.reason.as_str().to_owned(),
+            waits_for: waiting.waits_for.map(|run| run.as_str().to_owned()),
         }
     }
 }

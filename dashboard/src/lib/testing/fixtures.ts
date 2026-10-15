@@ -193,7 +193,8 @@ export function reviewStages(): Stage[] {
   ];
 }
 
-/** A review waiting for a slot (#251). */
+/** A review waiting for a slot (#251); `overrides` make it a rebase or a
+ * review waiting for one (#580). */
 export function waitingReview(runId: string, target: number, position: number, overrides: Partial<WaitingReview> = {}): WaitingReview {
   return {
     run_id: runId,
@@ -208,6 +209,8 @@ export function waitingReview(runId: string, target: number, position: number, o
     since: '2026-10-07T11:50:00Z',
     position,
     reason: 'no_slot',
+    priority: 'review',
+    waits_for: null,
     ...overrides,
   };
 }

@@ -41,8 +41,8 @@ The Model Context Protocol at `POST /mcp` (Streamable HTTP), for agents. It answ
 - `start_execute`: takes an issue to a pull request, as `POST /execute` does: the executor makes the change on a new branch, Henk opens the pull request and then reviews it. Needs `write`.
 - `start_rebase`: rebases a pull or merge request onto its base branch, as `POST /rebase` does: the executor resolves any conflict, Henk pushes with a lease so no one's commit is lost, then reviews the rebased commits. Needs `write`.
 - `cancel_run`: cancels a run this Henk process is running; a review ends cancelled with a neutral check. Needs `write`.
-- `list_queued_runs`: the review slots in use and the reviews waiting for one, in the order they will start.
-- `move_queued_run`: moves a review waiting for a slot to another place in the queue; position 1 starts next. Needs `write`.
+- `list_queued_runs`: the slots in use and the reviews and rebases waiting for one, in the order they will start (rebases first), then the reviews waiting for a rebase of their pull request.
+- `move_queued_run`: moves a review or rebase waiting for a slot to another place in the queue, within its priority; position 1 starts next. Needs `write`.
 - `list_runs`: runs, newest first, by kind, status, platform, repository, target and time.
 - `get_run`: one run in full: status, sessions, stages, the review loop's findings and their verdicts, tool usage, timeline and the requests that started it.
 - `get_run_events`: a run's timeline, in order.

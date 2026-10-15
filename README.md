@@ -1334,8 +1334,11 @@ These answer open questions of the spec provisionally; each becomes a
 line in `docs/SPEC.md` once the team confirms it.
 
 - §3.1 GitHub drafts are not reviewed until marked ready (`review.github_drafts`).
-- §3.1 One review per pull/merge request at a time: the same commit joins
-  the running review, a newer commit supersedes it.
+- §3.1 One run per pull/merge request at a time (#580): the same commit
+  joins the running review, a newer commit supersedes it. A rebase
+  supersedes a review of its pull request and waits for a slot ahead of
+  every review; a review asked for during a rebase starts after it. Reviews
+  and rebases share the `review.max_concurrent` slots.
 - §3.2 A review is the reviewer and executor loop (#309): nothing is posted
   on the pull request, and the check's summary carries the loop's report.
 - §3.3 A session that reaches its round's time limit, or a loop that

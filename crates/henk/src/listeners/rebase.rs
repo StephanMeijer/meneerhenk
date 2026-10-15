@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use henk_domain::queue::Decision;
 use henk_domain::review::is_rebase_request;
 use henk_events::{CommentKind, Event, EventKind, Handled, Listener};
 use henk_platform::ReviewTarget;
@@ -90,6 +91,10 @@ impl Listener for RebaseListener {
         if settings.roles.executor.is_none() {
             return Handled::Ignored("rebasing needs [roles.executor]".to_owned());
         }
-        Handled::Started(self.coordinator.submit_rebase(target, trigger, requester))
+        match self.coordinator.submit_rebase(target, trigger, requester) {
+            (Decision::Join, run) => Handled::Joined(run),
+            (Decision::Supersede, run) => Handled::Superseded(run),
+            (Decision::Start | Decision::After, run) => Handled::Started(run),
+        }
     }
 }

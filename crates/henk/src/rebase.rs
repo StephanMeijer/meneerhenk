@@ -255,6 +255,10 @@ impl Work<'_> {
         .await;
         let what = format!("rebasing #{}", target.number);
         stages::mark(store, run, Stage::Started, StageState::Done, what).await;
+        // Cancelled while it waited for a slot (#580): it ends here.
+        if cancel.is_cancelled() {
+            return Err(Cancelled.into());
+        }
         if !self.executor.rebases(&target.repo) {
             return Err(anyhow!(
                 "rebasing is off for {} ([roles.executor.repositories] rebase = false)",

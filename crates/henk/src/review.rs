@@ -355,9 +355,10 @@ async fn preflight(
     Ok((info, commit))
 }
 
-/// A newer commit arrived: no comment, a neutral check, and the run ends
-/// `superseded`, naming the run that replaced it when that is known, with
-/// the reason (§3.3, #231). Not Henk's failure, so nothing says it is.
+/// A newer commit arrived, or a rebase replaces this one (#580): no
+/// comment, a neutral check, and the run ends `superseded`, naming the run
+/// that replaced it when that is known, with the reason (§3.3, #231). Not
+/// Henk's failure, so nothing says it is.
 async fn report_superseded(
     review: ReviewRun<'_>,
     handle: Option<&henk_platform::ReviewHandle>,
@@ -365,25 +366,33 @@ async fn report_superseded(
     let ReviewRun {
         app, commit, run, ..
     } = review;
-    info!(run = %run, "review superseded by a newer commit");
-    let outcome = ReviewOutcome::superseded(commit.clone());
+    let by_rebase = app.cancels.superseded_for_rebase(run);
+    let outcome = if by_rebase {
+        info!(run = %run, "review superseded by a rebase");
+        ReviewOutcome::superseded_by_rebase(commit.clone())
+    } else {
+        info!(run = %run, "review superseded by a newer commit");
+        ReviewOutcome::superseded(commit.clone())
+    };
     if let Err(finish_error) = finish_checks(review, handle, &outcome).await {
         error!(%finish_error, "could not finish the check of a superseded review");
     }
-    let reason = Superseded.to_string();
+    let reason = if by_rebase {
+        "superseded by a rebase".to_owned()
+    } else {
+        Superseded.to_string()
+    };
     let superseded_by = app.cancels.superseded_by(run);
     let newer = superseded_by.as_ref().map_or_else(
         || "superseded by a newer commit".to_owned(),
         |by| format!("superseded by {by}"),
     );
-    stages::end(
-        &*app.store,
-        run,
-        StageState::Skipped,
-        &newer,
-        "a newer commit arrived",
-    )
-    .await;
+    let why = if by_rebase {
+        "a rebase replaces this commit"
+    } else {
+        "a newer commit arrived"
+    };
+    stages::end(&*app.store, run, StageState::Skipped, &newer, why).await;
     match superseded_by {
         Some(by) => app.store.supersede_run(run, &by, &reason).await?,
         None => {
@@ -2457,6 +2466,196 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #580: a rebase cancels the running review of its pull request, which
+    /// ends superseded by it, and takes a slot only once that review ended.
+    #[tokio::test]
+    async fn a_rebase_supersedes_the_running_review_of_its_pull_request() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-rebase-supersedes", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, review) = coordinator.submit_review(request(&placeholder), commit);
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&review).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        let target = request(&placeholder).target;
+        let (decision, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        for _ in 0..500 {
+            if coordinator.tracked_reviews() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(coordinator.tracked_reviews(), 0, "both ended");
+        let record = app.store.run(&review).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Superseded);
+        assert_eq!(record.superseded_by, Some(rebase));
+        assert_eq!(record.error.as_deref(), Some("superseded by a rebase"));
+        assert_eq!(coordinator.slots().in_use, 0);
+        app.shutdown.cancel();
+    }
+
+    /// #580: a rebase waits ahead of every review, takes the place of the
+    /// review of its pull request, and a review asked for meanwhile starts
+    /// after it, as the run it was promised.
+    #[tokio::test]
+    async fn a_rebase_goes_first_and_is_the_only_run_on_its_pull_request() {
+        use henk_domain::queue::{Decision, Priority};
+        use henk_domain::run::RunKind;
+
+        use crate::coordinator::Reason;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-rebase-first", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        // No executor: a rebase that gets its slot ends at once, unpushed.
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let on = |number| {
+            let mut asked = request(&placeholder);
+            asked.target.number = number;
+            asked
+        };
+        let rebase =
+            |number| coordinator.submit_rebase(on(number).target, "asked".to_owned(), None);
+
+        let (_, review7) = coordinator.submit_review(on(7), commit.clone());
+        let (_, review8) = coordinator.submit_review(on(8), commit.clone());
+        let (decision, rebase9) = rebase(9);
+        assert_eq!(decision, Decision::Start);
+        let (decision, rebase7) = rebase(7);
+        assert_eq!(decision, Decision::Supersede, "the review of #7 makes way");
+        assert_eq!(rebase(7), (Decision::Join, rebase7.clone()));
+        let (decision, after) = coordinator.submit_review(on(7), commit.clone());
+        assert_eq!(decision, Decision::After);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let seen: Vec<_> = coordinator
+            .slots()
+            .waiting
+            .into_iter()
+            .map(|w| {
+                (
+                    w.position,
+                    w.run,
+                    w.number,
+                    w.kind,
+                    w.priority,
+                    w.reason,
+                    w.waits_for,
+                )
+            })
+            .collect();
+        let (no_slot, after_rebase) = (Reason::NoSlot, Reason::AfterRebase);
+        let (rebasing, reviewing) = (
+            (RunKind::Rebase, Priority::Rebase),
+            (RunKind::Review, Priority::Review),
+        );
+        assert_eq!(
+            seen,
+            [
+                (1, rebase9, 9, rebasing.0, rebasing.1, no_slot, None),
+                (2, rebase7.clone(), 7, rebasing.0, rebasing.1, no_slot, None),
+                (
+                    3,
+                    review8.clone(),
+                    8,
+                    reviewing.0,
+                    reviewing.1,
+                    no_slot,
+                    None
+                ),
+                (
+                    4,
+                    after.clone(),
+                    7,
+                    reviewing.0,
+                    reviewing.1,
+                    after_rebase,
+                    Some(rebase7)
+                ),
+            ],
+            "rebases first; #7's review superseded and the newer one held"
+        );
+        assert!(seen.iter().all(|w| w.1 != review7));
+        assert_eq!(
+            coordinator.move_queued(&review8, 1),
+            Ok((3, 3)),
+            "not ahead of a rebase"
+        );
+
+        // The rebases end without pushing; the review held for #7's then
+        // starts, as the run it was promised.
+        assert!(coordinator.cancel(&review8, "github:1234".to_owned()));
+        drop(taken);
+        let mut status = None;
+        for _ in 0..500 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&after).await.unwrap().map(|r| r.status);
+            if status.is_some() {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the held review runs");
+        assert_eq!(coordinator.queued_reviews(), 0);
+        app.shutdown.cancel();
+    }
+
+    /// #580: a review held for a rebase that was cancelled is dropped when a
+    /// newer review of the pull request starts, so it never supersedes it.
+    #[tokio::test]
+    async fn a_newer_review_replaces_the_one_held_for_a_cancelled_rebase() {
+        use henk_domain::queue::Decision;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-held-replaced", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let target = request(&placeholder).target;
+
+        let (_, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
+        let (decision, held) = coordinator.submit_review(request(&placeholder), commit.clone());
+        assert_eq!(decision, Decision::After);
+        assert!(coordinator.cancel(&rebase, "github:1234".to_owned()));
+
+        let newer_commit = CommitSha::parse(&"b".repeat(40)).unwrap();
+        let (decision, newer) = coordinator.submit_review(request(&placeholder), newer_commit);
+        assert_eq!(decision, Decision::Start);
+        assert_eq!(coordinator.queued_reviews(), 1, "only the newer one waits");
+
+        // The cancelled rebase ends once its slot is free.
+        drop(taken);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            app.cancels.superseded_by(&newer),
+            None,
+            "the held review did not supersede the newer one"
+        );
+        assert!(
+            app.store.run(&held).await.unwrap().is_none(),
+            "the held review never started"
+        );
+        app.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn waiting_reviews_queue_in_order_with_who_asked_and_why_they_wait() {
         let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
@@ -2503,7 +2702,7 @@ requester_id = 3
                     w.trigger.as_str(),
                     w.requester.as_deref(),
                     w.reason,
-                    w.commit == commit,
+                    w.commit.as_ref() == Some(&commit),
                 )
             })
             .collect();

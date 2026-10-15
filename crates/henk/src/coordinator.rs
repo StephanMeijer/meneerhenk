@@ -1,13 +1,14 @@
-//! Runs reviews and plans in the background, one review per pull/merge
-//! request at a time (§5.2; open question 2 decided in `henk_domain::queue`).
+//! Runs reviews, rebases and plans in the background, one run per
+//! pull/merge request at a time, rebases first (§5.2, #580; open question 2
+//! decided in `henk_domain::queue`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use henk_domain::allowlist::Platform;
-use henk_domain::queue::{Decision, decide};
+use henk_domain::queue::{Decision, Priority, Work, decide};
 use henk_domain::review::{CommitSha, ReviewOutcome};
-use henk_domain::run::RunId;
+use henk_domain::run::{RunId, RunKind};
 use henk_platform::{IssueTarget, ReviewHandle, ReviewTarget};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -48,7 +49,8 @@ impl Key {
 #[derive(Debug)]
 struct Active {
     run: RunId,
-    commit: CommitSha,
+    /// What it does: a review of a commit, or a rebase.
+    work: Work,
     cancel: CancellationToken,
     generation: u64,
     /// The repository path as the request wrote it, which the run record
@@ -61,27 +63,97 @@ struct Active {
     /// What started it and who asked, for the queue (#251).
     trigger: String,
     requester: Option<String>,
+    /// Closed once its task has ended: a run that replaces it takes a slot
+    /// only then, so two runs never hold slots on one pull request (#580).
+    ended: watch::Receiver<()>,
 }
 
-/// The review slots: how many there are, how many are taken, and what
+/// Who asked for a run, as [`Active`] keeps it.
+struct Asked {
+    repo: String,
+    trigger: String,
+    requester: Option<String>,
+}
+
+impl Active {
+    /// A run on a pull request, taken now, and the sender whose drop says
+    /// it ended.
+    fn new(
+        run: RunId,
+        work: Work,
+        generation: u64,
+        cancel: CancellationToken,
+        asked: Asked,
+    ) -> (Self, watch::Sender<()>) {
+        let (ended_tx, ended) = watch::channel(());
+        let active = Self {
+            run,
+            work,
+            cancel,
+            generation,
+            repo: asked.repo,
+            since: time::OffsetDateTime::now_utc(),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            trigger: asked.trigger,
+            requester: asked.requester,
+            ended,
+        };
+        (active, ended_tx)
+    }
+}
+
+/// A review asked for while a rebase of its pull request runs (#580): it
+/// starts once the rebase ends, unless the rebase pushed, and the review
+/// of the rebased head takes its place.
+#[derive(Debug)]
+struct Held {
+    run: RunId,
+    request: ReviewRequest,
+    commit: CommitSha,
+    since: time::OffsetDateTime,
+}
+
+/// Waits until the run `predecessor` belongs to has ended, unless `cancel`
+/// fires first; true when it ended (#580).
+async fn after(predecessor: Option<&watch::Receiver<()>>, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => false,
+        () = ended(predecessor) => true,
+    }
+}
+
+/// Waits until the run `predecessor` belongs to has ended.
+async fn ended(predecessor: Option<&watch::Receiver<()>>) {
+    if let Some(mut ended) = predecessor.cloned() {
+        // Nothing is ever sent: the sender's drop is the end.
+        while ended.changed().await.is_ok() {}
+    }
+}
+
+/// The slots for runs on pull requests: how many there are, how many are taken, and what
 /// waits for one (#225).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slots {
     /// `review.max_concurrent`.
     pub limit: usize,
-    /// Slots a review holds now.
+    /// Slots a review or a rebase holds now.
     pub in_use: usize,
-    /// Reviews waiting for a slot, in the order they will start.
+    /// Runs waiting for a slot, in the order they will start, then reviews
+    /// waiting for a rebase of their pull request.
     pub waiting: Vec<Waiting>,
 }
 
-/// Why a review waits (#251).
+/// Why a run waits (#251).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    /// Every review slot is taken. A review never waits behind another of
-    /// the same pull request: a new commit supersedes it, the same commit
-    /// joins it.
+    /// Every slot is taken, or a rebase waits ahead of it. A review never
+    /// waits behind another of the same pull request: a new commit
+    /// supersedes it, the same commit joins it.
     NoSlot,
+    /// A rebase of its pull request runs or waits; it starts after that
+    /// (#580).
+    AfterRebase,
 }
 
 impl Reason {
@@ -90,23 +162,28 @@ impl Reason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NoSlot => "no_slot",
+            Self::AfterRebase => "after_rebase",
         }
     }
 }
 
-/// A review waiting for a slot.
+/// A run waiting for a slot, or a review waiting for a rebase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
     /// The run it will be; no record exists until it starts.
     pub run: RunId,
+    /// A review or a rebase.
+    pub kind: RunKind,
+    /// Where it waits: a rebase ahead of every review (#580).
+    pub priority: Priority,
     /// Where the pull or merge request is.
     pub platform: Platform,
     /// `owner/name`.
     pub repo: String,
     /// The pull or merge request.
     pub number: u64,
-    /// The commit it will review.
-    pub commit: CommitSha,
+    /// The commit it will review; none for a rebase.
+    pub commit: Option<CommitSha>,
     /// What started it.
     pub trigger: String,
     /// Who asked, as a stable id, when someone did.
@@ -117,21 +194,49 @@ pub struct Waiting {
     pub position: usize,
     /// Why it waits.
     pub reason: Reason,
+    /// The rebase it waits for, when it waits for one.
+    pub waits_for: Option<RunId>,
 }
 
-/// A waiting review as the queue shows it; its position is set by the caller.
+/// A waiting run as the queue shows it; its position is set by the caller.
 fn waiting(key: &Key, active: &Active) -> Waiting {
     Waiting {
         run: active.run.clone(),
+        kind: match active.work {
+            Work::Review(_) => RunKind::Review,
+            Work::Rebase => RunKind::Rebase,
+        },
+        priority: active.work.priority(),
         platform: key.platform,
         repo: active.repo.clone(),
         number: key.number,
-        commit: active.commit.clone(),
+        commit: active.work.commit().cloned(),
         trigger: active.trigger.clone(),
         requester: active.requester.clone(),
         since: active.since,
         position: 0,
         reason: Reason::NoSlot,
+        waits_for: None,
+    }
+}
+
+/// A review held for a rebase as the queue shows it.
+fn held(key: &Key, held: &Held, rebase: Option<&Active>) -> Waiting {
+    let request = &held.request;
+    Waiting {
+        run: held.run.clone(),
+        kind: RunKind::Review,
+        priority: Priority::Review,
+        platform: key.platform,
+        repo: request.target.repo.path(),
+        number: key.number,
+        commit: Some(held.commit.clone()),
+        trigger: request.trigger.clone(),
+        requester: request.requester.clone(),
+        since: held.since,
+        position: 0,
+        reason: Reason::AfterRebase,
+        waits_for: rebase.map(|a| a.run.clone()),
     }
 }
 
@@ -249,7 +354,10 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
         info!("review stopped before it started");
         return;
     };
-    let outcome = if app.cancels.superseded_by(run).is_some() {
+    let outcome = if app.cancels.superseded_for_rebase(run) {
+        info!("review superseded by a rebase before it started");
+        ReviewOutcome::superseded_by_rebase(commit.clone())
+    } else if app.cancels.superseded_by(run).is_some() {
         info!("review superseded before it started");
         ReviewOutcome::superseded(commit.clone())
     } else {
@@ -274,7 +382,15 @@ async fn ended_while_queued(app: &App, request: &ReviewRequest) {
 pub struct Coordinator {
     app: Arc<App>,
     active: Arc<Mutex<HashMap<Key, Active>>>,
-    /// The review slots, and the order reviews wait for them in (#401).
+    /// Reviews waiting for a rebase of their pull request (#580). Locked
+    /// after `active`, never before.
+    held: Mutex<HashMap<Key, Held>>,
+    /// Runs cancelled by a person while they may still be ending: the next
+    /// run on their pull request takes a slot only once they have (#580).
+    /// Locked after `active`, never before.
+    ending: Mutex<HashMap<Key, watch::Receiver<()>>>,
+    /// The slots for runs on pull requests, and the order runs wait for
+    /// them in (#401, #580).
     review_slots: Arc<SlotQueue>,
     generation: Mutex<u64>,
     /// Marked whenever [`Coordinator::slots`] may read differently, so the
@@ -300,6 +416,8 @@ impl Coordinator {
             ),
             app,
             active: Arc::new(Mutex::new(HashMap::new())),
+            held: Mutex::new(HashMap::new()),
+            ending: Mutex::new(HashMap::new()),
             generation: Mutex::new(0),
             slots_changed,
         }
@@ -311,15 +429,15 @@ impl Coordinator {
         &self.app
     }
 
-    /// Reviews running or waiting for a slot right now: what a shutdown
-    /// waits for, as both hear its token.
+    /// Runs on pull requests running or waiting for a slot right now: what
+    /// a shutdown waits for, as both hear its token.
     #[must_use]
     pub fn tracked_reviews(&self) -> usize {
         self.active.lock().map_or(0, |m| m.len())
     }
 
-    /// Reviews that hold a slot right now (#251: a waiting one does not
-    /// count as running).
+    /// Runs on pull requests that hold a slot right now (#251: a waiting
+    /// one does not count as running).
     #[must_use]
     pub fn running_reviews(&self) -> usize {
         self.active.lock().map_or(0, |m| {
@@ -329,17 +447,18 @@ impl Coordinator {
         })
     }
 
-    /// Reviews waiting for a slot right now.
+    /// Runs waiting for a slot right now, and reviews waiting for a rebase.
     #[must_use]
     pub fn queued_reviews(&self) -> usize {
-        self.active.lock().map_or(0, |m| {
+        let queued = self.active.lock().map_or(0, |m| {
             m.values()
                 .filter(|a| !a.started.load(std::sync::atomic::Ordering::Relaxed))
                 .count()
-        })
+        });
+        queued + self.held.lock().map_or(0, |h| h.len())
     }
 
-    /// The review slots and what waits for one.
+    /// The slots and what waits for one.
     #[must_use]
     pub fn slots(&self) -> Slots {
         let (limit, in_use) = self.review_slots.usage();
@@ -348,7 +467,7 @@ impl Coordinator {
         let mut waiting: Vec<Waiting> = self.active.lock().map_or_else(
             |_| Vec::new(),
             |active| {
-                order
+                let mut waiting: Vec<Waiting> = order
                     .iter()
                     .filter_map(|run| {
                         active
@@ -359,7 +478,17 @@ impl Coordinator {
                             })
                             .map(|(key, a)| waiting(key, a))
                     })
-                    .collect()
+                    .collect();
+                // Then the reviews that start after a rebase, oldest first.
+                if let Ok(holding) = self.held.lock() {
+                    let mut after: Vec<Waiting> = holding
+                        .iter()
+                        .map(|(key, h)| held(key, h, active.get(key)))
+                        .collect();
+                    after.sort_by_key(|w| w.since);
+                    waiting.extend(after);
+                }
+                waiting
             },
         );
         for (at, entry) in waiting.iter_mut().enumerate() {
@@ -372,86 +501,168 @@ impl Coordinator {
         }
     }
 
-    /// Takes a review slot as a review would, so a test can fill them.
+    /// Takes a slot as a run would, so a test can fill them.
     #[cfg(test)]
     pub(crate) fn take_a_slot(&self) -> Option<Slot> {
         self.review_slots.take_any()
     }
 
-    /// Wakes when a review starts waiting, takes or frees a slot, or leaves
+    /// Wakes when a run starts waiting, takes or frees a slot, or leaves
     /// the queue; [`Coordinator::slots`] then says how things stand.
     #[must_use]
     pub fn watch_slots(&self) -> watch::Receiver<()> {
         self.slots_changed.subscribe()
     }
 
-    /// Decides what to do with a review request for `commit` and acts on it.
-    /// Returns the decision and the run it concerns: the new run, or the one joined.
-    pub fn submit_review(&self, request: ReviewRequest, commit: CommitSha) -> (Decision, RunId) {
-        let key = Key::of(&request.target);
-        let generation = {
-            let Ok(mut counter) = self.generation.lock() else {
-                return (Decision::Start, new_run_id());
-            };
+    fn next_generation(&self) -> u64 {
+        self.generation.lock().map_or(0, |mut counter| {
             *counter += 1;
             *counter
+        })
+    }
+
+    /// Makes `run` the one run on its pull request, in place of any other
+    /// (#580). Returns its cancellation token, whether it started, and the
+    /// sender whose drop says it ended.
+    fn track(
+        &self,
+        active: &mut HashMap<Key, Active>,
+        key: Key,
+        tracked: (RunId, Work, u64),
+        asked: Asked,
+    ) -> (
+        CancellationToken,
+        Arc<std::sync::atomic::AtomicBool>,
+        watch::Sender<()>,
+    ) {
+        let (run, work, generation) = tracked;
+        // A child of the shutdown token: a shutdown reaches it too.
+        let cancel = self.app.shutdown.child_token();
+        let (entry, ended_tx) = Active::new(run, work, generation, cancel.clone(), asked);
+        let started = Arc::clone(&entry.started);
+        active.insert(key, entry);
+        (cancel, started, ended_tx)
+    }
+
+    /// Holds a review as `run` until the rebase of its pull request ends
+    /// (#580), in place of one held before.
+    fn hold(&self, key: Key, run: &RunId, request: ReviewRequest, commit: CommitSha) {
+        info!(repo = %request.target.repo.path(), number = key.number, run = %run, "a review waits for the rebase of its pull request");
+        let waits = Held {
+            run: run.clone(),
+            request,
+            commit,
+            since: time::OffsetDateTime::now_utc(),
         };
-        let run = new_run_id();
-        let (decision, cancel, started) = {
+        if let Ok(mut holding) = self.held.lock()
+            && let Some(older) = holding.insert(key, waits)
+        {
+            info!(older = %older.run, newer = %run, "a newer review replaces one waiting for a rebase");
+        }
+        self.slots_changed.send_replace(());
+    }
+
+    /// Forgets the review held for a rebase of the pull request, when a
+    /// newer review takes it as `newer`: the rebase it waited for may have
+    /// been cancelled, and the held one would otherwise start later and
+    /// supersede the newer review with an older commit. Called with
+    /// `active` locked.
+    fn drop_held(&self, key: &Key, newer: &RunId) {
+        if let Ok(mut holding) = self.held.lock()
+            && let Some(older) = holding.remove(key)
+        {
+            info!(older = %older.run, newer = %newer, "a newer review replaces one waiting for a rebase");
+        }
+    }
+
+    /// Records that a request joined `run`, off the lock: the store is
+    /// async and the coordinator's guard is not.
+    fn record_joined(&self, run: &RunId, trigger: &str) {
+        let store = Arc::clone(&self.app.store);
+        let (run, trigger) = (run.clone(), trigger.to_owned());
+        tokio::spawn(async move {
+            let _ = store.joined(&run, &trigger).await;
+        });
+    }
+
+    /// What the last run cancelled on the pull request may still be doing
+    /// (#580): the next run there waits for it to end.
+    fn still_ending(&self, key: &Key) -> Option<watch::Receiver<()>> {
+        self.ending.lock().ok().and_then(|mut e| e.remove(key))
+    }
+
+    /// Decides what to do with a review request for `commit` and acts on it.
+    /// Returns the decision and the run it concerns: the new run, the one
+    /// joined, or the one that will start after a rebase.
+    pub fn submit_review(&self, request: ReviewRequest, commit: CommitSha) -> (Decision, RunId) {
+        self.submit_review_as(request, commit, new_run_id())
+    }
+
+    /// [`Self::submit_review`] as `run`: a review held for a rebase keeps
+    /// the run id it was given then.
+    fn submit_review_as(
+        &self,
+        request: ReviewRequest,
+        commit: CommitSha,
+        run: RunId,
+    ) -> (Decision, RunId) {
+        let key = Key::of(&request.target);
+        let generation = self.next_generation();
+        let (decision, cancel, started, ended_tx, predecessor) = {
             let Ok(mut active) = self.active.lock() else {
                 error!("coordinator lock poisoned");
                 return (Decision::Start, run);
             };
-            let decision = decide(active.get(&key).map(|a| &a.commit), &commit);
+            let work = Work::Review(commit.clone());
+            let decision = decide(active.get(&key).map(|a| &a.work), &work);
+            let mut predecessor = None;
             match decision {
                 Decision::Join => {
                     let joined = active
                         .get(&key)
                         .map_or_else(|| run.clone(), |a| a.run.clone());
                     info!(repo = %request.target.repo.path(), number = key.number, run = %joined, "joined the running review");
-                    // Recorded off the lock: the store is async and this guard is not.
-                    let store = Arc::clone(&self.app.store);
-                    let (run_id, trigger) = (joined.clone(), request.trigger.clone());
-                    tokio::spawn(async move {
-                        let _ = store.joined(&run_id, &trigger).await;
-                    });
+                    self.record_joined(&joined, &request.trigger);
                     return (Decision::Join, joined);
+                }
+                Decision::After => {
+                    self.hold(key, &run, request, commit);
+                    return (Decision::After, run);
                 }
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
-                        warn!(repo = %request.target.repo.path(), number = key.number, old = %old.commit.short(), new = %commit.short(), "superseding a running review");
+                        warn!(repo = %request.target.repo.path(), number = key.number, new = %commit.short(), "superseding a running review");
                         // A review still waiting hands its place in the
                         // queue to the one that replaces it (#401).
-                        self.review_slots.replace(&old.run, &run);
+                        self.review_slots.replace(&old.run, &run, Priority::Review);
                         // The old run learns which run replaced it (#231).
                         if !self.app.cancels.supersede(&old.run, &run) {
                             old.cancel.cancel();
                         }
+                        predecessor = Some(old.ended);
                     }
+                    self.drop_held(&key, &run);
                 }
-                Decision::Start => {}
+                Decision::Start => {
+                    predecessor = self.still_ending(&key);
+                    self.drop_held(&key, &run);
+                }
             }
-            // A child of the shutdown token: a shutdown reaches it too.
-            let cancel = self.app.shutdown.child_token();
-            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            active.insert(
+            let asked = Asked {
+                repo: request.target.repo.path(),
+                trigger: request.trigger.clone(),
+                requester: request.requester.clone(),
+            };
+            let (cancel, started, ended_tx) = self.track(
+                &mut active,
                 key.clone(),
-                Active {
-                    run: run.clone(),
-                    commit: commit.clone(),
-                    cancel: cancel.clone(),
-                    generation,
-                    repo: request.target.repo.path(),
-                    since: time::OffsetDateTime::now_utc(),
-                    started: Arc::clone(&started),
-                    trigger: request.trigger.clone(),
-                    requester: request.requester.clone(),
-                },
+                (run.clone(), work, generation),
+                asked,
             );
-            (decision, cancel, started)
+            (decision, cancel, started, ended_tx, predecessor)
         };
         // In line from now: the queue's order is the order of the requests.
-        self.review_slots.join(&run);
+        self.review_slots.join(&run, Priority::Review);
         self.slots_changed.send_replace(());
 
         let app = Arc::clone(&self.app);
@@ -468,13 +679,20 @@ impl Coordinator {
         let queued = run.clone();
         tokio::spawn(async move {
             let _cancellable = cancellable;
+            // Dropped last: the end of this task is the end of the run.
+            let _ended = ended_tx;
             let mut request = request;
-            // A free slot with nobody before it starts the review at once,
-            // as before. Otherwise the pull request shows it queued while it
-            // waits (#262).
-            let permit = match slots.try_take(&queued) {
-                Some(slot) => Some(slot),
-                None => wait_for_slot(&app, &slots, &queued, &cancel, &mut request).await,
+            // A run that replaces another takes a slot once that one has
+            // ended (#580). Then a free slot with nobody before it starts
+            // the review at once, as before; otherwise the pull request
+            // shows it queued while it waits (#262).
+            let permit = if after(predecessor.as_ref(), &cancel).await {
+                match slots.try_take(&queued) {
+                    Some(slot) => Some(slot),
+                    None => wait_for_slot(&app, &slots, &queued, &cancel, &mut request).await,
+                }
+            } else {
+                None
             };
             // Out of the queue however the wait ended.
             slots.leave(&queued);
@@ -486,35 +704,58 @@ impl Coordinator {
                 warn!(%error, "review ended with an error");
             }
             drop(permit);
+            // Not ended before the run it replaced has.
+            ended(predecessor.as_ref()).await;
             leave(&active, &key, generation, &slots_changed);
         });
         (decision, run)
     }
 
-    /// Cancels a running review or plan on behalf of `by`
-    /// (#69). A cancelled review leaves the running set at once, so a new
+    /// Cancels a running or waiting review, rebase or plan on behalf of
+    /// `by` (#69). A cancelled run leaves the running set at once, so a new
     /// request for the same pull request starts afresh instead of joining
-    /// it. False when the run is not one this process is running.
+    /// it, once the cancelled one has ended (#580). False when the run is
+    /// not one this process is running.
     pub fn cancel(&self, run: &RunId, by: String) -> bool {
+        let held = self.held.lock().is_ok_and(|mut holding| {
+            let before = holding.len();
+            holding.retain(|_, h| h.run != *run);
+            holding.len() != before
+        });
+        if held {
+            info!(run = %run, by, "a review waiting for a rebase was cancelled");
+            self.slots_changed.send_replace(());
+            return true;
+        }
         if !self.app.cancels.cancel(run, by) {
             return false;
         }
         if let Ok(mut active) = self.active.lock() {
-            active.retain(|_, a| a.run != *run);
+            let key = active
+                .iter()
+                .find(|(_, a)| a.run == *run)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = key
+                && let Some(cancelled) = active.remove(&key)
+                && let Ok(mut ending) = self.ending.lock()
+            {
+                ending.insert(key, cancelled.ended);
+            }
         }
         self.review_slots.leave(run);
         self.slots_changed.send_replace(());
         true
     }
 
-    /// Moves a review waiting for a slot to `position` in the queue, 1
-    /// being the next to start, on behalf of a colleague (#401). Returns
+    /// Moves a run waiting for a slot to `position` in the queue, 1 being
+    /// the next to start, on behalf of a colleague (#401); never ahead of
+    /// a waiting rebase, nor a rebase behind a review (#580). Returns
     /// where it was and where it is now.
     ///
     /// # Errors
     ///
-    /// [`NotWaiting`] when the run is not a review waiting here: it
-    /// started, ended, or another process has it.
+    /// [`NotWaiting`] when the run is not one waiting here for a slot: it
+    /// started, ended, waits for a rebase, or another process has it.
     pub fn move_queued(&self, run: &RunId, position: usize) -> Result<(usize, usize), NotWaiting> {
         let waiting = self.active.lock().is_ok_and(|active| {
             active
@@ -525,7 +766,7 @@ impl Coordinator {
             return Err(NotWaiting);
         }
         let moved = self.review_slots.move_to(run, position)?;
-        info!(run = %run, from = moved.0, to = moved.1, "a waiting review moved in the queue");
+        info!(run = %run, from = moved.0, to = moved.1, "a waiting run moved in the queue");
         self.slots_changed.send_replace(());
         Ok(moved)
     }
@@ -568,17 +809,69 @@ impl Coordinator {
     }
 
     /// Starts a rebase of a pull request onto its base branch in the
-    /// background and returns its run id (#579). When it pushes, the
-    /// rebased head is reviewed in a run of its own: Henk asks for that
-    /// review himself, since the platform's event about his own push is
-    /// dropped as his own (§8.1).
+    /// background (#579), as the only run on it and ahead of every review
+    /// waiting for a slot (#580). A review of the pull request running or
+    /// waiting is superseded; a second rebase request joins the first.
+    /// Returns the decision and the run it concerns.
+    ///
+    /// When it pushes, the rebased head is reviewed in a run of its own:
+    /// Henk asks for that review himself, since the platform's event about
+    /// his own push is dropped as his own (§8.1). When it does not, a review
+    /// asked for while it ran starts then.
     pub fn submit_rebase(
         self: &Arc<Self>,
         target: ReviewTarget,
         trigger: String,
         requester: Option<String>,
-    ) -> RunId {
+    ) -> (Decision, RunId) {
+        let key = Key::of(&target);
+        let generation = self.next_generation();
         let run = new_run_id();
+        let (decision, cancel, started, ended_tx, predecessor) = {
+            let Ok(mut active) = self.active.lock() else {
+                error!("coordinator lock poisoned");
+                return (Decision::Start, run);
+            };
+            let decision = decide(active.get(&key).map(|a| &a.work), &Work::Rebase);
+            let mut predecessor = None;
+            match decision {
+                Decision::Join => {
+                    let joined = active
+                        .get(&key)
+                        .map_or_else(|| run.clone(), |a| a.run.clone());
+                    info!(repo = %target.repo.path(), number = key.number, run = %joined, "joined the waiting or running rebase");
+                    return (Decision::Join, joined);
+                }
+                Decision::Supersede => {
+                    if let Some(old) = active.remove(&key) {
+                        warn!(repo = %target.repo.path(), number = key.number, old = %old.run, "a rebase supersedes the review");
+                        // A review still waiting hands its place to the
+                        // rebase, which moves up to where rebases wait.
+                        self.review_slots.replace(&old.run, &run, Priority::Rebase);
+                        if !self.app.cancels.supersede_for_rebase(&old.run, &run) {
+                            old.cancel.cancel();
+                        }
+                        predecessor = Some(old.ended);
+                    }
+                }
+                Decision::Start | Decision::After => predecessor = self.still_ending(&key),
+            }
+            let asked = Asked {
+                repo: target.repo.path(),
+                trigger: trigger.clone(),
+                requester: requester.clone(),
+            };
+            let (cancel, started, ended_tx) = self.track(
+                &mut active,
+                key.clone(),
+                (run.clone(), Work::Rebase, generation),
+                asked,
+            );
+            (decision, cancel, started, ended_tx, predecessor)
+        };
+        self.review_slots.join(&run, Priority::Rebase);
+        self.slots_changed.send_replace(());
+
         let request = RebaseRequest {
             target,
             trigger,
@@ -586,23 +879,69 @@ impl Coordinator {
             requester: requester.clone(),
         };
         let coordinator = Arc::clone(self);
-        let cancel = self.app.shutdown.child_token();
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
+        let queued = run.clone();
         tokio::spawn(async move {
-            let report = run_rebase(&coordinator.app, request, cancel).await;
-            drop(cancellable);
-            match report {
-                Ok(report) => {
-                    if let Some(review) = report.review(requester)
-                        && let Some(commit) = review.commit.clone()
-                    {
-                        coordinator.submit_review(review, commit);
-                    }
+            let _ended = ended_tx;
+            let slots = Arc::clone(&coordinator.review_slots);
+            let permit = if after(predecessor.as_ref(), &cancel).await {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    slot = slots.wait(&queued) => Some(slot),
                 }
-                Err(error) => warn!(%error, "rebase ended with an error"),
-            }
+            } else {
+                None
+            };
+            slots.leave(&queued);
+            started.store(true, std::sync::atomic::Ordering::Relaxed);
+            coordinator.slots_changed.send_replace(());
+            // Cancelled before it had a slot, it still runs, to record that
+            // and say so; it stops before it reads anything.
+            let report = run_rebase(&coordinator.app, request, cancel).await;
+            drop(permit);
+            drop(cancellable);
+            ended(predecessor.as_ref()).await;
+            leave(
+                &coordinator.active,
+                &key,
+                generation,
+                &coordinator.slots_changed,
+            );
+            let rebased = match report {
+                Ok(report) => report.review(requester),
+                Err(error) => {
+                    warn!(%error, "rebase ended with an error");
+                    None
+                }
+            };
+            coordinator.review_after_rebase(&key, rebased);
         });
-        run
+        (decision, run)
+    }
+
+    /// Once a rebase of the pull request has ended: the review of the head
+    /// it pushed, or else the review asked for while it ran, if any.
+    fn review_after_rebase(&self, key: &Key, rebased: Option<ReviewRequest>) {
+        let waited = self
+            .held
+            .lock()
+            .ok()
+            .and_then(|mut holding| holding.remove(key));
+        match (rebased, waited) {
+            (Some(review), waited) => {
+                if let Some(waited) = waited {
+                    info!(run = %waited.run, "the review of the rebased head replaces a review of the old one");
+                }
+                if let Some(commit) = review.commit.clone() {
+                    self.submit_review(review, commit);
+                }
+            }
+            (None, Some(waited)) => {
+                self.submit_review_as(waited.request, waited.commit, waited.run);
+            }
+            (None, None) => {}
+        }
     }
 
     /// Starts a plan in the background and returns its run id.
@@ -676,17 +1015,18 @@ mod tests {
         let asked = target(Platform::GitHub, "Owner/Repo", 7);
         let key = Key::of(&asked);
         assert_eq!(key, Key::of(&target(Platform::GitHub, "owner/repo", 7)));
-        let active = Active {
-            run: new_run_id(),
-            commit: CommitSha::parse(&"a".repeat(40)).unwrap(),
-            cancel: CancellationToken::new(),
-            generation: 1,
-            repo: asked.repo.path(),
-            since: time::OffsetDateTime::now_utc(),
-            started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            trigger: "push".to_owned(),
-            requester: None,
-        };
+        let commit = CommitSha::parse(&"a".repeat(40)).unwrap();
+        let (active, _ended) = Active::new(
+            new_run_id(),
+            Work::Review(commit),
+            1,
+            CancellationToken::new(),
+            Asked {
+                repo: asked.repo.path(),
+                trigger: "push".to_owned(),
+                requester: None,
+            },
+        );
         assert_eq!(waiting(&key, &active).repo, "Owner/Repo");
     }
 }
