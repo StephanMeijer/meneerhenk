@@ -13,27 +13,11 @@ use henk_domain::allowlist::RepoRef;
 use crate::error::PlatformError;
 use crate::gitlab::rest::path_segment;
 use crate::gitlab::writer::GitLabWriter;
+use crate::gitlab::{number, text};
 use crate::push::{
     CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
 };
 use crate::writer::ReviewTarget;
-
-fn text(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned()
-}
-
-/// An id GitLab or the MCP server gives as a number or as a string.
-fn number(value: Option<&Value>) -> Option<u64> {
-    match value? {
-        Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
-}
 
 fn flag(value: &Value, key: &str) -> Option<bool> {
     value.get(key).and_then(Value::as_bool)
