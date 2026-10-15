@@ -1565,6 +1565,13 @@ model = "r"
         let sessions = f.app.store.sessions(&run.id).await.unwrap();
         let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["executor", "reviewer"]);
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        let session = stages
+            .iter()
+            .find(|s| s.stage == henk_store::Stage::Session)
+            .unwrap();
+        assert_eq!(session.state, StageState::Done, "{stages:?}");
+        assert_eq!(session.detail, "reviewed in 1 round");
     }
 
     #[tokio::test]
@@ -1624,6 +1631,13 @@ model = "r"
         let run = record(&f, "r-exec-req-round").await;
         assert_eq!(run.loop_stop.as_deref(), Some("converged"));
         assert_eq!(run.loop_rounds, Some(2));
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        let session = stages
+            .iter()
+            .find(|s| s.stage == henk_store::Stage::Session)
+            .unwrap();
+        assert_eq!(session.state, StageState::Done, "{stages:?}");
+        assert_eq!(session.detail, "reviewed in 2 rounds");
         let drafts = f.app.store.drafts(&run.id).await.unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].kind, henk_store::REQUIREMENT_POINT_KIND);

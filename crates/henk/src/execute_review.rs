@@ -98,7 +98,23 @@ pub(crate) async fn run(parts: Parts<'_>, cancel: &CancellationToken) -> anyhow:
     };
     review.conclude(&stop).await;
     match stop {
-        PlanStop::Converged => Ok(review.verdict()),
+        PlanStop::Converged => {
+            // The rounds re-open the stage; a review that converged closes it.
+            let what = format!(
+                "reviewed in {} {}",
+                review.round,
+                if review.round == 1 { "round" } else { "rounds" }
+            );
+            stages::mark(
+                &*review.app.store,
+                review.run,
+                Stage::Session,
+                StageState::Done,
+                what,
+            )
+            .await;
+            Ok(review.verdict())
+        }
         PlanStop::Cancelled => Err(Cancelled.into()),
         other => Err(no_pull(review.unsatisfied(&other))),
     }
