@@ -40,8 +40,13 @@ hmac = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 ring = "0.17"
 rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+# The run store's layer under evaluation (#601): one implementation for SQLite
+# and PostgreSQL. The default features of sea-orm pull webpki-roots and a CDLA
+# licence, so the runtime and TLS are chosen here: tokio, and (through the
+# direct sqlx dependency) rustls with ring and the platform's own roots.
+sea-orm = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite", "sqlx-postgres", "macros", "with-time"] }
+sea-orm-migration = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite", "sqlx-postgres"] }
+sqlx = { version = "0.9", default-features = false, features = ["tls-rustls-ring-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
 secrecy = "0.10"

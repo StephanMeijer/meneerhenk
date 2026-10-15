@@ -12,12 +12,12 @@ use time::format_description::well_known::Rfc3339;
 /// Why a store operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// SQLite said no.
+    /// SQLite said no (the spike's layer reports both databases as text).
     #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(String),
     /// The schema could not be brought up to date.
     #[error("migration error: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
+    Migration(String),
     /// `PostgreSQL` said no, or no connection could be had. The text is the
     /// whole cause chain: the driver's own `Display` is only "db error".
     #[error("PostgreSQL: {0}")]

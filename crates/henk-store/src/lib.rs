@@ -5,12 +5,12 @@
 //! [`PgStore`] in a `PostgreSQL` database.
 
 mod postgres;
-mod sqlite;
+mod sea;
 mod store;
 mod types;
 
 pub use postgres::{PgStore, describe_url};
-pub use sqlite::SqliteStore;
+pub use sea::Candidate;
 pub use store::RunStore;
 pub use types::{
     DayCounts, DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey,

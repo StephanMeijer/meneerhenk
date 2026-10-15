@@ -42,9 +42,10 @@ use std::path::{Path, PathBuf};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
-    EventFilter, EventKey, OutcomeFilter, Page, PgStore, RunFilter, RunKey, RunRecord, RunStatus,
-    RunStore, SessionRole, SqliteStore, ToolCallFilter, ToolCallKey,
+    Candidate, EventFilter, EventKey, OutcomeFilter, Page, PgStore, RunFilter, RunKey, RunRecord,
+    RunStatus, RunStore, SessionRole, ToolCallFilter, ToolCallKey,
 };
+use sea_orm::{ConnectionTrait, Database, Statement};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -545,15 +546,31 @@ fn check(database: &str, report: &[(&str, String)]) {
     );
 }
 
+/// The SQLite file, through a second connection of its own (sea-orm's, not
+/// the store's: rusqlite cannot share a build with this layer).
 struct SqliteSeeder(PathBuf);
 
 impl Seeder for SqliteSeeder {
     async fn execute(&self, sql: &str) {
-        rusqlite::Connection::open(&self.0)
-            .unwrap()
-            .execute_batch(sql)
+        let db = Database::connect(format!("sqlite://{}?mode=rwc", self.0.display()))
+            .await
             .unwrap();
+        db.execute_unprepared(sql).await.unwrap();
+        db.close().await.unwrap();
     }
+}
+
+/// One number out of a query, through a connection of its own.
+async fn scalar(url: &str, sql: &str) -> i64 {
+    let db = Database::connect(url).await.unwrap();
+    let row = db
+        .query_one_raw(Statement::from_string(db.get_database_backend(), sql))
+        .await
+        .unwrap()
+        .unwrap();
+    let value: i64 = row.try_get_by_index(0).unwrap();
+    db.close().await.unwrap();
+    value
 }
 
 /// A database file under the temp directory, removed with the guard.
@@ -581,10 +598,60 @@ impl Drop for File {
 #[tokio::test]
 async fn sqlite_returns_what_the_goldens_say() {
     let file = File::new();
-    drop(SqliteStore::open(&file.0).unwrap());
+    drop(Candidate::open(&file.0).await.unwrap());
     SqliteSeeder(file.0.clone()).execute(SEED).await;
-    let store = SqliteStore::open(&file.0).unwrap();
+    let store = Candidate::open(&file.0).await.unwrap();
     check("sqlite", &report(&store).await);
+}
+
+/// The fixture made by the old SQLite store at schema 020 and filled with
+/// the seed (`PRAGMA user_version = 20`, no `seaql_migrations`).
+const SQLITE_020: &str = "/tmp/claude-1000/-home-steve-Projects-github-com-StephanMeijer-meneerhenk/64411151-75e1-4b24-a999-21ad66170586/scratchpad/fixtures/sqlite-020-seeded.db";
+
+#[tokio::test]
+async fn sqlite_020_is_adopted_and_returns_what_the_goldens_say() {
+    let file = File::new();
+    std::fs::copy(SQLITE_020, &file.0).unwrap();
+    let url = format!("sqlite://{}?mode=rwc", file.0.display());
+    assert_eq!(scalar(&url, "PRAGMA user_version").await, 20);
+    let store = Candidate::open(&file.0).await.unwrap();
+    check("sqlite", &report(&store).await);
+    // Adopted: the first three steps were recorded without running, the
+    // fourth (new) one ran, and the old marker is as the old store left it.
+    assert_eq!(
+        scalar(&url, "SELECT count(*) FROM seaql_migrations").await,
+        4
+    );
+    assert_eq!(
+        scalar(
+            &url,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('sessions_run', 'findings_run', 'events_run')"
+        )
+        .await,
+        3
+    );
+    assert_eq!(scalar(&url, "PRAGMA user_version").await, 20);
+    // Opening it again changes nothing.
+    drop(store);
+    let store = Candidate::open(&file.0).await.unwrap();
+    check("sqlite", &report(&store).await);
+    assert_eq!(
+        scalar(&url, "SELECT count(*) FROM seaql_migrations").await,
+        4
+    );
+}
+
+#[tokio::test]
+async fn a_sqlite_file_between_001_and_019_is_refused_with_a_reason() {
+    let file = File::new();
+    let url = format!("sqlite://{}?mode=rwc", file.0.display());
+    let db = Database::connect(&url).await.unwrap();
+    db.execute_unprepared("CREATE TABLE runs (id TEXT); PRAGMA user_version = 13")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let error = Candidate::open(&file.0).await.unwrap_err();
+    assert!(error.to_string().contains("schema version 13"), "{error}");
 }
 
 #[tokio::test]
@@ -592,12 +659,12 @@ async fn the_seed_is_the_same_rows_whichever_way_it_is_read() {
     // The goldens are only as good as their seed: every table it fills has
     // rows, and a second read of the same file gives the same report.
     let file = File::new();
-    drop(SqliteStore::open(&file.0).unwrap());
+    drop(Candidate::open(&file.0).await.unwrap());
     SqliteSeeder(file.0.clone()).execute(SEED).await;
-    let first = report(&SqliteStore::open(&file.0).unwrap()).await;
-    let second = report(&SqliteStore::open(&file.0).unwrap()).await;
+    let first = report(&Candidate::open(&file.0).await.unwrap()).await;
+    let second = report(&Candidate::open(&file.0).await.unwrap()).await;
     assert_eq!(first, second);
-    let connection = rusqlite::Connection::open(&file.0).unwrap();
+    let url = format!("sqlite://{}?mode=rwc", file.0.display());
     for table in [
         "runs",
         "sessions",
@@ -612,11 +679,72 @@ async fn the_seed_is_the_same_rows_whichever_way_it_is_read() {
         "event_outcomes",
         "run_children",
     ] {
-        let rows: i64 = connection
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-            .unwrap();
+        let rows = scalar(&url, &format!("SELECT count(*) FROM {table}")).await;
         assert!(rows > 0, "the seed puts nothing in {table}");
     }
+}
+
+/// Eight tasks, fifty writes each, through the layer's pool onto one SQLite
+/// file: none may fail with "database is locked".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eight_writers_do_not_lock_each_other_out() {
+    use henk_domain::allowlist::Platform;
+    use henk_store::NewRun;
+
+    let file = File::new();
+    let store = std::sync::Arc::new(Candidate::open(&file.0).await.unwrap());
+    let tasks: Vec<_> = (0..8)
+        .map(|task| {
+            let store = std::sync::Arc::clone(&store);
+            tokio::spawn(async move {
+                for n in 0..50 {
+                    let id = format!("w{task}-{n}");
+                    store
+                        .create_run(&NewRun {
+                            id: run_id(&id),
+                            kind: RunKind::Review,
+                            platform: Platform::GitHub,
+                            repo: "o/r".into(),
+                            target: n,
+                            commit: None,
+                            requester: None,
+                            trigger: "test".into(),
+                            link: format!("https://henk.example/runs/{id}"),
+                        })
+                        .await?;
+                    store.event(&run_id(&id), "info", "started").await?;
+                }
+                Ok::<(), henk_store::StoreError>(())
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    assert_eq!(
+        store.count_runs(&RunFilter::default()).await.unwrap(),
+        400,
+        "every write landed"
+    );
+    // Three more writes, through the trait's other write shapes.
+    let parent = run_id("w0-0");
+    store
+        .link_child(&parent, henk_store::Stage::Plan, &run_id("w1-1"))
+        .await
+        .unwrap();
+    store
+        .link_child(&parent, henk_store::Stage::Plan, &run_id("w2-2"))
+        .await
+        .unwrap();
+    assert_eq!(store.children(&parent).await.unwrap().len(), 1, "an upsert");
+    store
+        .finish_run(&parent, RunStatus::Finished, Some("done"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.run(&parent).await.unwrap().unwrap().status,
+        RunStatus::Finished
+    );
 }
 
 /// `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server. Every test gets
@@ -702,8 +830,71 @@ mod postgres {
     async fn postgres_returns_what_the_goldens_say() {
         let schema = schema().await;
         // Connecting migrates; then the rows go in behind the store's back.
-        let store = PgStore::connect(&schema.url).await.unwrap();
+        let store = Candidate::connect(&schema.url).await.unwrap();
         PgSeeder(schema.url.clone()).execute(SEED).await;
         check("postgres", &report(&store).await);
+        assert_eq!(
+            scalar(&schema.url, "SELECT count(*) FROM seaql_migrations").await,
+            4
+        );
+    }
+
+    /// A schema the OLD store made (016, `henk_schema_migrations`), filled
+    /// with the seed, opened with the candidate.
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn postgres_016_is_adopted_and_returns_what_the_goldens_say() {
+        let schema = schema().await;
+        drop(PgStore::connect(&schema.url).await.unwrap());
+        PgSeeder(schema.url.clone()).execute(SEED).await;
+        assert_eq!(
+            scalar(
+                &schema.url,
+                "SELECT max(version)::bigint FROM henk_schema_migrations"
+            )
+            .await,
+            16
+        );
+        let store = Candidate::connect(&schema.url).await.unwrap();
+        check("postgres", &report(&store).await);
+        assert_eq!(
+            scalar(&schema.url, "SELECT count(*) FROM seaql_migrations").await,
+            4,
+            "three adopted, the fourth step ran"
+        );
+        assert_eq!(
+            scalar(
+                &schema.url,
+                "SELECT max(version)::bigint FROM henk_schema_migrations"
+            )
+            .await,
+            16,
+            "the old bookkeeping is left as it was"
+        );
+        // Again: nothing to adopt, nothing to run.
+        drop(store);
+        let store = Candidate::connect(&schema.url).await.unwrap();
+        check("postgres", &report(&store).await);
+        assert_eq!(
+            scalar(&schema.url, "SELECT count(*) FROM seaql_migrations").await,
+            4
+        );
+    }
+
+    /// Two Henk processes starting together on one new database.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn two_processes_migrating_at_once_do_not_collide() {
+        let schema = schema().await;
+        let (a, b) = tokio::join!(
+            Candidate::connect(&schema.url),
+            Candidate::connect(&schema.url)
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(
+            scalar(&schema.url, "SELECT count(*) FROM seaql_migrations").await,
+            4
+        );
     }
 }
