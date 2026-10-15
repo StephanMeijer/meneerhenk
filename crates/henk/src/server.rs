@@ -25,8 +25,8 @@ use crate::coordinator::Coordinator;
 use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
 use crate::listeners::{
-    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, TicketListener,
-    Writers,
+    ExecuteListener, MentionListener, PlanListener, RebaseListener, RebaseOnMoveListener,
+    ReviewListener, TicketListener, Writers,
 };
 use crate::pages;
 use crate::recorder::StoreRecorder;
@@ -155,6 +155,7 @@ pub fn compose_with_secrets(
             Arc::new(PlanListener::new(Arc::clone(&coordinator))),
             Arc::new(ExecuteListener::new(Arc::clone(&coordinator))),
             Arc::new(TicketListener::new(Arc::clone(&coordinator))),
+            Arc::new(RebaseOnMoveListener::new(Arc::clone(&coordinator))),
         ],
     ));
     let requester = app

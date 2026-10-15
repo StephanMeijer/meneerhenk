@@ -1166,7 +1166,7 @@ pub struct TrailerConfig {
 
 /// What one repository changes about the executor's pushes: its trailers
 /// (as [`TrailerConfig`]), and whether Henk rebases its pull requests
-/// (#579).
+/// (#579), on request and by himself.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorRepositoryConfig {
@@ -1179,6 +1179,10 @@ pub struct ExecutorRepositoryConfig {
     /// Whether Henk rebases this repository's pull requests onto their
     /// base branch. Default on.
     pub rebase: Option<bool>,
+    /// Whether Henk rebases his own pull requests (branches under
+    /// `[execution] branch_prefix`) by himself when their base branch
+    /// moves. Default off; needs `[execution]` and `rebase` not off.
+    pub rebase_when_behind: Option<bool>,
 }
 
 impl ExecutorRepositoryConfig {
@@ -1225,6 +1229,18 @@ impl ExecutorConfig {
         self.repository(repo)
             .and_then(|config| config.rebase)
             .unwrap_or(true)
+    }
+
+    /// Whether Henk rebases his own pull requests of `repo` by himself when
+    /// their base moves (#579): only when its `[roles.executor.repositories]`
+    /// entry says `rebase_when_behind = true`.
+    #[must_use]
+    pub fn rebases_when_behind(&self, repo: &RepoRef) -> bool {
+        self.rebases(repo)
+            && self
+                .repository(repo)
+                .and_then(|config| config.rebase_when_behind)
+                .unwrap_or(false)
     }
 
     /// `repo`'s entry in `[roles.executor.repositories]`, if it has one.
@@ -2026,6 +2042,7 @@ impl Config {
         if let Some(execution) = &self.execution {
             validate_execution(execution, &self.roles)?;
         }
+        validate_rebase_when_behind(self.execution.as_ref(), &self.roles)?;
         if let Some(autonomous) = &self.autonomous {
             validate_autonomous(
                 autonomous,
@@ -2512,6 +2529,34 @@ fn validate_requirements_review(
         if let Some(tool) = role.missing_requirements_handoff(&granted) {
             return Err(ConfigError::Role(format!(
                 "[roles.{role}] tools leave out {tool}, which the requirements review of [execution] needs: add {tool} to tools, or set requirements_max_rounds = 0 to turn the review off"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Rebasing a repository's own pull requests by himself (#579) needs to
+/// know which branches are his, which `[execution] branch_prefix` says, and
+/// contradicts `rebase = false`.
+fn validate_rebase_when_behind(
+    execution: Option<&ExecutionConfig>,
+    roles: &RolesConfig,
+) -> Result<(), ConfigError> {
+    let Some(executor) = &roles.executor else {
+        return Ok(());
+    };
+    for (key, config) in &executor.repositories {
+        if config.rebase_when_behind != Some(true) {
+            continue;
+        }
+        if execution.is_none() {
+            return Err(ConfigError::Role(format!(
+                "[roles.executor.repositories.\"{key}\"] rebase_when_behind needs [execution], whose branch_prefix says which pull requests are Henk's"
+            )));
+        }
+        if config.rebase == Some(false) {
+            return Err(ConfigError::Role(format!(
+                "[roles.executor.repositories.\"{key}\"] has rebase_when_behind = true and rebase = false; turn one of them off"
             )));
         }
     }
@@ -3179,10 +3224,12 @@ impl Settings {
                 .or_else(|_| RepoRef::parse(Platform::GitLab, key))
             {
                 let policy = address.trailer_policy(&repo);
-                let rebase = if address.rebases(&repo) {
-                    ""
-                } else {
+                let rebase = if !address.rebases(&repo) {
                     "; not rebased"
+                } else if address.rebases_when_behind(&repo) {
+                    "; rebases its own pull requests when their base moves"
+                } else {
+                    ""
                 };
                 let _ = writeln!(out, "  {key}: {}{rebase}", describe_policy(policy));
             }
@@ -4297,6 +4344,63 @@ github_owners = ["docspec"]
         assert!(
             address("", "[roles.executor.trailers]\nrebase = false\n").is_err(),
             "rebasing is per repository, not a trailer"
+        );
+    }
+
+    #[test]
+    fn henk_rebases_his_own_pull_requests_by_himself_only_where_a_repository_says_so() {
+        let on = "[execution]\n[roles.executor.repositories.\"docspec/kept\"]\nrebase_when_behind = true\n";
+        let settings = address("", on).unwrap();
+        let config = settings.roles.executor.as_ref().unwrap();
+        let kept = RepoRef::parse(Platform::GitHub, "DocSpec/Kept").unwrap();
+        let other = RepoRef::parse(Platform::GitHub, "docspec/other").unwrap();
+        assert!(config.rebases_when_behind(&kept));
+        assert!(!config.rebases_when_behind(&other), "off unless said");
+        assert!(config.rebases(&kept), "on request stays on");
+        let described = settings.describe();
+        assert!(described.contains("  docspec/kept: "), "{described}");
+        assert!(
+            described.contains("; rebases its own pull requests when their base moves"),
+            "{described}"
+        );
+
+        // A repository that says nothing, or false, is not rebased by itself.
+        let off = address(
+            "",
+            "[execution]\n[roles.executor.repositories.\"docspec/kept\"]\nrebase_when_behind = false\n",
+        )
+        .unwrap();
+        assert!(
+            !off.roles
+                .executor
+                .as_ref()
+                .unwrap()
+                .rebases_when_behind(&kept)
+        );
+
+        // It needs [execution], for the prefix that says which pull
+        // requests are Henk's.
+        let error = address(
+            "",
+            "[roles.executor.repositories.\"docspec/kept\"]\nrebase_when_behind = true\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("needs [execution]"), "{error}");
+
+        // And it contradicts turning rebasing off.
+        let error = address(
+            "",
+            "[execution]\n[roles.executor.repositories.\"docspec/kept\"]\nrebase = false\nrebase_when_behind = true\n",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("rebase = false"), "{error}");
+        assert!(
+            henk_domain::text::is_in_style(&error.to_string()),
+            "{error}"
+        );
+        assert!(
+            address("", "[roles.executor.trailers]\nrebase_when_behind = true\n").is_err(),
+            "per repository, not a trailer"
         );
     }
 

@@ -926,6 +926,28 @@ impl Coordinator {
         trigger: String,
         requester: Option<String>,
     ) -> (Decision, RunId) {
+        self.submit_rebase_as(target, trigger, requester, None)
+    }
+
+    /// [`Self::submit_rebase`] for a rebase Henk starts himself because the
+    /// base branch moved (#579): nobody asked, and `seen` is the head of the
+    /// branch he saw behind it.
+    pub fn submit_rebase_automatic(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        seen: CommitSha,
+    ) -> (Decision, RunId) {
+        self.submit_rebase_as(target, trigger, None, Some(seen))
+    }
+
+    fn submit_rebase_as(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+        automatic: Option<CommitSha>,
+    ) -> (Decision, RunId) {
         let key = Key::of(&target);
         let generation = self.next_generation();
         let run = new_run_id();
@@ -979,6 +1001,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester: requester.clone(),
+            automatic,
         };
         let coordinator = Arc::clone(self);
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());

@@ -112,6 +112,13 @@ pub fn is_rebase_request(platform: Platform, body: &str) -> bool {
     is_command(platform, body, "rebase")
 }
 
+/// The comment that asks Henk to rebase a pull request on `platform`, as
+/// [`is_rebase_request`] reads it, for him to quote (#579).
+#[must_use]
+pub fn rebase_command(platform: Platform) -> String {
+    format!("@{} rebase", handle(platform))
+}
+
 /// Whether a comment's whole text is Henk's handle and then `command`.
 fn is_command(platform: Platform, body: &str, command: &str) -> bool {
     let mut words = body.split_whitespace();
@@ -594,6 +601,12 @@ mod tests {
             "@meneer-henk rebase please"
         ));
         assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk review"));
+        // The command Henk quotes is one he reads back, on each platform.
+        for platform in [Platform::GitHub, Platform::GitLab] {
+            assert!(is_rebase_request(platform, &rebase_command(platform)));
+        }
+        assert_eq!(rebase_command(Platform::GitHub), "@meneer-henk rebase");
+        assert_eq!(rebase_command(Platform::GitLab), "@meneerhenk rebase");
     }
 
     #[test]
