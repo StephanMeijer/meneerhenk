@@ -375,20 +375,14 @@ pub(crate) type RoundRow = (
 pub(crate) fn round_record(row: RoundRow) -> Result<RoundRecord, StoreError> {
     let (session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len) =
         row;
-    let count = |column: &'static str, value: i64| {
-        u32::try_from(value).map_err(|_| StoreError::Corrupt {
-            column,
-            value: value.to_string(),
-        })
-    };
     Ok(RoundRecord {
         session,
         role: session_role(role)?,
-        round: count("session_rounds.round", round)?,
+        round: to_u32("session_rounds.round", round)?,
         started_at,
         ended_at,
-        first_turn: count("session_rounds.first_turn", first_turn)?,
-        turns: count("session_rounds.turns", turns)?,
+        first_turn: to_u32("session_rounds.first_turn", first_turn)?,
+        turns: to_u32("session_rounds.turns", turns)?,
         handover,
         handover_len: to_u64("session_rounds.handover_len", handover_len)?,
     })
@@ -1007,10 +1001,7 @@ pub(crate) fn session_endings(
 ) -> Result<Vec<SessionEnding>, StoreError> {
     rows.into_iter()
         .map(|(run, started_at, name, role, model, status, error)| {
-            let run_id = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
-                column: "sessions.run_id",
-                value: run,
-            })?;
+            let run_id = run_id("sessions.run_id", run)?;
             let role = session_role(role)?;
             let status = session_status(status)?;
             Ok(SessionEnding {
@@ -1032,10 +1023,7 @@ pub(crate) fn session_dots(
 ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
     rows.into_iter()
         .map(|(run, name, role, status)| {
-            let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
-                column: "sessions.run_id",
-                value: run,
-            })?;
+            let run = run_id("sessions.run_id", run)?;
             Ok((run, name, session_role(role)?, session_status(status)?))
         })
         .collect()
@@ -1057,6 +1045,35 @@ pub(crate) fn session_status(status: String) -> Result<SessionStatus, StoreError
     })
 }
 
+/// A stored run id, checked.
+pub(crate) fn run_id(column: &'static str, id: String) -> Result<RunId, StoreError> {
+    RunId::parse(id.clone()).map_err(|_| StoreError::Corrupt { column, value: id })
+}
+
+/// A stored inbound event id, checked.
+pub(crate) fn event_id(id: String) -> Result<EventId, StoreError> {
+    EventId::parse(id.clone()).map_err(|_| StoreError::Corrupt {
+        column: "inbound_events.id",
+        value: id,
+    })
+}
+
+/// A stored run kind, checked.
+pub(crate) fn run_kind(kind: String) -> Result<RunKind, StoreError> {
+    kind_parse(&kind).ok_or(StoreError::Corrupt {
+        column: "runs.kind",
+        value: kind,
+    })
+}
+
+/// A stored run platform, checked.
+pub(crate) fn run_platform(platform: String) -> Result<Platform, StoreError> {
+    platform_parse(&platform).ok_or(StoreError::Corrupt {
+        column: "runs.platform",
+        value: platform,
+    })
+}
+
 /// Stored (run, stage, state) rows, checked, each run's in stage order.
 pub(crate) fn stage_dots(
     rows: Vec<(String, String, String)>,
@@ -1064,10 +1081,7 @@ pub(crate) fn stage_dots(
     let mut dots = rows
         .into_iter()
         .map(|(run, which, where_at)| {
-            let run = RunId::parse(run.clone()).map_err(|_| StoreError::Corrupt {
-                column: "stages.run_id",
-                value: run,
-            })?;
+            let run = run_id("stages.run_id", run)?;
             let which = Stage::parse(&which).ok_or(StoreError::Corrupt {
                 column: "stages.stage",
                 value: which,
@@ -1410,11 +1424,6 @@ pub(crate) fn now() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
-/// The stored name of a status.
-pub(crate) fn status_str(status: RunStatus) -> &'static str {
-    status.as_str()
-}
-
 pub(crate) fn kind_str(kind: RunKind) -> &'static str {
     match kind {
         RunKind::Review => "review",
@@ -1426,7 +1435,7 @@ pub(crate) fn kind_str(kind: RunKind) -> &'static str {
     }
 }
 
-pub(crate) fn kind_parse(value: &str) -> Option<RunKind> {
+fn kind_parse(value: &str) -> Option<RunKind> {
     Some(match value {
         "review" => RunKind::Review,
         "plan" => RunKind::Plan,
@@ -1445,7 +1454,7 @@ pub(crate) fn platform_str(platform: Platform) -> &'static str {
     }
 }
 
-pub(crate) fn platform_parse(value: &str) -> Option<Platform> {
+fn platform_parse(value: &str) -> Option<Platform> {
     Some(match value {
         "github" => Platform::GitHub,
         "gitlab" => Platform::GitLab,
@@ -1465,6 +1474,14 @@ pub(crate) fn to_i64(column: &'static str, value: u64) -> Result<i64, StoreError
 /// A signed column read back as unsigned; a negative value is corrupt.
 pub(crate) fn to_u64(column: &'static str, value: i64) -> Result<u64, StoreError> {
     u64::try_from(value).map_err(|_| StoreError::Corrupt {
+        column,
+        value: value.to_string(),
+    })
+}
+
+/// A signed column read back as a `u32`; a value out of range is corrupt.
+pub(crate) fn to_u32(column: &'static str, value: i64) -> Result<u32, StoreError> {
+    u32::try_from(value).map_err(|_| StoreError::Corrupt {
         column,
         value: value.to_string(),
     })
@@ -1496,30 +1513,16 @@ pub(crate) struct RawRun {
 impl RawRun {
     /// Checks every value and builds the record.
     pub(crate) fn into_record(self) -> Result<RunRecord, StoreError> {
-        let id = RunId::parse(self.id.clone()).map_err(|_| StoreError::Corrupt {
-            column: "runs.id",
-            value: self.id,
-        })?;
-        let kind = kind_parse(&self.kind).ok_or(StoreError::Corrupt {
-            column: "runs.kind",
-            value: self.kind,
-        })?;
-        let platform = platform_parse(&self.platform).ok_or(StoreError::Corrupt {
-            column: "runs.platform",
-            value: self.platform,
-        })?;
+        let id = run_id("runs.id", self.id)?;
+        let kind = run_kind(self.kind)?;
+        let platform = run_platform(self.platform)?;
         let status = RunStatus::parse(&self.status).ok_or(StoreError::Corrupt {
             column: "runs.status",
             value: self.status,
         })?;
         let superseded_by = self
             .superseded_by
-            .map(|by| {
-                RunId::parse(by.clone()).map_err(|_| StoreError::Corrupt {
-                    column: "runs.superseded_by",
-                    value: by,
-                })
-            })
+            .map(|by| run_id("runs.superseded_by", by))
             .transpose()?;
         Ok(RunRecord {
             id,
@@ -1542,12 +1545,7 @@ impl RawRun {
             loop_stop: self.loop_stop,
             loop_rounds: self
                 .loop_rounds
-                .map(|n| {
-                    u32::try_from(n).map_err(|_| StoreError::Corrupt {
-                        column: "runs.loop_rounds",
-                        value: n.to_string(),
-                    })
-                })
+                .map(|n| to_u32("runs.loop_rounds", n))
                 .transpose()?,
         })
     }
