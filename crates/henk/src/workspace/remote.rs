@@ -108,10 +108,7 @@ impl Reply {
         if stdout.is_empty() {
             return ended;
         }
-        let mut start = stdout.len().saturating_sub(STDOUT_TAIL);
-        while !stdout.is_char_boundary(start) {
-            start += 1;
-        }
+        let start = stdout.ceil_char_boundary(stdout.len().saturating_sub(STDOUT_TAIL));
         let tail = stdout.get(start..).unwrap_or_default();
         let cut = if start > 0 { "…" } else { "" };
         format!("{ended}; it printed: {cut}{tail}")

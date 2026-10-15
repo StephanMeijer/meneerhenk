@@ -211,10 +211,7 @@ fn within_caps(body: &str) -> String {
 fn cut_texts(value: &mut Value) {
     match value {
         Value::String(text) if text.len() > MOST_TEXT => {
-            let mut end = MOST_TEXT;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = text.floor_char_boundary(MOST_TEXT);
             let rest = text.len() - end;
             text.truncate(end);
             let _ = write!(

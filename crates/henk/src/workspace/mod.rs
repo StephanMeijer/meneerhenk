@@ -1136,10 +1136,7 @@ pub fn tail(text: &str, cap: usize) -> String {
     if text.len() <= cap {
         return text.to_owned();
     }
-    let mut start = text.len().saturating_sub(cap);
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
+    let start = text.ceil_char_boundary(text.len().saturating_sub(cap));
     format!("[... cut ...]\n{}", text.get(start..).unwrap_or_default())
 }
 
