@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.3...v0.4.4) - 2026-10-15
+
+### Added
+
+- *(queue)* one run per pull request, rebases first ([#580](https://github.com/StephanMeijer/meneerhenk/pull/580))
+
+### Fixed
+
+- *(queue)* drop a review held for a rebase when a newer one starts
+
 ## [0.4.3](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.2...v0.4.3) - 2026-10-15
 
 ### Added
