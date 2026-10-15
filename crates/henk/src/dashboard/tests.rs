@@ -117,6 +117,7 @@ fn fixture_on(
         test_session: None,
         test_push_writer: None,
         test_issue_writer: None,
+        test_ci_reader: None,
     });
     let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
     let writers: Arc<dyn crate::listeners::Writers> =

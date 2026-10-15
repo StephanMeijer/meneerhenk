@@ -731,6 +731,7 @@ requester_id = 3
             test_session: None,
             test_push_writer: Some(Arc::clone(&hub) as Arc<dyn PushWriter>),
             test_issue_writer: Some(Arc::clone(&tracker) as Arc<dyn IssueWriter>),
+            test_ci_reader: None,
         };
         Fixture {
             app,

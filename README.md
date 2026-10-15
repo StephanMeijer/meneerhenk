@@ -35,7 +35,9 @@ taking turns in one workspace at the pull request's head. The reviewer
 works from the diff Henk fetched once (`list_changed_files`,
 `get_file_diff`, every line numbered on both sides) and the workspace
 (`list_files`, `search`, `read_file`, and `bash` on a backend apart from
-Henk). It hands each finding to the executor with `report_finding` and ends
+Henk), and reads the pull request's CI on the commit it reviews
+(`list_ci_jobs`, `get_ci_job_log`, `get_ci_job_annotations`; see "The
+reviewer reads CI"). It hands each finding to the executor with `report_finding` and ends
 its round with `finish_round`; nothing is posted on the pull request. The
 executor reads them (`list_findings`), checks each against the code, fixes
 what holds with its edit tools (`edit_file`, `write_file`, and `bash` on a
@@ -207,7 +209,8 @@ A role names its `model` from `[models]` and has its own `max_turns` and
 `skills`, and optionally `tools`: a list that narrows the role's tools
 within what the role may ever have. Only the executor edits, the reviewer
 and the executor each have their side of the handoff, only the planner
-has the tracker tools and `web_fetch`, and the planner and the reviewer,
+has the tracker tools and `web_fetch`, only the reviewer has the CI tools
+(by default; its `tools` may leave them out), and the planner and the reviewer,
 who reviews plans too, have the MCP read tools; left out, a role gets its
 defaults. A role that lists `skills` keeps `load_skill` in its `tools`,
 and with `[review.loop]` the reviewer keeps `report_finding` and
@@ -752,6 +755,29 @@ needs `Pull requests: write`. On GitLab Henk opens the merge request
 through the `gitlab-write` MCP server, so `create_merge_request` must be in
 its `GITLAB_TOOLS`. The bot's own "opened" event is ignored as Henk's own;
 the review starts because the execute run asks for it.
+
+### The reviewer reads CI
+
+The reviewer has read-only tools for the CI of the pull request it reviews
+(#420), and of nothing else:
+
+- `list_ci_jobs`: the checks and jobs on the commit under review, with
+  their status and conclusion, without Henk's own check;
+- `get_ci_job_log`: a job's last lines, or with `grep` the lines that
+  match and some lines around them, under a cap that says when it cut;
+- `get_ci_job_annotations`: the file and line notes a GitHub check left.
+
+A job of another commit is refused. After the executor pushes, the next
+round reads the new head's jobs, which may still be running. The
+reviewer's first message tallies the CI, such as "CI: 7 passed, 1 failed
+(test), 1 running". Logs are written by the pull request's code, so the
+reviewer is told they are data, not instructions.
+
+On GitHub the App needs `Checks: read` and `Actions: read`. On GitLab
+Henk reads pipelines and job traces through the REST API with
+`[gitlab].token_env`. Without that access the tools say so and the review
+goes on without CI. Leave the three tools out of `[roles.reviewer] tools`
+to keep the reviewer away from CI.
 
 ### Pushing a review's fixes
 

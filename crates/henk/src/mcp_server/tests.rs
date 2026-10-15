@@ -82,6 +82,7 @@ async fn start_henk(mcp_server: &str, tokens: Vec<Token>) -> Henk {
         test_session: None,
         test_push_writer: None,
         test_issue_writer: None,
+        test_ci_reader: None,
     });
     let composed = crate::server::compose_with_secrets(&app, None, None, None);
     let router = super::routes(

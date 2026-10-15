@@ -8,6 +8,7 @@
 
 mod app;
 mod cancel;
+mod ci_tools;
 mod code_tools;
 mod config;
 mod coordinator;

@@ -254,6 +254,44 @@ impl GitHubApi {
         self.retried(reqwest::Method::GET, path, accept, None).await
     }
 
+    /// `GET` a REST path as text, keeping only its last `max_bytes`, cut
+    /// at a line: for a CI log, which can run to hundreds of megabytes
+    /// (#420). A redirect is followed, without the token on another host.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] on transport or status failure.
+    pub async fn get_text_tail(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<crate::ci::CiLog, PlatformError> {
+        let url = format!("{}{path}", self.api_base);
+        with_retry(self.retry, &format!("GET {path}"), || async {
+            let mut response = self
+                .request_accepting(reqwest::Method::GET, &url, JSON)
+                .await?
+                .send()
+                .await?;
+            let status = response.status();
+            if !status.is_success() {
+                let headers = response.headers().clone();
+                let text = response.text().await?;
+                return Err(PlatformError::status(
+                    status.as_u16(),
+                    &text,
+                    Some(&headers),
+                ));
+            }
+            let mut tail = crate::ci::Tail::new(max_bytes);
+            while let Some(chunk) = response.chunk().await? {
+                tail.push(&chunk);
+            }
+            Ok(tail.finish())
+        })
+        .await
+    }
+
     /// `GET` a REST path authenticated as the App itself (JWT), not as an
     /// installation. Only `/app` and `/app/installations` need this.
     ///
@@ -301,7 +339,17 @@ impl GitHubApi {
     /// [`PlatformError::TooMany`] when the list goes on past `MAX_PAGES`
     /// (100) full pages.
     pub async fn get_all(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
-        self.get_pages(path, false).await
+        self.get_pages(path, false, None).await
+    }
+
+    /// [`Self::get_all`] for a list GitHub wraps in an object, such as
+    /// `{"check_runs": [...]}`: the entries under `key` of every page.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::get_all`].
+    pub async fn get_all_under(&self, path: &str, key: &str) -> Result<Vec<Value>, PlatformError> {
+        self.get_pages(path, false, Some(key)).await
     }
 
     /// [`Self::get_all`] authenticated as the App itself (JWT), for
@@ -312,10 +360,15 @@ impl GitHubApi {
     /// As [`Self::get_all`], and [`PlatformError::Auth`] when the client has
     /// no App credentials.
     pub async fn get_all_as_app(&self, path: &str) -> Result<Vec<Value>, PlatformError> {
-        self.get_pages(path, true).await
+        self.get_pages(path, true, None).await
     }
 
-    async fn get_pages(&self, path: &str, as_app: bool) -> Result<Vec<Value>, PlatformError> {
+    async fn get_pages(
+        &self,
+        path: &str,
+        as_app: bool,
+        key: Option<&str>,
+    ) -> Result<Vec<Value>, PlatformError> {
         let mut items = Vec::new();
         let separator = if path.contains('?') { '&' } else { '?' };
         // One page past the cap tells a list of exactly the cap, which ends
@@ -326,6 +379,10 @@ impl GitHubApi {
                 self.get_as_app(&paged).await?
             } else {
                 self.get(&paged).await?
+            };
+            let page_items = match key {
+                Some(key) => page_items.get(key).cloned().unwrap_or(Value::Null),
+                None => page_items,
             };
             let Some(array) = page_items.as_array() else {
                 return Ok(items);

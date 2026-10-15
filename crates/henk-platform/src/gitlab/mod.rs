@@ -1,6 +1,7 @@
 //! GitLab: the writer over a write-mode MCP session, and the few REST reads
-//! pushing needs besides.
+//! pushing and a merge request's CI (#420) need besides.
 
+pub mod ci;
 pub mod issues;
 pub mod push;
 pub mod rest;
