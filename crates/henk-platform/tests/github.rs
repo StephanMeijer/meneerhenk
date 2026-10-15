@@ -23,7 +23,7 @@ use std::sync::Arc;
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, GitHubWriter, Installations};
 use henk_platform::{PlatformWriter as _, ReviewTarget};
 use serde_json::{Value, json};
-use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -644,6 +644,121 @@ async fn an_executor_opens_a_ready_pull_request_for_its_branch() {
         .unwrap();
     assert_eq!(opened.number, 12);
     assert_eq!(opened.url, "https://github.com/docspec/app/pull/12");
+}
+
+/// A pull request of `list_pulls`, in `head_repo`.
+fn listed_pull(
+    number: u64,
+    head_ref: &str,
+    head_repo: Option<&str>,
+    sha: &str,
+    draft: bool,
+) -> Value {
+    json!({
+        "number": number, "draft": draft,
+        "head": {
+            "ref": head_ref, "sha": sha,
+            "repo": head_repo.map(|full_name| json!({"full_name": full_name})),
+        },
+    })
+}
+
+#[tokio::test]
+async fn the_open_pull_requests_behind_a_base_are_henks_own_in_the_repository_and_not_drafts() {
+    use henk_platform::push::PushWriter as _;
+
+    let (behind, current) = ("b".repeat(40), "c".repeat(40));
+    let other = "d".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls"))
+        .and(query_param("state", "open"))
+        .and(query_param("base", "main"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            listed_pull(11, "henk/9-export", Some("docspec/app"), &behind, false),
+            listed_pull(12, "henk/10-import", Some("DocSpec/App"), &current, false),
+            // Not Henk's branch, a fork, a deleted fork, and a draft: none
+            // is compared (no comparison is mounted for their heads).
+            listed_pull(13, "feature/x", Some("docspec/app"), &other, false),
+            listed_pull(14, "henk/11-fork", Some("someone/app"), &other, false),
+            listed_pull(15, "henk/12-gone", None, &other, false),
+            listed_pull(16, "henk/13-wip", Some("docspec/app"), &other, true),
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    for (head, behind_by) in [(&behind, 3), (&current, 0)] {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/docspec/app/compare/main...{head}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status": "diverged", "ahead_by": 1, "behind_by": behind_by}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let pulls = push_writer(&server)
+        .open_pulls_behind(&target().repo, "main", "henk/")
+        .await
+        .unwrap();
+    assert_eq!(pulls.len(), 1, "{pulls:?}");
+    assert_eq!(
+        (
+            pulls[0].number,
+            pulls[0].head_ref.as_str(),
+            pulls[0].behind_by
+        ),
+        (11, "henk/9-export", 3)
+    );
+    assert_eq!(pulls[0].head.as_str(), behind);
+}
+
+#[tokio::test]
+async fn a_base_with_a_slash_is_asked_for_by_name_and_a_failed_comparison_is_an_error() {
+    use henk_platform::push::PushWriter as _;
+
+    let head = "b".repeat(40);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls"))
+        .and(query_param("base", "release/1.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed_pull(
+            11,
+            "henk/9-export",
+            Some("docspec/app"),
+            &head,
+            false
+        )])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/docspec/app/compare/release/1.0...{head}"
+        )))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let writer = push_writer(&server);
+    assert!(
+        writer
+            .open_pulls_behind(&target().repo, "release/1.0", "henk/")
+            .await
+            .is_err()
+    );
+    // A list that is empty needs no comparison.
+    let quiet = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/docspec/app/pulls"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&quiet)
+        .await;
+    assert!(
+        push_writer(&quiet)
+            .open_pulls_behind(&target().repo, "main", "henk/")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

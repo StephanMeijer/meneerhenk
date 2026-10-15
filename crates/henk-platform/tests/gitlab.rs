@@ -23,7 +23,7 @@ use henk_platform::{PlatformWriter as _, ReviewTarget};
 use rmcp::model::{CallToolResult, ContentBlock};
 use secrecy::SecretString;
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -690,6 +690,53 @@ async fn a_planner_fetches_the_default_branch_at_its_head() {
     assert_eq!(head.default_branch, "main");
     assert_eq!(head.head.as_str(), SHA);
     assert_eq!(head.remote, "https://gitlab.example/9xxlab/tools/cli.git");
+}
+
+/// A merge request of the list, `diverged` commits behind its target.
+fn listed_mr(iid: u64, source: &str, source_project: u64, diverged: u64, draft: bool) -> Value {
+    json!({
+        "iid": iid, "source_branch": source, "sha": format!("{iid:040x}"),
+        "source_project_id": source_project, "target_project_id": 9,
+        "draft": draft, "diverged_commits_count": diverged,
+    })
+}
+
+#[tokio::test]
+async fn the_open_merge_requests_behind_a_target_are_henks_own_in_the_project_and_not_drafts() {
+    use henk_platform::push::PushWriter as _;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{PROJECT}/merge_requests")))
+        .and(query_param("state", "opened"))
+        .and(query_param("target_branch", "main"))
+        .and(query_param("include_diverged_commits_count", "true"))
+        .and(header("PRIVATE-TOKEN", TOKEN))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            listed_mr(11, "henk/9-export", 9, 3, false),
+            listed_mr(12, "henk/10-import", 9, 0, false),
+            listed_mr(13, "feature/x", 9, 4, false),
+            listed_mr(14, "henk/11-fork", 77, 4, false),
+            listed_mr(15, "henk/12-wip", 9, 4, true),
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_fake, writer) = push_writer(&server).await;
+    let pulls = writer
+        .open_pulls_behind(&target().repo, "main", "henk/")
+        .await
+        .unwrap();
+    assert_eq!(pulls.len(), 1, "{pulls:?}");
+    assert_eq!(
+        (
+            pulls[0].number,
+            pulls[0].head_ref.as_str(),
+            pulls[0].behind_by
+        ),
+        (11, "henk/9-export", 3)
+    );
+    assert_eq!(pulls[0].head.as_str(), format!("{:040x}", 11));
 }
 
 #[tokio::test]

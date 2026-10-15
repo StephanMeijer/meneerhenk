@@ -37,6 +37,19 @@ pub struct RepoHead {
     pub remote: String,
 }
 
+/// An open pull request whose branch lacks commits of its base (#579).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehindPull {
+    /// Its number (GitLab: iid).
+    pub number: u64,
+    /// Its branch, in the repository itself.
+    pub head_ref: String,
+    /// The branch's head commit now.
+    pub head: CommitSha,
+    /// How many commits of the base the branch lacks: above 0.
+    pub behind_by: u64,
+}
+
 /// Who Henk's commit is by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitIdentity {
@@ -136,4 +149,20 @@ pub trait PushWriter: Send + Sync {
         repo: &RepoRef,
         pull: &NewPull,
     ) -> Result<OpenedPull, PlatformError>;
+
+    /// The open pull or merge requests into `base` of `repo` that have
+    /// fallen behind it (#579): their branch is in `repo` itself (no
+    /// fork), starts with `head_prefix` (the branches Henk makes), and is
+    /// not a draft, and `base` has commits it lacks. One list and one
+    /// comparison per request that passes the first three.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when the platform cannot list or compare.
+    async fn open_pulls_behind(
+        &self,
+        repo: &RepoRef,
+        base: &str,
+        head_prefix: &str,
+    ) -> Result<Vec<BehindPull>, PlatformError>;
 }
