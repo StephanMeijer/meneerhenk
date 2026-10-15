@@ -3050,6 +3050,18 @@ mod thin_sqlite {
     }
 
     #[tokio::test]
+    async fn a_database_newer_than_the_steps_is_refused() {
+        let file = File::new();
+        drop(ThinStore::open(&file.0).unwrap());
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .pragma_update(None, "user_version", 21)
+            .unwrap();
+        let error = ThinStore::open(&file.0).unwrap_err().to_string();
+        assert!(error.contains("newer than the 20"), "{error}");
+    }
+
+    #[tokio::test]
     async fn an_invented_tool_name_from_before_is_cut_by_the_migration() {
         let file = File::new();
         let before = ThinStore::open_at(&file.0, 18).unwrap();
@@ -3200,6 +3212,59 @@ mod thin_postgres {
         client.batch_execute(LANE_ERA).await.unwrap();
         let store = ThinStore::connect(&schema.url).await.unwrap();
         super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    async fn client(url: &str) -> tokio_postgres::Client {
+        let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        client
+    }
+
+    async fn versions(url: &str) -> Vec<i32> {
+        client(url)
+            .await
+            .query("SELECT version FROM henk_schema_migrations ORDER BY 1", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
+    /// A database the old store left at its 11 (the last with a lanes
+    /// table) is taken on to the end, and the bookkeeping it reads and
+    /// writes is the old store's own: versions 1 to 16.
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn a_database_the_old_store_left_in_the_middle_of_its_history_is_migrated_on() {
+        let schema = super::postgres::schema_at(POSTGRES_LANE_ERA).await;
+        assert_eq!(versions(&schema.url).await, (1..=11).collect::<Vec<_>>());
+        client(&schema.url)
+            .await
+            .batch_execute(LANE_ERA)
+            .await
+            .unwrap();
+        let store = ThinStore::connect(&schema.url).await.unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+        assert_eq!(versions(&schema.url).await, (1..=16).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn a_database_newer_than_the_steps_is_refused() {
+        let schema = schema().await;
+        client(&schema.url)
+            .await
+            .batch_execute("INSERT INTO henk_schema_migrations (version) VALUES (21)")
+            .await
+            .unwrap();
+        let error = ThinStore::connect(&schema.url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("newer than the 20"), "{error}");
     }
 
     #[tokio::test]

@@ -203,6 +203,7 @@ pub(crate) async fn postgres(
         .max()
         .unwrap_or(0);
     if applied > STEPS.len() {
+        transaction.rollback().await?;
         return Err(newer(applied));
     }
     for (index, step) in STEPS.iter().enumerate().take(upto).skip(applied) {
