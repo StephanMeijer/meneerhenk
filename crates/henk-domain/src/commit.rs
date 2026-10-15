@@ -254,15 +254,16 @@ fn clean_body(body: &str) -> String {
     lines.join("\n")
 }
 
-/// Whether `line` has the shape of a trailer, `Key: value`, which
-/// `git interpret-trailers` would read as one.
+/// Whether `line` has the shape of a trailer, which `git interpret-trailers`
+/// would read as one. Git is loose: whitespace may sit between the key and
+/// the colon, and none is needed after it.
 fn looks_like_trailer(line: &str) -> bool {
     line.trim_start()
         .split_once(':')
         .is_some_and(|(key, value)| {
+            let key = key.trim_end();
             !key.is_empty()
                 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && value.starts_with(' ')
                 && !value.trim().is_empty()
         })
 }
@@ -731,6 +732,18 @@ mod tests {
                 "trailer",
             ),
             ("run", "fix: a", "Henk-Run: r-1", "trailer"),
+            (
+                "no space",
+                "fix: a",
+                "Signed-off-by:m <m@evil.example>",
+                "trailer",
+            ),
+            (
+                "space before colon",
+                "fix: a",
+                "Co-authored-by : m <m@evil.example>",
+                "trailer",
+            ),
         ] {
             let why = proposal_refusal(&[commit(&["a.rs"], subject, body)]).unwrap();
             assert!(why.contains(says), "{case}: {why}");

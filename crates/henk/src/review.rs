@@ -5339,7 +5339,7 @@ requester_id = 3
     }
 
     #[tokio::test]
-    async fn commits_that_miss_a_file_fall_back_to_one_commit_that_names_the_fix() {
+    async fn commits_the_tool_refuses_leave_no_proposal_and_the_round_is_one_commit() {
         let (f, _, remote, run) = two_file_fix(
             "loop-split-refused",
             serde_json::json!([{"files": ["src/a.rs"], "subject": "fix(a): make x 3"}]),
@@ -5365,6 +5365,59 @@ requester_id = 3
             events
                 .iter()
                 .any(|e| e.contains("proposed no commits for round 1")),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_a_later_change_outdates_falls_back_to_one_commit_that_names_the_fix() {
+        let proposal = serde_json::json!([
+            {"files": ["src/a.rs"], "subject": "fix(a): make x 3"},
+            {"files": ["docs/x.md"], "subject": "docs: say why x is 3"}
+        ]);
+        let mut script = fixes_f1_in_two_files(&proposal);
+        // The proposal held when it was made; this file comes after it.
+        script.insert(
+            4,
+            call(
+                "write_file",
+                serde_json::json!({"path": "docs/late.md", "content": "late.\n"}),
+            ),
+        );
+        let name = "loop-split-outdated";
+        let (f, _, _, remote) = looping(
+            name,
+            ScriptedClient::new("r", one_finding()),
+            ScriptedClient::new("f", script),
+            Arc::new(crate::workspace::host::HostProvider),
+        )
+        .await;
+        let run = RunId::parse(format!("r-{name}")).unwrap();
+        run_review(&f.app, request(&run), CancellationToken::new())
+            .await
+            .unwrap();
+        let commits =
+            crate::git::tests::remote_commits(remote.path(), "feature", 2, "%s%n%b").await;
+        assert_eq!(commits.len(), 2, "{commits:?}");
+        assert!(
+            commits[0].starts_with("Fix review findings f1\n- review loop round 1\n"),
+            "{commits:?}"
+        );
+        let events: Vec<String> = f
+            .app
+            .store
+            .events(&run)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        assert!(
+            events.iter().any(|e| e.contains("cannot be made")),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| e.contains("proposed no commits")),
             "{events:?}"
         );
     }
