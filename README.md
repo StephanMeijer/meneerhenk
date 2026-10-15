@@ -169,7 +169,7 @@ OpenBao.
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
-| `HENK_API_TOKEN` | `POST /review`, `/plan`, `/execute`, `/rebase` |
+| `HENK_API_TOKEN` | `POST /review`, `/plan`, `/execute`, `/ticket`, `/rebase` |
 | `HENK_DASHBOARD_CLIENT_ID`, `HENK_DASHBOARD_CLIENT_SECRET` | The GitHub OAuth App the dashboard signs in with |
 | `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
@@ -727,10 +727,17 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 `pull_request_review_comment`; GitLab sends merge request and note hooks.
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
-`POST /plan {"url", "note"?}`, `POST /execute {"url", "note"?}` and
-`POST /rebase {"url"}` with
+`POST /plan {"url", "note"?}`, `POST /execute {"url", "note"?}`,
+`POST /ticket {"url", "note"?}` and `POST /rebase {"url"}` with
 `Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
+
+`POST /ticket` takes an issue through a plan, an execute run and a review
+of the pull request it opens, with nobody starting each step (#536). It
+takes the same body as `/execute` and works only when the `[autonomous]`
+section is in the configuration, since it lets Henk write and push code
+without a person between the plan and the pull request. It needs
+`[planning]`, `[execution]` and `[review.loop]` as well.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in
@@ -1251,11 +1258,12 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
 - a form that starts what this Henk is configured for: a review, a plan,
-  an issue taken to a pull request (#329), or a rebase (#579); and a
+  an issue taken to a pull request (#329), a whole ticket run (#536), or a
+rebase (#579); and a
   button that cancels a running one.
 
-Starting works exactly like `POST /review`, `/plan`, `/execute` and
-`/rebase`: the
+Starting works exactly like `POST /review`, `/plan`, `/execute`, `/ticket`
+and `/rebase`: the
 request becomes an event, the listeners apply the allowlist and every
 refusal, and the browser goes to the event's page to see what they did.
 Each event records who asked as `github:<user id>`. A cancelled run ends
@@ -1317,8 +1325,9 @@ cd dashboard && HENK_URL=http://127.0.0.1:8080 npm run dev
 With `[mcp_server] enabled = true` and at least one token, `henk serve` also
 serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
 such as Claude Code can work with Henk:
-- `start_review`, `start_plan`, `start_execute`, `start_rebase`: start
-  work, exactly as `POST /review`, `/plan`, `/execute` and `/rebase` do. The request becomes an event,
+- `start_review`, `start_plan`, `start_execute`, `start_ticket`,
+  `start_rebase`: start work, exactly as `POST /review`, `/plan`,
+  `/execute`, `/ticket` and `/rebase` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
 - `cancel_run`, and `move_queued_run`, which moves a review waiting for a
