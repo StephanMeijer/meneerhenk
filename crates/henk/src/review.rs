@@ -1835,6 +1835,77 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// One slot held by a review of #7 with a slow model, and an awaited
+    /// review of #8 queued behind it, which has not started.
+    async fn awaited_review_in_the_queue(
+        name: &str,
+    ) -> (
+        Arc<App>,
+        Arc<crate::coordinator::Coordinator>,
+        RunId,
+        tokio::sync::oneshot::Receiver<anyhow::Result<ReviewReport>>,
+        Option<crate::git::ScratchDir>,
+    ) {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture(name, DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        let (app, commit, remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, first) = coordinator.submit_review(request(&placeholder), commit.clone());
+        running(&app, &first).await;
+
+        let mut other = request(&placeholder);
+        other.target.number = 8;
+        let (_, queued, ended) = coordinator.submit_review_awaited(other, commit);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            app.store.run(&queued).await.unwrap().is_none(),
+            "the second review waits for the slot"
+        );
+        (app, coordinator, queued, ended, remote)
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_replaced_while_it_waits_for_a_slot_is_told_it_was_superseded() {
+        let (app, coordinator, _queued, ended, _remote) =
+            awaited_review_in_the_queue("henk-await-queued-supersede").await;
+        let mut newer = request(&RunId::parse("r-placeholder").unwrap());
+        newer.target.number = 8;
+        let newer_commit = CommitSha::parse("fedcba9876543210fedcba9876543210fedcba98").unwrap();
+        let (decision, _) = coordinator.submit_review(newer, newer_commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<Superseded>(), "{error:#}");
+        assert!(!error.is::<Interrupted>(), "{error:#}");
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_replaced_by_a_rebase_while_it_waits_is_told_it_was_superseded() {
+        let (app, coordinator, _queued, ended, _remote) =
+            awaited_review_in_the_queue("henk-await-queued-rebase").await;
+        let mut target = request(&RunId::parse("r-placeholder").unwrap()).target;
+        target.number = 8;
+        let (decision, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
+        assert_eq!(decision, henk_domain::queue::Decision::Supersede);
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<Superseded>(), "{error:#}");
+        assert!(!error.is::<Interrupted>(), "{error:#}");
+        assert!(coordinator.cancel(&rebase, "github:1234".to_owned()));
+        app.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn an_awaited_review_stopped_by_a_shutdown_while_it_waits_is_told_it_was_interrupted() {
+        let (app, _coordinator, _queued, ended, _remote) =
+            awaited_review_in_the_queue("henk-await-queued-shutdown").await;
+        app.shutdown.cancel();
+        let error = ended_with(ended).await.unwrap_err();
+        assert!(error.is::<Interrupted>(), "{error:#}");
+        assert!(!error.is::<Superseded>(), "{error:#}");
+    }
+
     #[tokio::test]
     async fn an_awaited_review_replaced_by_a_newer_commit_is_told_it_was_superseded() {
         let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
