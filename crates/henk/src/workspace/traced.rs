@@ -129,14 +129,12 @@ fn level(done: &ExecResult) -> Level {
 /// character boundary.
 fn tail(output: &str, lines: usize, bytes: usize) -> &str {
     let output = output.trim_end();
-    let mut start = output
+    let start = output
         .rmatch_indices('\n')
         .nth(lines.saturating_sub(1))
-        .map_or(0, |(at, _)| at + 1);
-    start = start.max(output.len().saturating_sub(bytes));
-    while !output.is_char_boundary(start) {
-        start += 1;
-    }
+        .map_or(0, |(at, _)| at + 1)
+        .max(output.len().saturating_sub(bytes));
+    let start = output.ceil_char_boundary(start);
     output.get(start..).unwrap_or_default()
 }
 
