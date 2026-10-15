@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use henk_domain::run::{EventId, RunId};
 use henk_events::{EventBus, Hook};
@@ -372,13 +372,7 @@ fn signed_in_page(shared: &Shared, to: &str) -> Response {
         )
             .into_response();
     }
-    let mut response = StatusCode::SEE_OTHER.into_response();
-    if let Ok(location) = axum::http::HeaderValue::from_str(to) {
-        response
-            .headers_mut()
-            .insert(axum::http::header::LOCATION, location);
-    }
-    response
+    Redirect::to(to).into_response()
 }
 
 #[cfg(test)]
