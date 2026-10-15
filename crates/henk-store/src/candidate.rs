@@ -17,14 +17,13 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId, RunKind};
 use sqlx::any::{AnyArguments, AnyPoolOptions, AnyRow};
 use sqlx::migrate::{Migration, MigrationType, Migrator};
 use sqlx::query::Query;
-use sqlx::{Any, AnyPool, AssertSqlSafe, Executor as _, Row as _, SqlSafeStr as _};
+use sqlx::{Any, AnyPool, AssertSqlSafe, Row as _, SqlSafeStr as _};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -44,12 +43,9 @@ use crate::types::{
 /// Connections kept open at most on `PostgreSQL`, as in the `PostgreSQL` store.
 const PG_POOL_SIZE: u32 = 8;
 
-/// Connections kept open at most on a `SQLite` file. WAL lets readers run
-/// beside the one writer; writers queue on `busy_timeout`.
-const SQLITE_POOL_SIZE: u32 = 4;
-
-/// How long a statement waits for the database's write lock on `SQLite`.
-const SQLITE_BUSY: Duration = Duration::from_secs(5);
+/// Connections kept open at most for reading a `SQLite` file. WAL lets
+/// readers run beside the one writer.
+const SQLITE_READERS: u32 = 4;
 
 /// The database a [`Candidate`] talks to: where the SQL differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +242,13 @@ fn migrator(dialect: Dialect) -> Migrator {
 /// The run store over sqlx's `Any` driver.
 #[derive(Debug)]
 pub struct Candidate {
-    pool: AnyPool,
+    /// Where writes (and the migrations) go. On a `SQLite` file this is one
+    /// connection: writers queue in the pool, in order, instead of polling
+    /// the file's lock against each other (see [`Candidate::connect`]).
+    writer: AnyPool,
+    /// Where reads go: the same pool, except on a `SQLite` file, where WAL
+    /// lets several readers run beside the writer.
+    reader: AnyPool,
     dialect: Dialect,
 }
 
@@ -294,38 +296,52 @@ impl Candidate {
                 "the database URL is neither postgres: nor sqlite:".to_owned(),
             ));
         };
-        let options = match dialect {
-            Dialect::Postgres => AnyPoolOptions::new().max_connections(PG_POOL_SIZE),
+        let in_memory = url.contains(":memory:");
+        let connect = |max: u32| {
+            // Every connection to `sqlite::memory:` gets its own database
+            // through the `Any` driver, so memory is one connection that is
+            // never closed. Foreign keys are on by default in sqlx, and so is
+            // a busy timeout (5 s).
+            AnyPoolOptions::new()
+                .max_connections(max)
+                .min_connections(u32::from(in_memory))
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .connect(url)
+        };
+        let to_error = |error: sqlx::Error| StoreError::Connect(error.to_string());
+        let (writer, reader) = match dialect {
+            Dialect::Postgres => {
+                let pool = connect(PG_POOL_SIZE).await.map_err(to_error)?;
+                (pool.clone(), pool)
+            }
+            Dialect::Sqlite if in_memory => {
+                let pool = connect(1).await.map_err(to_error)?;
+                (pool.clone(), pool)
+            }
             Dialect::Sqlite => {
-                // Every connection to `sqlite::memory:` gets its own database
-                // through the `Any` driver, so memory is one connection that
-                // is never closed. A file is WAL, with a busy timeout, on
-                // every connection (foreign keys are on by default in sqlx).
-                let in_memory = url.contains(":memory:");
-                AnyPoolOptions::new()
-                    .max_connections(if in_memory { 1 } else { SQLITE_POOL_SIZE })
-                    .min_connections(u32::from(in_memory))
-                    .idle_timeout(None)
-                    .max_lifetime(None)
-                    .after_connect(|connection, _| {
-                        Box::pin(async move {
-                            connection.execute("PRAGMA journal_mode = WAL").await?;
-                            connection
-                                .execute(AssertSqlSafe(format!(
-                                    "PRAGMA busy_timeout = {}",
-                                    SQLITE_BUSY.as_millis()
-                                )))
-                                .await?;
-                            Ok(())
-                        })
-                    })
+                // One writer connection and a few readers. Eight tasks
+                // writing through a pool of four connections to a file on a
+                // disk (an fsync per commit) got "database is locked" after
+                // the 5 s busy timeout in about half the runs: SQLite's busy
+                // handler polls the lock, it does not queue, and a connection
+                // that sleeps between polls starves behind three that
+                // take the lock again at once. A pool of one queues them in
+                // order, and WAL lets the readers run beside it.
+                let writer = connect(1).await.map_err(to_error)?;
+                // WAL is a property of the file, so it is set once.
+                sqlx::query("PRAGMA journal_mode = WAL")
+                    .execute(&writer)
+                    .await
+                    .map_err(to_error)?;
+                (writer, connect(SQLITE_READERS).await.map_err(to_error)?)
             }
         };
-        let pool = options
-            .connect(url)
-            .await
-            .map_err(|error| StoreError::Connect(error.to_string()))?;
-        let store = Self { pool, dialect };
+        let store = Self {
+            writer,
+            reader,
+            dialect,
+        };
         store.migrate().await?;
         Ok(store)
     }
@@ -348,9 +364,9 @@ impl Candidate {
                      open it with the previous release first"
                 )));
             }
-            migrator.skip(&self.pool, Some(ADOPTED_AT_STEP)).await?;
+            migrator.skip(&self.writer, Some(ADOPTED_AT_STEP)).await?;
         }
-        migrator.run(&self.pool).await?;
+        migrator.run(&self.writer).await?;
         Ok(())
     }
 
@@ -359,7 +375,7 @@ impl Candidate {
         match self.dialect {
             Dialect::Sqlite => {
                 let version: i64 = sqlx::query("SELECT user_version FROM pragma_user_version")
-                    .fetch_one(&self.pool)
+                    .fetch_one(&self.writer)
                     .await?
                     .try_get(0)?;
                 Ok((version > 0).then_some(version))
@@ -368,7 +384,7 @@ impl Candidate {
                 let present: i64 = sqlx::query(
                     "SELECT CASE WHEN to_regclass('henk_schema_migrations') IS NULL THEN 0 ELSE 1 END",
                 )
-                .fetch_one(&self.pool)
+                .fetch_one(&self.writer)
                 .await?
                 .try_get(0)?;
                 if present == 0 {
@@ -377,7 +393,7 @@ impl Candidate {
                 let version: i64 = sqlx::query(
                     "SELECT CAST(COALESCE(MAX(version), 0) AS BIGINT) FROM henk_schema_migrations",
                 )
-                .fetch_one(&self.pool)
+                .fetch_one(&self.writer)
                 .await?
                 .try_get(0)?;
                 Ok((version > 0).then_some(version))
@@ -567,7 +583,7 @@ impl Candidate {
         bind: impl FnOnce(Q<'q>) -> Q<'q>,
     ) -> Result<Vec<AnyRow>, StoreError> {
         Ok(bind(sqlx::query(AssertSqlSafe(sql)))
-            .fetch_all(&self.pool)
+            .fetch_all(&self.reader)
             .await?)
     }
 
@@ -578,7 +594,7 @@ impl Candidate {
         bind: impl FnOnce(Q<'q>) -> Q<'q>,
     ) -> Result<(), StoreError> {
         bind(sqlx::query(AssertSqlSafe(sql)))
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -1199,7 +1215,7 @@ ported {
     async fn prune_events(&self, older_than: OffsetDateTime) -> Result<PruneCounts, StoreError> {
         let d = self.d();
         let cutoff = rfc3339(older_than);
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.writer.begin().await?;
         let outcomes = delete(
             &mut transaction,
             format!(
