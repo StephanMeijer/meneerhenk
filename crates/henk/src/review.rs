@@ -3103,6 +3103,7 @@ requester_id = 3
                 },
                 head: CommitSha::parse(&head).unwrap(),
                 remote: self.remote.to_string_lossy().into_owned(),
+                base_ref: "main".to_owned(),
             })
         }
         async fn git_credential(

@@ -708,6 +708,7 @@ async fn merge_request_facts_decide_the_push() {
         .unwrap();
     assert_eq!(facts.head.as_str(), SHA);
     assert_eq!(facts.push.head_ref, "feat/x");
+    assert_eq!(facts.base_ref, "main");
     assert_eq!(facts.push.head_repo.as_deref(), Some("9xxlab/tools/cli"));
     assert_eq!(facts.push.base_repo, "9xxlab/tools/cli");
     assert_eq!(facts.push.default_branch, "main");

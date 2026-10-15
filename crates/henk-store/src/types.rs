@@ -768,6 +768,9 @@ pub enum Stage {
     FactCheck,
     /// An address run's commit was made; runs before #327 only.
     Commit,
+    /// A rebase run replayed the pull request's commits onto its base,
+    /// with the executor resolving any conflict (#579).
+    Rebase,
     /// The executor's commit was pushed, or an address run's before #327.
     Push,
     /// What came of it was written on the platform.
@@ -795,6 +798,7 @@ impl Stage {
             Self::FactCheck => "fact_check",
             Self::Commit => "commit",
             Self::Push => "push",
+            Self::Rebase => "rebase",
             Self::Publish => "publish",
             Self::Replies => "replies",
             Self::Done => "done",
@@ -815,6 +819,7 @@ impl Stage {
             "fact_check" => Self::FactCheck,
             "commit" => Self::Commit,
             "push" => Self::Push,
+            "rebase" => Self::Rebase,
             "publish" => Self::Publish,
             "replies" => Self::Replies,
             "done" => Self::Done,
@@ -1429,6 +1434,7 @@ pub(crate) fn kind_str(kind: RunKind) -> &'static str {
         RunKind::Review => "review",
         RunKind::Plan => "plan",
         RunKind::Execute => "execute",
+        RunKind::Rebase => "rebase",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
         RunKind::Address => "address",
@@ -1440,6 +1446,7 @@ fn kind_parse(value: &str) -> Option<RunKind> {
         "review" => RunKind::Review,
         "plan" => RunKind::Plan,
         "execute" => RunKind::Execute,
+        "rebase" => RunKind::Rebase,
         "discord_turn" => RunKind::DiscordTurn,
         "mail_reply" => RunKind::MailReply,
         "address" => RunKind::Address,

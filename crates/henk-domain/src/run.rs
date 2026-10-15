@@ -126,6 +126,8 @@ pub enum RunKind {
     Plan,
     /// One issue taken to a pull request by the executor (§4a, #329).
     Execute,
+    /// One pull request rebased onto its base branch (§3.6, #579).
+    Rebase,
     /// One Discord turn (§5.2).
     DiscordTurn,
     /// One mail reply (§6).
@@ -149,6 +151,7 @@ impl fmt::Display for RunKind {
             Self::Review => "review",
             Self::Plan => "plan",
             Self::Execute => "execute",
+            Self::Rebase => "rebase",
             Self::DiscordTurn => "discord turn",
             Self::MailReply => "mail reply",
             Self::Address => "address",

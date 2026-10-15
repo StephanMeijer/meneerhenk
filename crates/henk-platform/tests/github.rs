@@ -499,6 +499,7 @@ async fn pull_facts_say_where_henk_would_push_and_whether_he_may() {
     assert_eq!(facts.head.as_str(), SHA);
     assert_eq!(facts.push.head_ref, "fix/typo");
     assert_eq!(facts.push.default_branch, "main");
+    assert_eq!(facts.base_ref, "main");
     assert!(!facts.push.head_protected);
     assert_eq!(facts.remote, format!("{}/docspec/app.git", server.uri()));
     assert_eq!(push_refusal(&facts.push), None);

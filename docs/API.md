@@ -109,7 +109,7 @@ Runs, newest first, each with its `sessions` (`name`, `role`, `status`) and
 
 | Query | Meaning |
 |---|---|
-| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `address` (runs from before #327), `discord_turn` or `mail_reply` |
+| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `rebase` (a pull request rebased onto its base branch, #579), `address` (runs from before #327), `discord_turn` or `mail_reply` |
 | `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
