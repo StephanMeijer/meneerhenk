@@ -579,7 +579,7 @@ mod tests {
     use henk_llm::{
         Block, Completion, ModelClient, Role as LlmRole, StopReason, ToolArguments, ToolCall, Usage,
     };
-    use henk_platform::push::{GitCredential, NewPull, OpenedPull, RepoHead};
+    use henk_platform::push::{BehindPull, GitCredential, NewPull, OpenedPull, RepoHead};
     use henk_platform::{PlatformError, PlatformWriter};
     use henk_store::RunStatus;
     use serde_json::json;
@@ -666,6 +666,14 @@ requester_id = 3
         }
         fn noreply_host(&self) -> Result<String, PlatformError> {
             Ok("github.com".to_owned())
+        }
+        async fn open_pulls_behind(
+            &self,
+            _: &RepoRef,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<BehindPull>, PlatformError> {
+            Err(unused())
         }
         async fn open_pull_request(
             &self,

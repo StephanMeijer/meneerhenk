@@ -10,12 +10,13 @@ use serde_json::{Value, json};
 
 use henk_domain::allowlist::RepoRef;
 
+use crate::encode::percent_encode;
 use crate::error::PlatformError;
 use crate::gitlab::rest::path_segment;
 use crate::gitlab::writer::GitLabWriter;
 use crate::gitlab::{number, text};
 use crate::push::{
-    CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
+    BehindPull, CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
 };
 use crate::writer::ReviewTarget;
 
@@ -185,6 +186,53 @@ impl PushWriter for GitLabWriter {
             number,
             url: text(&opened, "web_url"),
         })
+    }
+
+    async fn open_pulls_behind(
+        &self,
+        repo: &RepoRef,
+        base: &str,
+        head_prefix: &str,
+    ) -> Result<Vec<BehindPull>, PlatformError> {
+        let project = path_segment(&repo.path());
+        let requests = self
+            .rest()?
+            .get_all(&format!(
+                "/projects/{project}/merge_requests?state=opened&target_branch={}&include_diverged_commits_count=true",
+                percent_encode(base)
+            ))
+            .await?;
+        let mut behind = Vec::new();
+        for request in requests {
+            let head_ref = text(&request, "source_branch");
+            let in_project = number(request.get("source_project_id"))
+                .zip(number(request.get("target_project_id")))
+                .is_some_and(|(source, target)| source == target);
+            let draft = flag(&request, "draft") == Some(true)
+                || flag(&request, "work_in_progress") == Some(true);
+            if !in_project || draft || !head_ref.starts_with(head_prefix) {
+                continue;
+            }
+            let behind_by = number(request.get("diverged_commits_count")).unwrap_or(0);
+            let (Some(iid), Some(head)) = (
+                number(request.get("iid")),
+                request
+                    .get("sha")
+                    .and_then(Value::as_str)
+                    .and_then(|sha| CommitSha::parse(sha).ok()),
+            ) else {
+                continue;
+            };
+            if behind_by > 0 {
+                behind.push(BehindPull {
+                    number: iid,
+                    head_ref,
+                    head,
+                    behind_by,
+                });
+            }
+        }
+        Ok(behind)
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {

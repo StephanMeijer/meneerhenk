@@ -652,7 +652,7 @@ mod tests {
     };
     use henk_platform::IssueWriter;
     use henk_platform::PlatformError;
-    use henk_platform::push::{CommitIdentity, GitCredential, OpenedPull, PullFacts};
+    use henk_platform::push::{BehindPull, CommitIdentity, GitCredential, OpenedPull, PullFacts};
     use serde_json::json;
 
     use super::*;
@@ -731,6 +731,14 @@ requester_id = 3
         }
         fn noreply_host(&self) -> Result<String, PlatformError> {
             Ok("github.com".to_owned())
+        }
+        async fn open_pulls_behind(
+            &self,
+            _: &RepoRef,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<BehindPull>, PlatformError> {
+            Err(unused())
         }
         async fn open_pull_request(
             &self,

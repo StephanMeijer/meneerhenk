@@ -10,7 +10,7 @@ use crate::encode::percent_encode;
 use crate::error::PlatformError;
 use crate::github::writer::GitHubWriter;
 use crate::push::{
-    CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
+    BehindPull, CommitIdentity, GitCredential, NewPull, OpenedPull, PullFacts, PushWriter, RepoHead,
 };
 use crate::writer::ReviewTarget;
 
@@ -177,6 +177,65 @@ impl PushWriter for GitHubWriter {
             number,
             url: text(&opened, "/html_url"),
         })
+    }
+
+    async fn open_pulls_behind(
+        &self,
+        repo: &RepoRef,
+        base: &str,
+        head_prefix: &str,
+    ) -> Result<Vec<BehindPull>, PlatformError> {
+        let path = repo.path();
+        let pulls = self
+            .api()
+            .get_all(&format!(
+                "/repos/{path}/pulls?state=open&base={}",
+                percent_encode(base)
+            ))
+            .await?;
+        let mut behind = Vec::new();
+        for pull in pulls {
+            let head_ref = text(&pull, "/head/ref");
+            let in_repo = pull
+                .pointer("/head/repo/full_name")
+                .and_then(Value::as_str)
+                .is_some_and(|head| head.eq_ignore_ascii_case(&path));
+            let draft = pull.get("draft").and_then(Value::as_bool).unwrap_or(false);
+            if !in_repo || draft || !head_ref.starts_with(head_prefix) {
+                continue;
+            }
+            let (Some(number), Some(head)) = (
+                pull.get("number").and_then(Value::as_u64),
+                pull.pointer("/head/sha")
+                    .and_then(Value::as_str)
+                    .and_then(|sha| CommitSha::parse(sha).ok()),
+            ) else {
+                continue;
+            };
+            // `behind_by` is on every comparison, however long its commit
+            // list, so one commit of it is all that is asked for.
+            let comparison = self
+                .api()
+                .get(&format!(
+                    "/repos/{path}/compare/{}...{}?per_page=1",
+                    path_segment(base),
+                    head.as_str()
+                ))
+                .await?;
+            let behind_by = comparison
+                .get("behind_by")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if behind_by > 0 {
+                behind.push(BehindPull {
+                    number,
+                    head_ref,
+                    head,
+                    behind_by,
+                });
+            }
+        }
+        Ok(behind)
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
