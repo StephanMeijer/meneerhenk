@@ -171,15 +171,7 @@ pub async fn run_session(
     {
         tracing::warn!(error = %store_error, "could not record the session end");
     }
-    // Each time the repeat guard fired goes on the run (§8.6), so
-    // `henk runs show` says which tool, how often and whether it ended
-    // the session.
-    for firing in &outcome.repeats {
-        let _ = store
-            .event(run, "warn", &repeat_event(&spec.name, firing))
-            .await;
-    }
-    end_events(store, run, &spec.name, &outcome, error.is_some()).await;
+    end_events(store, run, &spec.name, &outcome).await;
     info!(turns = outcome.turns, ?status, "session ended");
     SessionOutcome {
         stop: outcome.stop,
@@ -529,12 +521,7 @@ impl ResumableSession {
         )
         .await;
         let status = session_status(&outcome.stop);
-        for firing in &outcome.repeats {
-            let _ = store
-                .event(run, "warn", &repeat_event(&self.name, firing))
-                .await;
-        }
-        end_events(store, run, &self.name, &outcome, status.1.is_some()).await;
+        end_events(store, run, &self.name, &outcome).await;
         let round_turns = outcome.turns;
         if let Err(error) = store.end_round(run, &self.name, round, round_turns).await {
             tracing::warn!(%error, "could not record the round end");
@@ -588,16 +575,23 @@ impl ResumableSession {
     }
 }
 
-/// The session's last lines on the run's timeline: how it stopped with its
-/// last words, and what prompt caching saved when it saved anything.
+/// The session's last lines on the run's timeline: each time the repeat
+/// guard fired, how it stopped with its last words, and what prompt caching
+/// saved when it saved anything.
 async fn end_events(
     store: &dyn RunStore,
     run: &RunId,
     name: &str,
     outcome: &henk_agent::AgentOutcome,
-    failed: bool,
 ) {
+    // Each time the repeat guard fired goes on the run (§8.6), so
+    // `henk runs show` says which tool, how often and whether it ended
+    // the session.
+    for firing in &outcome.repeats {
+        let _ = store.event(run, "warn", &repeat_event(name, firing)).await;
+    }
     let last_words: String = outcome.final_text.chars().take(200).collect();
+    let failed = session_status(&outcome.stop).1.is_some();
     let level = if failed || matches!(outcome.stop, StopCause::Timeout) {
         "warn"
     } else {
@@ -722,7 +716,6 @@ fn call_record(
     else {
         return None;
     };
-    let kept = cut_at(&arguments, cap).len();
     Some(ToolCallRecord {
         at: String::new(),
         session: session.to_owned(),
@@ -731,7 +724,7 @@ fn call_record(
         tool: name,
         origin,
         outcome: outcome.as_str().to_owned(),
-        arguments: arguments.get(..kept).unwrap_or_default().to_owned(),
+        arguments: cut_at(&arguments, cap).to_owned(),
         arguments_len: u64::try_from(arguments.len()).unwrap_or(u64::MAX),
         result_chars: u64::try_from(result_chars).unwrap_or(u64::MAX),
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
@@ -771,11 +764,8 @@ const MOST_HANDOVER_BYTES: usize = 8 * 1024;
 
 /// `text` cut to at most `cap` bytes, at a character boundary.
 fn cut_at(text: &str, cap: usize) -> &str {
-    let mut end = text.len().min(cap);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.get(..end).unwrap_or_default()
+    text.get(..text.floor_char_boundary(cap))
+        .unwrap_or_default()
 }
 
 /// The text of a message, its text blocks one after another.
