@@ -81,14 +81,23 @@ pub enum MaxTokensParam {
     MaxCompletionTokens,
 }
 
-/// How hard a Claude model thinks: Anthropic's `output_config.effort`.
+/// How hard a model thinks (#366).
 ///
-/// Current Claude models always think, adaptively; effort is the control.
-/// Sending it also sends `thinking: {type: "adaptive"}`. Claude Opus 5.5
-/// defaults to `medium` when it is not sent, other models to `high`.
+/// Anthropic: sent as `output_config.effort`, with `thinking: {type:
+/// "adaptive"}`. Current Claude models always think, adaptively; effort is
+/// the control. Claude Opus 5.5 defaults to `medium` when it is not sent,
+/// other models to `high`.
+///
+/// OpenAI: sent as `reasoning_effort` (Chat Completions) or
+/// `reasoning.effort` (Responses). Which values a model takes depends on
+/// the model; `none` and `minimal` exist on OpenAI only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
+    /// OpenAI only: no reasoning at all.
+    None,
+    /// OpenAI only: the least reasoning short of none.
+    Minimal,
     /// Least thinking: simple, high-volume work.
     Low,
     /// The step down from `high` where quality holds.
@@ -102,16 +111,65 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The value sent on the wire.
+    /// The name configuration spells it with.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
             Self::Max => "max",
         }
+    }
+
+    /// The levels `provider` takes.
+    #[must_use]
+    pub fn accepted(provider: Provider) -> &'static [Self] {
+        match provider {
+            Provider::Anthropic => &[Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max],
+            Provider::OpenAi => &[
+                Self::None,
+                Self::Minimal,
+                Self::Low,
+                Self::Medium,
+                Self::High,
+                Self::Xhigh,
+                Self::Max,
+            ],
+        }
+    }
+
+    /// The value sent to `provider`, or `None` when it takes no such level.
+    /// Both providers spell their levels as Henk does today; a provider
+    /// that does not would be mapped here.
+    #[must_use]
+    pub fn wire(self, provider: Provider) -> Option<&'static str> {
+        Self::accepted(provider)
+            .contains(&self)
+            .then(|| self.as_str())
+    }
+
+    /// The levels `provider` takes, as a refusal lists them.
+    #[must_use]
+    pub fn accepted_list(provider: Provider) -> String {
+        Self::accepted(provider)
+            .iter()
+            .map(|effort| effort.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The request parameter that carries effort on `provider` over `api`.
+#[must_use]
+pub fn effort_param(provider: Provider, api: Api) -> &'static str {
+    match (provider, api) {
+        (Provider::Anthropic, _) => "output_config.effort",
+        (Provider::OpenAi, Api::ChatCompletions) => "reasoning_effort",
+        (Provider::OpenAi, Api::Responses) => "reasoning.effort",
     }
 }
 
@@ -139,8 +197,8 @@ pub struct ModelConfig {
     /// OpenAI Chat Completions only: which parameter carries the output
     /// cap. The Responses API always sends `max_output_tokens`.
     pub max_tokens_param: MaxTokensParam,
-    /// Anthropic style only: thinking effort. `None` sends neither
-    /// `thinking` nor `output_config`, leaving the model's default.
+    /// Thinking effort, sent as [`effort_param`] says. `None` sends
+    /// nothing, leaving the model's default.
     pub effort: Option<Effort>,
     /// Anthropic style only: mark the system prompt and the end of the
     /// conversation for prompt caching. Off for a proxy that rejects
@@ -193,10 +251,15 @@ pub fn client_with(
             "the Responses API is OpenAI's; an Anthropic endpoint has none".to_owned(),
         ));
     }
-    if config.effort.is_some() && config.provider != Provider::Anthropic {
-        return Err(LlmError::InvalidConfig(
-            "effort applies to Anthropic-style endpoints only".to_owned(),
-        ));
+    if let Some(effort) = config.effort
+        && effort.wire(config.provider).is_none()
+    {
+        return Err(LlmError::InvalidConfig(format!(
+            "effort {:?} is not accepted by provider {:?}; accepted: {}",
+            effort.as_str(),
+            config.provider.as_str(),
+            Effort::accepted_list(config.provider)
+        )));
     }
     Ok(match (config.provider, config.api) {
         (Provider::OpenAi, Api::Responses) => Arc::new(ResponsesClient::with_http(config, http)),

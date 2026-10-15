@@ -11,9 +11,9 @@
 use std::time::Duration;
 
 use henk_llm::{
-    Api, Block, ChatMessage, CompletionRequest, LlmError, MaxTokensParam, ModelConfig, Provider,
-    RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName, ToolResult,
-    client_for, responses,
+    Api, Block, ChatMessage, CompletionRequest, Effort, LlmError, MaxTokensParam, ModelConfig,
+    Provider, RetryPolicy, Role, StopReason, ToolArguments, ToolChoice, ToolDef, ToolName,
+    ToolResult, client_for, responses,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
@@ -110,6 +110,59 @@ fn the_body_is_stateless_and_names_the_function_tools() {
     assert_eq!(
         named["tool_choice"],
         json!({"type": "function", "name": "get_pull_request"})
+    );
+}
+
+#[test]
+fn effort_goes_as_reasoning_effort_and_no_temperature() {
+    let mut cfg = config("https://x.test/v1");
+    cfg.effort = Some(Effort::Low);
+    let with_effort = responses::ResponsesClient::new(cfg).unwrap();
+    let body = with_effort.body(&CompletionRequest {
+        temperature: Some(0.2),
+        ..Default::default()
+    });
+    assert_eq!(body["reasoning"], json!({"effort": "low"}));
+    assert!(body.get("temperature").is_none());
+    let body = client().body(&CompletionRequest {
+        temperature: Some(0.2),
+        ..Default::default()
+    });
+    assert!(
+        body.get("reasoning").is_none(),
+        "nothing sent without effort"
+    );
+    assert_eq!(body["temperature"], 0.2);
+}
+
+#[tokio::test]
+async fn a_400_about_reasoning_names_the_effort_setting() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model.","param":"reasoning.effort"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(&format!("{}/v1", server.uri()));
+    cfg.effort = Some(Effort::Max);
+    let error = client_for(cfg)
+        .unwrap()
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            LlmError::EffortRejected {
+                effort: "max",
+                param: "reasoning.effort",
+                ..
+            }
+        ),
+        "{error:?}"
     );
 }
 

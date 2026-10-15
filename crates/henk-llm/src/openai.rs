@@ -6,7 +6,7 @@ use secrecy::ExposeSecret as _;
 use serde_json::{Map, Value, json};
 use tracing::instrument;
 
-use crate::client::{MaxTokensParam, ModelClient, ModelConfig};
+use crate::client::{MaxTokensParam, ModelClient, ModelConfig, Provider, effort_param};
 use crate::error::{LlmError, truncate_body};
 use crate::http::{build_endpoint_client, post_json, prepared, with_retry};
 use crate::schema;
@@ -61,7 +61,15 @@ impl OpenAiClient {
             MaxTokensParam::MaxCompletionTokens => "max_completion_tokens",
         };
         body.insert(key.into(), json!(max_tokens));
-        if let Some(temperature) = request.temperature {
+        if let Some(effort) = self
+            .config
+            .effort
+            .and_then(|effort| effort.wire(Provider::OpenAi))
+        {
+            // Reasoning models reject sampling parameters, so temperature
+            // is never sent alongside effort.
+            body.insert("reasoning_effort".into(), json!(effort));
+        } else if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
         if !request.tools.is_empty() {
@@ -284,6 +292,26 @@ impl ModelClient for OpenAiClient {
             decode(&response)
         })
         .await
+        .map_err(|error| effort_rejected(error, &self.config))
+    }
+}
+
+/// A 400 that names the reasoning parameter, on a model that sends effort,
+/// as [`LlmError::EffortRejected`], so the error names the setting (#366).
+/// Any other error is returned as it is.
+pub(crate) fn effort_rejected(error: LlmError, config: &ModelConfig) -> LlmError {
+    match (error, config.effort) {
+        (LlmError::BadRequest { status: 400, body }, Some(effort))
+            if body.contains("reasoning") =>
+        {
+            LlmError::EffortRejected {
+                effort: effort.as_str(),
+                param: effort_param(Provider::OpenAi, config.api),
+                status: 400,
+                body,
+            }
+        }
+        (error, _) => error,
     }
 }
 
