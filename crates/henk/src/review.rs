@@ -112,7 +112,6 @@ pub async fn run_review(
     request: ReviewRequest,
     cancel: CancellationToken,
 ) -> anyhow::Result<ReviewReport> {
-    let platform = request.target.platform();
     let writer = app.writer(&request.target.repo)?;
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
@@ -130,17 +129,7 @@ pub async fn run_review(
 
     let created = app
         .store
-        .create_run(&NewRun {
-            id: run.clone(),
-            kind: RunKind::Review,
-            platform,
-            repo: request.target.repo.path(),
-            target: request.target.number,
-            commit: Some(commit.as_str().to_owned()),
-            requester: request.requester.clone(),
-            trigger: request.trigger.clone(),
-            link: link.clone(),
-        })
+        .create_run(&new_review_run(&request, &run, &link, Some(&commit)))
         .await;
     if let Err(error) = created {
         let error = anyhow::Error::from(error);
@@ -278,29 +267,49 @@ async fn close_queued_check(
     link: &str,
     error: &anyhow::Error,
 ) {
-    let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
-        return;
-    };
-    let outcome = if let Some(NotReviewable(why)) = error.downcast_ref::<NotReviewable>() {
-        ReviewOutcome::not_reviewed(commit.clone(), why.clone())
-    } else {
-        error!(error = %format!("{error:#}"), "a queued review could not start");
-        ReviewOutcome {
-            commit: commit.clone(),
-            sessions: Vec::new(),
-            open_findings: 0,
-            nothing_to_review: false,
-            stopped: None,
-            not_reviewed: None,
-            findings_left: false,
-            report: None,
+    close_queued_as(writer, request, link, |commit| {
+        if let Some(NotReviewable(why)) = error.downcast_ref::<NotReviewable>() {
+            ReviewOutcome::not_reviewed(commit.clone(), why.clone())
+        } else {
+            error!(error = %format!("{error:#}"), "a queued review could not start");
+            failed_outcome(commit)
         }
-    };
-    if let Err(finish_error) = writer
-        .finish_review(&request.target, commit, Some(handle), &outcome, link)
-        .await
-    {
-        error!(%finish_error, "could not close the queued check");
+    })
+    .await;
+}
+
+/// The run record of a review of `request`, on `commit` when it is known.
+fn new_review_run(
+    request: &ReviewRequest,
+    run: &RunId,
+    link: &str,
+    commit: Option<&CommitSha>,
+) -> NewRun {
+    NewRun {
+        id: run.clone(),
+        kind: RunKind::Review,
+        platform: request.target.platform(),
+        repo: request.target.repo.path(),
+        target: request.target.number,
+        commit: commit.map(|c| c.as_str().to_owned()),
+        requester: request.requester.clone(),
+        trigger: request.trigger.clone(),
+        link: link.to_owned(),
+    }
+}
+
+/// The outcome of a review that failed: Henk's failure, with no session
+/// and nothing found (§3.3).
+fn failed_outcome(commit: &CommitSha) -> ReviewOutcome {
+    ReviewOutcome {
+        commit: commit.clone(),
+        sessions: Vec::new(),
+        open_findings: 0,
+        nothing_to_review: false,
+        stopped: None,
+        not_reviewed: None,
+        findings_left: false,
+        report: None,
     }
 }
 
@@ -362,7 +371,8 @@ async fn report_superseded(
         error!(%finish_error, "could not finish the check of a superseded review");
     }
     let reason = Superseded.to_string();
-    let newer = app.cancels.superseded_by(run).map_or_else(
+    let superseded_by = app.cancels.superseded_by(run);
+    let newer = superseded_by.as_ref().map_or_else(
         || "superseded by a newer commit".to_owned(),
         |by| format!("superseded by {by}"),
     );
@@ -374,7 +384,7 @@ async fn report_superseded(
         "a newer commit arrived",
     )
     .await;
-    match app.cancels.superseded_by(run) {
+    match superseded_by {
         Some(by) => app.store.supersede_run(run, &by, &reason).await?,
         None => {
             app.store
@@ -435,97 +445,7 @@ pub async fn report_cancelled_while_queued(
     request: &ReviewRequest,
     by: &str,
 ) -> anyhow::Result<()> {
-    let run = request.run.clone().unwrap_or_else(new_run_id);
-    let link = app.settings.run_link(&run);
-    let platform = request.target.platform();
-    let created = app
-        .store
-        .create_run(&NewRun {
-            id: run.clone(),
-            kind: RunKind::Review,
-            platform,
-            repo: request.target.repo.path(),
-            target: request.target.number,
-            commit: request.commit.as_ref().map(|c| c.as_str().to_owned()),
-            requester: request.requester.clone(),
-            trigger: request.trigger.clone(),
-            link: link.clone(),
-        })
-        .await;
-    if let Err(error) = created {
-        // No run page: the check links where the queue is shown.
-        match app.writer(&request.target.repo) {
-            Ok(writer) => {
-                close_queued_as_cancelled(&writer, request, &app.settings.queue_link(&run), by)
-                    .await;
-            }
-            Err(writer_error) => error!(%writer_error, "could not close the queued check"),
-        }
-        return Err(error.into());
-    }
-    info!(run = %run, by, "review {} before it started", crate::cancel::cancelled_reason(by));
-    stages::request(
-        &*app.store,
-        &run,
-        request.submitted_at,
-        &request.trigger,
-        request.requester.as_deref(),
-    )
-    .await;
-    let cancelled = format!("cancelled by {by} while waiting for a slot");
-    // It never got a slot: the queue stage ends skipped, not done.
-    stages::mark_span(
-        &*app.store,
-        &run,
-        Stage::Queued,
-        StageState::Skipped,
-        &cancelled,
-        request
-            .submitted_at
-            .unwrap_or_else(time::OffsetDateTime::now_utc),
-        None,
-    )
-    .await;
-    stages::end(
-        &*app.store,
-        &run,
-        StageState::Skipped,
-        &cancelled,
-        &cancelled,
-    )
-    .await;
-    match app.writer(&request.target.repo) {
-        Ok(writer) => close_queued_as_cancelled(&writer, request, &link, by).await,
-        Err(writer_error) => error!(%writer_error, "could not close the queued check"),
-    }
-    app.store
-        .finish_run(
-            &run,
-            RunStatus::Cancelled,
-            None,
-            Some(&CancelledBy(by.to_owned()).to_string()),
-        )
-        .await?;
-    Ok(())
-}
-
-/// A queued check of a review cancelled before it started closes as
-/// cancelled, as a running one's does (#262).
-async fn close_queued_as_cancelled(
-    writer: &Arc<dyn PlatformWriter>,
-    request: &ReviewRequest,
-    link: &str,
-    by: &str,
-) {
-    if let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) {
-        let outcome = ReviewOutcome::cancelled(commit.clone(), crate::cancel::cancelled_via(by));
-        if let Err(finish_error) = writer
-            .finish_review(&request.target, commit, Some(handle), &outcome, link)
-            .await
-        {
-            error!(%finish_error, "could not close the queued check");
-        }
-    }
+    end_while_queued(app, request, EndedWhileQueued::Cancelled { by }).await
 }
 
 /// Henk was told to stop while the review waited for a slot. It never
@@ -541,29 +461,69 @@ pub async fn report_interrupted_while_queued(
     app: &App,
     request: &ReviewRequest,
 ) -> anyhow::Result<()> {
+    end_while_queued(app, request, EndedWhileQueued::Interrupted).await
+}
+
+/// Why a review that waited for a slot ended before it started.
+#[derive(Clone, Copy)]
+enum EndedWhileQueued<'a> {
+    /// A person or an MCP client cancelled it; `by` says who.
+    Cancelled { by: &'a str },
+    /// Henk was told to stop.
+    Interrupted,
+}
+
+impl EndedWhileQueued<'_> {
+    /// The outcome its queued check closes with, as a running review's
+    /// check does (#262).
+    fn outcome(self, commit: &CommitSha) -> ReviewOutcome {
+        match self {
+            Self::Cancelled { by } => {
+                ReviewOutcome::cancelled(commit.clone(), crate::cancel::cancelled_via(by))
+            }
+            Self::Interrupted => ReviewOutcome::interrupted(commit.clone()),
+        }
+    }
+}
+
+/// A review that ended while it waited for a slot: its run recorded with
+/// the queue stage and the end, its queued check closed, and the run
+/// finished. When the run cannot be recorded, the check still closes.
+async fn end_while_queued(
+    app: &App,
+    request: &ReviewRequest,
+    ending: EndedWhileQueued<'_>,
+) -> anyhow::Result<()> {
     let run = request.run.clone().unwrap_or_else(new_run_id);
     let link = app.settings.run_link(&run);
-    let platform = request.target.platform();
     let created = app
         .store
-        .create_run(&NewRun {
-            id: run.clone(),
-            kind: RunKind::Review,
-            platform,
-            repo: request.target.repo.path(),
-            target: request.target.number,
-            commit: request.commit.as_ref().map(|c| c.as_str().to_owned()),
-            requester: request.requester.clone(),
-            trigger: request.trigger.clone(),
-            link: link.clone(),
-        })
+        .create_run(&new_review_run(
+            request,
+            &run,
+            &link,
+            request.commit.as_ref(),
+        ))
         .await;
     if let Err(error) = created {
         // No run page: the check links where the queue is shown.
-        close_queued_as_interrupted(app, request, &app.settings.queue_link(&run)).await;
+        close_ended_while_queued(app, request, &app.settings.queue_link(&run), ending).await;
         return Err(error.into());
     }
-    warn!(run = %run, "review interrupted before it started");
+    let (state, ended, status, reason) = match ending {
+        EndedWhileQueued::Cancelled { by } => {
+            info!(run = %run, by, "review {} before it started", crate::cancel::cancelled_reason(by));
+            let cancelled = format!("cancelled by {by} while waiting for a slot");
+            let reason = CancelledBy(by.to_owned()).to_string();
+            (StageState::Skipped, cancelled, RunStatus::Cancelled, reason)
+        }
+        EndedWhileQueued::Interrupted => {
+            warn!(run = %run, "review interrupted before it started");
+            let interrupted = "interrupted while waiting for a slot".to_owned();
+            let reason = Interrupted.to_string();
+            (StageState::Failed, interrupted, RunStatus::Failed, reason)
+        }
+    };
     stages::request(
         &*app.store,
         &run,
@@ -572,56 +532,66 @@ pub async fn report_interrupted_while_queued(
         request.requester.as_deref(),
     )
     .await;
-    let interrupted = "interrupted while waiting for a slot";
+    // It never got a slot: the queue stage ends as the review did, not done.
     stages::mark_span(
         &*app.store,
         &run,
         Stage::Queued,
-        StageState::Failed,
-        interrupted,
+        state,
+        &ended,
         request
             .submitted_at
             .unwrap_or_else(time::OffsetDateTime::now_utc),
         None,
     )
     .await;
-    stages::end(
-        &*app.store,
-        &run,
-        StageState::Failed,
-        interrupted,
-        interrupted,
-    )
-    .await;
-    close_queued_as_interrupted(app, request, &link).await;
+    stages::end(&*app.store, &run, state, &ended, &ended).await;
+    close_ended_while_queued(app, request, &link, ending).await;
     app.store
-        .finish_run(
-            &run,
-            RunStatus::Failed,
-            None,
-            Some(&Interrupted.to_string()),
-        )
+        .finish_run(&run, status, None, Some(&reason))
         .await?;
     Ok(())
 }
 
-/// A queued check of a review Henk stopped before it started closes as
-/// interrupted, as a running one's does (#262).
-async fn close_queued_as_interrupted(app: &App, request: &ReviewRequest, link: &str) {
+/// The queued check of a review that ended before it started closes as a
+/// running one's does (#262). A cancelled review asks for its writer even
+/// when it has no queued check, so a platform Henk cannot write to is
+/// logged either way; one Henk stopped asks only when there is a check.
+async fn close_ended_while_queued(
+    app: &App,
+    request: &ReviewRequest,
+    link: &str,
+    ending: EndedWhileQueued<'_>,
+) {
+    let queued = request.queued_check.is_some() && request.commit.is_some();
+    if !queued && matches!(ending, EndedWhileQueued::Interrupted) {
+        return;
+    }
+    match app.writer(&request.target.repo) {
+        Ok(writer) => {
+            close_queued_as(&writer, request, link, |commit| ending.outcome(commit)).await;
+        }
+        Err(writer_error) => error!(%writer_error, "could not close the queued check"),
+    }
+}
+
+/// A review's queued check, if it has one, closes with the outcome
+/// `outcome` gives for its commit, so it does not stay queued (#262).
+async fn close_queued_as(
+    writer: &Arc<dyn PlatformWriter>,
+    request: &ReviewRequest,
+    link: &str,
+    outcome: impl FnOnce(&CommitSha) -> ReviewOutcome,
+) {
     let (Some(handle), Some(commit)) = (&request.queued_check, &request.commit) else {
         return;
     };
-    let outcome = ReviewOutcome::interrupted(commit.clone());
-    match app.writer(&request.target.repo) {
-        Ok(writer) => {
-            if let Err(finish_error) = writer
-                .finish_review(&request.target, commit, Some(handle), &outcome, link)
-                .await
-            {
-                error!(%finish_error, "could not close the queued check");
-            }
-        }
-        Err(writer_error) => error!(%writer_error, "could not close the queued check"),
+    let outcome = outcome(commit);
+    if let Err(finish_error) = writer
+        .finish_review(&request.target, commit, Some(handle), &outcome, link)
+        .await
+    {
+        error!(%finish_error, "could not close the queued check");
     }
 }
 
@@ -663,16 +633,7 @@ async fn report_failure(
     } = review;
     let message = format!("{error:#}");
     error!(error = %message, "review failed");
-    let failed = ReviewOutcome {
-        commit: commit.clone(),
-        sessions: Vec::new(),
-        open_findings: 0,
-        nothing_to_review: false,
-        stopped: None,
-        not_reviewed: None,
-        findings_left: false,
-        report: None,
-    };
+    let failed = failed_outcome(commit);
     if let Err(finish_error) = finish_checks(review, handle, &failed).await {
         error!(%finish_error, "could not finish the check after failure");
     }
