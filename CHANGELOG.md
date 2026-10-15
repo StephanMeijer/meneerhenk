@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.7...v0.4.8) - 2026-10-15
+
+### Added
+
+- *(execute)* a reviewer checks the executor's changes against the issue before the pull request ([#535](https://github.com/StephanMeijer/meneerhenk/pull/535))
+- *(git)* the diff of a changeset against the commit checked out ([#535](https://github.com/StephanMeijer/meneerhenk/pull/535))
+- *(config)* [execution] requirements_max_rounds, and the tools a requirements review needs ([#535](https://github.com/StephanMeijer/meneerhenk/pull/535))
+
+### Fixed
+
+- *(execute)* a converged requirements review closes the session stage
+
 ## [0.4.7](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.6...v0.4.7) - 2026-10-15
 
 ### Added
