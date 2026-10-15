@@ -1143,6 +1143,30 @@ pub(crate) fn stage_records(
     Ok(records)
 }
 
+/// Stored `run_children` rows as the stage and the run each is, in the
+/// order the stages come.
+pub(crate) fn child_records(
+    rows: Vec<(String, String)>,
+) -> Result<Vec<(Stage, RunId)>, StoreError> {
+    let mut children = rows
+        .into_iter()
+        .map(|(stage, child)| {
+            Ok((
+                Stage::parse(&stage).ok_or(StoreError::Corrupt {
+                    column: "run_children.stage",
+                    value: stage,
+                })?,
+                RunId::parse(&child).map_err(|_| StoreError::Corrupt {
+                    column: "run_children.child",
+                    value: child,
+                })?,
+            ))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    children.sort_by_key(|(stage, _)| *stage);
+    Ok(children)
+}
+
 /// One recorded finding action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingRecord {

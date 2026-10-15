@@ -22,8 +22,8 @@ use crate::types::{
     RawRun, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
     SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, event_id, kind_str, merge_days,
-    platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
+    TranscriptSummary, attach_outcomes, child_records, draft_verdict, event_id, kind_str,
+    merge_days, platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
     session_role, session_status, stage_dots, stage_records, to_i64, to_u32, to_u64,
 };
 
@@ -44,6 +44,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/postgres/013_rounds.sql"),
     include_str!("../migrations/postgres/014_reasoning_tokens.sql"),
     include_str!("../migrations/postgres/015_tool_names.sql"),
+    include_str!("../migrations/postgres/016_run_children.sql"),
 ];
 
 /// Serialises migrations between Henk processes starting together.
@@ -736,6 +737,39 @@ impl RunStore for PgStore {
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         stage_records(rows)
+    }
+
+    async fn link_child(
+        &self,
+        parent: &RunId,
+        stage: Stage,
+        child: &RunId,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO run_children (parent, stage, child) VALUES ($1, $2, $3)
+                 ON CONFLICT (parent, stage) DO UPDATE SET child = excluded.child",
+                &[&parent.as_str(), &stage.as_str(), &child.as_str()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "SELECT stage, child FROM run_children WHERE parent = $1",
+                &[&parent.as_str()],
+            )
+            .await?;
+        let rows = rows
+            .iter()
+            .map(|row| Ok((row.try_get::<_, String>(0)?, row.try_get::<_, String>(1)?)))
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        child_records(rows)
     }
 
     async fn start_session(

@@ -142,6 +142,30 @@ pub trait RunStore: Send + Sync + std::fmt::Debug {
     /// Returns [`StoreError`] on a database failure or a corrupt row.
     async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError>;
 
+    /// Records that `child` is the run `parent` started for its `stage`
+    /// (#536): a ticket run's plan, execute and review. One child per stage;
+    /// linking a stage again replaces the child. The child need not exist
+    /// yet: a review has no run until it has a slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure, or when `parent` is not
+    /// a run.
+    async fn link_child(
+        &self,
+        parent: &RunId,
+        stage: Stage,
+        child: &RunId,
+    ) -> Result<(), StoreError>;
+
+    /// The runs `parent` started, with the stage each was for, in the order
+    /// the stages come.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] on a database failure or a corrupt row.
+    async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError>;
+
     /// Records a session as running, in the role that runs it (#324). New
     /// runs start sessions through henk-session, which knows only the
     /// three roles of [`henk_domain::role::Role`]; the history roles are
