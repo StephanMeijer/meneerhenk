@@ -7,6 +7,7 @@
 //! through a [`PlatformWriter`], which is code, not prompt (spec §8.4).
 
 pub mod ci;
+mod encode;
 pub mod error;
 pub mod github;
 pub mod gitlab;

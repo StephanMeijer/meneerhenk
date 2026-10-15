@@ -8,8 +8,6 @@
 //! never in a URL. Redirects are not followed, so it never reaches another
 //! host.
 
-use std::fmt::Write as _;
-
 use reqwest::header::HeaderValue;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
@@ -43,18 +41,7 @@ impl std::fmt::Debug for GitLabRest {
 
 /// One path segment, percent-encoded: GitLab takes a project path such as
 /// `group/sub/name` and a branch such as `feat/x` as a single segment.
-#[must_use]
-pub fn path_segment(segment: &str) -> String {
-    let mut out = String::with_capacity(segment.len());
-    for byte in segment.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
+pub use crate::encode::percent_encode as path_segment;
 
 impl GitLabRest {
     /// Builds a client for `api_url`, such as `https://gitlab.com/api/v4`.

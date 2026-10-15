@@ -40,19 +40,7 @@ const MAX_PAGES: usize = 100;
 
 /// `value` as a query-string value: every byte but an unreserved one is
 /// percent-encoded, so `+`, `&`, `%`, `#` and a space survive the trip.
-pub(crate) fn encode_query_value(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
+pub(crate) use crate::encode::percent_encode as encode_query_value;
 
 /// A check run to create.
 #[derive(Debug, Clone, Copy)]
