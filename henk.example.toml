@@ -215,10 +215,14 @@ requester_id = 523456789012345678
 # works on the default branch, Henk pushes a new branch under branch_prefix
 # and opens a ready pull request that closes the issue, then reviews it. It
 # needs [roles.executor] below; on GitHub the App needs "Pull requests:
-# write", on GitLab create_merge_request in GITLAB_TOOLS.
+# write", on GitLab create_merge_request in GITLAB_TOOLS. With
+# [roles.reviewer], the reviewer first checks the executor's changes against
+# the issue (#535) for at most requirements_max_rounds rounds, and a review
+# that is not satisfied opens no pull request; 0 turns the check off.
 [execution]
 run_timeout_secs = 3600
 branch_prefix = "henk/"
+requirements_max_rounds = 3
 
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then

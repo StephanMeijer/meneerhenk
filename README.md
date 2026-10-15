@@ -775,11 +775,30 @@ is the final word on the checks. When nothing changed or the branch
 exists, there is no pull request and one comment on the issue says why,
 with the run link.
 
+Before the pull request is opened, the reviewer checks the changes against
+the issue and its plan (spec §4a, #535). It is on whenever
+`[roles.reviewer]` is set. The reviewer reads the executor's changes
+where they stand, as a diff, and raises a point for each acceptance
+criterion not met, step skipped, or thing done that the issue puts out of
+scope. The executor answers each point, revises in the same conversation
+and proposes again, until the reviewer raises nothing more. The pull
+request's description then says how it went. If the rounds run out
+(`requirements_max_rounds`, 3), a session breaks off or the run's time
+ends first, there is no pull request: nothing is pushed, and the issue
+gets one comment with the points still open. The points are on the run
+like a plan review's. `requirements_max_rounds = 0` turns it off.
+
 ```toml
 [execution]
-run_timeout_secs = 3600   # the executor's time for one issue
-branch_prefix = "henk/"   # every branch Henk makes starts with it
+run_timeout_secs = 3600     # the executor's time for one issue
+branch_prefix = "henk/"     # every branch Henk makes starts with it
+requirements_max_rounds = 3 # the reviewer's check of the changes; 0 is off
 ```
+
+The requirements review uses `raise_point` and `finish_round` of the
+reviewer and `list_points` and `answer_point` of the executor. A role with
+a `tools` list that leaves one out is refused at start, with the two ways
+out: add the tool, or set `requirements_max_rounds = 0`.
 
 `[execution]` needs `[roles.executor]`, whose model, `max_turns`,
 `max_changed_files`, identity and trailers it uses. On GitHub the App also
