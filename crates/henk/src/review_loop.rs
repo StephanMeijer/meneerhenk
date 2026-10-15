@@ -188,9 +188,16 @@ pub(crate) async fn run_loop(
         stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;
     }
 
-    let mut rounds = Rounds::new(on, config, (profile, &recent), &workspace, &diff, writer)?
-        .alone(alone)
-        .until(deadline);
+    let mut rounds = Rounds::new(
+        on,
+        config,
+        (profile, &recent),
+        deadline,
+        &workspace,
+        &diff,
+        writer,
+    )?
+    .alone(alone);
     // Closed on every path; a run future that is dropped drops it instead,
     // and every backend destroys itself then too.
     let ended = rounds.run(facts, &diff, cancel).await;
@@ -262,7 +269,8 @@ struct Rounds<'a> {
     round: u32,
     /// The commits pushed, in order.
     pushed: Vec<String>,
-    /// When the whole run must have ended (#286).
+    /// When the whole run must have ended (#286), taken before its workspace
+    /// opened, so a wait for one counts (#403).
     deadline: tokio::time::Instant,
     /// The reviewer's limit per round, from `[roles.reviewer]`.
     reviewer_round: Duration,
@@ -275,6 +283,7 @@ impl<'a> Rounds<'a> {
         on: LoopTarget<'a>,
         config: &'a LoopConfig,
         (profile, recent): (&Profile, &[String]),
+        deadline: tokio::time::Instant,
         workspace: &Arc<dyn Workspace>,
         diff: &Arc<ReviewDiff>,
         writer: Arc<dyn PushWriter>,
@@ -377,7 +386,7 @@ impl<'a> Rounds<'a> {
             writer,
             round: 0,
             pushed: Vec::new(),
-            deadline: tokio::time::Instant::now() + Duration::from_secs(config.run_timeout_secs),
+            deadline,
             reviewer_round: Duration::from_secs(reviewer_round),
             executor_round: Duration::from_secs(address.timeout_secs),
         })
@@ -683,13 +692,6 @@ impl<'a> Rounds<'a> {
         None
     }
 
-    /// The run's time limit ends at `deadline`, taken before its workspace
-    /// opened, so a wait for one counts (#403).
-    fn until(mut self, deadline: tokio::time::Instant) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
     /// Whether the pull request is merged now (#413). A read that fails
     /// says no: the push reads it again before anything is pushed.
     async fn merged(&self) -> bool {
@@ -790,9 +792,6 @@ impl<'a> Rounds<'a> {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Pushed> {
         let app = self.on.app;
-        let Some(address) = app.settings.roles.executor.as_ref() else {
-            return Err(anyhow!("the review loop needs [roles.executor]"));
-        };
         let exported = self
             .workspace
             .export()
@@ -801,7 +800,7 @@ impl<'a> Rounds<'a> {
         if exported.is_empty() {
             return Ok(Pushed::Nothing);
         }
-        let changes = match checked_changeset(exported, address.max_changed_files) {
+        let changes = match checked_changeset(exported, self.fixing.max_changed_files) {
             Ok(changes) => changes,
             Err(why) => {
                 return Ok(Pushed::Stopped(LoopStop::PushRefused(format!(
