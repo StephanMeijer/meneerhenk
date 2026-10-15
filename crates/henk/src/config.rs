@@ -560,6 +560,57 @@ pub struct ModelFileConfig {
     /// wrote. Set false for a proxy that rejects `cache_control`.
     #[serde(default = "default_prompt_cache")]
     pub prompt_cache: bool,
+    /// How the model edits files as the executor (#561). Left out, a
+    /// GPT-family model gets `patch` and any other `replace`; see
+    /// [`ModelFileConfig::edit_format`].
+    #[serde(default)]
+    pub edit_format: Option<EditFormat>,
+}
+
+/// How a model edits files (#561).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EditFormat {
+    /// `edit_file`: replace exact text that occurs once.
+    Replace,
+    /// `apply_patch`: the Codex patch envelope, which GPT-family models
+    /// are trained on.
+    Patch,
+}
+
+impl EditFormat {
+    /// The tool that edits in this format.
+    #[must_use]
+    pub fn tool(self) -> &'static str {
+        match self {
+            Self::Replace => "edit_file",
+            Self::Patch => "apply_patch",
+        }
+    }
+
+    /// The name configuration spells it with.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Patch => "patch",
+        }
+    }
+}
+
+/// Whether a model name looks GPT-family, trained on the Codex patch
+/// envelope: after any `vendor/` prefix it starts with `gpt` or `codex`, or
+/// is an o-series name such as `o3` or `o4-mini`.
+fn looks_gpt(model: &str) -> bool {
+    let name = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let mut chars = name.chars();
+    name.starts_with("gpt")
+        || name.starts_with("codex")
+        || (chars.next() == Some('o') && chars.next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 fn default_prompt_cache() -> bool {
@@ -567,6 +618,17 @@ fn default_prompt_cache() -> bool {
 }
 
 impl ModelFileConfig {
+    /// How the model edits: as configured, else `patch` for a GPT-family
+    /// name and `replace` for any other.
+    #[must_use]
+    pub fn edit_format(&self) -> EditFormat {
+        self.edit_format.unwrap_or(if looks_gpt(&self.model) {
+            EditFormat::Patch
+        } else {
+            EditFormat::Replace
+        })
+    }
+
     /// The first key the model still has that belongs to its endpoint now
     /// (#368).
     fn removed_key(&self) -> Option<&'static str> {
@@ -2137,6 +2199,27 @@ fn validate_roles(
                 "roles.{role}: max_turns and timeout_secs must be above zero"
             )));
         }
+        if role == Role::Executor
+            && let Some(config) = models.get(model)
+        {
+            let format = config.edit_format();
+            let other = [EditFormat::Replace, EditFormat::Patch]
+                .into_iter()
+                .find(|f| *f != format)
+                .unwrap_or(format);
+            if granted.iter().any(|t| t == other.tool())
+                && !granted.iter().any(|t| t == format.tool())
+            {
+                return Err(ConfigError::Role(format!(
+                    "[roles.executor] tools grant {} but model {model} edits with {} (edit_format = \"{}\"): add {} to tools, or set edit_format = \"{}\" on the model",
+                    other.tool(),
+                    format.tool(),
+                    format.as_str(),
+                    format.tool(),
+                    other.as_str(),
+                )));
+            }
+        }
     }
     if let Some(executor) = &roles.executor {
         validate_executor(executor, team_leads, allowlist)?;
@@ -3083,14 +3166,20 @@ impl Settings {
     }
 
     /// Model `id` in a line: its name, its endpoint and, when set, its
-    /// effort and the parameter it is sent as (#366), such as `gpt-5.6 on
-    /// openai, effort high (sent as reasoning_effort: high)`.
+    /// edit tool (#561), and its effort and the parameter it is sent as
+    /// (#366), such as `gpt-5.6 on openai, edits with apply_patch, effort
+    /// high (sent as reasoning_effort: high)`.
     #[must_use]
     pub fn describe_model(&self, id: &str) -> String {
         let Some(model) = self.models.get(id) else {
             return "not configured".to_owned();
         };
-        let mut line = format!("{} on {}", model.model, model.endpoint);
+        let mut line = format!(
+            "{} on {}, edits with {}",
+            model.model,
+            model.endpoint,
+            model.edit_format().tool()
+        );
         if let Some(effort) = model.effort {
             let _ = write!(line, ", effort {}", effort.as_str());
             if let Some(endpoint) = self.endpoints.get(&model.endpoint)
@@ -4934,7 +5023,7 @@ github_owners = ["docspec"]
         let said = settings.describe();
         for line in [
             "Endpoints:\n  a: openai (chat completions) at https://a.test/v1 (key from $KEY_A, 1 header)\n  b: openai (chat completions) at https://b.test/v1 (key from $KEY_B)\n",
-            "Models:\n  gpt-a: gpt-5.5 on a\n  gpt-b: gpt-5.5 on b\n",
+            "Models:\n  gpt-a: gpt-5.5 on a, edits with apply_patch\n  gpt-b: gpt-5.5 on b, edits with apply_patch\n",
             "warning: used by no role: gpt-a, gpt-b",
         ] {
             assert!(said.contains(line), "{line}\n{said}");
@@ -5064,19 +5153,20 @@ github_owners = ["docspec"]
         let chat = on_api("", "effort = \"minimal\"\n").unwrap();
         assert_eq!(
             chat.describe_model("m"),
-            "gpt on o, effort minimal (sent as reasoning_effort: minimal)"
+            "gpt on o, edits with apply_patch, effort minimal (sent as reasoning_effort: minimal)"
         );
         let responses = on_api("api = \"responses\"\n", "effort = \"high\"\n").unwrap();
         assert_eq!(
             responses.describe_model("m"),
-            "gpt on o, effort high (sent as reasoning.effort: high)"
+            "gpt on o, edits with apply_patch, effort high (sent as reasoning.effort: high)"
         );
-        assert!(
-            responses
-                .describe()
-                .contains("  m: gpt on o, effort high (sent as reasoning.effort: high)\n")
+        assert!(responses.describe().contains(
+            "  m: gpt on o, edits with apply_patch, effort high (sent as reasoning.effort: high)\n"
+        ));
+        assert_eq!(
+            on_api("", "").unwrap().describe_model("m"),
+            "gpt on o, edits with apply_patch"
         );
-        assert_eq!(on_api("", "").unwrap().describe_model("m"), "gpt on o");
     }
 
     fn on_api(endpoint_extra: &str, model_extra: &str) -> Result<Settings, ConfigError> {
@@ -5084,6 +5174,75 @@ github_owners = ["docspec"]
             "{MINIMAL}\n[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"K\"\n{endpoint_extra}[models.m]\nendpoint = \"o\"\nmodel = \"gpt\"\n{model_extra}"
         );
         Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn a_gpt_family_model_edits_with_patches_unless_configured() {
+        for (name, gpt) in [
+            ("gpt-5.5", true),
+            ("openai/gpt-5.1-codex", true),
+            ("codex-mini-latest", true),
+            ("o4-mini", true),
+            ("O3", true),
+            ("claude-opus-5-5", false),
+            ("deepseek/omni", false),
+            ("gemma-3", false),
+            ("x", false),
+        ] {
+            assert_eq!(looks_gpt(name), gpt, "{name}");
+        }
+        let replace = on_api("", "edit_format = \"replace\"\n").unwrap();
+        assert_eq!(
+            replace.models.get("m").unwrap().edit_format(),
+            EditFormat::Replace
+        );
+        assert_eq!(
+            replace.describe_model("m"),
+            "gpt on o, edits with edit_file"
+        );
+        assert_eq!(
+            on_api("", "")
+                .unwrap()
+                .models
+                .get("m")
+                .unwrap()
+                .edit_format(),
+            EditFormat::Patch
+        );
+        let wrong = on_api("", "edit_format = \"diff\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong.contains("diff") && wrong.contains("replace") && wrong.contains("patch"),
+            "{wrong}"
+        );
+    }
+
+    #[test]
+    fn an_executor_s_tools_grant_the_edit_tool_its_model_uses() {
+        let executor = |model: &str, extra: &str| {
+            let text = format!(
+                "{MINIMAL}{}",
+                ADDRESS
+                    .replace("PERSON", "")
+                    .replace("model = \"x\"", &format!("model = \"{model}\"\n{extra}"))
+            );
+            Config::parse(&format!("{text}tools = [\"edit_file\", \"write_file\"]\n"))
+                .and_then(Config::into_settings)
+        };
+        assert!(executor("claude-opus-5-5", "").is_ok());
+        assert_eq!(
+            executor("gpt-5.5", "").unwrap_err().to_string(),
+            "[roles.executor] tools grant edit_file but model m edits with apply_patch (edit_format = \"patch\"): add apply_patch to tools, or set edit_format = \"replace\" on the model"
+        );
+        assert!(executor("gpt-5.5", "edit_format = \"replace\"").is_ok());
+        let both = format!(
+            "{MINIMAL}{}tools = [\"edit_file\", \"apply_patch\"]\n",
+            ADDRESS
+                .replace("PERSON", "")
+                .replace("model = \"x\"", "model = \"gpt-5.5\"")
+        );
+        assert!(Config::parse(&both).and_then(Config::into_settings).is_ok());
     }
 
     #[test]

@@ -338,6 +338,14 @@ cat -- "$1""#;
 /// mode and a new one is not executable (the runner's umask is 022).
 const WRITE: &str = r#"mkdir -p -- "$(dirname -- "$1")" && cat > "$1""#;
 
+/// Removes `$1`, a file or a link, never what a link points to.
+const REMOVE: &str = r#"rm -f -- "$1""#;
+
+/// Moves `$1` to `$2`, making its directories and never replacing a path
+/// that is there; the file keeps its mode.
+const RENAME: &str = r#"if [ -e "$2" ] || [ -L "$2" ]; then exit 4; fi
+mkdir -p -- "$(dirname -- "$2")" && mv -- "$1" "$2""#;
+
 /// The regular files under `$1`, NUL-separated, links not followed and any
 /// `.git` directory left out.
 const LIST: &str = r#"find -P "$1" \( -iname .git -prune \) -o \( -type f -print0 \)"#;
@@ -613,6 +621,54 @@ impl Workspace for RemoteWorkspace {
         self.script(WRITE, &[&target], content)
             .await?
             .ok(&format!("writing {path}"))
+            .map(|_| ())
+    }
+
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let resolved = self.resolve(path).await?;
+        if !resolved.link {
+            match resolved.kind.as_str() {
+                "missing" => return Err(WorkspaceError::NotFound(path.to_string())),
+                "dir" => return Err(WorkspaceError::Refused(format!("{path} is a directory"))),
+                _ => {}
+            }
+        }
+        if !self.resolve_real_dir(&resolved.ancestor, path).await? {
+            return Err(WorkspaceError::Refused(format!(
+                "{path} is under a file, not a directory"
+            )));
+        }
+        let target = format!("{}/{}", self.work, path.as_str());
+        self.script(REMOVE, &[&target], &[])
+            .await?
+            .ok(&format!("removing {path}"))
+            .map(|_| ())
+    }
+
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let (source, real) = self.existing(from).await?;
+        if source.link {
+            return Err(WorkspaceError::Refused(format!(
+                "{from} is a symbolic link; edit what it points to"
+            )));
+        }
+        if source.kind == "dir" {
+            return Err(WorkspaceError::Refused(format!("{from} is a directory")));
+        }
+        let target = self.resolve(to).await?;
+        if target.kind != "missing" || target.link {
+            return Err(WorkspaceError::Refused(format!("{to} already exists")));
+        }
+        self.inside(&target.ancestor, to)?;
+        if !self.resolve_real_dir(&target.ancestor, to).await? {
+            return Err(WorkspaceError::Refused(format!(
+                "{to} is under a file, not a directory"
+            )));
+        }
+        let destination = format!("{}/{}", self.work, to.as_str());
+        self.script(RENAME, &[&real, &destination], &[])
+            .await?
+            .ok(&format!("moving {from} to {to}"))
             .map(|_| ())
     }
 

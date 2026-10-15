@@ -16,6 +16,7 @@ pub mod identity;
 pub mod ignore;
 pub mod mail;
 pub mod marker;
+pub mod patch;
 pub mod path;
 pub mod plan;
 pub mod plan_review;

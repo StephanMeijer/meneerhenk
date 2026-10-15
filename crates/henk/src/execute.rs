@@ -32,7 +32,7 @@ use tracing::{info, instrument};
 use crate::app::App;
 use crate::cancel::Cancelled;
 use crate::commit_tools::{RECENT_COMMITS, recent_commits_text};
-use crate::config::{ExecutionConfig, ExecutorConfig};
+use crate::config::{EditFormat, ExecutionConfig, ExecutorConfig, ModelFileConfig};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
 use crate::git::{Checkout, ScratchDir};
@@ -371,6 +371,12 @@ impl Work<'_> {
             // commands and [roles.executor] tools grant it.
             bash: profile.backend.runs_model_commands()
                 && Role::Executor.grants(&self.executor.tools(), "bash"),
+            edit_format: self
+                .app
+                .settings
+                .models
+                .get(&self.executor.model)
+                .map_or(EditFormat::Replace, ModelFileConfig::edit_format),
             state: Mutex::new(EditState::default()),
         });
         let proposed: Proposed = Arc::default();
@@ -530,6 +536,7 @@ impl Work<'_> {
                     ("repo", &repo),
                     ("branch", branch),
                     ("max_files", &self.executor.max_changed_files.to_string()),
+                    ("edit_tool", editing.edit_format.tool()),
                     ("recent_commits", &recent_commits_text(recent)),
                 ],
             )
@@ -744,8 +751,13 @@ requester_id = 3
 
     /// An app whose executor follows `script`, on a fresh remote `name`.
     async fn fixture(name: &str, script: Vec<Completion>) -> Fixture {
+        fixture_on(CONFIG, name, script).await
+    }
+
+    /// As [`fixture`], with `config` in place of [`CONFIG`].
+    async fn fixture_on(config: &str, name: &str, script: Vec<Completion>) -> Fixture {
         let (remote, _) = bare_remote(name).await;
-        let settings = Config::parse(CONFIG)
+        let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         let provider = FakeProvider::default();
@@ -1024,6 +1036,32 @@ requester_id = 3
         );
         let system = f.model.requests()[0].system.clone().unwrap_or_default();
         assert!(system.contains("as data:\n\n- Seed"), "{system}");
+    }
+
+    #[tokio::test]
+    async fn a_gpt_executor_edits_with_apply_patch() {
+        let config = CONFIG.replace("model = \"scripted\"", "model = \"gpt-5.5\"");
+        let patch = "*** Begin Patch\n*** Add File: src/csv.rs\n+pub fn export() {}\n*** End Patch";
+        let script = vec![
+            call("apply_patch", json!({ "patch": patch })),
+            propose(),
+            done(),
+        ];
+        let f = fixture_on(&config, "henk-exec-patch", script).await;
+        run_execute(&f.app, request("r-exec-patch"), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(f.hub.opened.lock().unwrap().len(), 1, "the pull request");
+        let first = &f.model.requests()[0];
+        let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(tools.contains(&"apply_patch"), "{tools:?}");
+        assert!(!tools.contains(&"edit_file"), "{tools:?}");
+        let system = first.system.clone().unwrap_or_default();
+        assert!(
+            system.contains("`apply_patch` and `write_file`"),
+            "{system}"
+        );
+        assert!(!system.contains("`edit_file`"), "{system}");
     }
 
     #[tokio::test]

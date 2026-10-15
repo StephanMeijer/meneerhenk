@@ -40,8 +40,9 @@ Henk), and reads the pull request's CI on the commit it reviews
 reviewer reads CI"). It hands each finding to the executor with `report_finding` and ends
 its round with `finish_round`; nothing is posted on the pull request. The
 executor reads them (`list_findings`), checks each against the code, fixes
-what holds with its edit tools (`edit_file`, `write_file`, and `bash` on a
-backend apart from Henk, where it also runs the repository's own checks)
+what holds with its edit tools (`edit_file` or `apply_patch`, `write_file`,
+and `bash` on a backend apart from Henk, where it also runs the
+repository's own checks)
 and gives each its verdict with `give_verdict`: fixed, rejected (it does
 not hold) or won't fix. Henk runs no checks of his own: he checks the
 changeset (see "Pushing a review's fixes") and pushes it to the pull
@@ -247,6 +248,23 @@ model, and an OpenAI-compatible server may not take the parameter at all,
 so set `effort` only where the endpoint supports it: an endpoint that
 refuses it fails the call with an error naming the model's `effort`, and
 leaving `effort` out sends nothing.
+
+`edit_format` says how a model edits files as the executor (#561):
+`replace` gives it `edit_file`, which replaces exact text that occurs
+once; `patch` gives it `apply_patch`, which takes the Codex patch format
+GPT-family models are trained on (`*** Begin Patch`, then `*** Add File:`,
+`*** Update File:` with an optional `*** Move to:`, or `*** Delete File:`,
+then `*** End Patch`) and adds, changes, moves and deletes several files at
+once. A patch is checked as a whole before anything is written: a change
+whose context is missing, or matches more than one place, is refused and
+nothing is written. If the workspace then refuses a write, the steps before
+it stay applied and the error says how many. Lines a patch leaves alone
+keep their `\r\n` or `\n`. Left
+out, a model whose name starts with `gpt` or `codex`, or is an o-series
+name such as `o3`, gets `patch`, and any other `replace`; `henk config
+check` shows which tool each model edits with. An executor's `tools` list
+that names `edit_file` but not `apply_patch` is refused for a model that
+edits with patches: add `apply_patch`, or set `edit_format = "replace"`.
 
 Skills give a role the team's own instructions for one kind of work,
 such as splitting a migration into steps. Each skill is a folder with a

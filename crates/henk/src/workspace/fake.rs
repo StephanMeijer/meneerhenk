@@ -222,6 +222,25 @@ impl Workspace for FakeWorkspace {
         Ok(())
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        self.files()?
+            .remove(path.as_str())
+            .map(|_| ())
+            .ok_or_else(|| WorkspaceError::NotFound(path.to_string()))
+    }
+
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let mut files = self.files()?;
+        if files.contains_key(to.as_str()) {
+            return Err(WorkspaceError::Refused(format!("{to} already exists")));
+        }
+        let file = files
+            .remove(from.as_str())
+            .ok_or_else(|| WorkspaceError::NotFound(from.to_string()))?;
+        files.insert(to.as_str().to_owned(), file);
+        Ok(())
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,

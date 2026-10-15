@@ -10,12 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use henk_agent::{Tool, ToolOutput, ToolSet};
+use henk_domain::patch::{self, Operation, Patch};
 use henk_domain::path::WorkspacePath;
 use henk_llm::{ToolDef, ToolName};
 use serde_json::{Value, json};
 
 use crate::code_tools::{self, MAX_FILE_BYTES};
-use crate::workspace::Workspace;
+use crate::config::EditFormat;
+use crate::workspace::{Workspace, WorkspaceError};
 
 /// What the edit tools share.
 pub struct EditContext {
@@ -28,6 +30,8 @@ pub struct EditContext {
     /// Whether the model may run commands of its own (`bash`, #172): only
     /// on a backend apart from Henk, and when its role's tools grant it.
     pub bash: bool,
+    /// How the model edits: `edit_file` or `apply_patch` (#561).
+    pub edit_format: EditFormat,
     /// What the tools changed so far.
     pub state: Mutex<EditState>,
 }
@@ -40,17 +44,22 @@ pub struct EditState {
 }
 
 impl EditContext {
-    /// Refuses a write to a new file beyond the limit, or of more bytes
-    /// than a file may have. Nothing is recorded yet.
-    fn may_write(&self, path: &WorkspacePath, bytes: usize) -> Result<(), String> {
-        if u64::try_from(bytes).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
-            return Err(format!("{path} would be larger than 1 MB"));
-        }
+    /// Refuses changes that would take the files changed past the limit.
+    /// A file already changed is not counted again. Nothing is recorded.
+    fn may_change<'a>(
+        &self,
+        paths: impl IntoIterator<Item = &'a WorkspacePath>,
+    ) -> Result<(), String> {
         let state = self
             .state
             .lock()
             .map_err(|_| "edit state unavailable".to_owned())?;
-        if !state.written.contains(path.as_str()) && state.written.len() >= self.max_changed_files {
+        let new: BTreeSet<&str> = paths
+            .into_iter()
+            .map(WorkspacePath::as_str)
+            .filter(|path| !state.written.contains(*path))
+            .collect();
+        if state.written.len() + new.len() > self.max_changed_files {
             return Err(format!(
                 "At most {} files per run; that limit is reached.",
                 self.max_changed_files
@@ -59,19 +68,74 @@ impl EditContext {
         Ok(())
     }
 
-    /// Writes `content` to `path` within the limits and records it.
-    async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), String> {
-        self.may_write(path, content.len())?;
-        self.workspace
-            .write(path, content)
-            .await
-            .map_err(|e| format!("cannot write {path}: {e}"))?;
+    /// Refuses a write of more bytes than a file may have.
+    fn may_hold(path: &WorkspacePath, bytes: usize) -> Result<(), String> {
+        if u64::try_from(bytes).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
+            return Err(format!("{path} would be larger than 1 MB"));
+        }
+        Ok(())
+    }
+
+    fn record(&self, path: &WorkspacePath) -> Result<(), String> {
         self.state
             .lock()
             .map_err(|_| "edit state unavailable".to_owned())?
             .written
             .insert(path.as_str().to_owned());
         Ok(())
+    }
+
+    /// Writes `content` to `path` within the limits and records it.
+    async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), String> {
+        Self::may_hold(path, content.len())?;
+        self.may_change([path])?;
+        self.workspace
+            .write(path, content)
+            .await
+            .map_err(|e| format!("cannot write {path}: {e}"))?;
+        self.record(path)
+    }
+
+    /// Removes `path` within the limits and records it.
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), String> {
+        self.may_change([path])?;
+        self.workspace
+            .remove(path)
+            .await
+            .map_err(|e| format!("cannot delete {path}: {e}"))?;
+        self.record(path)
+    }
+
+    /// Moves `from` to `to` within the limits and records both. The file
+    /// keeps its mode.
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), String> {
+        self.may_change([from, to])?;
+        self.workspace
+            .rename(from, to)
+            .await
+            .map_err(|e| format!("cannot move {from} to {to}: {e}"))?;
+        self.record(from)?;
+        self.record(to)
+    }
+
+    /// Whether `path` is a file; an error for anything that cannot be one
+    /// to add or move to, such as a directory.
+    async fn exists(&self, path: &WorkspacePath) -> Result<bool, String> {
+        match self.workspace.read(path, MAX_FILE_BYTES).await {
+            Ok(_) => Ok(true),
+            Err(WorkspaceError::NotFound(_)) => Ok(false),
+            Err(error) => Err(format!("cannot use {path}: {error}")),
+        }
+    }
+
+    /// The text of an existing file.
+    async fn text(&self, path: &WorkspacePath) -> Result<String, String> {
+        let bytes = self
+            .workspace
+            .read(path, MAX_FILE_BYTES)
+            .await
+            .map_err(|error| format!("cannot read {path}: {error}"))?;
+        String::from_utf8(bytes).map_err(|_| format!("{path} is not a text file"))
     }
 }
 
@@ -96,6 +160,7 @@ macro_rules! edit_tool {
 
 edit_tool!(EditFile);
 edit_tool!(WriteFile);
+edit_tool!(ApplyPatch);
 
 #[async_trait::async_trait]
 impl Tool for EditFile {
@@ -181,6 +246,118 @@ impl Tool for WriteFile {
     }
 }
 
+/// One step of an applied patch, worked out before anything is written.
+enum Step {
+    Write(WorkspacePath, String),
+    Remove(WorkspacePath),
+    /// A move that keeps the file's mode; the new text is written after it.
+    Move(WorkspacePath, WorkspacePath),
+}
+
+impl ApplyPatch {
+    /// Works out every step of `parsed` and what to say of it, reading the
+    /// files but changing none.
+    async fn plan(&self, parsed: &Patch) -> Result<(Vec<Step>, Vec<String>), String> {
+        let ctx = &self.0;
+        let mut steps = Vec::new();
+        let mut done = Vec::new();
+        for operation in &parsed.operations {
+            match operation {
+                Operation::Add { path, content } => {
+                    if ctx.exists(path).await? {
+                        return Err(format!("{path} already exists; update it instead"));
+                    }
+                    steps.push(Step::Write(path.clone(), content.clone()));
+                    done.push(format!("added {path}"));
+                }
+                Operation::Delete { path } => {
+                    if !ctx.exists(path).await? {
+                        return Err(format!("{path} does not exist"));
+                    }
+                    steps.push(Step::Remove(path.clone()));
+                    done.push(format!("deleted {path}"));
+                }
+                Operation::Update {
+                    path,
+                    move_to,
+                    hunks,
+                } => {
+                    let text = ctx.text(path).await?;
+                    let new = patch::apply(path, &text, hunks).map_err(|e| e.to_string())?;
+                    if let Some(to) = move_to {
+                        if ctx.exists(to).await? {
+                            return Err(format!("{to} already exists; cannot move {path} there"));
+                        }
+                        steps.push(Step::Move(path.clone(), to.clone()));
+                        steps.push(Step::Write(to.clone(), new));
+                        done.push(format!("moved {path} to {to}"));
+                    } else {
+                        steps.push(Step::Write(path.clone(), new));
+                        done.push(format!("updated {path}"));
+                    }
+                }
+            }
+        }
+        for step in &steps {
+            if let Step::Write(path, content) = step {
+                EditContext::may_hold(path, content.len())?;
+            }
+        }
+        ctx.may_change(steps.iter().flat_map(|step| match step {
+            Step::Write(path, _) | Step::Remove(path) => vec![path],
+            Step::Move(from, to) => vec![from, to],
+        }))?;
+        Ok((steps, done))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ApplyPatch {
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: name("apply_patch"),
+            description: "Adds, updates, moves and deletes files with one patch. The patch is checked as a whole before anything is written; if a write then fails, the steps before it stay applied and the error says how many. The patch is:\n*** Begin Patch\n*** Add File: path\n+every line of the new file\n*** Update File: path\n*** Move to: new/path (optional)\n@@ a line just above the change (optional)\n context line\n-removed line\n+added line\n*** Delete File: path\n*** End Patch\nContext lines are copied exactly from the file, with about three around each change, enough that each change matches one place.".to_owned(),
+            input_schema: schema(&json!({"patch": {"type": "string"}}), &["patch"]),
+        }
+    }
+
+    async fn call(&self, args: Value) -> ToolOutput {
+        let Some(text) = arg_str(&args, "patch") else {
+            return ToolOutput::error("patch is required");
+        };
+        let parsed = match Patch::parse(text) {
+            Ok(parsed) => parsed,
+            Err(error) => return ToolOutput::error(format!("{error}; nothing was changed")),
+        };
+        let (steps, done) = match self.plan(&parsed).await {
+            Ok(planned) => planned,
+            Err(error) => return ToolOutput::error(format!("{error}; nothing was changed")),
+        };
+        for (index, step) in steps.iter().enumerate() {
+            let result = match step {
+                Step::Write(path, content) => self.0.write(path, content.as_bytes()).await,
+                Step::Remove(path) => self.0.remove(path).await,
+                Step::Move(from, to) => self.0.rename(from, to).await,
+            };
+            if let Err(error) = result {
+                return ToolOutput::error(format!(
+                    "{error}; {index} of {} steps were applied before it, so read the files before trying again",
+                    steps.len()
+                ));
+            }
+        }
+        let mut summary = done.join(", ");
+        if let Some(first) = summary.get(..1) {
+            summary = format!(
+                "{}{}.",
+                first.to_uppercase(),
+                summary.get(1..).unwrap_or_default()
+            );
+        }
+        ToolOutput::ok(summary)
+    }
+}
+
 /// The tools to read and change the code, and to run the repository's
 /// checks where commands may run: what the executor works with (#284).
 #[must_use]
@@ -195,8 +372,11 @@ pub fn edit_tools(ctx: &Arc<EditContext>) -> ToolSet {
             code_tools::BashUse::Executor,
         );
     }
-    set.add(EditFile(Arc::clone(ctx)))
-        .add(WriteFile(Arc::clone(ctx)));
+    match ctx.edit_format {
+        EditFormat::Replace => set.add(EditFile(Arc::clone(ctx))),
+        EditFormat::Patch => set.add(ApplyPatch(Arc::clone(ctx))),
+    };
+    set.add(WriteFile(Arc::clone(ctx)));
     set
 }
 
@@ -242,6 +422,7 @@ pub(crate) mod tests {
             command_timeout: Duration::from_secs(5),
             max_changed_files: 2,
             bash: false,
+            edit_format: EditFormat::Replace,
             state: Mutex::default(),
         });
         (provider, ctx)
@@ -333,6 +514,308 @@ pub(crate) mod tests {
         assert!(third.is_error);
     }
 
+    /// The tools of `ctx`'s workspace, editing with patches, with room
+    /// for `files` changed files; `docs/old.md` and `notes.txt` are there
+    /// too.
+    async fn patching(ctx: &Arc<EditContext>, files: usize) -> Arc<EditContext> {
+        for (path, text) in [("docs/old.md", "old\n"), ("notes.txt", "keep\n")] {
+            ctx.workspace
+                .write(&WorkspacePath::parse(path).unwrap(), text.as_bytes())
+                .await
+                .unwrap();
+        }
+        ctx.workspace.baseline().await.unwrap();
+        Arc::new(EditContext {
+            workspace: Arc::clone(&ctx.workspace),
+            command_timeout: ctx.command_timeout,
+            max_changed_files: files,
+            bash: false,
+            edit_format: EditFormat::Patch,
+            state: Mutex::default(),
+        })
+    }
+
+    const PATCH: &str = "*** Begin Patch
+*** Add File: docs/new.md
++# New
+*** Update File: src/a.rs
+*** Move to: src/main.rs
+@@ fn main() {
+     let x = 1;
+-    let x = 1;
++    let y = 2;
+*** Delete File: docs/old.md
+*** End Patch";
+
+    #[tokio::test]
+    async fn one_patch_adds_updates_moves_and_deletes() {
+        let (_provider, plain) = workspace("henk-tools-patch").await;
+        let ctx = patching(&plain, 10).await;
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": PATCH}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(
+            out.content,
+            "Added docs/new.md, moved src/a.rs to src/main.rs, deleted docs/old.md."
+        );
+        assert_eq!(content(&ctx, "docs/new.md").await, "# New\n");
+        assert_eq!(
+            content(&ctx, "src/main.rs").await,
+            "fn main() {\n    let x = 1;\n    let y = 2;\n}\n"
+        );
+        let mut changes: Vec<(String, bool)> = ctx
+            .workspace
+            .export()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.raw.path, c.raw.deleted))
+            .collect();
+        changes.sort();
+        assert_eq!(
+            changes,
+            [
+                ("docs/new.md".to_owned(), false),
+                ("docs/old.md".to_owned(), true),
+                ("src/a.rs".to_owned(), true),
+                ("src/main.rs".to_owned(), false),
+            ]
+        );
+        assert_eq!(ctx.state.lock().unwrap().written.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_moved_executable_stays_executable() {
+        let dir = crate::workspace::contract::source("henk-tools-patch-mode");
+        let provider = FakeProvider::default();
+        let workspace = provider
+            .open(dir.path(), &Profile::default())
+            .await
+            .unwrap();
+        let ctx = Arc::new(EditContext {
+            workspace,
+            command_timeout: Duration::from_secs(5),
+            max_changed_files: 10,
+            bash: false,
+            edit_format: EditFormat::Patch,
+            state: Mutex::default(),
+        });
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": "*** Begin Patch\n*** Update File: run.sh\n*** Move to: bin/run.sh\n-echo run\n+echo moved\n*** End Patch"}))
+            .await;
+        assert!(!out.is_error, "{out:?}");
+        assert_eq!(out.content, "Moved run.sh to bin/run.sh.");
+        assert_eq!(content(&ctx, "bin/run.sh").await, "#!/bin/sh\necho moved\n");
+        let mut changes: Vec<_> = ctx
+            .workspace
+            .export()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.raw.path, c.raw.mode, c.raw.deleted))
+            .collect();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            changes,
+            [
+                (
+                    "bin/run.sh".to_owned(),
+                    henk_domain::workspace::FileMode::Executable,
+                    false
+                ),
+                (
+                    "run.sh".to_owned(),
+                    henk_domain::workspace::FileMode::Executable,
+                    true
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_patch_changes_nothing() {
+        let (_provider, plain) = workspace("henk-tools-patch-refused").await;
+        let ctx = patching(&plain, 10).await;
+        let bad_hunk = PATCH.replace("-    let x = 1;\n", "-    let z = 1;\n");
+        for (patch, why) in [
+            (bad_hunk.as_str(), "context is not in the file"),
+            (
+                "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch",
+                "already exists",
+            ),
+            (
+                "*** Begin Patch\n*** Delete File: gone.txt\n*** End Patch",
+                "does not exist",
+            ),
+            (
+                "*** Begin Patch\n*** Add File: ../out.txt\n+x\n*** End Patch",
+                "leaves the repository",
+            ),
+            ("not a patch", "*** Begin Patch"),
+        ] {
+            let out = ApplyPatch(Arc::clone(&ctx))
+                .call(json!({ "patch": patch }))
+                .await;
+            assert!(out.is_error, "{patch}");
+            assert!(out.content.contains(why), "{}", out.content);
+            assert!(
+                out.content.contains("nothing was changed"),
+                "{}",
+                out.content
+            );
+        }
+        assert!(ctx.workspace.export().await.unwrap().is_empty());
+        assert!(ctx.state.lock().unwrap().written.is_empty());
+    }
+
+    /// A workspace that refuses to write one path, as a backend can refuse
+    /// what the planning cannot see; the rest is the fake's.
+    struct RefusesWrite {
+        inner: Arc<dyn Workspace>,
+        path: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Workspace for RefusesWrite {
+        async fn exec(
+            &self,
+            argv: &[String],
+            cwd: &WorkspacePath,
+            timeout: Duration,
+        ) -> Result<crate::workspace::ExecResult, WorkspaceError> {
+            self.inner.exec(argv, cwd, timeout).await
+        }
+
+        async fn read(
+            &self,
+            path: &WorkspacePath,
+            max_bytes: u64,
+        ) -> Result<Vec<u8>, WorkspaceError> {
+            self.inner.read(path, max_bytes).await
+        }
+
+        async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
+            if path.as_str() == self.path {
+                return Err(WorkspaceError::Refused(format!(
+                    "{path} is a symbolic link; edit what it points to"
+                )));
+            }
+            self.inner.write(path, content).await
+        }
+
+        async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+            self.inner.remove(path).await
+        }
+
+        async fn rename(
+            &self,
+            from: &WorkspacePath,
+            to: &WorkspacePath,
+        ) -> Result<(), WorkspaceError> {
+            self.inner.rename(from, to).await
+        }
+
+        async fn list(
+            &self,
+            dir: &WorkspacePath,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            cap: usize,
+        ) -> Result<Vec<String>, WorkspaceError> {
+            self.inner.list(dir, only, cap).await
+        }
+
+        async fn search(
+            &self,
+            dir: &WorkspacePath,
+            pattern: &crate::workspace::Pattern,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            context: usize,
+            max_file_bytes: u64,
+            cap: usize,
+        ) -> Result<Vec<crate::workspace::Hit>, WorkspaceError> {
+            self.inner
+                .search(dir, pattern, only, context, max_file_bytes, cap)
+                .await
+        }
+
+        async fn export(&self) -> Result<Vec<crate::workspace::Exported>, WorkspaceError> {
+            self.inner.export().await
+        }
+
+        async fn baseline(&self) -> Result<(), WorkspaceError> {
+            self.inner.baseline().await
+        }
+
+        async fn close(&self) {
+            self.inner.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_fails_reports_the_steps_already_applied() {
+        let (_provider, plain) = workspace("henk-tools-patch-partial").await;
+        let patched = patching(&plain, 10).await;
+        let ctx = Arc::new(EditContext {
+            workspace: Arc::new(RefusesWrite {
+                inner: Arc::clone(&patched.workspace),
+                path: "src/a.rs",
+            }),
+            command_timeout: patched.command_timeout,
+            max_changed_files: 10,
+            bash: false,
+            edit_format: EditFormat::Patch,
+            state: Mutex::default(),
+        });
+        // The planning reads the tree and finds nothing wrong; the third
+        // step is the one the workspace refuses.
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": "*** Begin Patch\n*** Add File: docs/new.md\n+x\n*** Delete File: notes.txt\n*** Update File: src/a.rs\n-fn main() {\n+fn run() {\n*** End Patch"}))
+            .await;
+        assert!(out.is_error, "{out:?}");
+        assert!(
+            out.content.contains("2 of 3 steps were applied"),
+            "{}",
+            out.content
+        );
+        assert_eq!(content(&ctx, "docs/new.md").await, "x\n");
+        assert!(
+            ctx.workspace
+                .read(&WorkspacePath::parse("notes.txt").unwrap(), 10)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn moves_and_deletes_count_against_the_file_limit() {
+        let (_provider, plain) = workspace("henk-tools-patch-limit").await;
+        let ctx = patching(&plain, 3).await;
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": PATCH}))
+            .await;
+        assert!(out.content.contains("At most 3 files"), "{}", out.content);
+        assert!(ctx.workspace.export().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_edit_format_picks_the_edit_tool() {
+        let (_provider, plain) = workspace("henk-tools-format").await;
+        let names = |ctx: &Arc<EditContext>| {
+            edit_tools(ctx)
+                .names()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let replace = names(&plain);
+        assert!(replace.iter().any(|n| n == "edit_file"), "{replace:?}");
+        assert!(!replace.iter().any(|n| n == "apply_patch"), "{replace:?}");
+        let patch = names(&patching(&plain, 2).await);
+        assert!(patch.iter().any(|n| n == "apply_patch"), "{patch:?}");
+        assert!(!patch.iter().any(|n| n == "edit_file"), "{patch:?}");
+        assert!(patch.iter().any(|n| n == "write_file"), "{patch:?}");
+    }
+
     #[tokio::test]
     async fn the_checks_are_the_executor_s_own_with_bash_and_henk_has_none() {
         let (_provider, ctx) = workspace("henk-tools-checks").await;
@@ -350,6 +833,7 @@ pub(crate) mod tests {
             command_timeout: ctx.command_timeout,
             max_changed_files: ctx.max_changed_files,
             bash: true,
+            edit_format: ctx.edit_format,
             state: Mutex::default(),
         });
         let with = names(&with_bash);

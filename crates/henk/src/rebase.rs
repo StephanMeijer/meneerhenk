@@ -32,7 +32,7 @@ use tracing::{info, instrument};
 
 use crate::app::App;
 use crate::cancel::Cancelled;
-use crate::config::ExecutorConfig;
+use crate::config::{EditFormat, ExecutorConfig, ModelFileConfig};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::git::{Checkout, RebaseStep, ScratchDir};
 use crate::ids::new_run_id;
@@ -448,6 +448,11 @@ impl Work<'_> {
             max_changed_files: files.len(),
             // Resolving a conflict needs no commands of its own.
             bash: false,
+            edit_format: app
+                .settings
+                .models
+                .get(&self.executor.model)
+                .map_or(EditFormat::Replace, ModelFileConfig::edit_format),
             state: Mutex::new(EditState::default()),
         });
         let spec = self.session(&editing, base, commit, files);
@@ -498,7 +503,7 @@ impl Work<'_> {
                     ("base", base),
                     ("commit", commit),
                     ("files", &listed.join("\n")),
-                    ("edit_tool", "edit_file"),
+                    ("edit_tool", editing.edit_format.tool()),
                 ],
             )
         );
@@ -675,23 +680,35 @@ requester_id = 3
         app: App,
         writer: Arc<FakeWriter>,
         remote: ScratchDir,
+        model: Arc<ScriptedClient>,
     }
 
     /// An app whose executor follows `script`, for a pull request on a
     /// fresh remote `name` (see [`diverged_remote`]), under `extra` config.
     async fn fixture(
         name: &str,
+        flags: (bool, bool),
+        extra: &str,
+        script: Vec<Completion>,
+    ) -> Fixture {
+        fixture_on(CONFIG, name, flags, extra, script).await
+    }
+
+    /// [`fixture`] on a configuration of its own.
+    async fn fixture_on(
+        config: &str,
+        name: &str,
         (clash, fork): (bool, bool),
         extra: &str,
         script: Vec<Completion>,
     ) -> Fixture {
         let (remote, _) = diverged_remote(name, clash).await;
-        let settings = Config::parse(&format!("{CONFIG}{extra}"))
+        let settings = Config::parse(&format!("{config}{extra}"))
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
         let model = Arc::new(ScriptedClient::new("scripted", script.into_iter().map(Ok)));
         let mut models: BTreeMap<String, Arc<dyn ModelClient>> = BTreeMap::new();
-        models.insert("m".to_owned(), model as Arc<dyn ModelClient>);
+        models.insert("m".to_owned(), Arc::clone(&model) as Arc<dyn ModelClient>);
         let writer = Arc::new(FakeWriter::default());
         let hub = Arc::new(PullHub {
             remote: remote.path().to_path_buf(),
@@ -719,6 +736,7 @@ requester_id = 3
             app,
             writer,
             remote,
+            model,
         }
     }
 
@@ -850,6 +868,29 @@ requester_id = 3
             "{:?}",
             comments(&f)
         );
+    }
+
+    #[tokio::test]
+    async fn a_gpt_executor_is_given_apply_patch_to_resolve_a_conflict() {
+        let config = CONFIG.replace("model = \"scripted\"", "model = \"gpt-5.5\"");
+        let f = fixture_on(
+            &config,
+            "henk-rebase-patch",
+            (true, false),
+            "",
+            vec![done()],
+        )
+        .await;
+        run_rebase(&f.app, request("r-rebase-patch"), CancellationToken::new())
+            .await
+            .unwrap_err();
+        let first = &f.model.requests()[0];
+        let tools: Vec<&str> = first.tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(tools.contains(&"apply_patch"), "{tools:?}");
+        assert!(!tools.contains(&"edit_file"), "{tools:?}");
+        let system = first.system.clone().unwrap_or_default();
+        assert!(system.contains("`apply_patch` or `write_file`"), "{system}");
+        assert!(!system.contains("`edit_file`"), "{system}");
     }
 
     #[tokio::test]

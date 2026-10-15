@@ -248,6 +248,16 @@ impl Workspace for Traced {
         self.noted("write", result).await
     }
 
+    async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let result = self.inner.remove(path).await;
+        self.noted("remove", result).await
+    }
+
+    async fn rename(&self, from: &WorkspacePath, to: &WorkspacePath) -> Result<(), WorkspaceError> {
+        let result = self.inner.rename(from, to).await;
+        self.noted("rename", result).await
+    }
+
     async fn list(
         &self,
         dir: &WorkspacePath,
@@ -395,6 +405,12 @@ mod tests {
             ))
         }
         async fn write(&self, _: &WorkspacePath, _: &[u8]) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        async fn remove(&self, _: &WorkspacePath) -> Result<(), WorkspaceError> {
+            Ok(())
+        }
+        async fn rename(&self, _: &WorkspacePath, _: &WorkspacePath) -> Result<(), WorkspaceError> {
             Ok(())
         }
         async fn list(
