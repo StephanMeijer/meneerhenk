@@ -19,9 +19,9 @@ use crate::types::{
     RawRun, RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
     SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, event_id, kind_str, merge_days, now,
-    platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
-    session_role, session_status, stage_dots, stage_records, to_i64, to_u64,
+    TranscriptSummary, attach_outcomes, child_records, draft_verdict, event_id, kind_str,
+    merge_days, now, platform_str, round_record, run_kind, run_platform, session_dots,
+    session_endings, session_role, session_status, stage_dots, stage_records, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -70,6 +70,7 @@ fn migrations() -> Migrations<'static> {
             "../migrations/sqlite/018_reasoning_tokens.sql"
         )),
         M::up(include_str!("../migrations/sqlite/019_tool_names.sql")),
+        M::up(include_str!("../migrations/sqlite/020_run_children.sql")),
     ])
 }
 
@@ -350,6 +351,35 @@ impl RunStore for SqliteStore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             stage_records(rows)
+        })
+    }
+
+    async fn link_child(
+        &self,
+        parent: &RunId,
+        stage: Stage,
+        child: &RunId,
+    ) -> Result<(), StoreError> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO run_children (parent, stage, child) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (parent, stage) DO UPDATE SET child = excluded.child",
+                params![parent.as_str(), stage.as_str(), child.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
+        self.with(|c| {
+            let mut statement =
+                c.prepare("SELECT stage, child FROM run_children WHERE parent = ?1")?;
+            let rows = statement
+                .query_map(params![parent.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            child_records(rows)
         })
     }
 

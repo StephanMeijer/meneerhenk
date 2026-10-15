@@ -750,6 +750,15 @@ pub enum Stage {
     Queued,
     /// The run started, and a review its check.
     Started,
+    /// A ticket run's plan stage: the plan run it started, and how it ended
+    /// (#536).
+    Plan,
+    /// A ticket run's execute stage: the execute run and the pull request it
+    /// opened (#536).
+    Execute,
+    /// A ticket run's review stage: the review run of that pull request and
+    /// how it ended (#536).
+    Review,
     /// The diff was read.
     Diff,
     /// The review's workspaces were checked out.
@@ -789,6 +798,9 @@ impl Stage {
             Self::Requested => "requested",
             Self::Queued => "queued",
             Self::Started => "started",
+            Self::Plan => "plan",
+            Self::Execute => "execute",
+            Self::Review => "review",
             Self::Diff => "diff",
             Self::Checkout => "checkout",
             Self::Workspace => "workspace",
@@ -810,6 +822,9 @@ impl Stage {
             "requested" => Self::Requested,
             "queued" => Self::Queued,
             "started" => Self::Started,
+            "plan" => Self::Plan,
+            "execute" => Self::Execute,
+            "review" => Self::Review,
             "diff" => Self::Diff,
             "checkout" => Self::Checkout,
             "workspace" => Self::Workspace,
@@ -1128,6 +1143,30 @@ pub(crate) fn stage_records(
     Ok(records)
 }
 
+/// Stored `run_children` rows as the stage and the run each is, in the
+/// order the stages come.
+pub(crate) fn child_records(
+    rows: Vec<(String, String)>,
+) -> Result<Vec<(Stage, RunId)>, StoreError> {
+    let mut children = rows
+        .into_iter()
+        .map(|(stage, child)| {
+            Ok((
+                Stage::parse(&stage).ok_or(StoreError::Corrupt {
+                    column: "run_children.stage",
+                    value: stage,
+                })?,
+                RunId::parse(&child).map_err(|_| StoreError::Corrupt {
+                    column: "run_children.child",
+                    value: child,
+                })?,
+            ))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    children.sort_by_key(|(stage, _)| *stage);
+    Ok(children)
+}
+
 /// One recorded finding action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingRecord {
@@ -1435,6 +1474,7 @@ pub(crate) fn kind_str(kind: RunKind) -> &'static str {
         RunKind::Plan => "plan",
         RunKind::Execute => "execute",
         RunKind::Rebase => "rebase",
+        RunKind::Ticket => "ticket",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",
         RunKind::Address => "address",
@@ -1447,6 +1487,7 @@ fn kind_parse(value: &str) -> Option<RunKind> {
         "plan" => RunKind::Plan,
         "execute" => RunKind::Execute,
         "rebase" => RunKind::Rebase,
+        "ticket" => RunKind::Ticket,
         "discord_turn" => RunKind::DiscordTurn,
         "mail_reply" => RunKind::MailReply,
         "address" => RunKind::Address,

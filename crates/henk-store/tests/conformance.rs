@@ -79,6 +79,8 @@ macro_rules! for_each_scenario {
             a_superseded_run_names_the_run_that_replaced_it,
             sessions_that_timed_out_or_did_not_finish_say_so,
             stages_come_back_in_order_and_keep_when_they_started,
+            a_ticket_run_keeps_its_kind_and_its_stages_in_pipeline_order,
+            a_ticket_run_knows_the_runs_it_started,
             days_count_runs_findings_and_drafts,
             event_facets_are_the_sources_and_kinds_seen,
             sessions_and_stages_of_many_runs_come_in_one_read,
@@ -1378,6 +1380,114 @@ async fn sessions_that_timed_out_or_did_not_finish_say_so(store: &dyn RunStore) 
         ]
     );
     assert_eq!(lanes[2].error.as_deref(), Some("rate limited"));
+}
+
+/// #536: a ticket run reads back as one, and its plan, execute and review
+/// stages come back between `started` and `done`, whatever order they were
+/// written in.
+async fn a_ticket_run_keeps_its_kind_and_its_stages_in_pipeline_order(store: &dyn RunStore) {
+    let mut ticket = new_run("r-ticket");
+    ticket.kind = RunKind::Ticket;
+    ticket.commit = None;
+    store.create_run(&ticket).await.unwrap();
+    let run = id("r-ticket");
+    assert_eq!(
+        store.run(&run).await.unwrap().unwrap().kind,
+        RunKind::Ticket
+    );
+    for stage in [
+        Stage::Done,
+        Stage::Review,
+        Stage::Requested,
+        Stage::Plan,
+        Stage::Execute,
+        Stage::Started,
+    ] {
+        store
+            .stage(&run, &StageWrite::now(stage, StageState::Done, "x"))
+            .await
+            .unwrap();
+    }
+    let stages = store.stages(&run).await.unwrap();
+    assert_eq!(
+        stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+        [
+            Stage::Requested,
+            Stage::Started,
+            Stage::Plan,
+            Stage::Execute,
+            Stage::Review,
+            Stage::Done
+        ]
+    );
+    let found = store
+        .list_runs(
+            &RunFilter {
+                kind: Some(RunKind::Ticket),
+                ..RunFilter::default()
+            },
+            Page::new(10, 0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1, "the kind filter finds it");
+}
+
+/// #536: a ticket run links the runs it started, one per stage, whether or
+/// not the run exists yet, and reads them back in the order of the stages.
+async fn a_ticket_run_knows_the_runs_it_started(store: &dyn RunStore) {
+    let mut ticket = new_run("r-ticket");
+    ticket.kind = RunKind::Ticket;
+    store.create_run(&ticket).await.unwrap();
+    let parent = id("r-ticket");
+    assert!(store.children(&parent).await.unwrap().is_empty());
+
+    // Linked as they start, the review's run not stored yet.
+    store
+        .link_child(&parent, Stage::Review, &id("r-review"))
+        .await
+        .unwrap();
+    store
+        .link_child(&parent, Stage::Plan, &id("r-plan"))
+        .await
+        .unwrap();
+    store
+        .link_child(&parent, Stage::Execute, &id("r-execute"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.children(&parent).await.unwrap(),
+        [
+            (Stage::Plan, id("r-plan")),
+            (Stage::Execute, id("r-execute")),
+            (Stage::Review, id("r-review")),
+        ],
+        "in the order of the stages, not as linked"
+    );
+
+    // A stage linked again names the run that replaced it.
+    store
+        .link_child(&parent, Stage::Review, &id("r-review-2"))
+        .await
+        .unwrap();
+    let children = store.children(&parent).await.unwrap();
+    assert_eq!(children.len(), 3);
+    assert_eq!(children[2], (Stage::Review, id("r-review-2")));
+
+    // Another run's children are its own, and a run that is none has none.
+    let mut other = new_run("r-other");
+    other.kind = RunKind::Ticket;
+    store.create_run(&other).await.unwrap();
+    assert!(store.children(&id("r-other")).await.unwrap().is_empty());
+    assert!(store.children(&id("r-nobody")).await.unwrap().is_empty());
+
+    // A link needs its parent to be a run.
+    assert!(
+        store
+            .link_child(&id("r-nobody"), Stage::Plan, &id("r-plan"))
+            .await
+            .is_err()
+    );
 }
 
 async fn stages_come_back_in_order_and_keep_when_they_started(store: &dyn RunStore) {

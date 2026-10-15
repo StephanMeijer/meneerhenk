@@ -96,7 +96,8 @@ pub(crate) struct QueueMove {
 /// What `list_runs` takes. Every filter is optional.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ListRuns {
-    /// `review`, `plan`, `execute`, `rebase`, `address`, `discord_turn` or `mail_reply`.
+    /// `review`, `plan`, `execute`, `rebase`, `ticket`, `address`, `discord_turn` or
+    /// `mail_reply`.
     kind: Option<String>,
     /// `running`, `finished`, `failed`, `cancelled` or `superseded`.
     status: Option<String>,

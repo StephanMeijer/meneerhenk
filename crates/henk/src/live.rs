@@ -359,6 +359,20 @@ impl RunStore for Announcing {
         self.inner.stages(run).await
     }
 
+    async fn link_child(
+        &self,
+        parent: &RunId,
+        stage: Stage,
+        child: &RunId,
+    ) -> Result<(), StoreError> {
+        let _writing = self.feed.writing().await;
+        self.inner.link_child(parent, stage, child).await
+    }
+
+    async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
+        self.inner.children(parent).await
+    }
+
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
         self.inner.daily_stats(since).await
     }
@@ -816,6 +830,17 @@ mod tests {
         }
         async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
             self.inner.stages(run).await
+        }
+        async fn link_child(
+            &self,
+            parent: &RunId,
+            stage: Stage,
+            child: &RunId,
+        ) -> Result<(), StoreError> {
+            self.inner.link_child(parent, stage, child).await
+        }
+        async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
+            self.inner.children(parent).await
         }
         async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
             self.inner.daily_stats(since).await

@@ -128,6 +128,10 @@ pub enum RunKind {
     Execute,
     /// One pull request rebased onto its base branch (§3.6, #579).
     Rebase,
+    /// One issue driven through a plan, an execute run and a review of the
+    /// pull request by one autonomous run (#536). The three are runs of
+    /// their own; this one owns them.
+    Ticket,
     /// One Discord turn (§5.2).
     DiscordTurn,
     /// One mail reply (§6).
@@ -141,7 +145,7 @@ impl RunKind {
     /// Whether the run's target is an issue rather than a pull request.
     #[must_use]
     pub fn is_about_an_issue(self) -> bool {
-        matches!(self, Self::Plan | Self::Execute)
+        matches!(self, Self::Plan | Self::Execute | Self::Ticket)
     }
 }
 
@@ -152,6 +156,7 @@ impl fmt::Display for RunKind {
             Self::Plan => "plan",
             Self::Execute => "execute",
             Self::Rebase => "rebase",
+            Self::Ticket => "ticket",
             Self::DiscordTurn => "discord turn",
             Self::MailReply => "mail reply",
             Self::Address => "address",
@@ -164,6 +169,18 @@ mod tests {
     #![allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// A ticket run is about an issue, as the plan and the execute run it
+    /// drives are; a review and a rebase are about a pull request.
+    #[test]
+    fn a_ticket_run_is_about_an_issue() {
+        assert!(RunKind::Ticket.is_about_an_issue());
+        assert!(RunKind::Plan.is_about_an_issue());
+        assert!(RunKind::Execute.is_about_an_issue());
+        assert!(!RunKind::Review.is_about_an_issue());
+        assert!(!RunKind::Rebase.is_about_an_issue());
+        assert_eq!(RunKind::Ticket.to_string(), "ticket");
+    }
 
     #[test]
     fn accepts_plain_ids() {
