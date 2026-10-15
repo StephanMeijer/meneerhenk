@@ -22,7 +22,7 @@ use tracing::{info, instrument, warn};
 use crate::app::App;
 use crate::cancel::Cancelled;
 use crate::ids::new_run_id;
-use crate::issue_runs::{IssueThread, OnIssue, open_issue};
+use crate::issue_runs::{Comments, IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
 use crate::plan_pairing::{IssueMaterial, Pairing, reviewer_workspace};
 use crate::plan_review_tools::{
@@ -51,6 +51,8 @@ pub struct PlanRequest {
     /// Who asked, for the run record, when not the configured Team Lead:
     /// `github:<id>` from the dashboard (#69).
     pub requester: Option<String>,
+    /// Who says on the issue how it ended when it did not end well.
+    pub comments: Comments,
 }
 
 impl PlanRequest {
@@ -143,6 +145,7 @@ pub async fn run_plan(
         thread: IssueThread {
             writer: &writer,
             target: &request.target,
+            comments: request.comments,
         },
         run: &run,
         link: &link,
@@ -189,7 +192,7 @@ async fn finish_plan(
 ) -> anyhow::Result<PlanReport> {
     let OnIssue {
         app,
-        thread: IssueThread { writer, target },
+        thread: IssueThread { writer, target, .. },
         run,
         link,
         ..
@@ -931,6 +934,7 @@ model = "r"
             trigger: "test".to_owned(),
             run: Some(RunId::parse(run).unwrap()),
             requester: None,
+            comments: Comments::Own,
         }
     }
 
@@ -1526,6 +1530,60 @@ model = "r"
             .unwrap()
             .unwrap();
         assert_eq!(record.status, RunStatus::Failed);
+    }
+
+    /// #536: a plan its caller drives ends in the store with its reason, and
+    /// the caller can read the reason; the issue hears nothing from it.
+    #[tokio::test]
+    async fn a_quiet_plan_that_fails_ends_in_the_store_without_a_word_on_the_issue() {
+        let f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs."),
+            vec![done()],
+        )
+        .await;
+        let quiet = PlanRequest {
+            comments: Comments::Caller,
+            ..request("r-plan-quiet")
+        };
+        let error = run_plan(&f.app, quiet, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let failed = error
+            .downcast_ref::<crate::issue_runs::RunFailed>()
+            .expect("the failure is typed");
+        assert_eq!(failed.what, "planning");
+        assert_eq!(failed.reason, "the model ended without writing a plan");
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        let record = f
+            .app
+            .store
+            .run(&RunId::parse("r-plan-quiet").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(record.error.as_deref(), Some(failed.reason.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_quiet_plan_cancelled_by_a_person_ends_cancelled_without_a_word() {
+        let f = fixture(
+            FakeIssueWriter::new(Platform::GitHub, None, "Export runs."),
+            vec![done()],
+        )
+        .await;
+        let run = RunId::parse("r-plan-quiet-9").unwrap();
+        let cancel = CancellationToken::new();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        assert!(f.app.cancels.cancel(&run, "github:1234".to_owned()));
+        let quiet = PlanRequest {
+            comments: Comments::Caller,
+            ..request("r-plan-quiet-9")
+        };
+        run_plan(&f.app, quiet, cancel).await.unwrap_err();
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        let record = f.app.store.run(&run).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Cancelled);
     }
 
     #[tokio::test]
