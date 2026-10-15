@@ -52,7 +52,7 @@ impl NameMap {
         while self.reverse.contains_key(&candidate) {
             let tail = format!("_{suffix}");
             let mut head = base.clone();
-            truncate_to(&mut head, MAX_LEN.saturating_sub(tail.len()));
+            head.truncate(MAX_LEN.saturating_sub(tail.len()));
             candidate = format!("{head}{tail}");
             suffix += 1;
         }
@@ -106,14 +106,8 @@ pub fn sanitize(name: &str) -> String {
     if out.is_empty() {
         out.push_str("tool");
     }
-    truncate_to(&mut out, MAX_LEN);
+    out.truncate(MAX_LEN);
     out
-}
-
-fn truncate_to(s: &mut String, max: usize) {
-    if s.len() > max {
-        s.truncate(max);
-    }
 }
 
 #[cfg(test)]
