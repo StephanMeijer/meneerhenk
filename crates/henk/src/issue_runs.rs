@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::app::App;
 use crate::cancel::is_cancelled;
-use crate::review::Interrupted;
+use crate::review::{CancelledBy, Interrupted};
 use crate::stages;
 
 /// Issue `target`, when it is one Henk works on: open, and not a pull
@@ -160,8 +160,9 @@ impl<T: Thread> OnRun<'_, T> {
     }
 
     /// A person cancelled the run (#69): one comment saying who, no failure,
-    /// and the run ends `cancelled`.
-    async fn cancelled(&self, by: &str) -> anyhow::Error {
+    /// and the run ends `cancelled`. The error is [`CancelledBy`], with the
+    /// same words as before.
+    pub(crate) async fn cancelled(&self, by: &str) -> anyhow::Error {
         let reason = crate::cancel::cancelled_reason(by);
         info!(run = %self.run, by, "{} {reason}", self.what);
         let body = self
@@ -179,12 +180,12 @@ impl<T: Thread> OnRun<'_, T> {
         {
             return store_error.into();
         }
-        anyhow!(reason)
+        CancelledBy(by.to_owned()).into()
     }
 
     /// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
     /// posted; the run ends with the reason (#7).
-    async fn interrupted(&self) -> anyhow::Error {
+    pub(crate) async fn interrupted(&self) -> anyhow::Error {
         warn!(run = %self.run, "{} interrupted", self.what);
         let store = &*self.app.store;
         stages::end(

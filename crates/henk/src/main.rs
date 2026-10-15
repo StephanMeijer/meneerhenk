@@ -51,6 +51,7 @@ mod skill_tools;
 mod skills;
 mod slot_queue;
 mod stages;
+mod ticket;
 mod urls;
 mod web_fetch;
 mod workspace;
@@ -120,6 +121,16 @@ enum Command {
         /// Issue URL, such as <https://github.com/owner/repo/issues/9>
         url: String,
         /// A note for the executor, as a colleague would give in conversation.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Take one issue through a plan, an execute run and a review now, with
+    /// nobody starting each step (#536). Needs `[autonomous]`.
+    Ticket {
+        /// Issue URL, such as <https://github.com/owner/repo/issues/9>
+        url: String,
+        /// A note for the planner and the executor, as a colleague would
+        /// give in conversation.
         #[arg(long)]
         note: Option<String>,
     },
@@ -311,6 +322,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Review { urls, commit } => cmd_review(&cli.config, &urls, commit).await,
         Command::Plan { url, note } => cmd_plan(&cli.config, &url, note).await,
         Command::Execute { url, note } => cmd_execute(&cli.config, &url, note).await,
+        Command::Ticket { url, note } => cmd_ticket(&cli.config, &url, note).await,
         Command::Llm {
             command: LlmCommand::Probe { model, prompt },
         } => cmd_llm_probe(&cli.config, &model, prompt).await,
@@ -529,6 +541,44 @@ async fn cmd_execute(config: &Path, url: &str, note: Option<String>) -> anyhow::
         println!("{summary}");
     }
     Ok(())
+}
+
+async fn cmd_ticket(config: &Path, url: &str, note: Option<String>) -> anyhow::Result<()> {
+    let settings = load_settings(config)?;
+    let target = parse_issue_url(url, &urls::Hosts::from_settings(&settings))?;
+    let limits = ticket::Limits::from_settings(&settings)?;
+    let app = App::build(settings, None).await?;
+    liveness::reap_orphans(&app).await;
+    interrupt_on_ctrl_c(app.shutdown.clone());
+    let app = Arc::new(app);
+    let stages = ticket::Live::new(Arc::new(coordinator::Coordinator::new(Arc::clone(&app))));
+    let report = ticket::run_ticket(
+        &app,
+        &stages,
+        ticket::TicketRequest {
+            target,
+            note,
+            trigger: "cli".to_owned(),
+            run: None,
+            requester: None,
+        },
+        app.shutdown.child_token(),
+        limits,
+    )
+    .await?;
+    println!("run {}", report.run);
+    if let Some(pull) = &report.pull {
+        println!("pull request #{}: {}", pull.target.number, pull.url);
+    }
+    println!("{}", report.ending);
+    if report.ending.is_well() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "the autonomous run did not finish: {}",
+            report.ending
+        ))
+    }
 }
 
 async fn cmd_llm_probe(config: &Path, model: &str, prompt: String) -> anyhow::Result<()> {

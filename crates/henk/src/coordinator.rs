@@ -615,10 +615,6 @@ impl Coordinator {
     /// waits on: the receiver is closed and the run id names that run. A
     /// closed receiver after `Start` means the coordinator refused or the
     /// run's task died, and nothing says how it ended.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ticket run waits on its review (#536)")
-    )]
     pub fn submit_review_awaited(
         &self,
         request: ReviewRequest,
