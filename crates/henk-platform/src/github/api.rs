@@ -8,6 +8,7 @@ use tracing::instrument;
 
 use henk_domain::allowlist::RepoRef;
 
+use crate::encode::percent_encode;
 use crate::error::{PlatformError, success_text, truncate};
 use crate::github::app::{GitHubAuth, Installations, Scope};
 use crate::retry::{RetryPolicy, with_retry};
@@ -37,10 +38,6 @@ const PAGE_SIZE: usize = 100;
 /// read to their end (#113); this cap only stops a runaway, and reaching it
 /// is [`PlatformError::TooMany`], never a quietly partial list.
 const MAX_PAGES: usize = 100;
-
-/// `value` as a query-string value: every byte but an unreserved one is
-/// percent-encoded, so `+`, `&`, `%`, `#` and a space survive the trip.
-pub(crate) use crate::encode::percent_encode as encode_query_value;
 
 /// A check run to create.
 #[derive(Debug, Clone, Copy)]
@@ -518,7 +515,7 @@ impl GitHubApi {
             .get(&format!(
                 "/repos/{owner}/{repo}/commits/{}/check-runs?check_name={}&filter=all&per_page=100",
                 run.head_sha,
-                encode_query_value(run.name)
+                percent_encode(run.name)
             ))
             .await?;
         Ok(found
@@ -599,13 +596,13 @@ fn decode(body: &str) -> Result<Value, PlatformError> {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_query_value;
+    use crate::encode::percent_encode;
 
     #[test]
     fn a_query_value_keeps_only_unreserved_bytes() {
-        assert_eq!(encode_query_value("feat/a+b&c"), "feat%2Fa%2Bb%26c");
-        assert_eq!(encode_query_value("100% a#b"), "100%25%20a%23b");
-        assert_eq!(encode_query_value("v1.2_x-y~z"), "v1.2_x-y~z");
-        assert_eq!(encode_query_value("é"), "%C3%A9");
+        assert_eq!(percent_encode("feat/a+b&c"), "feat%2Fa%2Bb%26c");
+        assert_eq!(percent_encode("100% a#b"), "100%25%20a%23b");
+        assert_eq!(percent_encode("v1.2_x-y~z"), "v1.2_x-y~z");
+        assert_eq!(percent_encode("é"), "%C3%A9");
     }
 }
