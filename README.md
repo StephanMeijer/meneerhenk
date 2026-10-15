@@ -232,9 +232,18 @@ Without `[review.loop]`
 reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
 `reviews` check. A configuration from before #309 that still has lanes or
-a fact-check is refused; see "Migrating from lanes" below. `effort` on an
-Anthropic model sets how much it thinks; it needs a `max_tokens` of 16384
-or so and a longer `timeout_secs`.
+a fact-check is refused; see "Migrating from lanes" below. `effort` sets how
+much a model thinks: `low`, `medium`, `high` or `xhigh`, and `max` on
+Anthropic only, or `none` and `minimal` on OpenAI only (#366). It needs a `max_tokens` of 16384
+or so and a longer `timeout_secs`. Anthropic gets it as
+`output_config.effort`; OpenAI as `reasoning_effort` (Chat Completions) or
+`reasoning.effort` (Responses), and `henk config check` and the
+dashboard's health page say which. A level the provider has no such value
+for is refused at load. Which levels an OpenAI model takes depends on the
+model, and an OpenAI-compatible server may not take the parameter at all,
+so set `effort` only where the endpoint supports it: an endpoint that
+refuses it fails the call with an error naming the model's `effort`, and
+leaving `effort` out sends nothing.
 
 Skills give a role the team's own instructions for one kind of work,
 such as splitting a migration into steps. Each skill is a folder with a

@@ -41,6 +41,21 @@ pub enum LlmError {
     /// The connection failed or timed out. Retried.
     #[error("transport error talking to the model endpoint")]
     Transport(#[source] reqwest::Error),
+    /// HTTP 400 naming the reasoning parameter, on a model with `effort`
+    /// set: the endpoint does not take that effort (#366). Not retried.
+    #[error(
+        "the model endpoint refused effort {effort:?} (sent as {param}); remove the model's `effort` or set one this model accepts ({status}): {body}"
+    )]
+    EffortRejected {
+        /// The effort as configured.
+        effort: &'static str,
+        /// The parameter it was sent as.
+        param: &'static str,
+        /// HTTP status.
+        status: u16,
+        /// Response body, truncated.
+        body: String,
+    },
     /// The endpoint answered 2xx with something we could not read.
     #[error("could not decode the model response: {0}")]
     Decode(String),
@@ -69,6 +84,7 @@ impl LlmError {
             }
             Self::Unauthorized { .. }
             | Self::BadRequest { .. }
+            | Self::EffortRejected { .. }
             | Self::Decode(_)
             | Self::RetriesExhausted { .. }
             | Self::InvalidConfig(_) => false,

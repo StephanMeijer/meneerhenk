@@ -27,6 +27,7 @@ pub mod types;
 
 pub use client::{
     Api, Effort, MaxTokensParam, ModelClient, ModelConfig, Provider, client_for, client_with,
+    effort_param,
 };
 pub use error::LlmError;
 pub use http::{RetryPolicy, build_endpoint_client, ensure_tls_provider};

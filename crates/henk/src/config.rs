@@ -547,8 +547,9 @@ pub struct ModelFileConfig {
     /// only).
     #[serde(default)]
     pub max_tokens_param: Option<MaxTokensParam>,
-    /// Thinking effort (Anthropic style only): `low`, `medium`, `high`,
-    /// `xhigh` or `max`. Left out, the model's own default applies.
+    /// Thinking effort: `low`, `medium`, `high` or `xhigh`, and `max` on
+    /// Anthropic only, or `none` and `minimal` on OpenAI only (#366). Left out, nothing is sent
+    /// and the model's own default applies.
     #[serde(default)]
     pub effort: Option<Effort>,
     /// Prompt caching (Anthropic style only): the system prompt and the end
@@ -2215,10 +2216,18 @@ fn validate_models(
                 ),
             ));
         }
-        if model.effort.is_some() && endpoint.provider != Provider::Anthropic {
+        if let Some(effort) = model.effort
+            && effort.wire(endpoint.provider).is_none()
+        {
             return Err(ConfigError::Model(
                 id.clone(),
-                "effort applies to provider \"anthropic\" only".to_owned(),
+                format!(
+                    "effort {:?} is not accepted by provider {:?} (endpoint {}); accepted: {}",
+                    effort.as_str(),
+                    endpoint.provider.as_str(),
+                    model.endpoint,
+                    Effort::accepted_list(endpoint.provider)
+                ),
             ));
         }
     }
@@ -2960,6 +2969,28 @@ impl Settings {
         );
     }
 
+    /// Model `id` in a line: its name, its endpoint and, when set, its
+    /// effort and the parameter it is sent as (#366), such as `gpt-5.6 on
+    /// openai, effort high (sent as reasoning_effort: high)`.
+    #[must_use]
+    pub fn describe_model(&self, id: &str) -> String {
+        let Some(model) = self.models.get(id) else {
+            return "not configured".to_owned();
+        };
+        let mut line = format!("{} on {}", model.model, model.endpoint);
+        if let Some(effort) = model.effort {
+            let _ = write!(line, ", effort {}", effort.as_str());
+            if let Some(endpoint) = self.endpoints.get(&model.endpoint)
+                && let Some(wire) = effort.wire(endpoint.provider)
+            {
+                let param =
+                    henk_llm::effort_param(endpoint.provider, endpoint.api.unwrap_or_default());
+                let _ = write!(line, " (sent as {param}: {wire})");
+            }
+        }
+        line
+    }
+
     /// The endpoints, then the models on them (#368), with what no role
     /// or model uses.
     fn describe_models(&self, out: &mut String) {
@@ -2986,12 +3017,8 @@ impl Settings {
             );
         }
         let _ = writeln!(out, "Models:");
-        for (id, model) in &self.models {
-            let effort = model
-                .effort
-                .map(|effort| format!(", effort {}", effort.as_str()))
-                .unwrap_or_default();
-            let _ = writeln!(out, "  {id}: {} on {}{effort}", model.model, model.endpoint);
+        for id in self.models.keys() {
+            let _ = writeln!(out, "  {id}: {}", self.describe_model(id));
         }
         let unused_models = self.unused_models();
         if !unused_models.is_empty() {
@@ -4809,13 +4836,13 @@ github_owners = ["docspec"]
     }
 
     #[test]
-    fn effort_is_for_anthropic_models_only() {
+    fn effort_is_taken_on_both_providers() {
         let model = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"m\"\nmodel = \"gpt\"\neffort = \"high\"\n";
         let text = format!("{MINIMAL}\n{model}");
-        assert!(matches!(
-            Config::parse(&text).and_then(Config::into_settings),
-            Err(ConfigError::Model(..))
-        ));
+        let settings = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap();
+        assert_eq!(settings.models.get("m").unwrap().effort, Some(Effort::High));
         let text = text.replace("openai", "anthropic");
         let settings = Config::parse(&text)
             .and_then(Config::into_settings)
@@ -4823,6 +4850,42 @@ github_owners = ["docspec"]
         assert_eq!(settings.models.get("m").unwrap().effort, Some(Effort::High));
         let bad = text.replace("\"high\"", "\"extreme\"");
         assert!(matches!(Config::parse(&bad), Err(ConfigError::Syntax(_))));
+    }
+
+    #[test]
+    fn an_openai_level_on_anthropic_is_refused_with_the_accepted_ones() {
+        let model = "[endpoints.a]\nprovider = \"anthropic\"\nbase_url = \"https://x\"\napi_key_env = \"K\"\n[models.m]\nendpoint = \"a\"\nmodel = \"claude\"\neffort = \"minimal\"\n";
+        let error = Config::parse(&format!("{MINIMAL}\n{model}"))
+            .and_then(Config::into_settings)
+            .unwrap_err();
+        let said = error.to_string();
+        assert!(matches!(error, ConfigError::Model(..)), "{said}");
+        assert!(
+            said.contains(
+                "effort \"minimal\" is not accepted by provider \"anthropic\" (endpoint a); accepted: low, medium, high, xhigh, max"
+            ),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn the_model_line_says_how_effort_is_sent() {
+        let chat = on_api("", "effort = \"minimal\"\n").unwrap();
+        assert_eq!(
+            chat.describe_model("m"),
+            "gpt on o, effort minimal (sent as reasoning_effort: minimal)"
+        );
+        let responses = on_api("api = \"responses\"\n", "effort = \"high\"\n").unwrap();
+        assert_eq!(
+            responses.describe_model("m"),
+            "gpt on o, effort high (sent as reasoning.effort: high)"
+        );
+        assert!(
+            responses
+                .describe()
+                .contains("  m: gpt on o, effort high (sent as reasoning.effort: high)\n")
+        );
+        assert_eq!(on_api("", "").unwrap().describe_model("m"), "gpt on o");
     }
 
     fn on_api(endpoint_extra: &str, model_extra: &str) -> Result<Settings, ConfigError> {

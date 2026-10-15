@@ -4,7 +4,7 @@ use secrecy::ExposeSecret as _;
 use serde_json::{Map, Value, json};
 use tracing::instrument;
 
-use crate::client::{ModelClient, ModelConfig};
+use crate::client::{ModelClient, ModelConfig, Provider};
 use crate::error::LlmError;
 use crate::http::{build_endpoint_client, post_json, prepared, with_retry};
 use crate::schema;
@@ -62,11 +62,15 @@ impl AnthropicClient {
                 body.insert("system".into(), json!(system));
             }
         }
-        if let Some(effort) = self.config.effort {
+        if let Some(effort) = self
+            .config
+            .effort
+            .and_then(|effort| effort.wire(Provider::Anthropic))
+        {
             // Thinking models reject sampling parameters, so temperature is
             // never sent alongside effort.
             body.insert("thinking".into(), json!({"type": "adaptive"}));
-            body.insert("output_config".into(), json!({"effort": effort.as_str()}));
+            body.insert("output_config".into(), json!({"effort": effort}));
         } else if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }

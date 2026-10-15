@@ -11,10 +11,10 @@ use secrecy::ExposeSecret as _;
 use serde_json::{Map, Value, json};
 use tracing::instrument;
 
-use crate::client::{ModelClient, ModelConfig};
+use crate::client::{ModelClient, ModelConfig, Provider};
 use crate::error::{LlmError, truncate_body};
 use crate::http::{build_endpoint_client, post_json, prepared, with_retry};
-use crate::openai::decode_usage;
+use crate::openai::{decode_usage, effort_rejected};
 use crate::schema;
 use crate::types::{
     Block, ChatMessage, Completion, CompletionRequest, Role, StopReason, ToolArguments, ToolCall,
@@ -63,7 +63,15 @@ impl ResponsesClient {
             "max_output_tokens".into(),
             json!(request.max_tokens.unwrap_or(self.config.max_tokens)),
         );
-        if let Some(temperature) = request.temperature {
+        if let Some(effort) = self
+            .config
+            .effort
+            .and_then(|effort| effort.wire(Provider::OpenAi))
+        {
+            // Reasoning models reject sampling parameters, so temperature
+            // is never sent alongside effort.
+            body.insert("reasoning".into(), json!({"effort": effort}));
+        } else if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
         body.insert("store".into(), json!(false));
@@ -336,5 +344,6 @@ impl ModelClient for ResponsesClient {
             decode(&response)
         })
         .await
+        .map_err(|error| effort_rejected(error, &self.config))
     }
 }

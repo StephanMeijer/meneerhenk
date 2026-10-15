@@ -703,10 +703,136 @@ fn anthropic_without_effort_sends_no_thinking_settings() {
 }
 
 #[test]
-fn effort_is_refused_on_openai_style_endpoints() {
+fn openai_sends_reasoning_effort_and_no_temperature() {
     let mut cfg = config(Provider::OpenAi, "https://x.test/v1");
+    cfg.effort = Some(Effort::High);
+    let client = openai::OpenAiClient::new(cfg).unwrap();
+    let request = CompletionRequest {
+        messages: vec![ChatMessage::user("a")],
+        temperature: Some(0.2),
+        ..Default::default()
+    };
+    let body = client.body(&request);
+    assert_eq!(body["reasoning_effort"], "high");
+    assert!(body.get("temperature").is_none());
+}
+
+#[test]
+fn openai_sends_its_own_levels_verbatim() {
+    let mut cfg = config(Provider::OpenAi, "https://x.test/v1");
+    cfg.effort = Some(Effort::Minimal);
+    let client = openai::OpenAiClient::new(cfg).unwrap();
+    let body = client.body(&CompletionRequest::default());
+    assert_eq!(body["reasoning_effort"], "minimal");
+}
+
+#[test]
+fn openai_without_effort_sends_no_reasoning_effort() {
+    let client = openai::OpenAiClient::new(config(Provider::OpenAi, "https://x.test/v1")).unwrap();
+    let request = CompletionRequest {
+        temperature: Some(0.2),
+        ..Default::default()
+    };
+    let body = client.body(&request);
+    assert!(body.get("reasoning_effort").is_none());
+    assert_eq!(body["temperature"], 0.2);
+}
+
+#[test]
+fn an_effort_the_provider_does_not_take_is_refused_with_what_it_takes() {
+    let mut cfg = config(Provider::Anthropic, "https://x.test");
+    cfg.effort = Some(Effort::Minimal);
+    let Err(LlmError::InvalidConfig(why)) = client_for(cfg) else {
+        panic!("minimal is OpenAI's");
+    };
+    assert_eq!(
+        why,
+        "effort \"minimal\" is not accepted by provider \"anthropic\"; accepted: low, medium, high, xhigh, max"
+    );
+}
+
+#[test]
+fn openai_has_no_max_effort_and_refuses_it_at_load() {
+    let mut cfg = config(Provider::OpenAi, "https://x.test/v1");
+    cfg.effort = Some(Effort::Max);
+    let Err(LlmError::InvalidConfig(why)) = client_for(cfg) else {
+        panic!("max is Anthropic's");
+    };
+    assert_eq!(
+        why,
+        "effort \"max\" is not accepted by provider \"openai\"; accepted: none, minimal, low, medium, high, xhigh"
+    );
+}
+
+#[tokio::test]
+async fn a_400_about_a_reasoning_item_stays_a_bad_request_with_effort_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Item 'rs_1' of type 'reasoning' was provided without its required following item.","param":"input"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(Provider::OpenAi, &format!("{}/v1", server.uri()));
     cfg.effort = Some(Effort::Low);
-    assert!(matches!(client_for(cfg), Err(LlmError::InvalidConfig(_))));
+    let error = client_for(cfg)
+        .unwrap()
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::BadRequest { status: 400, .. }));
+}
+
+#[tokio::test]
+async fn a_400_about_reasoning_effort_names_the_setting_and_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({"reasoning_effort": "xhigh"})))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Unsupported value: 'reasoning_effort' does not support 'xhigh' with this model.","param":"reasoning_effort"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(Provider::OpenAi, &format!("{}/v1", server.uri()));
+    cfg.effort = Some(Effort::Xhigh);
+    let error = client_for(cfg)
+        .unwrap()
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            LlmError::EffortRejected {
+                effort: "xhigh",
+                param: "reasoning_effort",
+                status: 400,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("remove the model's `effort`"));
+}
+
+#[tokio::test]
+async fn a_400_about_something_else_stays_a_bad_request_with_effort_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad tool schema"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut cfg = config(Provider::OpenAi, &format!("{}/v1", server.uri()));
+    cfg.effort = Some(Effort::Low);
+    let error = client_for(cfg)
+        .unwrap()
+        .complete(&CompletionRequest::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LlmError::BadRequest { status: 400, .. }));
 }
 
 #[test]
