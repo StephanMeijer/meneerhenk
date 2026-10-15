@@ -327,6 +327,9 @@ pub fn proposal_refusal(commits: &[CommitProposal]) -> Option<String> {
         if subject.contains(['\n', '\r']) {
             return Some(format!("the subject of {which} is more than one line"));
         }
+        if subject.chars().any(char::is_control) {
+            return Some(format!("the subject of {which} has a control character"));
+        }
         let length = subject.chars().count();
         if length > MAX_SUBJECT {
             return Some(format!(
@@ -338,7 +341,10 @@ pub fn proposal_refusal(commits: &[CommitProposal]) -> Option<String> {
                 "{which} breaks the style rules (no emoji, no em-dash)"
             ));
         }
-        if let Some(line) = commit.body.lines().find(|l| looks_like_trailer(l)) {
+        // The body as the commit carries it, with control characters gone, so
+        // a trailer hidden by one is still seen.
+        let body = clean_body(&commit.body);
+        if let Some(line) = body.lines().find(|l| looks_like_trailer(l)) {
             return Some(format!(
                 "the body of {which} has a line shaped like a trailer ({}); Henk writes the trailers, so rephrase it",
                 line.trim()
@@ -716,6 +722,14 @@ mod tests {
         for (case, subject, body, says) in [
             ("blank", " ", "", "has no subject"),
             ("lines", "fix: a\nand b", "", "more than one line"),
+            ("nul", "fix: a\u{0}b", "", "control character"),
+            ("escape", "fix: a\u{1b}[31m", "", "control character"),
+            (
+                "hidden",
+                "fix: a",
+                "Signed-off-by\u{7}: x <x@y.z>",
+                "trailer",
+            ),
             ("long", long.as_str(), "", "73 characters"),
             ("emoji", "fix: a \u{1f680}", "", "style rules"),
             ("dash", "fix: a", "a \u{2014} b", "style rules"),
