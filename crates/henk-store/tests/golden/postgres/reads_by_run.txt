@@ -1,0 +1,464 @@
+== r-001
+(1 rows)
+RunRecord { id: RunId("r-001"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa1"), requester: None, trigger: "opened", status: Finished, started_at: "2026-10-01T10:00:00Z", finished_at: Some("2026-10-01T10:05:00Z"), link: "https://henk.example/runs/r-001", summary: Some("two findings"), error: None, heartbeat_at: Some("2026-10-01T10:04:00Z"), check_id: Some("chk-1"), superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(3 rows)
+SessionRecord { name: "check-1", role: Check, model: "claude-m", status: Finished, turns: 2, input_tokens: 400, output_tokens: 80, cache_read_tokens: 300, cache_write_tokens: 0, reasoning_tokens: 0, error: None, started_at: "2026-10-01T10:04:00Z", finished_at: Some("2026-10-01T10:04:30Z") }
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: Finished, turns: 4, input_tokens: 1200, output_tokens: 300, cache_read_tokens: 800, cache_write_tokens: 100, reasoning_tokens: 0, error: None, started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:03:00Z") }
+SessionRecord { name: "lane-b", role: Lane, model: "gpt-m", status: TimedOut, turns: 6, input_tokens: 900, output_tokens: 120, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 50, error: None, started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:04:00Z") }
+-- stages
+(5 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-01T10:00:00Z", ended_at: Some("2026-10-01T10:00:00Z"), detail: "opened" }
+StageRecord { stage: Started, state: Done, started_at: "2026-10-01T10:00:00Z", ended_at: Some("2026-10-01T10:00:01Z"), detail: "" }
+StageRecord { stage: Lanes, state: Done, started_at: "2026-10-01T10:00:02Z", ended_at: Some("2026-10-01T10:04:00Z"), detail: "two lanes" }
+StageRecord { stage: Publish, state: Done, started_at: "2026-10-01T10:04:30Z", ended_at: Some("2026-10-01T10:05:00Z"), detail: "" }
+StageRecord { stage: Done, state: Done, started_at: "2026-10-01T10:05:00Z", ended_at: Some("2026-10-01T10:05:00Z"), detail: "2 findings" }
+-- rounds
+(0 rows)
+-- findings
+(3 rows)
+FindingRecord { at: "2026-10-01T10:03:00Z", session: "lane-a", path: "src/a.rs", line: 4, comment_id: "c-1", action: "posted" }
+FindingRecord { at: "2026-10-01T10:04:00Z", session: "lane-b", path: "src/b.rs", line: 9, comment_id: "c-2", action: "refused" }
+FindingRecord { at: "2026-10-01T10:04:10Z", session: "lane-a", path: "src/a.rs", line: 12, comment_id: "c-3", action: "rejected" }
+-- drafts
+(3 rows)
+DraftRecord { at: "2026-10-01T10:02:00Z", draft: "d1", session: "lane-a", model: "claude-m", kind: "finding", path: "src/a.rs", line: 4, target: "", body: "x is never set.", decision: Some(DraftDecision { at: "2026-10-01T10:04:00Z", verdict: Confirmed, checker: "check-1", reason: "it holds", same_as: "", comment_id: "c-1" }) }
+DraftRecord { at: "2026-10-01T10:02:30Z", draft: "d2", session: "lane-a", model: "claude-m", kind: "finding", path: "src/a.rs", line: 12, target: "", body: "y leaks.", decision: Some(DraftDecision { at: "2026-10-01T10:04:10Z", verdict: Rejected, checker: "check-1", reason: "it does not", same_as: "", comment_id: "" }) }
+DraftRecord { at: "2026-10-01T10:03:00Z", draft: "d3", session: "lane-b", model: "gpt-m", kind: "rewrite", path: "src/b.rs", line: 9, target: "c-9", body: "Better text.", decision: None }
+-- events
+(3 rows)
+EventRecord { at: "2026-10-01T10:00:00Z", level: "info", message: "review started" }
+EventRecord { at: "2026-10-01T10:04:00Z", level: "warn", message: "lane-b reached its time limit" }
+EventRecord { at: "2026-10-01T10:05:00Z", level: "info", message: "review ended" }
+-- tool calls
+(6 rows)
+ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }
+ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }
+ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }
+ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }
+ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }
+ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }
+-- transcripts
+(1 rows)
+TranscriptSummary { at: "2026-10-01T10:03:00Z", session: "lane-a", model: "claude-m", stop: "end_turn", turns: 4, bytes: 12 }
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-001"), received_at: "2026-10-01T10:00:00Z", source: "github_webhook", kind: "pull_request", repo: Some("o/r"), target: Some(7), payload: Some("{}"), requester: None }
+== r-002
+(1 rows)
+RunRecord { id: RunId("r-002"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa2"), requester: Some("github:42"), trigger: "synchronize", status: Failed, started_at: "2026-10-01T10:00:00Z", finished_at: Some("2026-10-01T10:02:00Z"), link: "https://henk.example/runs/r-002", summary: None, error: Some("the model gave up"), heartbeat_at: Some("2026-10-01T10:01:30Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, turns: 1, input_tokens: 100, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: Some("the model gave up"), started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:02:00Z") }
+-- stages
+(2 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-01T10:00:00Z", ended_at: Some("2026-10-01T10:00:00Z"), detail: "synchronize" }
+StageRecord { stage: Lanes, state: Failed, started_at: "2026-10-01T10:00:02Z", ended_at: Some("2026-10-01T10:02:00Z"), detail: "the model gave up" }
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-003
+(1 rows)
+RunRecord { id: RunId("r-003"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa3"), requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-01T10:00:00.4Z", finished_at: Some("2026-10-01T10:20:00Z"), link: "https://henk.example/runs/r-003", summary: Some("clean after two rounds"), error: None, heartbeat_at: Some("2026-10-01T10:19:00Z"), check_id: Some("chk-3"), superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(2) }
+-- sessions
+(2 rows)
+SessionRecord { name: "executor", role: Executor, model: "claude-m", status: Finished, turns: 12, input_tokens: 6000, output_tokens: 1500, cache_read_tokens: 5000, cache_write_tokens: 700, reasoning_tokens: 0, error: None, started_at: "2026-10-01T10:05:00Z", finished_at: Some("2026-10-01T10:18:00Z") }
+SessionRecord { name: "reviewer", role: Reviewer, model: "claude-m", status: Finished, turns: 9, input_tokens: 4000, output_tokens: 900, cache_read_tokens: 3000, cache_write_tokens: 500, reasoning_tokens: 200, error: None, started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:19:00Z") }
+-- stages
+(0 rows)
+-- rounds
+(4 rows)
+RoundRecord { session: "reviewer", role: Reviewer, round: 1, started_at: "2026-10-01T10:00:01Z", ended_at: Some("2026-10-01T10:05:00Z"), first_turn: 1, turns: 4, handover: "Review the pull request.", handover_len: 24 }
+RoundRecord { session: "executor", role: Executor, round: 1, started_at: "2026-10-01T10:05:00Z", ended_at: Some("2026-10-01T10:12:00Z"), first_turn: 1, turns: 6, handover: "Round 1. The reviewer found 1 finding.", handover_len: 38 }
+RoundRecord { session: "reviewer", role: Reviewer, round: 2, started_at: "2026-10-01T10:12:00Z", ended_at: Some("2026-10-01T10:15:00Z"), first_turn: 5, turns: 3, handover: "Round 2. The executor answered.", handover_len: 31 }
+RoundRecord { session: "executor", role: Executor, round: 2, started_at: "2026-10-01T10:15:00Z", ended_at: Some("2026-10-01T10:18:00Z"), first_turn: 7, turns: 6, handover: "Round 2. Nothing new.", handover_len: 21 }
+-- findings
+(0 rows)
+-- drafts
+(2 rows)
+DraftRecord { at: "2026-10-01T10:04:00Z", draft: "f1", session: "reviewer", model: "claude-m", kind: "loop_finding", path: "src/a.rs", line: 2, target: "", body: "x must be 3.", decision: Some(DraftDecision { at: "2026-10-01T10:11:00Z", verdict: Fixed, checker: "executor", reason: "changed", same_as: "", comment_id: "abc" }) }
+DraftRecord { at: "2026-10-01T10:04:10Z", draft: "f2", session: "reviewer", model: "claude-m", kind: "loop_finding", path: "src/b.rs", line: 5, target: "", body: "z is wrong.", decision: Some(DraftDecision { at: "2026-10-01T10:11:10Z", verdict: Rejected, checker: "executor", reason: "it holds elsewhere", same_as: "", comment_id: "" }) }
+-- events
+(1 rows)
+EventRecord { at: "2026-10-01T10:00:00.4Z", level: "info", message: "loop started" }
+-- tool calls
+(4 rows)
+ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }
+ToolCallRecord { at: "2026-10-01T10:04:00Z", session: "reviewer", model: "claude-m", turn: 2, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 2 }
+ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }
+ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }
+-- transcripts
+(2 rows)
+TranscriptSummary { at: "2026-10-01T10:15:00Z", session: "reviewer", model: "claude-m", stop: "end_turn", turns: 9, bytes: 12 }
+TranscriptSummary { at: "2026-10-01T10:19:00Z", session: "reviewer", model: "claude-m", stop: "end_turn", turns: 9, bytes: 12 }
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-004
+(1 rows)
+RunRecord { id: RunId("r-004"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-01T10:00:00.123457Z", finished_at: None, link: "https://henk.example/runs/r-004", summary: None, error: None, heartbeat_at: Some("2026-10-01T10:00:30Z"), check_id: Some("chk-4"), superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: Running, turns: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: None, started_at: "2026-10-01T10:00:01Z", finished_at: None }
+-- stages
+(2 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-01T10:00:00.123457Z", ended_at: Some("2026-10-01T10:00:00.2Z"), detail: "" }
+StageRecord { stage: Lanes, state: Running, started_at: "2026-10-01T10:00:02Z", ended_at: None, detail: "" }
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-003"), received_at: "2026-10-01T10:00:00.4Z", source: "github_webhook", kind: "pull_request", repo: Some("o/r"), target: Some(8), payload: Some("{}"), requester: None }
+== r-005
+(1 rows)
+RunRecord { id: RunId("r-005"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb2"), requester: None, trigger: "synchronize", status: Superseded, started_at: "2026-10-01T10:00:01Z", finished_at: Some("2026-10-01T10:00:02Z"), link: "https://henk.example/runs/r-005", summary: None, error: Some("Superseded by a newer commit."), heartbeat_at: None, check_id: Some("chk-5"), superseded_by: Some(RunId("r-006")), loop_stop: None, loop_rounds: None }
+-- sessions
+(0 rows)
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-006
+(1 rows)
+RunRecord { id: RunId("r-006"), kind: Review, platform: GitHub, repo: "o/r", target: 8, commit: Some("bbbbbbb3"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-01T10:00:02Z", finished_at: Some("2026-10-01T10:09:00Z"), link: "https://henk.example/runs/r-006", summary: Some("one finding"), error: None, heartbeat_at: Some("2026-10-01T10:08:00Z"), check_id: Some("chk-6"), superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: Finished, turns: 3, input_tokens: 800, output_tokens: 200, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: None, started_at: "2026-10-01T10:00:03Z", finished_at: Some("2026-10-01T10:08:00Z") }
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(1 rows)
+FindingRecord { at: "2026-10-01T10:08:00Z", session: "lane-a", path: "src/c.rs", line: 2, comment_id: "c-4", action: "posted" }
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-007
+(1 rows)
+RunRecord { id: RunId("r-007"), kind: Plan, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-02T09:00:00Z", finished_at: Some("2026-10-02T09:20:00Z"), link: "https://henk.example/runs/r-007", summary: Some("plan written"), error: None, heartbeat_at: Some("2026-10-02T09:19:00Z"), check_id: None, superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(3) }
+-- sessions
+(2 rows)
+SessionRecord { name: "planner", role: Planner, model: "claude-m", status: Finished, turns: 20, input_tokens: 9000, output_tokens: 2500, cache_read_tokens: 7000, cache_write_tokens: 1000, reasoning_tokens: 300, error: None, started_at: "2026-10-02T09:00:01Z", finished_at: Some("2026-10-02T09:19:00Z") }
+SessionRecord { name: "reviewer", role: Reviewer, model: "claude-m", status: Finished, turns: 8, input_tokens: 3000, output_tokens: 700, cache_read_tokens: 2000, cache_write_tokens: 300, reasoning_tokens: 0, error: None, started_at: "2026-10-02T09:05:00Z", finished_at: Some("2026-10-02T09:18:00Z") }
+-- stages
+(3 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-02T09:00:00Z", ended_at: Some("2026-10-02T09:00:00Z"), detail: "dashboard" }
+StageRecord { stage: Session, state: Done, started_at: "2026-10-02T09:00:01Z", ended_at: Some("2026-10-02T09:19:00Z"), detail: "planner and reviewer" }
+StageRecord { stage: Publish, state: Done, started_at: "2026-10-02T09:19:30Z", ended_at: Some("2026-10-02T09:20:00Z"), detail: "" }
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(1 rows)
+DraftRecord { at: "2026-10-02T09:06:00Z", draft: "p1", session: "reviewer", model: "claude-m", kind: "plan_point", path: "step 2", line: 0, target: "", body: "Step 2 misses the migration.", decision: Some(DraftDecision { at: "2026-10-02T09:10:00Z", verdict: Taken, checker: "planner", reason: "added", same_as: "", comment_id: "" }) }
+-- events
+(1 rows)
+EventRecord { at: "2026-10-02T09:00:00Z", level: "info", message: "plan started" }
+-- tool calls
+(2 rows)
+ToolCallRecord { at: "2026-10-02T09:01:00Z", session: "planner", model: "claude-m", turn: 1, tool: "github__issue_read", origin: "mcp:github", outcome: "ok", arguments: "{\"issue\":9}", arguments_len: 11, result_chars: 2000, elapsed_ms: 300 }
+ToolCallRecord { at: "2026-10-02T09:10:00Z", session: "planner", model: "claude-m", turn: 2, tool: "write_plan", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 20, elapsed_ms: 2 }
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-004"), received_at: "2026-10-02T09:00:00Z", source: "api", kind: "plan_requested", repo: Some("o/r"), target: Some(9), payload: Some("{}"), requester: Some("github:42") }
+== r-008
+(1 rows)
+RunRecord { id: RunId("r-008"), kind: Execute, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Finished, started_at: "2026-10-02T09:30:00Z", finished_at: Some("2026-10-02T09:50:00Z"), link: "https://henk.example/runs/r-008", summary: Some("pull request #12 opened: https://github.com/o/r/pull/12"), error: None, heartbeat_at: Some("2026-10-02T09:49:00Z"), check_id: None, superseded_by: None, loop_stop: Some("converged"), loop_rounds: Some(1) }
+-- sessions
+(1 rows)
+SessionRecord { name: "executor", role: Executor, model: "claude-m", status: Finished, turns: 30, input_tokens: 20000, output_tokens: 6000, cache_read_tokens: 15000, cache_write_tokens: 2000, reasoning_tokens: 0, error: None, started_at: "2026-10-02T09:30:01Z", finished_at: Some("2026-10-02T09:49:00Z") }
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(1 rows)
+DraftRecord { at: "2026-10-02T09:40:00Z", draft: "q1", session: "reviewer", model: "claude-m", kind: "requirement_point", path: "criterion 2", line: 0, target: "", body: "No header row.", decision: Some(DraftDecision { at: "2026-10-02T09:49:00Z", verdict: Unsettled, checker: "", reason: "the review stopped", same_as: "", comment_id: "" }) }
+-- events
+(0 rows)
+-- tool calls
+(2 rows)
+ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }
+ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-005"), received_at: "2026-10-02T09:30:00Z", source: "api", kind: "execute_requested", repo: Some("o/r"), target: Some(9), payload: Some("{}"), requester: Some("github:42") }
+== r-009
+(1 rows)
+RunRecord { id: RunId("r-009"), kind: Rebase, platform: GitHub, repo: "o/r", target: 12, commit: Some("ccccccc1"), requester: None, trigger: "rebase command", status: Finished, started_at: "2026-10-02T10:00:00Z", finished_at: Some("2026-10-02T10:03:00Z"), link: "https://henk.example/runs/r-009", summary: Some("rebased onto main"), error: None, heartbeat_at: Some("2026-10-02T10:02:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(0 rows)
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-006"), received_at: "2026-10-02T10:00:00Z", source: "github_webhook", kind: "comment", repo: Some("o/r"), target: Some(12), payload: Some("{}"), requester: None }
+== r-010
+(1 rows)
+RunRecord { id: RunId("r-010"), kind: Ticket, platform: GitHub, repo: "o/r", target: 9, commit: None, requester: Some("github:42"), trigger: "dashboard", status: Running, started_at: "2026-10-02T11:00:00Z", finished_at: None, link: "https://henk.example/runs/r-010", summary: None, error: None, heartbeat_at: Some("2026-10-02T11:00:05Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(0 rows)
+-- stages
+(4 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-02T11:00:00Z", ended_at: Some("2026-10-02T11:00:00Z"), detail: "" }
+StageRecord { stage: Plan, state: Done, started_at: "2026-10-02T11:00:01Z", ended_at: Some("2026-10-02T11:20:00Z"), detail: "run r-007" }
+StageRecord { stage: Execute, state: Done, started_at: "2026-10-02T11:20:00Z", ended_at: Some("2026-10-02T11:30:00Z"), detail: "run r-008" }
+StageRecord { stage: Review, state: Running, started_at: "2026-10-02T11:30:00Z", ended_at: None, detail: "run r-006" }
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(3 rows)
+(Plan, RunId("r-007"))
+(Execute, RunId("r-008"))
+(Review, RunId("r-006"))
+-- inbound events
+(0 rows)
+== r-011
+(1 rows)
+RunRecord { id: RunId("r-011"), kind: Review, platform: GitHub, repo: "o/r", target: 10, commit: Some("ddddddd1"), requester: None, trigger: "opened", status: Running, started_at: "2026-10-02T12:00:00Z", finished_at: None, link: "https://henk.example/runs/r-011", summary: None, error: None, heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(0 rows)
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-012
+(1 rows)
+RunRecord { id: RunId("r-012"), kind: Review, platform: GitLab, repo: "9xxlab/tools/cli", target: 3, commit: Some("eeeeeee1"), requester: None, trigger: "update", status: Finished, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:10:00Z"), link: "https://henk.example/runs/r-012", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-03T08:09:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: Finished, turns: 2, input_tokens: 500, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: None, started_at: "2026-10-03T08:00:01Z", finished_at: Some("2026-10-03T08:09:00Z") }
+-- stages
+(1 rows)
+StageRecord { stage: Requested, state: Done, started_at: "2026-10-03T08:00:00Z", ended_at: Some("2026-10-03T08:00:00Z"), detail: "update" }
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(1 rows)
+InboundEvent { id: EventId("e-007"), received_at: "2026-10-03T08:00:00Z", source: "gitlab_webhook", kind: "pull_request", repo: Some("9xxlab/tools/cli"), target: Some(3), payload: Some("{}"), requester: None }
+== r-013
+(1 rows)
+RunRecord { id: RunId("r-013"), kind: Review, platform: GitHub, repo: "other/repo", target: 1, commit: Some("fffffff1"), requester: None, trigger: "opened", status: Cancelled, started_at: "2026-10-03T08:00:00Z", finished_at: Some("2026-10-03T08:00:30Z"), link: "https://henk.example/runs/r-013", summary: None, error: Some("Cancelled from the dashboard."), heartbeat_at: Some("2026-10-03T08:00:20Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(0 rows)
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-014
+(1 rows)
+RunRecord { id: RunId("r-014"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa4"), requester: None, trigger: "synchronize", status: Finished, started_at: "2026-10-03T23:59:59Z", finished_at: Some("2026-10-04T00:05:00Z"), link: "https://henk.example/runs/r-014", summary: Some("clean"), error: None, heartbeat_at: Some("2026-10-04T00:04:00Z"), check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: Finished, turns: 2, input_tokens: 500, output_tokens: 100, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: None, started_at: "2026-10-03T23:59:59.5Z", finished_at: Some("2026-10-04T00:04:00Z") }
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== r-015
+(1 rows)
+RunRecord { id: RunId("r-015"), kind: Review, platform: GitHub, repo: "o/r", target: 7, commit: Some("aaaaaaa5"), requester: None, trigger: "synchronize", status: Failed, started_at: "2026-10-04T00:00:00Z", finished_at: Some("2026-10-04T00:01:00Z"), link: "https://henk.example/runs/r-015", summary: None, error: Some("the model refused"), heartbeat_at: None, check_id: None, superseded_by: None, loop_stop: None, loop_rounds: None }
+-- sessions
+(1 rows)
+SessionRecord { name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, turns: 1, input_tokens: 100, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, error: Some("refused"), started_at: "2026-10-04T00:00:01Z", finished_at: Some("2026-10-04T00:01:00Z") }
+-- stages
+(0 rows)
+-- rounds
+(0 rows)
+-- findings
+(0 rows)
+-- drafts
+(0 rows)
+-- events
+(0 rows)
+-- tool calls
+(0 rows)
+-- transcripts
+(0 rows)
+-- children
+(0 rows)
+-- inbound events
+(0 rows)
+== the newest transcript of r-003's reviewer
+(1 rows)
+TranscriptRecord { at: "2026-10-01T10:19:00Z", session: "reviewer", model: "claude-m", stop: "end_turn", turns: 9, bytes: 12, body: "[{\"role\":\"user\"},{\"role\":\"assistant\"}]" }
+== no transcript
+(0 rows)
+== the sessions of every run in one read
+(14 rows)
+(RunId("r-001"), "check-1", Check, Finished)
+(RunId("r-001"), "lane-a", Lane, Finished)
+(RunId("r-001"), "lane-b", Lane, TimedOut)
+(RunId("r-002"), "lane-a", Lane, DidNotFinish)
+(RunId("r-003"), "executor", Executor, Finished)
+(RunId("r-003"), "reviewer", Reviewer, Finished)
+(RunId("r-004"), "lane-a", Lane, Running)
+(RunId("r-006"), "lane-a", Lane, Finished)
+(RunId("r-007"), "planner", Planner, Finished)
+(RunId("r-007"), "reviewer", Reviewer, Finished)
+(RunId("r-008"), "executor", Executor, Finished)
+(RunId("r-012"), "lane-a", Lane, Finished)
+(RunId("r-014"), "lane-a", Lane, Finished)
+(RunId("r-015"), "lane-a", Lane, DidNotFinish)
+== the stages of every run in one read
+(17 rows)
+(RunId("r-001"), Requested, Done)
+(RunId("r-001"), Started, Done)
+(RunId("r-001"), Lanes, Done)
+(RunId("r-001"), Publish, Done)
+(RunId("r-001"), Done, Done)
+(RunId("r-002"), Requested, Done)
+(RunId("r-002"), Lanes, Failed)
+(RunId("r-004"), Requested, Done)
+(RunId("r-004"), Lanes, Running)
+(RunId("r-007"), Requested, Done)
+(RunId("r-007"), Session, Done)
+(RunId("r-007"), Publish, Done)
+(RunId("r-010"), Requested, Done)
+(RunId("r-010"), Plan, Done)
+(RunId("r-010"), Execute, Done)
+(RunId("r-010"), Review, Running)
+(RunId("r-012"), Requested, Done)
+== the stages of no run
+(0 rows)

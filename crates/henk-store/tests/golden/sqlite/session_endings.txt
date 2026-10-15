@@ -1,0 +1,30 @@
+== session endings since None, 10 reviews
+(10 rows)
+SessionEnding { run_id: RunId("r-015"), started_at: "2026-10-04T00:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, error: Some("refused") }
+SessionEnding { run_id: RunId("r-014"), started_at: "2026-10-03T23:59:59Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-012"), started_at: "2026-10-03T08:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-006"), started_at: "2026-10-01T10:00:02Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-003"), started_at: "2026-10-01T10:00:00.4Z", name: "executor", role: Executor, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-003"), started_at: "2026-10-01T10:00:00.4Z", name: "reviewer", role: Reviewer, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-002"), started_at: "2026-10-01T10:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, error: Some("the model gave up") }
+SessionEnding { run_id: RunId("r-001"), started_at: "2026-10-01T10:00:00Z", name: "check-1", role: Check, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-001"), started_at: "2026-10-01T10:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-001"), started_at: "2026-10-01T10:00:00Z", name: "lane-b", role: Lane, model: "gpt-m", status: TimedOut, error: None }
+== session endings since Some("2026-10-02T00:00:00Z"), 10 reviews
+(3 rows)
+SessionEnding { run_id: RunId("r-015"), started_at: "2026-10-04T00:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, error: Some("refused") }
+SessionEnding { run_id: RunId("r-014"), started_at: "2026-10-03T23:59:59Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-012"), started_at: "2026-10-03T08:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+== session endings since Some("2026-10-01T10:00:01Z"), 10 reviews
+(4 rows)
+SessionEnding { run_id: RunId("r-015"), started_at: "2026-10-04T00:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, error: Some("refused") }
+SessionEnding { run_id: RunId("r-014"), started_at: "2026-10-03T23:59:59Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-012"), started_at: "2026-10-03T08:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-006"), started_at: "2026-10-01T10:00:02Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+== session endings since None, 3 reviews
+(3 rows)
+SessionEnding { run_id: RunId("r-015"), started_at: "2026-10-04T00:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: DidNotFinish, error: Some("refused") }
+SessionEnding { run_id: RunId("r-014"), started_at: "2026-10-03T23:59:59Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+SessionEnding { run_id: RunId("r-012"), started_at: "2026-10-03T08:00:00Z", name: "lane-a", role: Lane, model: "claude-m", status: Finished, error: None }
+== session endings since None, 0 reviews
+(0 rows)

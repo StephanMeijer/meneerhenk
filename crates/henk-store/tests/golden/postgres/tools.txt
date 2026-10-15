@@ -1,0 +1,193 @@
+== usage, every call
+(13 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "bash", tally: ToolTally { calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 9000 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "edit_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 8 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 3 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "search", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 40 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "github__issue_read", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 300 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "write_plan", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 11 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, every call
+(14 rows)
+ToolCallListing { id: 14, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }, transcript_kept: false }
+ToolCallListing { id: 13, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }, transcript_kept: false }
+ToolCallListing { id: 12, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:10:00Z", session: "planner", model: "claude-m", turn: 2, tool: "write_plan", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 20, elapsed_ms: 2 }, transcript_kept: false }
+ToolCallListing { id: 11, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:01:00Z", session: "planner", model: "claude-m", turn: 1, tool: "github__issue_read", origin: "mcp:github", outcome: "ok", arguments: "{\"issue\":9}", arguments_len: 11, result_chars: 2000, elapsed_ms: 300 }, transcript_kept: false }
+ToolCallListing { id: 10, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }, transcript_kept: false }
+ToolCallListing { id: 9, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }, transcript_kept: false }
+ToolCallListing { id: 8, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:04:00Z", session: "reviewer", model: "claude-m", turn: 2, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 2 }, transcript_kept: true }
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 3, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }, transcript_kept: true }
+ToolCallListing { id: 7, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }, transcript_kept: true }
+ToolCallListing { id: 2, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }, transcript_kept: true }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== usage, outcome ok
+(13 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "bash", tally: ToolTally { calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 9000 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "edit_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 8 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 3 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "search", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 40 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "github__issue_read", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 300 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "write_plan", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 11 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, outcome ok
+(10 rows)
+ToolCallListing { id: 14, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }, transcript_kept: false }
+ToolCallListing { id: 13, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }, transcript_kept: false }
+ToolCallListing { id: 12, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:10:00Z", session: "planner", model: "claude-m", turn: 2, tool: "write_plan", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 20, elapsed_ms: 2 }, transcript_kept: false }
+ToolCallListing { id: 11, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:01:00Z", session: "planner", model: "claude-m", turn: 1, tool: "github__issue_read", origin: "mcp:github", outcome: "ok", arguments: "{\"issue\":9}", arguments_len: 11, result_chars: 2000, elapsed_ms: 300 }, transcript_kept: false }
+ToolCallListing { id: 9, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }, transcript_kept: false }
+ToolCallListing { id: 8, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:04:00Z", session: "reviewer", model: "claude-m", turn: 2, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 2 }, transcript_kept: true }
+ToolCallListing { id: 3, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }, transcript_kept: true }
+ToolCallListing { id: 7, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }, transcript_kept: true }
+ToolCallListing { id: 2, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }, transcript_kept: true }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== usage, any outcome but ok
+(13 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "bash", tally: ToolTally { calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 9000 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "edit_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 8 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 3 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "search", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 40 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "github__issue_read", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 300 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "write_plan", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 11 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, any outcome but ok
+(4 rows)
+ToolCallListing { id: 10, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }, transcript_kept: false }
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+== usage, tool read_file
+(3 rows)
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 11 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, tool read_file
+(4 rows)
+ToolCallListing { id: 7, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }, transcript_kept: true }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== usage, model gpt-m
+(2 rows)
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, model gpt-m
+(3 rows)
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+== usage, role executor
+(4 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "bash", tally: ToolTally { calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 9000 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "edit_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 8 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+== calls, role executor
+(4 rows)
+ToolCallListing { id: 14, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }, transcript_kept: false }
+ToolCallListing { id: 13, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }, transcript_kept: false }
+ToolCallListing { id: 10, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }, transcript_kept: false }
+ToolCallListing { id: 9, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }, transcript_kept: false }
+== usage, role lane
+(5 rows)
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 3 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "search", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 40 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, role lane
+(6 rows)
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 3, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }, transcript_kept: true }
+ToolCallListing { id: 2, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }, transcript_kept: true }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== usage, since the 2nd of October
+(4 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "github__issue_read", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 300 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "write_plan", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+== calls, since the 2nd of October
+(4 rows)
+ToolCallListing { id: 14, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }, transcript_kept: false }
+ToolCallListing { id: 13, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }, transcript_kept: false }
+ToolCallListing { id: 12, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:10:00Z", session: "planner", model: "claude-m", turn: 2, tool: "write_plan", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 20, elapsed_ms: 2 }, transcript_kept: false }
+ToolCallListing { id: 11, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:01:00Z", session: "planner", model: "claude-m", turn: 1, tool: "github__issue_read", origin: "mcp:github", outcome: "ok", arguments: "{\"issue\":9}", arguments_len: 11, result_chars: 2000, elapsed_ms: 300 }, transcript_kept: false }
+== usage, until the 2nd of October
+(9 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "bash", tally: ToolTally { calls: 1, errors: 1, refusals: 0, other: 0, total_ms: 9000 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "edit_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 8 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 12 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 3 } }
+ToolUsage { session: "lane", model: "claude-m", tool: "search", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 40 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "read_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 11 } }
+ToolUsage { session: "reviewer", model: "claude-m", tool: "report_finding", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "Review complete. End.", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 1, total_ms: 0 } }
+ToolUsage { session: "lane", model: "gpt-m", tool: "read_file", tally: ToolTally { calls: 2, errors: 1, refusals: 1, other: 0, total_ms: 6 } }
+== calls, until the 2nd of October
+(10 rows)
+ToolCallListing { id: 10, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }, transcript_kept: false }
+ToolCallListing { id: 9, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }, transcript_kept: false }
+ToolCallListing { id: 8, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:04:00Z", session: "reviewer", model: "claude-m", turn: 2, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 2 }, transcript_kept: true }
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 3, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }, transcript_kept: true }
+ToolCallListing { id: 7, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }, transcript_kept: true }
+ToolCallListing { id: 2, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }, transcript_kept: true }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== usage since the 2nd of October
+(4 rows)
+ToolUsage { session: "executor", model: "claude-m", tool: "propose_pull_request", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 6 } }
+ToolUsage { session: "executor", model: "claude-m", tool: "write_file", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 4 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "github__issue_read", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 300 } }
+ToolUsage { session: "planner", model: "claude-m", tool: "write_plan", tally: ToolTally { calls: 1, errors: 0, refusals: 0, other: 0, total_ms: 2 } }
+== calls, page 1 of 3 after None
+(3 rows)
+ToolCallListing { id: 14, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:48:00Z", session: "executor", model: "claude-m", turn: 2, tool: "propose_pull_request", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 30, elapsed_ms: 6 }, transcript_kept: false }
+ToolCallListing { id: 13, run_id: "r-008", repo: "o/r", target: 9, platform: GitHub, kind: Execute, call: ToolCallRecord { at: "2026-10-02T09:31:00Z", session: "executor", model: "claude-m", turn: 1, tool: "write_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/csv.rs\"}", arguments_len: 21, result_chars: 20, elapsed_ms: 4 }, transcript_kept: false }
+ToolCallListing { id: 12, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:10:00Z", session: "planner", model: "claude-m", turn: 2, tool: "write_plan", origin: "henk", outcome: "ok", arguments: "{}", arguments_len: 2, result_chars: 20, elapsed_ms: 2 }, transcript_kept: false }
+== calls, page 2 of 3 after Some(ToolCallKey { at: "2026-10-02T09:10:00Z", id: 12 })
+(3 rows)
+ToolCallListing { id: 11, run_id: "r-007", repo: "o/r", target: 9, platform: GitHub, kind: Plan, call: ToolCallRecord { at: "2026-10-02T09:01:00Z", session: "planner", model: "claude-m", turn: 1, tool: "github__issue_read", origin: "mcp:github", outcome: "ok", arguments: "{\"issue\":9}", arguments_len: 11, result_chars: 2000, elapsed_ms: 300 }, transcript_kept: false }
+ToolCallListing { id: 10, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:07:00Z", session: "executor", model: "claude-m", turn: 2, tool: "bash", origin: "henk", outcome: "error", arguments: "{\"command\":\"cargo test\"}", arguments_len: 24, result_chars: 400, elapsed_ms: 9000 }, transcript_kept: false }
+ToolCallListing { id: 9, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:06:00Z", session: "executor", model: "claude-m", turn: 1, tool: "edit_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 20, elapsed_ms: 8 }, transcript_kept: false }
+== calls, page 3 of 3 after Some(ToolCallKey { at: "2026-10-01T10:06:00Z", id: 9 })
+(3 rows)
+ToolCallListing { id: 8, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:04:00Z", session: "reviewer", model: "claude-m", turn: 2, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 2 }, transcript_kept: true }
+ToolCallListing { id: 6, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:03:00Z", session: "lane-b", model: "gpt-m", turn: 3, tool: "Review complete. End.", origin: "unknown_tool", outcome: "unknown_tool", arguments: "", arguments_len: 0, result_chars: 0, elapsed_ms: 0 }, transcript_kept: false }
+ToolCallListing { id: 3, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:02:00Z", session: "lane-a", model: "claude-m", turn: 3, tool: "report_finding", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 10, elapsed_ms: 3 }, transcript_kept: true }
+== calls, page 4 of 3 after Some(ToolCallKey { at: "2026-10-01T10:02:00Z", id: 3 })
+(3 rows)
+ToolCallListing { id: 7, run_id: "r-003", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "reviewer", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 11 }, transcript_kept: true }
+ToolCallListing { id: 2, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:10Z", session: "lane-a", model: "claude-m", turn: 2, tool: "search", origin: "henk", outcome: "ok", arguments: "{\"pattern\":\"x\"}", arguments_len: 15, result_chars: 300, elapsed_ms: 40 }, transcript_kept: true }
+ToolCallListing { id: 5, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 2, tool: "read_file", origin: "henk", outcome: "refused_scope", arguments: "{\"path\":\"../x\"}", arguments_len: 15, result_chars: 30, elapsed_ms: 1 }, transcript_kept: false }
+== calls, page 5 of 3 after Some(ToolCallKey { at: "2026-10-01T10:00:05Z", id: 5 })
+(2 rows)
+ToolCallListing { id: 4, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-b", model: "gpt-m", turn: 1, tool: "read_file", origin: "henk", outcome: "error", arguments: "{\"path\":\"nope\"}", arguments_len: 15, result_chars: 40, elapsed_ms: 5 }, transcript_kept: false }
+ToolCallListing { id: 1, run_id: "r-001", repo: "o/r", target: 7, platform: GitHub, kind: Review, call: ToolCallRecord { at: "2026-10-01T10:00:05Z", session: "lane-a", model: "claude-m", turn: 1, tool: "read_file", origin: "henk", outcome: "ok", arguments: "{\"path\":\"src/a.rs\"}", arguments_len: 19, result_chars: 900, elapsed_ms: 12 }, transcript_kept: true }
+== calls, page 6 of 3 after Some(ToolCallKey { at: "2026-10-01T10:00:05Z", id: 1 })
+(0 rows)
