@@ -16,8 +16,9 @@ pub use types::{
     DayCounts, DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LOOP_FINDING_KIND,
     MAX_PAYLOAD_BYTES, MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, PLAN_POINT_KIND,
-    Page, PruneCounts, RoundRecord, RunFilter, RunKey, RunRecord, RunStatus, SessionEnding,
-    SessionRecord, SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite,
-    StoreError, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallListing, ToolCallRecord,
-    ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, UNKNOWN_TOOL, counted_as,
+    Page, PruneCounts, REQUIREMENT_POINT_KIND, RoundRecord, RunFilter, RunKey, RunRecord,
+    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallListing,
+    ToolCallRecord, ToolTally, ToolUsage, TranscriptRecord, TranscriptSummary, UNKNOWN_TOOL,
+    counted_as,
 };

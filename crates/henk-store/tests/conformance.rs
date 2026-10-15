@@ -18,9 +18,10 @@ use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey, FindingAction,
     InboundEvent, LOOP_FINDING_KIND, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
-    PLAN_POINT_KIND, Page, PgStore, PruneCounts, RoundRecord, RunFilter, RunKey, RunRecord,
-    RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite,
-    TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord, TranscriptRecord, UNKNOWN_TOOL,
+    PLAN_POINT_KIND, Page, PgStore, PruneCounts, REQUIREMENT_POINT_KIND, RoundRecord, RunFilter,
+    RunKey, RunRecord, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage,
+    StageState, StageWrite, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord,
+    TranscriptRecord, UNKNOWN_TOOL,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -709,7 +710,8 @@ async fn a_loop_run_keeps_why_it_stopped(store: &dyn RunStore) {
 }
 
 /// A review loop's findings (#285) keep the executor's verdicts, and stay out
-/// of the overview's drafts per day.
+/// of the overview's drafts per day, as the points of a plan review (#328) and
+/// of a requirements review (#535) do.
 async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
     let run = new_run("r-loop");
     store.create_run(&run).await.unwrap();
@@ -742,6 +744,9 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
     let mut point = draft("p1", "reviewer", 0, "step 2 misses the migration");
     PLAN_POINT_KIND.clone_into(&mut point.kind);
     store.record_draft(&run.id, &point).await.unwrap();
+    let mut requirement = draft("p2", "reviewer", 0, "criterion 2 is not met");
+    REQUIREMENT_POINT_KIND.clone_into(&mut requirement.kind);
+    store.record_draft(&run.id, &requirement).await.unwrap();
     let stored: Vec<_> = store
         .drafts(&run.id)
         .await
@@ -756,7 +761,7 @@ async fn loop_findings_keep_their_verdicts(store: &dyn RunStore) {
     assert_eq!(
         days.iter().map(|d| d.drafts).sum::<u64>(),
         1,
-        "the overview's drafts per day leave loop findings and plan points out too"
+        "the overview's drafts per day leave loop findings, plan points and requirement points out too"
     );
 }
 

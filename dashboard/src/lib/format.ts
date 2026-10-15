@@ -16,8 +16,11 @@ export function verdictText(draft: Draft): string {
   return decision.same_as === '' ? verdict : `${verdict} ${decision.same_as}`;
 }
 
-/** The handoff kinds: a review loop's finding (#285) and a plan review's point (#328). */
-const HANDOFF_KINDS = ['loop_finding', 'plan_point'];
+/**
+ * The handoff kinds: a review loop's finding (#285), a plan review's point
+ * (#328) and a requirements review's point (#535).
+ */
+const HANDOFF_KINDS = ['loop_finding', 'plan_point', 'requirement_point'];
 
 /**
  * What a draft says; a rewrite or withdrawal names the comment it is about,
