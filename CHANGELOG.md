@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.2...v0.4.3) - 2026-10-15
+
+### Added
+
+- *(rebase)* rebase a pull request onto its base on request ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+- *(git)* rebase a checkout onto its base and push it with a lease ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+- *(domain)* the rebase run kind, its stage and the @meneer-henk rebase command ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+
+### Fixed
+
+- *(rebase)* stop on conflicts that leave no markers to resolve
+
+### Other
+
+- *(runs)* say how a run ended on its issue or its pull request ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+- *(review)* the loop takes its deadline when it starts and reads the executor's file limit from its edit context
+
 ## [0.4.2](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.1...v0.4.2) - 2026-10-15
 
 ### Added
