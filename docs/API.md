@@ -83,11 +83,12 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 
 Who is signed in, the CSRF token their actions send, and the kinds of run
 `POST /runs` can start here, as configured: `review` with `[review.loop]`,
-`plan` with `[planning]`, `execute` with `[execution]` (#329) and
-`rebase` with `[roles.executor]` (#579).
+`plan` with `[planning]`, `execute` with `[execution]` (#329),
+`rebase` with `[roles.executor]` (#579) and `ticket` with `[autonomous]`
+(#536).
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute", "rebase"]}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute", "rebase", "ticket"]}
 ```
 
 ### `GET /health`
@@ -491,7 +492,7 @@ kept) and its outcomes.
 
 ### `POST /runs`
 
-Starts a review, a plan, an execute run or a rebase, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
+Starts a review, a plan, an execute run, a ticket run or a rebase, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
 apply the allowlist and every refusal. Read the event to see what came of
 it.
 
@@ -499,9 +500,9 @@ it.
 {"kind": "review", "url": "https://github.com/o/r/pull/7", "commit": "abc1234"}
 ```
 
-`kind` is `review`, `plan`, `execute` or `rebase`. `url` is a pull
+`kind` is `review`, `plan`, `execute`, `ticket` or `rebase`. `url` is a pull
 request for a review or a rebase and an issue for the others. `commit`
-(reviews) and `note` (plans and execute runs) are optional; a rebase takes
+(reviews) and `note` (plans, execute runs and ticket runs) are optional; a rebase takes
 neither.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
