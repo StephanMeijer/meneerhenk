@@ -298,6 +298,23 @@ impl HenkMcp {
     }
 
     #[tool(
+        description = "Take a GitHub or GitLab issue through a plan, an execute run and a review of the pull request in one go, as POST /ticket does: Henk plans it, the executor makes the change and opens the pull request, and Henk reviews it, with no one starting each step. Answers the event id, and the run id once the run started or joined the one the issue already has."
+    )]
+    async fn start_ticket(
+        &self,
+        Parameters(input): Parameters<StartWithNote>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = StartRequest {
+            kind: "ticket".to_owned(),
+            url: input.url,
+            commit: None,
+            note: input.note,
+        };
+        self.start(&parts, &request).await
+    }
+
+    #[tool(
         description = "Rebase a GitHub pull request or GitLab merge request onto its base branch, as POST /rebase does: Henk replays its commits, has the executor resolve any conflict, pushes with a lease so no one's commit is lost, and then reviews the rebased commits. Answers the event id, and the run id once the run started."
     )]
     async fn start_rebase(
@@ -583,7 +600,7 @@ impl ServerHandler for HenkMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("meneer-henk", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Meneer Henk reviews pull requests, fixing what the review finds, plans issues, and takes issues to pull requests. Start work with start_review, start_plan or start_execute, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
+                "Meneer Henk reviews pull requests, fixing what the review finds, plans issues, and takes issues to pull requests. Start work with start_review, start_plan, start_execute or start_ticket, follow it with get_run, and read what came of it. Henk is advisory: nothing here approves, blocks or merges.",
             )
     }
 }

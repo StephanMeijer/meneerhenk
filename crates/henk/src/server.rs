@@ -25,7 +25,8 @@ use crate::coordinator::Coordinator;
 use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
 use crate::listeners::{
-    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, Writers,
+    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, TicketListener,
+    Writers,
 };
 use crate::pages;
 use crate::recorder::StoreRecorder;
@@ -153,6 +154,7 @@ pub fn compose_with_secrets(
             Arc::new(MentionListener::new(settings, writers)),
             Arc::new(PlanListener::new(Arc::clone(&coordinator))),
             Arc::new(ExecuteListener::new(Arc::clone(&coordinator))),
+            Arc::new(TicketListener::new(Arc::clone(&coordinator))),
         ],
     ));
     let requester = app
@@ -268,7 +270,9 @@ pub async fn serve(app: Arc<App>) -> anyhow::Result<()> {
     // Reviews in flight end as interrupted and close their checks (#7).
     app.shutdown.cancel();
     let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
-    while composed.coordinator.tracked_reviews() > 0 && tokio::time::Instant::now() < deadline {
+    while (composed.coordinator.tracked_reviews() > 0 || composed.coordinator.tracked_tickets() > 0)
+        && tokio::time::Instant::now() < deadline
+    {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     cancel.cancel();
@@ -712,7 +716,7 @@ github_owners = ["docspec"]
             .to_owned();
         assert_eq!(
             wait_for_outcomes(&app, &event).await,
-            5,
+            6,
             "every listener recorded an outcome"
         );
         let recorded = app
@@ -957,6 +961,44 @@ github_owners = ["docspec"]
         );
     }
 
+    /// #536: `POST /ticket` is an event like the other starts, for an issue.
+    #[tokio::test]
+    async fn api_publishes_a_ticket_request_as_an_event() {
+        let app = test_app().await;
+        let ticket = Request::post("/ticket")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/issues/9","note":"small"}"#,
+            ))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, ticket).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "ticket_requested");
+        assert_eq!(recorded.source, "api");
+        let pull = Request::post("/ticket")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/pull/9"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            call(composed(&app).router, pull).await.0,
+            StatusCode::BAD_REQUEST,
+            "a pull request is not an issue"
+        );
+    }
+
     #[tokio::test]
     async fn api_publishes_requests_as_events() {
         let app = test_app().await;
@@ -989,7 +1031,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 5);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1013,7 +1055,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 5);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())

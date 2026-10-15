@@ -2094,6 +2094,18 @@ async fn what_can_be_started_is_what_this_henk_is_configured_for() {
     let (cookie, _) = viewer(&f);
     let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
     assert_eq!(me["startable"], json!(["execute"]));
+
+    // #536: a ticket run is startable once `[autonomous]` is there.
+    let f = crate::dashboard::tests::fixture_with(
+        "https://127.0.0.1:9",
+        crate::dashboard::app::Assets(&[]),
+        |s| {
+            s.autonomous = Some(toml::from_str("").unwrap());
+        },
+    );
+    let (cookie, _) = viewer(&f);
+    let me = get(&f, "/dashboard/api/v1/me", &cookie).await.json();
+    assert_eq!(me["startable"], json!(["ticket"]));
 }
 
 #[tokio::test]

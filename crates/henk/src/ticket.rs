@@ -837,13 +837,16 @@ mod tests {
 
     use henk_domain::allowlist::{Platform, RepoRef};
     use henk_domain::review::ReviewOutcome;
-    use henk_llm::ModelClient;
     use henk_llm::testing::ScriptedClient;
+    use henk_llm::{ChatMessage, Completion, ModelClient, StopReason, Usage};
+    use henk_mcp::McpSession;
+    use henk_mcp::testing::{FakeServer, echo_behaviour};
     use henk_platform::ReviewTarget;
     use tokio::sync::Notify;
 
     use super::*;
     use crate::config::Config;
+    use crate::coordinator::Submitted;
     use crate::listeners::testing::FakeWriter;
     use crate::plan_tools::tests::FakeIssueWriter;
 
@@ -1851,6 +1854,90 @@ requester_id = 3
         assert!(error.to_string().contains("is a pull request"), "{error}");
         assert!(f.app.store.run(&ticket).await.unwrap().is_none());
         assert!(stages.calls().is_empty());
+    }
+
+    /// A fixture whose planner never answers in time, so a ticket run stays in
+    /// its first step until it is cancelled.
+    async fn hanging() -> Fixture {
+        let mut f = fixture();
+        let server = FakeServer::new(
+            vec![FakeServer::tool("issue_read", "", &["owner", "repo"])],
+            echo_behaviour(),
+        );
+        let session: Arc<dyn McpSession> = Arc::new(server.connect("github").await);
+        f.app.test_session = Some(session);
+        let answer = Completion {
+            message: ChatMessage::assistant("Plan written."),
+            stop: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let slow =
+            ScriptedClient::new("scripted", [Ok(answer)]).with_delay(Duration::from_secs(30));
+        f.app.models.insert("m".to_owned(), Arc::new(slow));
+        f
+    }
+
+    /// #536: an issue has one ticket run at a time, a second request joins
+    /// it, another issue is its own, and a cancel from the dashboard stops
+    /// the plan it is in, says so once and frees the issue.
+    #[tokio::test]
+    async fn an_issue_has_one_ticket_run_at_a_time_and_a_cancel_frees_it() {
+        let f = hanging().await;
+        let issue = Arc::clone(&f.issue);
+        let app = Arc::new(f.app);
+        let coordinator = Arc::new(Coordinator::new(Arc::clone(&app)));
+        let target = request().target;
+        let ask = |target: IssueTarget| {
+            coordinator
+                .submit_ticket(target, None, "test".to_owned(), Some("github:1".to_owned()))
+                .unwrap()
+        };
+
+        let Submitted::Started(first) = ask(target.clone()) else {
+            panic!("the first request starts a run")
+        };
+        let mut plan = None;
+        for _ in 0..400 {
+            if let Some((_, run)) = app.store.children(&first).await.unwrap().into_iter().next() {
+                plan = Some(run);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let plan = plan.expect("the ticket run started its plan");
+        assert_eq!(coordinator.tracked_tickets(), 1);
+        assert_eq!(
+            ask(target.clone()),
+            Submitted::Joined(first.clone()),
+            "one at a time"
+        );
+        assert_eq!(coordinator.tracked_tickets(), 1);
+
+        assert!(coordinator.cancel(&first, "github:1234".to_owned()));
+        until("the ticket run ended", || {
+            coordinator.tracked_tickets() == 0
+        })
+        .await;
+        let ticket = app.store.run(&first).await.unwrap().unwrap();
+        assert_eq!(ticket.status, RunStatus::Cancelled);
+        let plan = app.store.run(&plan).await.unwrap().unwrap();
+        assert_eq!(plan.status, RunStatus::Cancelled, "its stage was stopped");
+        let comments = issue.comments.lock().unwrap().clone();
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert!(
+            comments[0].starts_with("Cancelled from the dashboard by GitHub account 1234."),
+            "{}",
+            comments[0]
+        );
+
+        // Free again: a request starts a run of its own.
+        let Submitted::Started(second) = ask(target) else {
+            panic!("a cancelled issue starts afresh")
+        };
+        assert_ne!(second, first);
+        assert!(coordinator.cancel(&second, "github:1234".to_owned()));
+        until("the second ended", || coordinator.tracked_tickets() == 0).await;
+        app.shutdown.cancel();
     }
 
     #[test]
