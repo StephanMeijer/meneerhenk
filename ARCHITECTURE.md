@@ -248,8 +248,9 @@ files. Henk runs no checks of his own; the executor ran the repository's,
 and the pull request's CI is the final word. `push.rs`
 then applies the changeset to a fresh checkout that nothing ran in, commits
 it as Henk, as the commits the executor proposed with `propose_commits`
-once `henk_domain::commit::planned_commits` takes them, or as one "Fix
-review findings f1, f3" commit (#400), and pushes them as one
+once `henk_domain::commit::planned_commits` takes them and
+`finding_refusal` finds no finding id of the run in them (#585), or as one
+"Fix review findings" commit (#400), and pushes them as one
 fast-forward, after
 reading the branch again: a head that moved, or a branch Henk may no longer
 push to, refuses the push ("The push", below). Every commit is recorded in
@@ -378,9 +379,12 @@ remote (`Checkout::remote_has_branch`), and the push of the new ref is never
 forced. The caller passes the commits, `PlannedCommit`s that each name
 their paths (`Checkout::commit_paths` stages only those): the executor's,
 when `planned_commits` takes them, or else one commit, "Fix review
-findings f1, f3" for the loop and "Resolve #N: <title>" for an execute
+findings" for the loop and "Resolve #N: <title>" for an execute
 run. Henk writes every trailer block; `proposal_refusal` refuses a body
-line shaped like a trailer.
+line shaped like a trailer, and `finding_refusal` a subject or body that
+names a finding of the run, whose ids mean nothing outside it (#585).
+`ProposeCommits` applies it when the executor proposes, so it rewords in the
+same round, and `Rounds::round_commits` again where the commits are made.
 
 The rules of the changeset are pure functions in `henk-domain`:
 `henk_domain::workspace::changeset_refusal` (`.git`, escapes, links,
