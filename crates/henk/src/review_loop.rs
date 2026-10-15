@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::commit::FIX_SUBJECT;
+use henk_domain::commit::{PlannedCommit, bullet_body, fix_subject, planned_commits};
 use henk_domain::diff::ReviewDiff;
 use henk_domain::identity::RequesterId;
 use henk_domain::push::push_refusal;
@@ -46,6 +46,7 @@ use tracing::{info, warn};
 use crate::app::App;
 use crate::cancel::is_cancelled;
 use crate::ci_tools::CiScope;
+use crate::commit_tools::{ProposeCommits, RECENT_COMMITS, recent_commits_text};
 use crate::config::LoopConfig;
 use crate::diff_tools::{DiffFiles, GetFileDiff, ListChangedFiles};
 use crate::edit_tools::{EditContext, EditState, edit_tools};
@@ -172,8 +173,8 @@ pub(crate) async fn run_loop(
         opened = opening => opened,
         () = cancel.cancelled() => return Err(crate::cancel::Cancelled.into()),
     };
-    let workspace = match opened {
-        Ok(workspace) => workspace,
+    let (workspace, recent) = match opened {
+        Ok(opened) => opened,
         Err(error) => {
             let why = format!("{error:#}");
             stages::mark(store, run, Stage::Checkout, StageState::Failed, &why).await;
@@ -187,7 +188,7 @@ pub(crate) async fn run_loop(
         stages::mark(store, run, Stage::Push, StageState::Skipped, skipped).await;
     }
 
-    let mut rounds = Rounds::new(on, config, profile, &workspace, &diff, writer)?
+    let mut rounds = Rounds::new(on, config, (profile, &recent), &workspace, &diff, writer)?
         .alone(alone)
         .until(deadline);
     // Closed on every path; a run future that is dropped drops it instead,
@@ -205,7 +206,9 @@ pub(crate) async fn run_loop(
 /// every command on the run, and sets it up as the profile says. The loop
 /// clones the branch at its head, which it pushes to; the reviewer alone
 /// gets `reviewed`, fetched by its sha, which a fork or a branch that moved
-/// on still has.
+/// on still has. Also returns the branch's latest commit subjects, which
+/// show the executor its commit convention (#400); none for the reviewer
+/// alone.
 async fn open_workspace(
     app: &App,
     run: &RunId,
@@ -213,7 +216,7 @@ async fn open_workspace(
     reviewed: Option<&CommitSha>,
     credential: Option<GitCredential>,
     (profile, deadline): (&Profile, tokio::time::Instant),
-) -> anyhow::Result<Arc<dyn Workspace>> {
+) -> anyhow::Result<(Arc<dyn Workspace>, Vec<String>)> {
     let dir =
         ScratchDir::new(&format!("henk-loop-{run}")).context("making the checkout directory")?;
     let checkout = match reviewed {
@@ -230,7 +233,14 @@ async fn open_workspace(
         }
     }
     .context("checking out the pull request")?;
-    crate::workspace::open_prepared(app, run, &checkout, profile, Some(deadline)).await
+    let recent = if reviewed.is_none() {
+        checkout.recent_subjects(RECENT_COMMITS).await
+    } else {
+        Vec::new()
+    };
+    let workspace =
+        crate::workspace::open_prepared(app, run, &checkout, profile, Some(deadline)).await?;
+    Ok((workspace, recent))
 }
 
 /// The loop's state across rounds.
@@ -264,7 +274,7 @@ impl<'a> Rounds<'a> {
     fn new(
         on: LoopTarget<'a>,
         config: &'a LoopConfig,
-        profile: &Profile,
+        (profile, recent): (&Profile, &[String]),
         workspace: &Arc<dyn Workspace>,
         diff: &Arc<ReviewDiff>,
         writer: Arc<dyn PushWriter>,
@@ -284,6 +294,7 @@ impl<'a> Rounds<'a> {
             store: Arc::clone(&app.store),
             reviewer_model: reviewer_model.model().to_owned(),
             state: Mutex::new(HandoffState::default()),
+            commits: Arc::default(),
         });
         let mut reviewer_system = format!(
             "{}\n\n{}",
@@ -322,7 +333,7 @@ impl<'a> Rounds<'a> {
             state: Mutex::new(EditState::default()),
         });
         let (executor_system, executor_tools) =
-            executor_setup(app, address, &fixing, &handoff, &reference, &repo);
+            executor_setup(app, address, &fixing, &handoff, (&reference, &repo, recent));
 
         let reviewer_turns = reviewer.max_turns(Role::Reviewer);
         let reviewer_limits = round_limits(
@@ -571,7 +582,7 @@ impl<'a> Rounds<'a> {
         let unpushed = match &pushed {
             Pushed::Nothing => "marked fixed, but nothing changed in the workspace".to_owned(),
             Pushed::Stopped(stop) => stop.to_string(),
-            Pushed::Commit { .. } => String::new(),
+            Pushed::Commits { .. } => String::new(),
         };
         let ids: Vec<_> = self
             .handoff
@@ -597,10 +608,16 @@ impl<'a> Rounds<'a> {
                 "Round {}. The executor pushed nothing this round. Their verdicts:\n\n{verdicts}\n\n{contest} Review again.",
                 round + 1
             ),
-            Pushed::Commit { sha, patch } => format!(
-                "Round {}. The executor pushed commit {sha} to the branch, and your workspace is at it now. What it changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
-                round + 1
-            ),
+            Pushed::Commits { shas, patch } => {
+                let pushed = match shas.as_slice() {
+                    [one] => format!("commit {one}"),
+                    many => format!("{} commits, {}", many.len(), many.join(", ")),
+                };
+                format!(
+                    "Round {}. The executor pushed {pushed} to the branch, and your workspace is at its head now. What the round changed:\n\n```diff\n{patch}\n```\n\nTheir verdicts:\n\n{verdicts}\n\n{contest} Review again.",
+                    round + 1
+                )
+            }
             Pushed::Stopped(stop) => return Ok(Err(stop)),
         };
         Ok(Ok(next))
@@ -761,8 +778,10 @@ impl<'a> Rounds<'a> {
         )))
     }
 
-    /// Pushes what the executor changed as one commit, once the changeset
-    /// passes Henk's rules; the workspace then counts from the new head.
+    /// Pushes what the executor changed as the commits it proposed, or as
+    /// one commit when it proposed none that hold (#400), once the
+    /// changeset passes Henk's rules; the workspace then counts from the
+    /// new head.
     /// Henk runs no checks of his own: the executor runs the repository's
     /// checks, and the pull request's CI is the final word (#396).
     async fn push_round(
@@ -808,14 +827,14 @@ impl<'a> Rounds<'a> {
             .await
             .context("getting a credential for git")?;
         let checkout = pusher.checkout_pull(&name, facts, credential).await?;
-        let notes = [format!("review loop round {}", self.round)];
+        let commits = self.round_commits(&pusher, &changes).await;
         let to = PushTo::Pull {
             target: self.on.target,
             facts,
         };
-        let pushing = pusher.commit_and_push(&checkout, &to, FIX_SUBJECT, &notes, &changes, cancel);
-        let sha = match pushing.await {
-            Ok(sha) => sha,
+        let pushing = pusher.commit_and_push(&checkout, &to, &commits, &changes, cancel);
+        let shas = match pushing.await {
+            Ok(shas) => shas,
             Err(error) if is_cancelled(&error) => return Err(error),
             Err(error) if error.is::<MergedMeanwhile>() => {
                 return Ok(Pushed::Stopped(LoopStop::Merged));
@@ -829,6 +848,7 @@ impl<'a> Rounds<'a> {
         };
         // On the branch now: whatever fails next, the new head gets the
         // review's check.
+        let sha = shas.last().context("no commit was pushed")?.clone();
         let new_head = CommitSha::parse(&sha).context("the pushed commit")?;
         if let Ok(mut head) = self.on.pushed_head.lock() {
             *head = Some(new_head.clone());
@@ -837,10 +857,14 @@ impl<'a> Rounds<'a> {
             ci.follow(new_head.clone());
         }
         self.handoff.with_ledger(|ledger| ledger.pushed(&sha));
-        self.pushed.push(sha);
+        let from = facts.head.clone();
+        let short: Vec<String> = shas
+            .iter()
+            .map(|sha| sha.get(..12).unwrap_or(sha).to_owned())
+            .collect();
+        self.pushed.extend(shas);
         facts.head = new_head;
-        let short = facts.head.short().to_owned();
-        let patch = head_patch(&checkout).await;
+        let patch = round_patch(&checkout, &from).await;
         self.workspace
             .baseline()
             .await
@@ -853,10 +877,49 @@ impl<'a> Rounds<'a> {
             self.on.run,
             Stage::Push,
             StageState::Done,
-            format!("pushed {short} in round {}", self.round),
+            format!("pushed {} in round {}", short.join(", "), self.round),
         )
         .await;
-        Ok(Pushed::Commit { sha: short, patch })
+        Ok(Pushed::Commits { shas: short, patch })
+    }
+
+    /// The commits for this round's `changes`: the executor's, when they
+    /// hold every change once and are in shape, or else one commit whose
+    /// subject names the findings fixed, with why on the run's timeline
+    /// (#400).
+    async fn round_commits(
+        &self,
+        pusher: &Pusher<'_>,
+        changes: &[henk_domain::workspace::Change],
+    ) -> Vec<PlannedCommit> {
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        let round = self.round;
+        match self.handoff.proposed_commits() {
+            Some(proposed) => match planned_commits(&proposed, &paths) {
+                Ok(planned) => return planned,
+                Err(why) => {
+                    pusher
+                        .note(&format!(
+                            "the executor's commits for round {round} cannot be made ({why}); the round is pushed as one commit"
+                        ))
+                        .await;
+                }
+            },
+            None => {
+                pusher
+                    .note(&format!(
+                        "the executor proposed no commits for round {round}; the round is pushed as one commit"
+                    ))
+                    .await;
+            }
+        }
+        // Only ids and Henk's own words: no model's text reaches this
+        // commit's message.
+        vec![PlannedCommit {
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            subject: fix_subject(&self.handoff.unpushed_fixes()),
+            body: bullet_body(&[format!("review loop round {round}")]),
+        }]
     }
 }
 
@@ -868,8 +931,7 @@ fn executor_setup(
     address: &crate::config::ExecutorConfig,
     fixing: &Arc<EditContext>,
     handoff: &Arc<Handoff>,
-    reference: &str,
-    repo: &str,
+    (reference, repo, recent): (&str, &str, &[String]),
 ) -> (String, ToolSet) {
     let mut system = format!(
         "{}\n\n{}",
@@ -880,6 +942,7 @@ fn executor_setup(
                 ("ref", reference),
                 ("repo", repo),
                 ("max_files", &address.max_changed_files.to_string()),
+                ("recent_commits", &recent_commits_text(recent)),
             ],
         )
     );
@@ -889,6 +952,10 @@ fn executor_setup(
     let mut tools = edit_tools(fixing);
     tools.add(ListFindings(Arc::clone(handoff)));
     tools.add(GiveVerdict(Arc::clone(handoff)));
+    tools.add(ProposeCommits {
+        proposed: Arc::clone(&handoff.commits),
+        workspace: Arc::clone(&fixing.workspace),
+    });
     let tools = equip_and_grant(
         Role::Executor,
         &mut system,
@@ -986,8 +1053,9 @@ fn round_limits(
 enum Pushed {
     /// The executor changed nothing.
     Nothing,
-    /// One commit, with its patch for the reviewer.
-    Commit { sha: String, patch: String },
+    /// The round's commits, short and oldest first, with the round's patch
+    /// for the reviewer.
+    Commits { shas: Vec<String>, patch: String },
     /// The loop cannot go on, and why.
     Stopped(LoopStop),
 }
@@ -1002,12 +1070,13 @@ fn opening(target: &ReviewTarget, commit: &CommitSha, diff: &ReviewDiff) -> Stri
     )
 }
 
-/// The patch of the commit at the checkout's head, cut to
-/// [`MAX_PATCH_CHARS`]; empty when git cannot say.
-async fn head_patch(checkout: &Checkout) -> String {
+/// The patch of the round, from `from` to the checkout's head, however
+/// many commits it took, cut to [`MAX_PATCH_CHARS`]; empty when git cannot
+/// say.
+async fn round_patch(checkout: &Checkout, from: &CommitSha) -> String {
     let output = git_command(
         checkout.path(),
-        &["show", "--format=", "--patch", "HEAD"],
+        &["diff", "--patch", from.as_str(), "HEAD"],
         None,
     )
     .output()

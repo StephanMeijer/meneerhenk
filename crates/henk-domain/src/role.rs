@@ -49,6 +49,7 @@ const EXECUTOR: &[&str] = &[
     "write_file",
     "list_findings",
     "give_verdict",
+    "propose_commits",
     "propose_pull_request",
 ];
 /// What only the planner has: the tracker tools, which draft until the

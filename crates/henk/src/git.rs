@@ -419,16 +419,59 @@ impl Checkout {
     }
 
     /// Commits every change as `identity` with `message`; hooks do not run.
+    /// Henk's own pushes commit path by path ([`Checkout::commit_paths`]);
+    /// this one makes the tests' history.
     ///
     /// # Errors
     ///
     /// Returns [`GitError`] when staging or committing fails.
+    #[cfg(test)]
     pub async fn commit(
         &self,
         identity: &CommitIdentity,
         message: &str,
     ) -> Result<String, GitError> {
         run(self.path(), &["add", "--all"], None, None).await?;
+        self.commit_staged(identity, message).await
+    }
+
+    /// Commits the changes to `paths` alone, added, changed and deleted, as
+    /// `identity` with `message`; the rest stays uncommitted for the next
+    /// commit (#400). Paths are taken literally, never as patterns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when staging or committing fails.
+    pub async fn commit_paths(
+        &self,
+        identity: &CommitIdentity,
+        message: &str,
+        paths: &[String],
+    ) -> Result<String, GitError> {
+        let mut listed = paths.join("\0");
+        listed.push('\0');
+        run(
+            self.path(),
+            &[
+                "--literal-pathspecs",
+                "add",
+                "--all",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            None,
+            Some(&listed),
+        )
+        .await?;
+        self.commit_staged(identity, message).await
+    }
+
+    /// Commits what is staged; hooks do not run.
+    async fn commit_staged(
+        &self,
+        identity: &CommitIdentity,
+        message: &str,
+    ) -> Result<String, GitError> {
         let name = format!("user.name={}", identity.name);
         let email = format!("user.email={}", identity.email);
         run(
@@ -452,6 +495,22 @@ impl Checkout {
         )
         .await?;
         self.head().await
+    }
+
+    /// The subjects of the last `n` commits, newest first: how the
+    /// repository words its commits, for the executor (#400). Empty when
+    /// git cannot say.
+    pub async fn recent_subjects(&self, n: usize) -> Vec<String> {
+        let count = n.to_string();
+        run(
+            self.path(),
+            &["log", "-n", &count, "--format=%s"],
+            None,
+            None,
+        )
+        .await
+        .map(|log| log.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
     }
 
     /// Whether `origin` has a branch named `branch` (#329).
@@ -625,6 +684,25 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    /// The last `n` commits of `branch` on a bare remote, newest first, in
+    /// `git log` `format`, one per entry.
+    pub(crate) async fn remote_commits(
+        remote: &Path,
+        branch: &str,
+        n: usize,
+        format: &str,
+    ) -> Vec<String> {
+        let format = format!("--format={format}%x00");
+        let (branch, count) = (format!("refs/heads/{branch}"), n.to_string());
+        run(remote, &["log", "-n", &count, &format, &branch], None, None)
+            .await
+            .unwrap()
+            .split('\0')
+            .map(|c| c.trim_matches('\n').to_owned())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
     /// The content of `path` at the head of `branch` on a bare remote.
     pub(crate) async fn remote_branch_file(remote: &Path, branch: &str, path: &str) -> String {
         let spec = format!("refs/heads/{branch}:{path}");
@@ -706,6 +784,55 @@ pub(crate) mod tests {
             "{log}"
         );
         assert!(log.contains("Henk-Run: r-1"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn one_change_is_committed_path_by_path_as_several_commits() {
+        let (remote, head) = bare_remote("henk-git-split").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let checkout = Checkout::clone_at(
+            ScratchDir::new("henk-git-split-work").unwrap(),
+            &url,
+            "feature",
+            &head,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(checkout.recent_subjects(20).await, ["Seed"]);
+        std::fs::write(checkout.path().join("NEW.md"), "new\n").unwrap();
+        std::fs::write(checkout.path().join("*.md"), "a star\n").unwrap();
+        std::fs::remove_file(checkout.path().join("src/a.rs")).unwrap();
+        checkout
+            .commit_paths(&identity(), "docs: add notes\n", &["NEW.md".to_owned()])
+            .await
+            .unwrap();
+        let mut left = checkout.changed_files().await.unwrap();
+        left.sort();
+        // A path is literal: `*.md` did not take NEW.md, nor NEW.md `*.md`.
+        assert_eq!(left, ["*.md", "src/a.rs"]);
+        checkout
+            .commit_paths(
+                &identity(),
+                "refactor: drop a.rs\n",
+                &["src/a.rs".to_owned(), "*.md".to_owned()],
+            )
+            .await
+            .unwrap();
+        assert!(checkout.changed_files().await.unwrap().is_empty());
+        checkout.push("feature").await.unwrap();
+        assert_eq!(
+            remote_commits(remote.path(), "feature", 3, "%s|%an").await,
+            [
+                "refactor: drop a.rs|meneer-henk[bot]",
+                "docs: add notes|meneer-henk[bot]",
+                "Seed|Seed",
+            ]
+        );
+        assert_eq!(
+            checkout.recent_subjects(2).await,
+            ["refactor: drop a.rs", "docs: add notes"]
+        );
     }
 
     #[tokio::test]

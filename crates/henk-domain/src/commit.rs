@@ -6,7 +6,9 @@
 
 use std::fmt;
 
+use crate::review_loop::FindingId;
 use crate::run::RunId;
+use crate::text::style_violations;
 
 /// Why a commit identity is refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -192,20 +194,220 @@ impl Default for TrailerPolicy {
     }
 }
 
-/// The subject of the commits the review loop pushes (§3.5).
-pub const FIX_SUBJECT: &str = "Fix review findings";
+/// The longest commit subject Henk writes or takes: what `git log
+/// --oneline` and the platforms show without cutting it.
+pub const MAX_SUBJECT: usize = 72;
 
-/// The message of a commit Henk pushes (§3.5, §8.6): `subject`, what he
-/// changed, then one blank line and the trailers in a fixed order: `Henk-Run`,
-/// `Requested-by`, the requester's `Co-authored-by` and `Signed-off-by`,
-/// and Henk's `Signed-off-by` last, as the committer's.
+/// The most commits an executor may split one round, or one execute run,
+/// into (#400).
+pub const MAX_COMMITS: usize = 10;
+
+/// `subject` on one line, cut to [`MAX_SUBJECT`] characters with `...`.
+#[must_use]
+pub fn cut_subject(subject: &str) -> String {
+    let subject = one_line(subject);
+    if subject.chars().count() <= MAX_SUBJECT {
+        return subject;
+    }
+    let cut: String = subject.chars().take(MAX_SUBJECT - 3).collect();
+    format!("{}...", cut.trim_end())
+}
+
+/// The subject of a review loop's commit when the executor proposed no
+/// usable commits (§3.5): `Fix review findings f1, f3`, the findings it
+/// fixed, cut to [`MAX_SUBJECT`].
+#[must_use]
+pub fn fix_subject(fixed: &[FindingId]) -> String {
+    if fixed.is_empty() {
+        return "Fix review findings".to_owned();
+    }
+    let ids: Vec<String> = fixed.iter().map(ToString::to_string).collect();
+    cut_subject(&format!("Fix review findings {}", ids.join(", ")))
+}
+
+/// A body of `- note` lines, one per note, each on one line.
+#[must_use]
+pub fn bullet_body(notes: &[String]) -> String {
+    notes
+        .iter()
+        .map(|note| format!("- {}", one_line(note)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A body as a commit message carries it: its lines without control
+/// characters or trailing whitespace, at most one blank line in a row, and
+/// none at either end.
+fn clean_body(body: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let line: String = line.chars().filter(|c| !c.is_control()).collect();
+        let line = line.trim_end().to_owned();
+        if line.is_empty() && lines.last().is_none_or(String::is_empty) {
+            continue;
+        }
+        lines.push(line);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Whether `line` has the shape of a trailer, which `git interpret-trailers`
+/// would read as one. Git is loose: whitespace may sit between the key and
+/// the colon, and none is needed after it.
+fn looks_like_trailer(line: &str) -> bool {
+    line.trim_start()
+        .split_once(':')
+        .is_some_and(|(key, value)| {
+            let key = key.trim_end();
+            !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !value.trim().is_empty()
+        })
+}
+
+/// One commit as the executor proposes it (#400): the files it holds, and
+/// its subject and body in the repository's own convention. Henk adds the
+/// trailers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitProposal {
+    /// The files, as the workspace names them.
+    pub files: Vec<String>,
+    /// One line.
+    pub subject: String,
+    /// Plain text; may be empty.
+    pub body: String,
+}
+
+/// One commit Henk makes: the paths it stages, and its subject and body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedCommit {
+    /// The paths it holds.
+    pub paths: Vec<String>,
+    /// One line, at most [`MAX_SUBJECT`] characters.
+    pub subject: String,
+    /// Plain text, without trailers.
+    pub body: String,
+}
+
+/// Why the executor's commits cannot be made as they are, or `None` when
+/// their shape holds (#400): at least one and at most [`MAX_COMMITS`],
+/// none without files, no file twice, a subject of one line of at most
+/// [`MAX_SUBJECT`] characters, and bodies of plain text with no line a
+/// trailer could be read from. Trailers are Henk's alone.
+#[must_use]
+pub fn proposal_refusal(commits: &[CommitProposal]) -> Option<String> {
+    if commits.is_empty() {
+        return Some("propose at least one commit".to_owned());
+    }
+    if commits.len() > MAX_COMMITS {
+        return Some(format!(
+            "{} commits proposed; at most {MAX_COMMITS}",
+            commits.len()
+        ));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for (n, commit) in commits.iter().enumerate() {
+        let which = format!("commit {}", n + 1);
+        if commit.files.is_empty() {
+            return Some(format!("{which} has no files"));
+        }
+        for file in &commit.files {
+            if seen.contains(&file.as_str()) {
+                return Some(format!("{file} is in more than one commit"));
+            }
+            seen.push(file);
+        }
+        let subject = commit.subject.trim();
+        if subject.is_empty() {
+            return Some(format!("{which} has no subject"));
+        }
+        if subject.contains(['\n', '\r']) {
+            return Some(format!("the subject of {which} is more than one line"));
+        }
+        if subject.chars().any(char::is_control) {
+            return Some(format!("the subject of {which} has a control character"));
+        }
+        let length = subject.chars().count();
+        if length > MAX_SUBJECT {
+            return Some(format!(
+                "the subject of {which} is {length} characters; at most {MAX_SUBJECT}"
+            ));
+        }
+        if !style_violations(subject).is_empty() || !style_violations(&commit.body).is_empty() {
+            return Some(format!(
+                "{which} breaks the style rules (no emoji, no em-dash)"
+            ));
+        }
+        // The body as the commit carries it, with control characters gone, so
+        // a trailer hidden by one is still seen.
+        let body = clean_body(&commit.body);
+        if let Some(line) = body.lines().find(|l| looks_like_trailer(l)) {
+            return Some(format!(
+                "the body of {which} has a line shaped like a trailer ({}); Henk writes the trailers, so rephrase it",
+                line.trim()
+            ));
+        }
+    }
+    None
+}
+
+/// The commits Henk makes of the executor's proposal for a change of the
+/// files `changed`, or why it cannot (#400): the shape must hold
+/// ([`proposal_refusal`]), every changed file must be in exactly one
+/// commit, and no commit may name a file that did not change.
+///
+/// # Errors
+///
+/// Returns why, in words the executor can act on.
+pub fn planned_commits(
+    commits: &[CommitProposal],
+    changed: &[&str],
+) -> Result<Vec<PlannedCommit>, String> {
+    if let Some(why) = proposal_refusal(commits) {
+        return Err(why);
+    }
+    let proposed: Vec<&str> = commits
+        .iter()
+        .flat_map(|c| c.files.iter().map(String::as_str))
+        .collect();
+    if let Some(file) = proposed.iter().find(|f| !changed.contains(f)) {
+        return Err(format!("{file} is in a commit but did not change"));
+    }
+    let missing: Vec<&str> = changed
+        .iter()
+        .copied()
+        .filter(|f| !proposed.contains(f))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "these changed files are in no commit: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(commits
+        .iter()
+        .map(|c| PlannedCommit {
+            paths: c.files.clone(),
+            subject: c.subject.trim().to_owned(),
+            body: clean_body(&c.body),
+        })
+        .collect())
+}
+
+/// The message of a commit Henk pushes (§3.5, §8.6): `subject`, its `body`
+/// when it has one, then one blank line and the trailers in a fixed order:
+/// `Henk-Run`, `Requested-by`, the requester's `Co-authored-by` and
+/// `Signed-off-by`, and Henk's `Signed-off-by` last, as the committer's.
 ///
 /// A requester with Henk's own address gets no trailers of their own, and
 /// no line appears twice.
 #[must_use]
 pub fn commit_message(
     subject: &str,
-    fixed: &[String],
+    body: &str,
     run: &RunId,
     requested_by: Option<&str>,
     henk: &CommitPerson,
@@ -213,13 +415,11 @@ pub fn commit_message(
     policy: TrailerPolicy,
 ) -> String {
     let mut message = format!("{}\n", one_line(subject));
-    if !fixed.is_empty() {
+    let body = clean_body(body);
+    if !body.is_empty() {
         message.push('\n');
-        for note in fixed {
-            message.push_str("- ");
-            message.push_str(&one_line(note));
-            message.push('\n');
-        }
+        message.push_str(&body);
+        message.push('\n');
     }
 
     let requester =
@@ -298,8 +498,8 @@ mod tests {
     #[test]
     fn the_default_is_henks_signoff_and_the_requesters_coauthor() {
         let message = commit_message(
-            FIX_SUBJECT,
-            &["src/a.rs: off-by-one\nin the loop".to_owned()],
+            "Fix review findings",
+            &bullet_body(&["src/a.rs: off-by-one\nin the loop".to_owned()]),
             &run(),
             Some("discord:3"),
             &henk(),
@@ -328,8 +528,8 @@ mod tests {
             };
             for requester in [None, Some(alice())] {
                 let message = commit_message(
-                    FIX_SUBJECT,
-                    &[],
+                    "Fix review findings",
+                    "",
                     &run(),
                     Some("discord:3"),
                     &henk(),
@@ -363,10 +563,14 @@ mod tests {
             requester_coauthor: true,
             requester_signoff: true,
         };
-        for fixed in [vec![], vec!["a".to_owned(), "b".to_owned()]] {
+        for body in [
+            "",
+            "- a\n- b",
+            "fix(ci): pin the toolchain\n\nSo the build is the same.\n",
+        ] {
             let message = commit_message(
-                FIX_SUBJECT,
-                &fixed,
+                "Fix review findings",
+                body,
                 &run(),
                 None,
                 &henk(),
@@ -394,7 +598,15 @@ mod tests {
             requester_coauthor: true,
             requester_signoff: true,
         };
-        let message = commit_message(FIX_SUBJECT, &[], &run(), None, &henk(), Some(&twin), all);
+        let message = commit_message(
+            "Fix review findings",
+            "",
+            &run(),
+            None,
+            &henk(),
+            Some(&twin),
+            all,
+        );
         assert_eq!(
             trailer_block(&message),
             [
@@ -407,8 +619,8 @@ mod tests {
     #[test]
     fn a_note_that_looks_like_a_trailer_stays_in_the_body() {
         let message = commit_message(
-            FIX_SUBJECT,
-            &["Signed-off-by: mallory <m@evil.example>".to_owned()],
+            "Fix review findings",
+            &bullet_body(&["Signed-off-by: mallory <m@evil.example>".to_owned()]),
             &run(),
             None,
             &henk(),
@@ -418,6 +630,183 @@ mod tests {
         let block = trailer_block(&message);
         assert!(block.iter().all(|l| !l.contains("evil")), "{message}");
         assert!(message.contains("- Signed-off-by: mallory"), "{message}");
+    }
+
+    fn commit(files: &[&str], subject: &str, body: &str) -> CommitProposal {
+        CommitProposal {
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_proposal_that_covers_every_changed_file_once_becomes_its_commits() {
+        let proposed = [
+            commit(
+                &["src/a.rs"],
+                "fix(loop): stop at the last round",
+                "Fixes f1.\n\n\n",
+            ),
+            commit(
+                &[".github/workflows/ci.yml", "Cargo.toml"],
+                " ci: pin the toolchain ",
+                "",
+            ),
+        ];
+        let planned = planned_commits(
+            &proposed,
+            &["Cargo.toml", "src/a.rs", ".github/workflows/ci.yml"],
+        )
+        .unwrap();
+        assert_eq!(
+            planned,
+            [
+                PlannedCommit {
+                    paths: vec!["src/a.rs".to_owned()],
+                    subject: "fix(loop): stop at the last round".to_owned(),
+                    body: "Fixes f1.".to_owned(),
+                },
+                PlannedCommit {
+                    paths: vec![
+                        ".github/workflows/ci.yml".to_owned(),
+                        "Cargo.toml".to_owned()
+                    ],
+                    subject: "ci: pin the toolchain".to_owned(),
+                    body: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_proposal_that_misses_repeats_or_invents_a_file_is_refused() {
+        let changed = ["a.rs", "b.rs"];
+        for (case, proposed, says) in [
+            (
+                "missing",
+                vec![commit(&["a.rs"], "fix: a", "")],
+                "in no commit: b.rs",
+            ),
+            (
+                "repeated",
+                vec![
+                    commit(&["a.rs", "b.rs"], "fix: a", ""),
+                    commit(&["b.rs"], "fix: b", ""),
+                ],
+                "b.rs is in more than one commit",
+            ),
+            (
+                "unknown",
+                vec![commit(&["a.rs", "b.rs", "c.rs"], "fix: a", "")],
+                "c.rs is in a commit but did not change",
+            ),
+            (
+                "empty",
+                vec![
+                    commit(&["a.rs", "b.rs"], "fix: a", ""),
+                    commit(&[], "fix: b", ""),
+                ],
+                "commit 2 has no files",
+            ),
+            ("none", vec![], "at least one commit"),
+        ] {
+            let why = planned_commits(&proposed, &changed).unwrap_err();
+            assert!(why.contains(says), "{case}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_subject_or_body_out_of_shape_is_refused() {
+        let long = "x".repeat(MAX_SUBJECT + 1);
+        for (case, subject, body, says) in [
+            ("blank", " ", "", "has no subject"),
+            ("lines", "fix: a\nand b", "", "more than one line"),
+            ("nul", "fix: a\u{0}b", "", "control character"),
+            ("escape", "fix: a\u{1b}[31m", "", "control character"),
+            (
+                "hidden",
+                "fix: a",
+                "Signed-off-by\u{7}: x <x@y.z>",
+                "trailer",
+            ),
+            ("long", long.as_str(), "", "73 characters"),
+            ("emoji", "fix: a \u{1f680}", "", "style rules"),
+            ("dash", "fix: a", "a \u{2014} b", "style rules"),
+            (
+                "signoff",
+                "fix: a",
+                "Done.\n\nSigned-off-by: m <m@evil.example>",
+                "trailer",
+            ),
+            (
+                "coauthor",
+                "fix: a",
+                "  Co-authored-by: m <m@evil.example>",
+                "trailer",
+            ),
+            ("run", "fix: a", "Henk-Run: r-1", "trailer"),
+            (
+                "no space",
+                "fix: a",
+                "Signed-off-by:m <m@evil.example>",
+                "trailer",
+            ),
+            (
+                "space before colon",
+                "fix: a",
+                "Co-authored-by : m <m@evil.example>",
+                "trailer",
+            ),
+        ] {
+            let why = proposal_refusal(&[commit(&["a.rs"], subject, body)]).unwrap();
+            assert!(why.contains(says), "{case}: {why}");
+        }
+        let many: Vec<CommitProposal> = (0..=MAX_COMMITS)
+            .map(|n| commit(&[&format!("{n}.rs")], "fix: a", ""))
+            .collect();
+        assert!(proposal_refusal(&many).unwrap().contains("at most"));
+        // Prose with a colon is not a trailer.
+        let prose = "Fixes f2: the loop stopped a round early.\nSee https://example.com/x.";
+        assert_eq!(
+            proposal_refusal(&[commit(&["a.rs"], "fix: a", prose)]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fallback_subject_names_the_findings_and_fits_on_a_line() {
+        let ids = |n: u32| -> Vec<FindingId> {
+            (1..=n)
+                .filter_map(|i| FindingId::parse(&i.to_string()))
+                .collect()
+        };
+        assert_eq!(fix_subject(&[]), "Fix review findings");
+        assert_eq!(fix_subject(&ids(2)), "Fix review findings f1, f2");
+        let many = fix_subject(&ids(30));
+        assert_eq!(many.chars().count(), MAX_SUBJECT);
+        assert!(many.ends_with("..."), "{many}");
+    }
+
+    #[test]
+    fn a_body_keeps_its_lines_and_the_trailers_stay_henks() {
+        let message = commit_message(
+            "fix(ci): pin the toolchain",
+            "\nThe build used whatever was newest.\n\n\n\nFixes f3.  \n",
+            &run(),
+            None,
+            &henk(),
+            None,
+            TrailerPolicy::default(),
+        );
+        assert_eq!(
+            message,
+            "fix(ci): pin the toolchain\n\n\
+             The build used whatever was newest.\n\n\
+             Fixes f3.\n\n\
+             Henk-Run: r-20261006-0000beef\n\
+             Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>\n"
+        );
     }
 
     #[test]

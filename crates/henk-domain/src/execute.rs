@@ -5,9 +5,6 @@
 /// The most characters of the title's slug in a branch name.
 const MAX_SLUG: usize = 40;
 
-/// The most characters of a commit subject.
-const MAX_SUBJECT: usize = 72;
-
 /// The branch for issue `number`: `prefix`, the number and a slug of the
 /// title, such as `henk/329-the-executor-takes-an-issue`. The slug keeps
 /// ASCII letters and digits, lowercased, with one `-` between words, and is
@@ -78,13 +75,7 @@ pub fn branch_candidate(name: &str, n: u32) -> String {
 /// line, cut to 72 characters.
 #[must_use]
 pub fn commit_subject(reference: &str, title: &str) -> String {
-    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let subject = format!("Resolve {reference}: {title}");
-    if subject.chars().count() <= MAX_SUBJECT {
-        return subject;
-    }
-    let cut: String = subject.chars().take(MAX_SUBJECT - 3).collect();
-    format!("{}...", cut.trim_end())
+    crate::commit::cut_subject(&format!("Resolve {reference}: {title}"))
 }
 
 /// The pull request's body: it closes the issue, says what changed and
