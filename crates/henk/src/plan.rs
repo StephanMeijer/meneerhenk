@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::marker::ModelId;
 use henk_domain::plan::{ChangeBudget, SessionEntry, extract_plan, with_plan_section};
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::scope::Scope;
@@ -134,69 +133,63 @@ pub async fn run_plan(
     )
     .await;
 
-    if let Err(failure) = &result {
-        let on_issue = OnIssue {
-            app,
-            writer: &writer,
-            target: &request.target,
-            run: &run,
-            link: &link,
-            model: &context.model,
-            what: "planning",
-        };
-        if let Some(ended) = on_issue.ended_early(failure).await {
-            return Err(ended);
-        }
+    let on_issue = OnIssue {
+        app,
+        writer: &writer,
+        target: &request.target,
+        run: &run,
+        link: &link,
+        model: &context.model,
+        what: "planning",
+    };
+    if let Err(failure) = &result
+        && let Some(ended) = on_issue.ended_early(failure).await
+    {
+        return Err(ended);
     }
 
-    let (plan, changes) = match context.state.lock() {
-        Ok(state) => (state.plan.clone(), state.changes.clone()),
-        Err(_) => (None, Vec::new()),
+    let (planned, changes) = match context.state.lock() {
+        Ok(state) => (state.plan.is_some(), state.changes.clone()),
+        Err(_) => (false, Vec::new()),
     };
-    let when = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
 
     finish_plan(
-        app,
-        &writer,
-        &request,
-        &run,
-        &link,
+        &on_issue,
         &model,
         requester.to_string(),
         result,
-        plan,
+        planned,
         changes,
-        when,
-        &context.model,
     )
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "everything the plan session produced, recorded in one place"
-)]
+/// Ends a plan run on the issue: the session entry under the plan and the
+/// run finished when a plan was written, a failure comment otherwise.
 async fn finish_plan(
-    app: &App,
-    writer: &Arc<dyn henk_platform::IssueWriter>,
-    request: &PlanRequest,
-    run: &RunId,
-    link: &str,
+    on_issue: &OnIssue<'_>,
     model: &Arc<dyn henk_llm::ModelClient>,
     requester: String,
     result: anyhow::Result<()>,
-    plan: Option<String>,
+    planned: bool,
     changes: Vec<String>,
-    when: String,
-    model_id: &ModelId,
 ) -> anyhow::Result<PlanReport> {
-    match (result, plan) {
-        (Ok(()), Some(_)) => {
+    let OnIssue {
+        app,
+        writer,
+        target,
+        run,
+        link,
+        ..
+    } = *on_issue;
+    match (result, planned) {
+        (Ok(()), true) => {
+            let when = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
             // Append the session entry under the plan (§4).
             let current = writer
-                .issue(&request.target)
+                .issue(target)
                 .await
                 .map(|i| i.body)
                 .unwrap_or_default();
@@ -214,7 +207,7 @@ async fn finish_plan(
                 let body = with_plan_section(&current, &section);
                 if let Err(error) = writer
                     .update_issue(
-                        &request.target,
+                        target,
                         IssueUpdate {
                             body: Some(body),
                             ..Default::default()
@@ -258,15 +251,6 @@ async fn finish_plan(
                 Ok(()) => "the model ended without writing a plan".to_owned(),
                 Err(error) => format!("{error:#}"),
             };
-            let on_issue = OnIssue {
-                app,
-                writer,
-                target: &request.target,
-                run,
-                link,
-                model: model_id,
-                what: "planning",
-            };
             Err(on_issue
                 .failed(
                     "Planning failed. That is my failure, not the issue's.",
@@ -299,12 +283,14 @@ async fn begin_stages(
     stages::mark(store, run, Stage::Session, StageState::Running, session).await;
 }
 
-async fn planner_tools(
+/// The tools the planner and the plan reviewer share: the platform's tools
+/// and, with a copy of the default branch (#172), the code tools and `bash`
+/// to read and run there. The platform's tools stay for issues, pull
+/// requests and history.
+async fn read_tools(
     session: Arc<dyn McpSession>,
     platform: henk_domain::allowlist::Platform,
     scope: &Scope,
-    context: Arc<PlanContext>,
-    handoff: &Arc<PlanHandoff>,
     workspace: Option<&PlanWorkspace>,
 ) -> anyhow::Result<ToolSet> {
     let tools = platform_tools(session, platform, scope.clone(), &[])
@@ -314,9 +300,6 @@ async fn planner_tools(
     for tool in tools {
         set.add(tool);
     }
-    // With a copy of the default branch (#172), the code tools and `bash`
-    // read and run there; the platform's tools stay for issues, pull
-    // requests and history.
     if let Some(workspace) = workspace {
         crate::code_tools::add(&mut set, &workspace.workspace);
         crate::code_tools::add_bash(
@@ -326,6 +309,18 @@ async fn planner_tools(
             crate::code_tools::BashUse::Plan,
         );
     }
+    Ok(set)
+}
+
+async fn planner_tools(
+    session: Arc<dyn McpSession>,
+    platform: henk_domain::allowlist::Platform,
+    scope: &Scope,
+    context: Arc<PlanContext>,
+    handoff: &Arc<PlanHandoff>,
+    workspace: Option<&PlanWorkspace>,
+) -> anyhow::Result<ToolSet> {
+    let mut set = read_tools(session, platform, scope, workspace).await?;
     set.add(WebFetch::new()?);
     set.add(SetTitle(Arc::clone(&context)));
     set.add(SetDescription(Arc::clone(&context)));
@@ -404,22 +399,7 @@ async fn plan_reviewer_tools(
     handoff: &Arc<PlanHandoff>,
     workspace: Option<&PlanWorkspace>,
 ) -> anyhow::Result<ToolSet> {
-    let tools = platform_tools(session, platform, scope.clone(), &[])
-        .await
-        .context("listing MCP tools")?;
-    let mut set = ToolSet::new();
-    for tool in tools {
-        set.add(tool);
-    }
-    if let Some(workspace) = workspace {
-        crate::code_tools::add(&mut set, &workspace.workspace);
-        crate::code_tools::add_bash(
-            &mut set,
-            &workspace.workspace,
-            Duration::from_secs(workspace.limits.command_secs),
-            crate::code_tools::BashUse::Plan,
-        );
-    }
+    let mut set = read_tools(session, platform, scope, workspace).await?;
     set.add(RaisePoint(Arc::clone(handoff)));
     set.add(FinishReview(Arc::clone(handoff)));
     Ok(set)
