@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use crate::app::App;
 use crate::execute::{ExecuteRequest, run_execute};
 use crate::ids::new_run_id;
+use crate::issue_runs::Comments;
 use crate::plan::{PlanRequest, run_plan};
 use crate::rebase::{RebaseRequest, run_rebase};
 use crate::review::{
@@ -835,6 +836,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester: requester.clone(),
+            comments: Comments::Own,
         };
         let coordinator = Arc::clone(self);
         let cancel = self.app.shutdown.child_token();
@@ -1005,6 +1007,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester,
+            comments: Comments::Own,
         };
         let app = Arc::clone(&self.app);
         let cancel = app.shutdown.child_token();

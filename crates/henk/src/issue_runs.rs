@@ -47,18 +47,44 @@ pub(crate) trait Thread: Send + Sync {
     async fn comment(&self, body: &str) -> Result<(), PlatformError>;
 }
 
+/// Who tells the issue how a plan or an execute run ended (#536).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comments {
+    /// The run does: a failure, and a person's cancel, get a comment.
+    Own,
+    /// Whoever drove the run does, once for all the runs they drove. The
+    /// run still ends in the store with its reason and posts nothing.
+    Caller,
+}
+
 /// An issue, through the issue writer.
 #[derive(Clone, Copy)]
 pub(crate) struct IssueThread<'a> {
     pub(crate) writer: &'a Arc<dyn IssueWriter>,
     pub(crate) target: &'a IssueTarget,
+    /// Whether the run says how it ended on the issue itself.
+    pub(crate) comments: Comments,
 }
 
 #[async_trait::async_trait]
 impl Thread for IssueThread<'_> {
     async fn comment(&self, body: &str) -> Result<(), PlatformError> {
+        if self.comments == Comments::Caller {
+            return Ok(());
+        }
         self.writer.comment(self.target, body).await.map(|_| ())
     }
+}
+
+/// That a run failed, and why: what [`OnRun::failed`] returns, so whoever
+/// drove the run can read the reason instead of parsing a message.
+#[derive(Debug, thiserror::Error)]
+#[error("{what} failed: {reason}")]
+pub(crate) struct RunFailed {
+    /// What the run did: `planning`, `execution`.
+    pub(crate) what: &'static str,
+    /// Why, in Henk's own words.
+    pub(crate) reason: String,
 }
 
 /// A pull or merge request's conversation, through the platform writer.
@@ -201,6 +227,10 @@ impl<T: Thread> OnRun<'_, T> {
         {
             return store_error.into();
         }
-        anyhow!("{} failed: {reason}", self.what)
+        RunFailed {
+            what: self.what,
+            reason: reason.to_owned(),
+        }
+        .into()
     }
 }

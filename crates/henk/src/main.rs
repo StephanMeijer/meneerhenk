@@ -483,6 +483,7 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
             trigger: "cli".to_owned(),
             run: None,
             requester: None,
+            comments: issue_runs::Comments::Own,
         },
         app.shutdown.child_token(),
     )
@@ -510,6 +511,7 @@ async fn cmd_execute(config: &Path, url: &str, note: Option<String>) -> anyhow::
             trigger: "cli".to_owned(),
             run: None,
             requester: None,
+            comments: issue_runs::Comments::Own,
         },
         app.shutdown.child_token(),
     )
