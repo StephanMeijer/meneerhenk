@@ -43,7 +43,8 @@ const REVIEWER: &[&str] = &[
 ];
 /// What only the executor has: editing, its side of the handoff, and
 /// proposing the pull request for an issue (#329). It runs the
-/// repository's checks with `bash` (#396).
+/// repository's checks with `bash` (#396). It answers the points of a
+/// requirements review with the plan pairing's tools (#535).
 const EXECUTOR: &[&str] = &[
     "edit_file",
     "apply_patch",
@@ -52,6 +53,8 @@ const EXECUTOR: &[&str] = &[
     "give_verdict",
     "propose_commits",
     "propose_pull_request",
+    "list_points",
+    "answer_point",
 ];
 /// What only the planner has: the tracker tools, which draft until the
 /// review is done, and its side of the plan's handoff.
@@ -163,6 +166,29 @@ impl Role {
     #[must_use]
     pub fn missing_plan_handoff(self, granted: &[String]) -> Option<&'static str> {
         self.plan_handoff()
+            .iter()
+            .copied()
+            .find(|tool| !granted.iter().any(|g| g == tool))
+    }
+
+    /// The handoff tools the role needs in an execute run's requirements
+    /// review (#535): without them the reviewer cannot raise a point or end
+    /// its round, and the executor cannot answer a point. The planner has
+    /// none.
+    #[must_use]
+    pub fn requirements_handoff(self) -> &'static [&'static str] {
+        match self {
+            Self::Planner => &[],
+            Self::Reviewer => &["raise_point", "finish_round"],
+            Self::Executor => &["answer_point"],
+        }
+    }
+
+    /// The first requirements handoff tool of the role's that `granted`
+    /// leaves out.
+    #[must_use]
+    pub fn missing_requirements_handoff(self, granted: &[String]) -> Option<&'static str> {
+        self.requirements_handoff()
             .iter()
             .copied()
             .find(|tool| !granted.iter().any(|g| g == tool))
@@ -326,6 +352,32 @@ mod tests {
             Some("answer_point")
         );
         assert_eq!(Role::Executor.missing_plan_handoff(&[]), None);
+    }
+
+    #[test]
+    fn the_reviewer_and_the_executor_keep_their_side_of_the_requirements_handoff() {
+        for role in Role::ALL {
+            assert_eq!(
+                role.missing_requirements_handoff(&role.default_tools()),
+                None,
+                "{role}"
+            );
+            assert!(
+                role.requirements_handoff()
+                    .iter()
+                    .all(|tool| role.allows(tool)),
+                "{role}"
+            );
+        }
+        assert_eq!(
+            Role::Reviewer.missing_requirements_handoff(&tools(&["read_file", "raise_point"])),
+            Some("finish_round")
+        );
+        assert_eq!(
+            Role::Executor.missing_requirements_handoff(&tools(&["edit_file", "list_points"])),
+            Some("answer_point")
+        );
+        assert_eq!(Role::Planner.missing_requirements_handoff(&[]), None);
     }
 
     #[test]

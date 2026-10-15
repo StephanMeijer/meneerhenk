@@ -1466,7 +1466,7 @@ const DAY_FINDINGS: &str = concat!(
 const DAY_DRAFTS: &str = concat!(
     "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
     instant_of!("created_at"),
-    " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point') GROUP BY 1"
+    " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point', 'requirement_point') GROUP BY 1"
 );
 
 /// The rounds of a run (#374), over parameter 1, in the order they

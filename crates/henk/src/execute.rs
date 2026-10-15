@@ -465,7 +465,13 @@ impl Work<'_> {
             .title
             .clone()
             .unwrap_or_else(|| self.issue.title.clone());
-        let body = pull_body(&reference, &proposal.summary, &proposal.left_out, self.link);
+        let body = pull_body(
+            &reference,
+            &proposal.summary,
+            &proposal.left_out,
+            "",
+            self.link,
+        );
         let pull = NewPull {
             head: branch.to_owned(),
             base: base.default_branch.clone(),

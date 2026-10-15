@@ -47,6 +47,9 @@ describe('format', () => {
     expect(draftWhat(draft('p2', { kind: 'plan_point', target: 'p1', body: 'Step 2 is too big.' }))).toBe(
       'contests p1: Step 2 is too big.',
     );
+    expect(draftWhat(draft('q2', { kind: 'requirement_point', target: 'q1', body: 'Criterion 2 is not met.' }))).toBe(
+      'contests q1: Criterion 2 is not met.',
+    );
     expect(draftPlace(draft('p2', { kind: 'plan_point', path: 'step 2', line: 0 }))).toBe('step 2');
     expect(draftPlace(draft('d3', { path: 'src/a.rs', line: 4 }))).toBe('src/a.rs:4');
   });

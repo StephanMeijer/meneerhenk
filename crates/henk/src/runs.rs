@@ -282,12 +282,19 @@ pub fn draft_text(draft: &DraftRecord) -> String {
     let what = match draft.kind.as_str() {
         "finding" => String::new(),
         // A review loop's finding names the rejected one it contests (#285).
-        // A review loop's finding or a plan review's point names the
-        // rejected one it contests (#285, #328).
-        henk_store::LOOP_FINDING_KIND | henk_store::PLAN_POINT_KIND if draft.target.is_empty() => {
+        // A review loop's finding, a plan review's point or a requirements
+        // review's point names the rejected one it contests (#285, #328,
+        // #535).
+        henk_store::LOOP_FINDING_KIND
+        | henk_store::PLAN_POINT_KIND
+        | henk_store::REQUIREMENT_POINT_KIND
+            if draft.target.is_empty() =>
+        {
             String::new()
         }
-        henk_store::LOOP_FINDING_KIND | henk_store::PLAN_POINT_KIND => {
+        henk_store::LOOP_FINDING_KIND
+        | henk_store::PLAN_POINT_KIND
+        | henk_store::REQUIREMENT_POINT_KIND => {
             format!(" contests {}", draft.target)
         }
         kind => format!(" {kind} of {}", draft.target),

@@ -265,6 +265,10 @@ pub const LOOP_FINDING_KIND: &str = "loop_finding";
 /// The overview's drafts per day leaves them out as well.
 pub const PLAN_POINT_KIND: &str = "plan_point";
 
+/// The `kind` of an execute run's requirements review points in the drafts
+/// table (#535). The overview's drafts per day leaves them out as well.
+pub const REQUIREMENT_POINT_KIND: &str = "requirement_point";
+
 /// A stored verdict, refused when it is not one.
 pub(crate) fn draft_verdict(text: &str) -> Result<DraftVerdict, StoreError> {
     DraftVerdict::parse(text).ok_or_else(|| StoreError::Corrupt {
