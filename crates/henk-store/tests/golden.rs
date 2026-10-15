@@ -43,7 +43,7 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::{
     EventFilter, EventKey, OutcomeFilter, Page, PgStore, RunFilter, RunKey, RunRecord, RunStatus,
-    RunStore, SessionRole, SqliteStore, ToolCallFilter, ToolCallKey,
+    RunStore, SessionRole, SqliteStore, ThinStore, ToolCallFilter, ToolCallKey,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -619,6 +619,105 @@ async fn the_seed_is_the_same_rows_whichever_way_it_is_read() {
     }
 }
 
+/// The version and the tables, indexes and triggers of a `SQLite` file: what
+/// a migration would change.
+fn sqlite_schema(path: &Path) -> (i64, Vec<(String, String, Option<String>)>) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let version = connection
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let mut statement = connection
+        .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
+        .unwrap();
+    let objects = statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    (version, objects)
+}
+
+#[tokio::test]
+async fn thin_sqlite_returns_what_the_goldens_say() {
+    let file = File::new();
+    drop(ThinStore::open(&file.0).unwrap());
+    SqliteSeeder(file.0.clone()).execute(SEED).await;
+    let store = ThinStore::open(&file.0).unwrap();
+    check("sqlite", &report(&store).await);
+}
+
+#[tokio::test]
+async fn thin_and_old_sqlite_make_the_same_schema_and_return_the_same_report() {
+    let (old_file, thin_file) = (File::new(), File::new());
+    drop(SqliteStore::open(&old_file.0).unwrap());
+    drop(ThinStore::open(&thin_file.0).unwrap());
+    assert_eq!(
+        sqlite_schema(&old_file.0),
+        sqlite_schema(&thin_file.0),
+        "a fresh database through the unified steps is the one the old steps made"
+    );
+    SqliteSeeder(old_file.0.clone()).execute(SEED).await;
+    SqliteSeeder(thin_file.0.clone()).execute(SEED).await;
+    let old = report(&SqliteStore::open(&old_file.0).unwrap()).await;
+    let thin = report(&ThinStore::open(&thin_file.0).unwrap()).await;
+    assert_eq!(old, thin);
+}
+
+/// A database the current code made at schema 20 and filled with the seed
+/// is opened without a migration, and reads back as the goldens say.
+async fn thin_adopts_sqlite_020(file: &File) {
+    let before = sqlite_schema(&file.0);
+    assert_eq!(before.0, 20, "the starting point is SQLite 020");
+    let store = ThinStore::open(&file.0).unwrap();
+    check("sqlite", &report(&store).await);
+    drop(store);
+    assert_eq!(
+        sqlite_schema(&file.0),
+        before,
+        "adopting changes nothing in the schema or its version"
+    );
+}
+
+#[tokio::test]
+async fn thin_adopts_a_sqlite_database_the_old_store_made() {
+    let file = File::new();
+    drop(SqliteStore::open(&file.0).unwrap());
+    SqliteSeeder(file.0.clone()).execute(SEED).await;
+    thin_adopts_sqlite_020(&file).await;
+}
+
+/// The same, on a copy of the file the spike was given (`HENK_TEST_SQLITE_020`).
+#[tokio::test]
+#[ignore = "needs HENK_TEST_SQLITE_020, a seeded SQLite 020 file"]
+async fn thin_adopts_the_given_sqlite_020_file() {
+    let source = std::env::var("HENK_TEST_SQLITE_020").expect("HENK_TEST_SQLITE_020 is not set");
+    let file = File::new();
+    std::fs::copy(source, &file.0).unwrap();
+    thin_adopts_sqlite_020(&file).await;
+}
+
+#[tokio::test]
+async fn thin_migrates_a_sqlite_database_from_the_middle_of_its_history() {
+    // The old steps up to 15 (the last with a lanes table), rows written as
+    // then; the thin store takes it from there and runs steps 16 to 20.
+    let file = File::new();
+    drop(SqliteStore::open_at(&file.0, 15).unwrap());
+    rusqlite::Connection::open(&file.0)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO runs (id, kind, platform, repo, target, trigger, status, started_at, link)
+             VALUES ('r-old', 'review', 'github', 'o/r', 7, 'opened', 'finished', '2026-10-01T10:00:00Z', 'l');
+             INSERT INTO lanes (run_id, name, model, status, started_at)
+             VALUES ('r-old', 'fixer', 'm', 'finished', '2026-10-01T10:00:00Z');",
+        )
+        .unwrap();
+    let store = ThinStore::open(&file.0).unwrap();
+    let sessions = store.sessions(&run_id("r-old")).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].role, SessionRole::Executor);
+    assert_eq!(sqlite_schema(&file.0).0, 20);
+}
+
 /// `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server. Every test gets
 /// its own schema, dropped with the guard.
 mod postgres {
@@ -705,5 +804,109 @@ mod postgres {
         let store = PgStore::connect(&schema.url).await.unwrap();
         PgSeeder(schema.url.clone()).execute(SEED).await;
         check("postgres", &report(&store).await);
+    }
+
+    /// The versions `PostgreSQL`'s bookkeeping holds.
+    async fn versions(url: &str) -> Vec<i32> {
+        client(url)
+            .await
+            .unwrap()
+            .query("SELECT version FROM henk_schema_migrations ORDER BY 1", &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
+    /// Every column (type, nullability, default, identity) and index of
+    /// the schema `schema` names, written without its name.
+    async fn shape(schema: &Schema) -> Vec<String> {
+        let client = client(&schema.url).await.unwrap();
+        let columns = client
+            .query(
+                "SELECT table_name::text, column_name::text, data_type::text, is_nullable::text,
+                        column_default::text, is_identity::text
+                 FROM information_schema.columns WHERE table_schema = current_schema()
+                 ORDER BY table_name, ordinal_position",
+                &[],
+            )
+            .await
+            .unwrap();
+        let indexes = client
+            .query(
+                "SELECT indexdef::text FROM pg_indexes WHERE schemaname = current_schema()
+                 ORDER BY indexname",
+                &[],
+            )
+            .await
+            .unwrap();
+        let columns = columns.iter().map(|r| {
+            format!(
+                "{:?}",
+                (
+                    r.get::<_, String>(0),
+                    r.get::<_, String>(1),
+                    r.get::<_, String>(2),
+                    r.get::<_, String>(3),
+                    r.get::<_, Option<String>>(4),
+                    r.get::<_, String>(5),
+                )
+            )
+        });
+        let indexes = indexes.iter().map(|r| r.get::<_, String>(0));
+        columns
+            .chain(indexes)
+            .map(|l| l.replace(&schema.name, "S"))
+            .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn thin_postgres_returns_what_the_goldens_say() {
+        let schema = schema().await;
+        let store = ThinStore::connect(&schema.url).await.unwrap();
+        PgSeeder(schema.url.clone()).execute(SEED).await;
+        check("postgres", &report(&store).await);
+        assert_eq!(
+            versions(&schema.url).await,
+            (1..=16).collect::<Vec<_>>(),
+            "a fresh database records the legacy numbers the old store wrote"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn thin_adopts_a_postgres_database_the_old_store_made() {
+        let schema = schema().await;
+        drop(PgStore::connect(&schema.url).await.unwrap());
+        PgSeeder(schema.url.clone()).execute(SEED).await;
+        let before = versions(&schema.url).await;
+        assert_eq!(before, (1..=16).collect::<Vec<_>>());
+        let columns = shape(&schema).await;
+        let store = ThinStore::connect(&schema.url).await.unwrap();
+        check("postgres", &report(&store).await);
+        assert_eq!(
+            versions(&schema.url).await,
+            before,
+            "adopting writes nothing to the bookkeeping"
+        );
+        assert_eq!(shape(&schema).await, columns, "or to the schema");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn thin_and_old_postgres_make_the_same_schema_and_return_the_same_report() {
+        let (old, thin) = (schema().await, schema().await);
+        let old_store = PgStore::connect(&old.url).await.unwrap();
+        let thin_store = ThinStore::connect(&thin.url).await.unwrap();
+        assert_eq!(
+            shape(&old).await,
+            shape(&thin).await,
+            "a fresh database through the unified steps is the one the old steps made"
+        );
+        PgSeeder(old.url.clone()).execute(SEED).await;
+        PgSeeder(thin.url.clone()).execute(SEED).await;
+        assert_eq!(report(&old_store).await, report(&thin_store).await);
     }
 }

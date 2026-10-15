@@ -7,11 +7,13 @@
 mod postgres;
 mod sqlite;
 mod store;
+mod thin;
 mod types;
 
 pub use postgres::{PgStore, describe_url};
 pub use sqlite::SqliteStore;
 pub use store::RunStore;
+pub use thin::ThinStore;
 pub use types::{
     DayCounts, DraftDecision, DraftRecord, DraftVerdict, EventFacets, EventFilter, EventKey,
     EventRecord, EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, LOOP_FINDING_KIND,

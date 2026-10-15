@@ -20,7 +20,7 @@ use henk_store::{
     InboundEvent, LOOP_FINDING_KIND, MAX_PAYLOAD_BYTES, NewRun, OutcomeFilter, OutcomeRecord,
     PLAN_POINT_KIND, Page, PgStore, PruneCounts, REQUIREMENT_POINT_KIND, RoundRecord, RunFilter,
     RunKey, RunRecord, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage,
-    StageState, StageWrite, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord,
+    StageState, StageWrite, ThinStore, TokenUsage, ToolCallFilter, ToolCallKey, ToolCallRecord,
     TranscriptRecord, UNKNOWN_TOOL,
 };
 use time::OffsetDateTime;
@@ -2859,6 +2859,21 @@ mod postgres {
 
     /// A store in a fresh schema migrated only up to `version`.
     pub(super) async fn schema_at(version: usize) -> Schema {
+        schema_with(async |url| {
+            Arc::new(PgStore::connect_at(url, version).await.unwrap()) as Arc<dyn RunStore>
+        })
+        .await
+    }
+
+    /// The thin store in a fresh schema migrated only up to its step `version`.
+    pub(super) async fn thin_schema_at(version: usize) -> Schema {
+        schema_with(async |url| {
+            Arc::new(ThinStore::connect_at(url, version).await.unwrap()) as Arc<dyn RunStore>
+        })
+        .await
+    }
+
+    async fn schema_with(open: impl AsyncFnOnce(&str) -> Arc<dyn RunStore>) -> Schema {
         let base = std::env::var(URL).unwrap_or_else(|_| panic!("{URL} is not set"));
         // The process id and counter keep tests apart, within one run and
         // across runs at once; the clock keeps a schema a crashed run left
@@ -2879,7 +2894,7 @@ mod postgres {
             .unwrap();
         let separator = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{separator}options=-c%20search_path%3D{name}");
-        let store = Arc::new(PgStore::connect_at(&url, version).await.unwrap());
+        let store = open(&url).await;
         Schema {
             store,
             url,
@@ -2962,6 +2977,269 @@ mod postgres {
                 .unwrap();
         })
         .await;
+    }
+}
+
+/// The thin store on `SQLite`: every scenario the other `SQLite` store passes.
+mod thin_sqlite {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    fn open() -> Arc<dyn RunStore> {
+        Arc::new(ThinStore::in_memory().unwrap())
+    }
+
+    macro_rules! tests {
+        ($($scenario:ident),* $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $scenario() {
+                    super::$scenario(open().as_ref()).await;
+                }
+            )*
+        };
+    }
+
+    for_each_scenario!(tests);
+
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
+    /// A database file under the temp directory, removed with the guard.
+    struct File(std::path::PathBuf);
+
+    impl File {
+        fn new() -> Self {
+            let n = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!("henk-thin-{}-{n}.db", std::process::id())))
+        }
+    }
+
+    impl Drop for File {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut path = self.0.clone().into_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lane_era_database_reads_back_in_full_after_migrating() {
+        let file = File::new();
+        drop(ThinStore::open_at(&file.0, SQLITE_LANE_ERA).unwrap());
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .execute_batch(LANE_ERA)
+            .unwrap();
+        let store = ThinStore::open(&file.0).unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    #[tokio::test]
+    async fn a_lane_era_database_the_old_store_made_reads_back_in_full_after_migrating() {
+        let file = File::new();
+        drop(SqliteStore::open_at(&file.0, SQLITE_LANE_ERA).unwrap());
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .execute_batch(LANE_ERA)
+            .unwrap();
+        let store = ThinStore::open(&file.0).unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    #[tokio::test]
+    async fn an_invented_tool_name_from_before_is_cut_by_the_migration() {
+        let file = File::new();
+        let before = ThinStore::open_at(&file.0, 18).unwrap();
+        let run = super::new_run("r-prose");
+        before.create_run(&run).await.unwrap();
+        let prose = "Review complete. End. ".repeat(200);
+        for tool in [prose.as_str(), "read_file"] {
+            before
+                .record_tool_call(
+                    &run.id,
+                    &super::tool_call("reviewer", "m", tool, "unknown_tool", 1),
+                )
+                .await
+                .unwrap();
+        }
+        drop(before);
+        let store = ThinStore::open(&file.0).unwrap();
+        let tools: Vec<String> = store
+            .tool_calls(&run.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.tool)
+            .collect();
+        assert_eq!(
+            tools,
+            [format!("{} [cut]", &prose[..58]), "read_file".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_in_one_second_list_by_time() {
+        let file = File::new();
+        let store = ThinStore::open(&file.0).unwrap();
+        let raw = rusqlite::Connection::open(&file.0).unwrap();
+        // Stored as written: the text whose order is not the time's.
+        super::runs_in_one_second_list_by_time(&store, async |run, at| {
+            raw.execute(
+                "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                rusqlite::params![run, at],
+            )
+            .unwrap();
+        })
+        .await;
+    }
+
+    /// Eight tasks write fifty runs each into one file, through one store
+    /// and through two stores on the same file (two processes' worth of
+    /// connections): none is refused with "database is locked".
+    #[tokio::test]
+    async fn concurrent_writers_are_not_refused_as_locked() {
+        let file = File::new();
+        let stores = [
+            Arc::new(ThinStore::open(&file.0).unwrap()),
+            Arc::new(ThinStore::open(&file.0).unwrap()),
+        ];
+        let mut tasks = Vec::new();
+        for task in 0..8 {
+            let store = Arc::clone(&stores[task % 2]);
+            tasks.push(tokio::spawn(async move {
+                for n in 0..50 {
+                    let run = super::new_run(&format!("r-{task}-{n}"));
+                    store.create_run(&run).await?;
+                    store.event(&run.id, "info", "written").await?;
+                }
+                Ok::<_, henk_store::StoreError>(())
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let count = stores[0].count_runs(&RunFilter::default()).await.unwrap();
+        assert_eq!(count, 400);
+    }
+
+    /// Reads and writes at once: the readers see whole rows, never an error.
+    #[tokio::test]
+    async fn readers_and_writers_share_a_file() {
+        let file = File::new();
+        let store = Arc::new(ThinStore::open(&file.0).unwrap());
+        let writer = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                for n in 0..100 {
+                    store
+                        .create_run(&super::new_run(&format!("r-w-{n}")))
+                        .await
+                        .unwrap();
+                }
+            })
+        };
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let store = Arc::clone(&store);
+            readers.push(tokio::spawn(async move {
+                for _ in 0..50 {
+                    store
+                        .list_runs(&RunFilter::default(), Page::new(20, 0))
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        writer.await.unwrap();
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        assert_eq!(store.count_runs(&RunFilter::default()).await.unwrap(), 100);
+    }
+}
+
+/// The thin store on `PostgreSQL`, when `HENK_TEST_DATABASE_URL` names a server.
+mod thin_postgres {
+    use super::postgres::{Schema, thin_schema_at};
+    use super::*;
+
+    async fn schema() -> Schema {
+        thin_schema_at(usize::MAX).await
+    }
+
+    macro_rules! tests {
+        ($($scenario:ident),* $(,)?) => {
+            $(
+                #[tokio::test]
+                #[ignore = "needs HENK_TEST_DATABASE_URL"]
+                async fn $scenario() {
+                    let schema = schema().await;
+                    super::$scenario(schema.store.as_ref()).await;
+                }
+            )*
+        };
+    }
+
+    for_each_scenario!(tests);
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn a_lane_era_database_reads_back_in_full_after_migrating() {
+        // Step 15 is the last with a lanes table: PostgreSQL's 11.
+        let schema = thin_schema_at(15).await;
+        let client = {
+            let (client, connection) = tokio_postgres::connect(&schema.url, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+            tokio::spawn(connection);
+            client
+        };
+        client.batch_execute(LANE_ERA).await.unwrap();
+        let store = ThinStore::connect(&schema.url).await.unwrap();
+        super::a_lane_era_database_reads_back_in_full(&store).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn migrating_again_changes_nothing_and_concurrent_starts_agree() {
+        let schema = schema().await;
+        schema.store.create_run(&new_run("r-kept")).await.unwrap();
+        let (a, b) = tokio::join!(
+            ThinStore::connect(&schema.url),
+            ThinStore::connect(&schema.url)
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            a.run(&id("r-kept")).await.unwrap().is_some(),
+            "data survives"
+        );
+        assert!(b.run(&id("r-kept")).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HENK_TEST_DATABASE_URL"]
+    async fn concurrent_writers_all_succeed() {
+        let schema = schema().await;
+        let store = Arc::new(ThinStore::connect(&schema.url).await.unwrap());
+        let mut tasks = Vec::new();
+        for task in 0..8 {
+            let store = Arc::clone(&store);
+            tasks.push(tokio::spawn(async move {
+                for n in 0..50 {
+                    store
+                        .create_run(&super::new_run(&format!("r-{task}-{n}")))
+                        .await?;
+                }
+                Ok::<_, henk_store::StoreError>(())
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(store.count_runs(&RunFilter::default()).await.unwrap(), 400);
     }
 }
 

@@ -51,10 +51,10 @@ const MIGRATIONS: &[&str] = &[
 const MIGRATION_LOCK: i64 = 0x4865_6e6b; // "Henk"
 
 /// Connections kept open at most. Henk's writes are small and few.
-const POOL_SIZE: usize = 8;
+pub(crate) const POOL_SIZE: usize = 8;
 
 /// How long a new connection may take when the URL does not say.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The run store over `PostgreSQL`.
 #[derive(Debug)]
@@ -186,13 +186,13 @@ pub fn describe_url(url: &str) -> Result<String, StoreError> {
     ))
 }
 
-fn parse_url(url: &str) -> Result<tokio_postgres::Config, StoreError> {
+pub(crate) fn parse_url(url: &str) -> Result<tokio_postgres::Config, StoreError> {
     // The parse error can quote the URL, and the URL holds the password.
     url.parse()
         .map_err(|_| StoreError::Connect("the database URL does not parse".to_owned()))
 }
 
-fn tls() -> Result<MakeRustlsConnect, StoreError> {
+pub(crate) fn tls() -> Result<MakeRustlsConnect, StoreError> {
     let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
