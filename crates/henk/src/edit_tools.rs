@@ -301,7 +301,7 @@ impl Tool for ApplyPatch {
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: name("apply_patch"),
-            description: "Adds, updates, moves and deletes files with one patch, applied all or nothing. The patch is:\n*** Begin Patch\n*** Add File: path\n+every line of the new file\n*** Update File: path\n*** Move to: new/path (optional)\n@@ a line just above the change (optional)\n context line\n-removed line\n+added line\n*** Delete File: path\n*** End Patch\nContext lines are copied exactly from the file, with about three around each change, enough that each change matches one place.".to_owned(),
+            description: "Adds, updates, moves and deletes files with one patch. The patch is checked as a whole before anything is written; if a write then fails, the steps before it stay applied and the error says how many. The patch is:\n*** Begin Patch\n*** Add File: path\n+every line of the new file\n*** Update File: path\n*** Move to: new/path (optional)\n@@ a line just above the change (optional)\n context line\n-removed line\n+added line\n*** Delete File: path\n*** End Patch\nContext lines are copied exactly from the file, with about three around each change, enough that each change matches one place.".to_owned(),
             input_schema: schema(&json!({"patch": {"type": "string"}}), &["patch"]),
         }
     }
@@ -603,6 +603,116 @@ pub(crate) mod tests {
         }
         assert!(ctx.workspace.export().await.unwrap().is_empty());
         assert!(ctx.state.lock().unwrap().written.is_empty());
+    }
+
+    /// A workspace that refuses to write one path, as a backend can refuse
+    /// what the planning cannot see; the rest is the fake's.
+    struct RefusesWrite {
+        inner: Arc<dyn Workspace>,
+        path: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Workspace for RefusesWrite {
+        async fn exec(
+            &self,
+            argv: &[String],
+            cwd: &WorkspacePath,
+            timeout: Duration,
+        ) -> Result<crate::workspace::ExecResult, WorkspaceError> {
+            self.inner.exec(argv, cwd, timeout).await
+        }
+
+        async fn read(
+            &self,
+            path: &WorkspacePath,
+            max_bytes: u64,
+        ) -> Result<Vec<u8>, WorkspaceError> {
+            self.inner.read(path, max_bytes).await
+        }
+
+        async fn write(&self, path: &WorkspacePath, content: &[u8]) -> Result<(), WorkspaceError> {
+            if path.as_str() == self.path {
+                return Err(WorkspaceError::Refused(format!(
+                    "{path} is a symbolic link; edit what it points to"
+                )));
+            }
+            self.inner.write(path, content).await
+        }
+
+        async fn remove(&self, path: &WorkspacePath) -> Result<(), WorkspaceError> {
+            self.inner.remove(path).await
+        }
+
+        async fn list(
+            &self,
+            dir: &WorkspacePath,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            cap: usize,
+        ) -> Result<Vec<String>, WorkspaceError> {
+            self.inner.list(dir, only, cap).await
+        }
+
+        async fn search(
+            &self,
+            dir: &WorkspacePath,
+            pattern: &crate::workspace::Pattern,
+            only: Option<&henk_domain::ignore::PathFilter>,
+            context: usize,
+            max_file_bytes: u64,
+            cap: usize,
+        ) -> Result<Vec<crate::workspace::Hit>, WorkspaceError> {
+            self.inner
+                .search(dir, pattern, only, context, max_file_bytes, cap)
+                .await
+        }
+
+        async fn export(&self) -> Result<Vec<crate::workspace::Exported>, WorkspaceError> {
+            self.inner.export().await
+        }
+
+        async fn baseline(&self) -> Result<(), WorkspaceError> {
+            self.inner.baseline().await
+        }
+
+        async fn close(&self) {
+            self.inner.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_fails_reports_the_steps_already_applied() {
+        let (_provider, plain) = workspace("henk-tools-patch-partial").await;
+        let patched = patching(&plain, 10).await;
+        let ctx = Arc::new(EditContext {
+            workspace: Arc::new(RefusesWrite {
+                inner: Arc::clone(&patched.workspace),
+                path: "src/a.rs",
+            }),
+            command_timeout: patched.command_timeout,
+            max_changed_files: 10,
+            bash: false,
+            edit_format: EditFormat::Patch,
+            state: Mutex::default(),
+        });
+        // The planning reads the tree and finds nothing wrong; the third
+        // step is the one the workspace refuses.
+        let out = ApplyPatch(Arc::clone(&ctx))
+            .call(json!({"patch": "*** Begin Patch\n*** Add File: docs/new.md\n+x\n*** Delete File: notes.txt\n*** Update File: src/a.rs\n-fn main() {\n+fn run() {\n*** End Patch"}))
+            .await;
+        assert!(out.is_error, "{out:?}");
+        assert!(
+            out.content.contains("2 of 3 steps were applied"),
+            "{}",
+            out.content
+        );
+        assert_eq!(content(&ctx, "docs/new.md").await, "x\n");
+        assert!(
+            ctx.workspace
+                .read(&WorkspacePath::parse("notes.txt").unwrap(), 10)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

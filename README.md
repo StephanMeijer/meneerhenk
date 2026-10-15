@@ -255,8 +255,11 @@ once; `patch` gives it `apply_patch`, which takes the Codex patch format
 GPT-family models are trained on (`*** Begin Patch`, then `*** Add File:`,
 `*** Update File:` with an optional `*** Move to:`, or `*** Delete File:`,
 then `*** End Patch`) and adds, changes, moves and deletes several files at
-once. A patch is applied all or nothing: a change whose context is missing,
-or matches more than one place, is refused and nothing is written. Left
+once. A patch is checked as a whole before anything is written: a change
+whose context is missing, or matches more than one place, is refused and
+nothing is written. If the workspace then refuses a write, the steps before
+it stay applied and the error says how many. Lines a patch leaves alone
+keep their `\r\n` or `\n`. Left
 out, a model whose name starts with `gpt` or `codex`, or is an o-series
 name such as `o3`, gets `patch`, and any other `replace`; `henk config
 check` shows which tool each model edits with. An executor's `tools` list
