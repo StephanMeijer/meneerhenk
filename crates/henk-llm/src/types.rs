@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Who wrote a message. The system prompt is not a message; it travels
 /// separately in [`CompletionRequest::system`].
@@ -129,6 +129,33 @@ pub enum ToolArguments {
     /// The model produced something that is not JSON. The caller should
     /// answer with an error result so the model can try again.
     Malformed(String),
+}
+
+impl ToolArguments {
+    /// The arguments as text: the JSON for parsed arguments, the model's own
+    /// text for malformed ones.
+    #[must_use]
+    pub fn text(&self) -> Cow<'_, str> {
+        match self {
+            Self::Parsed(value) => Cow::Owned(value.to_string()),
+            Self::Malformed(raw) => Cow::Borrowed(raw),
+        }
+    }
+
+    /// Reads the `arguments` field of a tool call as a provider sent it:
+    /// a JSON string, an object, or nothing.
+    pub(crate) fn from_wire(arguments: Option<&Value>) -> Self {
+        match arguments {
+            // Proxies and some models send "" for a tool without
+            // parameters; that is an empty object, not malformed JSON.
+            Some(Value::String(raw)) if raw.trim().is_empty() => Self::Parsed(json!({})),
+            Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
+                .map_or_else(|_| Self::Malformed(raw.clone()), Self::Parsed),
+            Some(Value::Object(map)) => Self::Parsed(Value::Object(map.clone())),
+            Some(Value::Null) | None => Self::Parsed(json!({})),
+            Some(other) => Self::Malformed(other.to_string()),
+        }
+    }
 }
 
 /// One tool call in an assistant message.

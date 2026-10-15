@@ -25,7 +25,7 @@
 
 use std::fmt::Write as _;
 
-use henk_llm::{Block, ChatMessage, Role, ToolArguments};
+use henk_llm::{Block, ChatMessage, Role};
 
 /// Results shorter than this are never stubbed; the stub would not be
 /// much shorter.
@@ -43,10 +43,7 @@ pub fn size(messages: &[ChatMessage]) -> usize {
         .flat_map(|m| &m.blocks)
         .map(|block| match block {
             Block::Text(text) => text.chars().count(),
-            Block::ToolCall(call) => match &call.arguments {
-                ToolArguments::Parsed(value) => value.to_string().chars().count(),
-                ToolArguments::Malformed(raw) => raw.chars().count(),
-            },
+            Block::ToolCall(call) => call.arguments.text().chars().count(),
             Block::ToolResult(result) => result.content.chars().count(),
             Block::Opaque(value) => value.to_string().chars().count(),
         })
@@ -178,7 +175,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use henk_llm::{ToolCall, ToolResult};
+    use henk_llm::{ToolArguments, ToolCall, ToolResult};
     use serde_json::json;
 
     use super::*;
