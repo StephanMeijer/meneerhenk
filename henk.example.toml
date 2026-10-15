@@ -110,16 +110,29 @@ endpoint = "anthropic"
 model = "claude-sonnet-5-5"
 max_tokens = 16384
 
-# effort (Anthropic only): low, medium, high, xhigh or max. It sets how much
-# the model thinks; left out, the model's default applies, which for Claude
-# Opus 5.5 is medium. Calls are not streamed, so a higher effort needs a
-# longer timeout_secs.
+# effort: low, medium, high, xhigh or max, and on OpenAI also none and
+# minimal. It sets how much the model thinks; left out, nothing is sent and
+# the model's default applies, which for Claude Opus 5.5 is medium. Calls
+# are not streamed, so a higher effort needs a longer timeout_secs.
+# `henk config check` shows the parameter each model's effort is sent as.
 [models.opus]
 endpoint = "anthropic"
 model = "claude-opus-5-5"
 effort = "high"
 max_tokens = 16384
 timeout_secs = 300
+
+# On OpenAI, effort goes as reasoning_effort (Chat Completions) or
+# reasoning.effort (Responses). Which levels a model takes depends on the
+# model, and an OpenAI-compatible server may not take the parameter at all:
+# set effort only where the endpoint supports it. A refusal names the
+# setting; leave effort out to send nothing.
+# [models.gpt]
+# endpoint = "openai"
+# model = "gpt-5.6"
+# effort = "medium"
+# max_tokens = 16384
+# timeout_secs = 300
 
 [review]
 # Every turn resends the conversation. Past this many characters, the oldest
