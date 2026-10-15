@@ -284,6 +284,9 @@ requester_id = 523456789012345678
 # the operator's statement that requesters in this repository agree to that.
 # [roles.executor.repositories."StephanMeijer/scratch-repo"]
 # requester_signoff = true
+# Henk rebases a pull request onto its base branch when asked
+# (@meneer-henk rebase), on every repository unless it says no here.
+# rebase = false
 
 # Where the review loop's workspace is: the reviewer's and the executor's
 # file tools, and their bash, run there. Henk copies the pull request's files
