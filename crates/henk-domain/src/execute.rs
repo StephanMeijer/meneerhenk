@@ -79,16 +79,27 @@ pub fn commit_subject(reference: &str, title: &str) -> String {
 }
 
 /// The pull request's body: it closes the issue, says what changed and
-/// what was left out, and links the run.
+/// what was left out, and links the run. `requirements` is how the
+/// requirements review ended (#535), or empty when the run had none.
 #[must_use]
-pub fn pull_body(reference: &str, summary: &str, left_out: &str, run_link: &str) -> String {
+pub fn pull_body(
+    reference: &str,
+    summary: &str,
+    left_out: &str,
+    requirements: &str,
+    run_link: &str,
+) -> String {
     let left_out = if left_out.trim().is_empty() {
         "Nothing."
     } else {
         left_out.trim()
     };
+    let requirements = match requirements.trim() {
+        "" => String::new(),
+        text => format!("## Requirements review\n\n{text}\n\n"),
+    };
     format!(
-        "Closes {reference}\n\n## What changed\n\n{}\n\n## Left out\n\n{left_out}\n\nMeneer Henk's executor made this change; his review follows. Run: {run_link}",
+        "Closes {reference}\n\n## What changed\n\n{}\n\n## Left out\n\n{left_out}\n\n{requirements}Meneer Henk's executor made this change; his review follows. Run: {run_link}",
         summary.trim()
     )
 }
@@ -167,12 +178,31 @@ mod tests {
 
     #[test]
     fn the_body_closes_the_issue_and_says_what_was_left_out() {
-        let body = pull_body("#9", "Runs export as CSV.", "", "https://henk/runs/r-1");
+        let body = pull_body("#9", "Runs export as CSV.", "", "", "https://henk/runs/r-1");
         assert!(body.starts_with("Closes #9\n"), "{body}");
         assert!(body.contains("## Left out\n\nNothing."), "{body}");
         assert!(body.ends_with("Run: https://henk/runs/r-1"), "{body}");
+        assert!(!body.contains("Requirements review"), "{body}");
         assert!(crate::text::is_in_style(&body));
-        let body = pull_body("#9", "CSV.", "JSON export, out of scope.", "l");
+        let body = pull_body("#9", "CSV.", "JSON export, out of scope.", "", "l");
         assert!(body.contains("JSON export, out of scope."), "{body}");
+    }
+
+    #[test]
+    fn the_body_says_how_the_requirements_review_ended_between_what_was_left_out_and_the_run() {
+        let body = pull_body(
+            "#9",
+            "CSV.",
+            "",
+            "Converged after 2 rounds: 1 point raised, 1 taken.\n",
+            "l",
+        );
+        assert!(
+            body.contains(
+                "## Left out\n\nNothing.\n\n## Requirements review\n\nConverged after 2 rounds: 1 point raised, 1 taken.\n\nMeneer Henk's executor"
+            ),
+            "{body}"
+        );
+        assert!(crate::text::is_in_style(&body));
     }
 }
