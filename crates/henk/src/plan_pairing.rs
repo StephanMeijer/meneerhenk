@@ -74,6 +74,11 @@ impl Pairing<'_> {
                 return Err(error);
             }
         };
+        // Said where `run_plan` reads the plan's state, so the report can
+        // tell a converged review from one that ran out of rounds or time.
+        if let Ok(mut state) = self.context.state.lock() {
+            state.stop = Some(stop.clone());
+        }
         self.handoff
             .close_all(&format!("the review stopped: {stop}"))
             .await;

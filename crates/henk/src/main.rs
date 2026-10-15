@@ -489,6 +489,7 @@ async fn cmd_plan(config: &Path, url: &str, note: Option<String>) -> anyhow::Res
     .await?;
     println!("run {}", report.run);
     println!("plan written: {}", report.planned);
+    println!("plan review stopped: {}", report.stop);
     for change in report.changes {
         println!("- {change}");
     }

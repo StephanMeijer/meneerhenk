@@ -13,6 +13,7 @@ use henk_domain::marker::{Marker, MarkerKind, ModelId};
 use henk_domain::plan::{
     ChangeBudget, PlanSection, body_without_plan, extract_plan, with_plan_section,
 };
+use henk_domain::plan_review::PlanStop;
 use henk_domain::run::RunId;
 use henk_domain::text::style_violations;
 use henk_domain::triage::TriageFields;
@@ -56,6 +57,9 @@ pub struct PlanState {
     pub sub_issues: Vec<u64>,
     /// The plan text once published.
     pub plan: Option<String>,
+    /// Why the review of the draft stopped, set once when it has; `None`
+    /// until then, and when the planner failed before the review began.
+    pub stop: Option<PlanStop>,
 }
 
 impl PlanState {
@@ -68,6 +72,7 @@ impl PlanState {
             changes: Vec::new(),
             sub_issues: Vec::new(),
             plan: None,
+            stop: None,
         }
     }
 }

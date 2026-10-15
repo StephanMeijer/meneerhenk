@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
 use henk_domain::plan::{ChangeBudget, SessionEntry, extract_plan, with_plan_section};
+use henk_domain::plan_review::PlanStop;
 use henk_domain::run::{RunId, RunKind};
 use henk_domain::scope::Scope;
 use henk_llm::ChatMessage;
@@ -68,6 +69,10 @@ pub struct PlanReport {
     pub run: RunId,
     /// Whether a plan is in the issue now.
     pub planned: bool,
+    /// Why the review of the plan stopped. Only [`PlanStop::Converged`]
+    /// means the reviewer raised nothing more; any other stop left the
+    /// plan published with its open points.
+    pub stop: PlanStop,
     /// What changed, in words.
     pub changes: Vec<String>,
 }
@@ -150,9 +155,13 @@ pub async fn run_plan(
         return Err(ended);
     }
 
-    let (planned, changes) = match context.state.lock() {
-        Ok(state) => (state.plan.is_some(), state.changes.clone()),
-        Err(_) => (false, Vec::new()),
+    let (planned, changes, stop) = match context.state.lock() {
+        Ok(state) => (
+            state.plan.is_some(),
+            state.changes.clone(),
+            state.stop.clone(),
+        ),
+        Err(_) => (false, Vec::new(), None),
     };
 
     finish_plan(
@@ -162,6 +171,7 @@ pub async fn run_plan(
         result,
         planned,
         changes,
+        stop,
     )
     .await
 }
@@ -175,6 +185,7 @@ async fn finish_plan(
     result: anyhow::Result<()>,
     planned: bool,
     changes: Vec<String>,
+    stop: Option<PlanStop>,
 ) -> anyhow::Result<PlanReport> {
     let OnIssue {
         app,
@@ -244,6 +255,10 @@ async fn finish_plan(
             Ok(PlanReport {
                 run: run.clone(),
                 planned: true,
+                // Never `Converged` unless the review said so.
+                stop: stop.unwrap_or_else(|| {
+                    PlanStop::SessionFailed("the review did not record why it stopped".to_owned())
+                }),
                 changes,
             })
         }
@@ -1739,6 +1754,11 @@ model = "r"
             .await
             .unwrap();
         assert!(report.planned);
+        assert_eq!(
+            report.stop,
+            PlanStop::Converged,
+            "the reviewer raised nothing more"
+        );
 
         let untouched = watching.untouched.lock().unwrap().clone();
         assert_eq!(untouched.len(), 5);
@@ -1850,9 +1870,11 @@ model = "r"
             None,
         )
         .await;
-        run_plan(&f.app, request("r-plan-max"), CancellationToken::new())
+        let report = run_plan(&f.app, request("r-plan-max"), CancellationToken::new())
             .await
             .unwrap();
+        assert!(report.planned, "the plan is published all the same");
+        assert_eq!(report.stop, PlanStop::MaxRounds(1));
         let body = f.tracker.issue.lock().unwrap().body.clone();
         let section = extract_plan(&body).unwrap();
         assert!(
@@ -1904,9 +1926,14 @@ model = "r"
             None,
         )
         .await;
-        run_plan(&f.app, request("r-plan-broke"), CancellationToken::new())
+        let report = run_plan(&f.app, request("r-plan-broke"), CancellationToken::new())
             .await
             .unwrap();
+        assert!(
+            matches!(report.stop, PlanStop::SessionFailed(_)),
+            "{:?}",
+            report.stop
+        );
         let run = RunId::parse("r-plan-broke").unwrap();
         let record = f.app.store.run(&run).await.unwrap().unwrap();
         assert_eq!(record.loop_stop.as_deref(), Some("session_failed"));
