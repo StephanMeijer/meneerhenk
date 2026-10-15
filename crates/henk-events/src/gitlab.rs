@@ -41,10 +41,7 @@ pub fn parse_gitlab(event: &str, payload: &Value) -> EventKind {
 }
 
 fn parse_gitlab_merge_request(payload: &Value, repo: RepoRef, sender: Sender) -> EventKind {
-    let attributes = payload
-        .get("object_attributes")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let attributes = payload.get("object_attributes").unwrap_or(&Value::Null);
     let action = match attributes.get("action").and_then(Value::as_str) {
         Some("open") => PullRequestAction::Opened,
         Some("reopen") => PullRequestAction::Reopened,
@@ -85,10 +82,7 @@ fn parse_gitlab_merge_request(payload: &Value, repo: RepoRef, sender: Sender) ->
 }
 
 fn parse_gitlab_note(payload: &Value, repo: RepoRef, sender: Sender) -> EventKind {
-    let attributes = payload
-        .get("object_attributes")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let attributes = payload.get("object_attributes").unwrap_or(&Value::Null);
     if attributes.get("noteable_type").and_then(Value::as_str) != Some("MergeRequest") {
         return EventKind::Ignored("note on something other than a merge request".to_owned());
     }
