@@ -154,6 +154,9 @@
     if (detail.run.kind === 'execute') {
       return 'The executor works on the issue; Henk checks, pushes a new branch and opens the pull request, which a review run then takes.';
     }
+    if (detail.run.kind === 'ticket') {
+      return 'The plan, the execute run and the review are runs of their own; this run starts each in order and stops at the first that fails.';
+    }
     if (detail.run.kind === 'address') return 'One commit to the branch, then replies on the threads (before #327).';
     return '';
   }
@@ -176,6 +179,13 @@
     if (detail.run.kind === 'execute') {
       return [
         'The executor stops now. Nothing is pushed and no pull request is opened, unless that already happened.',
+        `On the issue, one comment says it was cancelled and names ${you}.`,
+      ];
+    }
+    if (detail.run.kind === 'ticket') {
+      return [
+        'The step in progress stops now, and nothing more is started.',
+        'A pull request that was already opened stays open.',
         `On the issue, one comment says it was cancelled and names ${you}.`,
       ];
     }

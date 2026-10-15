@@ -249,6 +249,23 @@ describe('Run', () => {
     ]);
   });
 
+  it('says what cancelling a ticket run does (#536)', async () => {
+    const detail = runDetail('running');
+    detail.run = { ...detail.run, kind: 'ticket' };
+    render(Run, { id: 'r-1', who: 'github:5821', load: () => Promise.resolve(detail), cancel: vi.fn(), connect: fakeConnect().connect });
+    await settle();
+    expect(document.querySelector('h1')?.textContent).toBe('ticket r-1');
+    cancelButton()?.click();
+    await settle(1);
+    const dialog = document.querySelector('dialog[open]');
+    const effects = [...(dialog?.querySelectorAll('li') ?? [])].map((li) => li.textContent);
+    expect(effects).toEqual([
+      'The step in progress stops now, and nothing more is started.',
+      'A pull request that was already opened stays open.',
+      'On the issue, one comment says it was cancelled and names you, github:5821.',
+    ]);
+  });
+
   it('names the run that replaced a superseded one', async () => {
     const detail = { ...runDetail(), run: { ...runDetail().run, status: 'superseded', superseded_by: 'r-2' } };
     render(Run, { id: 'r-1', load: () => Promise.resolve(detail), cancel: vi.fn() });

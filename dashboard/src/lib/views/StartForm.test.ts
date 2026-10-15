@@ -35,6 +35,34 @@ describe('StartForm', () => {
     expect(button()?.textContent).toBe('Start review');
   });
 
+  it('starts a whole ticket run for an issue, with a note (#536)', async () => {
+    const start = vi.fn(() => Promise.resolve({ event_id: 'e-11' }));
+    const go = vi.fn();
+    render(StartForm, { startable: ['review', 'execute', 'ticket'], start, go });
+    await settle();
+    expect(document.body.textContent).toContain('Take an issue through plan, build and review');
+    choose('ticket');
+    await settle(1);
+    expect(label()).toBe('Issue URL');
+    expect(button()?.textContent).toBe('Start the run');
+    expect(document.querySelector('input[name=commit]')).toBeNull();
+    fill('url','https://github.com/docspec/app/pull/3');
+    await settle(1);
+    expect(check()).toBe('This is a pull request. Taking one through plan, build and review needs an issue URL.');
+    fill('url', 'https://github.com/docspec/app/issues/3');
+    fill('note', 'keep it small');
+    await settle(1);
+    document.querySelector('form')?.requestSubmit();
+    await settle();
+    expect(start).toHaveBeenCalledWith({
+      kind: 'ticket',
+      url: 'https://github.com/docspec/app/issues/3',
+      commit: null,
+      note: 'keep it small',
+    });
+    expect(go).toHaveBeenCalledWith('/events/e-11');
+  });
+
   it('takes an issue to a pull request with a note (#329)', async () => {
     const start = vi.fn(() => Promise.resolve({ event_id: 'e-10' }));
     render(StartForm, { startable: ['review', 'plan', 'execute'], start, go: vi.fn() });
@@ -54,32 +82,6 @@ describe('StartForm', () => {
     await settle();
     expect(start).toHaveBeenCalledWith({
       kind: 'execute',
-      url: 'https://github.com/docspec/app/issues/3',
-      commit: null,
-      note: 'keep it small',
-    });
-  });
-
-  it('takes an issue through plan, pull request and review, with a note (#536)', async () => {
-    const start = vi.fn(() => Promise.resolve({ event_id: 'e-12' }));
-    render(StartForm, { startable: ['ticket'], start, go: vi.fn() });
-    await settle();
-    const kinds = [...document.querySelectorAll<HTMLInputElement>('input[type=radio]')].map((r) => r.value);
-    expect(kinds).toEqual(['ticket']);
-    expect(document.querySelector<HTMLInputElement>('input[value=ticket]')?.checked).toBe(true);
-    expect(label()).toBe('Issue URL');
-    expect(button()?.textContent).toBe('Run the ticket');
-    expect(document.querySelector('input[name=commit]')).toBeNull();
-    fill('url', 'https://github.com/docspec/app/pull/3');
-    await settle(1);
-    expect(check()).toBe('This is a pull request. A ticket run needs an issue URL.');
-    fill('url', 'https://github.com/docspec/app/issues/3');
-    fill('note', 'keep it small');
-    await settle(1);
-    document.querySelector('form')?.requestSubmit();
-    await settle();
-    expect(start).toHaveBeenCalledWith({
-      kind: 'ticket',
       url: 'https://github.com/docspec/app/issues/3',
       commit: null,
       note: 'keep it small',

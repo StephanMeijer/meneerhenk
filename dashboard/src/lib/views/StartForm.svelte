@@ -32,22 +32,22 @@
       line: 'The executor makes the change on a new branch, Henk opens the pull request and reviews it.',
     },
     {
+      kind: 'ticket',
+      label: 'Take an issue through plan, build and review',
+      line: 'Henk plans it, the executor makes the change and opens the pull request, and Henk reviews it, with no one starting each step.',
+    },
+    {
       kind: 'rebase',
       label: 'Rebase a pull request',
       line: 'Henk replays it onto its base branch, has the executor resolve conflicts, pushes with a lease and reviews it.',
-    },
-    {
-      kind: 'ticket',
-      label: 'Take an issue through plan, pull request and review',
-      line: 'Henk plans the issue, the executor makes the change and opens the pull request, and Henk reviews it, with no one starting each step.',
     },
   ];
   const BUTTONS: Record<Start, string> = {
     review: 'Start review',
     plan: 'Start plan',
     execute: 'Take it on',
+    ticket: 'Start the run',
     rebase: 'Rebase it',
-    ticket: 'Run the ticket',
   };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
