@@ -216,13 +216,17 @@ request is a merge request.
    contributor notes and the branch's latest subjects, which Henk shows
    it). Henk checks the proposal: every changed file in exactly one
    commit, no empty commit, a subject of one line of at most 72
-   characters, and a body of plain text with no line shaped like a
-   trailer. Trailers are Henk's alone. He applies the changeset to a
+   characters, a body of plain text with no line shaped like a
+   trailer, and neither naming a finding of the run (`f1`, `f3`): their
+   ids restart in every run and mean nothing in the repository's history
+   (#585), so a proposal that names one is sent back to the executor to
+   reword in the same round. Trailers are Henk's alone. He applies the changeset to a
    clean checkout that nothing ran in, makes the commits there in order,
    each ending in his trailer block with the run, and the requester when
    Henk knows who asked, and pushes them at once. A round with no usable
-   proposal is one commit, "Fix review findings" with the findings it
-   fixed, and the run's timeline says why. Only a fast-forward, never a
+   proposal is one commit, "Fix review findings", and the run's timeline
+   says why. No commit message carries a finding id; the `Henk-Run`
+   trailer points back to the run. Only a fast-forward, never a
    force push: if the branch moved since he read it, nothing is pushed
    and the loop stops. A rebase (§3.6) is the one push that replaces the
    branch.
@@ -806,6 +810,12 @@ surprising reading of the earlier wording; veto any that is wrong.
   stay readable.
 
 ## Revision notes (2026-10-15)
+
+- §3.5: no commit of a review loop names a finding id (#585). The prompt
+  no longer suggests "Fixes f3."; a proposal whose subject or body names
+  a finding of the run is refused and the executor rewords it; the
+  fallback commit is "Fix review findings" without ids. The `Henk-Run`
+  trailer stays.
 
 - §3.1, §3.6: one run per pull request at a time, of any kind (#580). A
   rebase waits for a slot ahead of every review, supersedes a review of

@@ -6,10 +6,13 @@
 use std::sync::{Arc, Mutex};
 
 use henk_agent::{Tool, ToolOutput};
-use henk_domain::commit::{CommitProposal, MAX_COMMITS, MAX_SUBJECT, planned_commits};
+use henk_domain::commit::{
+    CommitProposal, MAX_COMMITS, MAX_SUBJECT, finding_refusal, planned_commits,
+};
 use henk_llm::{ToolDef, ToolName};
 use serde_json::{Value, json};
 
+use crate::loop_tools::Handoff;
 use crate::workspace::Workspace;
 
 /// Where the executor's commits wait for Henk's code.
@@ -26,7 +29,7 @@ pub fn commits_schema() -> Value {
             "properties": {
                 "files": {"type": "array", "items": {"type": "string"}, "description": "The changed files this commit holds, as the workspace names them"},
                 "subject": {"type": "string", "description": format!("One line of at most {MAX_SUBJECT} characters, in the repository's commit convention")},
-                "body": {"type": "string", "description": "Why, in plain text; names the finding it fixes. No trailers: Henk adds them"}
+                "body": {"type": "string", "description": "Why, in plain text. No trailers: Henk adds them"}
             },
             "required": ["files", "subject"]
         }
@@ -98,6 +101,8 @@ pub struct ProposeCommits {
     pub proposed: ProposedCommits,
     /// The workspace the changes are in.
     pub workspace: Arc<dyn Workspace>,
+    /// The run's findings: their ids are not for a commit message (#585).
+    pub handoff: Arc<Handoff>,
 }
 
 #[async_trait::async_trait]
@@ -121,6 +126,9 @@ impl Tool for ProposeCommits {
             Err(why) => return ToolOutput::error(format!("Not proposed: {why}.")),
         };
         if let Err(why) = check_commits(&*self.workspace, &commits).await {
+            return ToolOutput::error(format!("Not proposed: {why}."));
+        }
+        if let Some(why) = finding_refusal(&commits, &self.handoff.finding_ids()) {
             return ToolOutput::error(format!("Not proposed: {why}."));
         }
         let count = commits.len();
@@ -149,4 +157,103 @@ pub fn recent_commits_text(subjects: &[String]) -> String {
         .map(|s| format!("- {}", s.split_whitespace().collect::<Vec<_>>().join(" ")))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use henk_domain::path::WorkspacePath;
+    use henk_domain::review_loop::{Ledger, Report};
+    use henk_domain::run::RunId;
+    use henk_store::SqliteStore;
+
+    use super::*;
+    use crate::edit_tools::tests::workspace;
+    use crate::loop_tools::HandoffState;
+
+    /// A handoff of a run whose reviewer reported one finding, `f1`.
+    fn handoff_with_f1() -> Arc<Handoff> {
+        let mut ledger = Ledger::default();
+        ledger.start_round(1);
+        ledger
+            .report(
+                Report {
+                    path: "src/a.rs".to_owned(),
+                    line: 2,
+                    claim: "x is never set".to_owned(),
+                    why: "the caller divides by it".to_owned(),
+                    fix: String::new(),
+                },
+                None,
+            )
+            .unwrap();
+        Arc::new(Handoff {
+            run: RunId::parse("r-commit-tools").unwrap(),
+            store: Arc::new(SqliteStore::in_memory().unwrap()),
+            reviewer_model: "reviewer".to_owned(),
+            state: std::sync::Mutex::new(HandoffState {
+                ledger,
+                ..HandoffState::default()
+            }),
+            commits: Arc::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_names_a_finding_of_the_run_is_not_proposed() {
+        let (_provider, ctx) = workspace("henk-commit-tools-finding").await;
+        ctx.workspace
+            .write(
+                &WorkspacePath::parse("src/a.rs").unwrap(),
+                b"fn main() {}\n",
+            )
+            .await
+            .unwrap();
+        let handoff = handoff_with_f1();
+        let tool = ProposeCommits {
+            proposed: Arc::clone(&handoff.commits),
+            workspace: Arc::clone(&ctx.workspace),
+            handoff: Arc::clone(&handoff),
+        };
+        let propose = |body: &str| {
+            json!({"commits": [{
+                "files": ["src/a.rs"],
+                "subject": "fix(a): set x",
+                "body": body
+            }]})
+        };
+
+        // Named in a body, in a subject, or in capitals: sent back, and
+        // nothing waits for Henk.
+        for (case, args) in [
+            ("body", propose("The caller divides by it.\n\nFixes f1.")),
+            (
+                "subject",
+                json!({"commits": [{"files": ["src/a.rs"], "subject": "fix(a): f1 is gone"}]}),
+            ),
+            ("capitals", propose("Closes F1.")),
+        ] {
+            let refused = tool.call(args).await;
+            assert!(refused.is_error, "{case}: {refused:?}");
+            assert!(
+                refused
+                    .content
+                    .starts_with("Not proposed: commit 1 names the finding f1 in its"),
+                "{case}: {}",
+                refused.content
+            );
+            assert!(refused.content.contains("say in words"), "{case}");
+            assert!(handoff.proposed_commits().is_none(), "{case}");
+        }
+
+        // Reworded in words, and with an id that is not the run's, it holds.
+        let ok = tool
+            .call(propose(
+                "The caller divides by it, so it must be set. See f16.",
+            ))
+            .await;
+        assert!(!ok.is_error, "{ok:?}");
+        assert_eq!(handoff.proposed_commits().unwrap().len(), 1);
+    }
 }

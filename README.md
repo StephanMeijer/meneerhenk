@@ -856,10 +856,12 @@ checks the proposal: every changed file in exactly one commit (split by
 file, not by hunk), at most 10 commits, none empty, a subject of one line
 of at most 72 characters, and a body without emoji, em-dash or a line
 shaped like a trailer (`Key: value`), so the model cannot write a
-`Signed-off-by` or `Co-authored-by`. He makes the commits in order and
+`Signed-off-by` or `Co-authored-by`. Neither subject nor body may name a
+finding of the run (`f1`, `f3`): the ids restart in every run and mean
+nothing in the repository's history, so such a proposal goes back to the
+executor to reword (#585). He makes the commits in order and
 pushes them as one fast-forward. Without a usable proposal the round is
-one commit, "Fix review findings f1, f3" naming the findings fixed, and
-the run's timeline says why.
+one commit, "Fix review findings", and the run's timeline says why.
 
 Every commit ends in a trailer block,
 in this order: `Henk-Run` (the run), `Requested-by` (who asked, by a

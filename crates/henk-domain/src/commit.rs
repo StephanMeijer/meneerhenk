@@ -214,15 +214,12 @@ pub fn cut_subject(subject: &str) -> String {
 }
 
 /// The subject of a review loop's commit when the executor proposed no
-/// usable commits (§3.5): `Fix review findings f1, f3`, the findings it
-/// fixed, cut to [`MAX_SUBJECT`].
+/// usable commits (§3.5): `Fix review findings`. It names no finding: their
+/// ids restart in every run and mean nothing in the repository's history
+/// (#585); the commit's `Henk-Run` trailer points back to the run.
 #[must_use]
-pub fn fix_subject(fixed: &[FindingId]) -> String {
-    if fixed.is_empty() {
-        return "Fix review findings".to_owned();
-    }
-    let ids: Vec<String> = fixed.iter().map(ToString::to_string).collect();
-    cut_subject(&format!("Fix review findings {}", ids.join(", ")))
+pub fn fix_subject() -> String {
+    "Fix review findings".to_owned()
 }
 
 /// A body of `- note` lines, one per note, each on one line.
@@ -349,6 +346,42 @@ pub fn proposal_refusal(commits: &[CommitProposal]) -> Option<String> {
                 "the body of {which} has a line shaped like a trailer ({}); Henk writes the trailers, so rephrase it",
                 line.trim()
             ));
+        }
+    }
+    None
+}
+
+/// The first of `ids` that `text` names as a word of its own (#585): not
+/// part of a longer word or number, so `f1` is in "Fixes f1." and "(F1)" and
+/// not in "f16", "pf1" or "f1a". Only the ids given are looked for.
+#[must_use]
+pub fn mentions_finding(text: &str, ids: &[FindingId]) -> Option<FindingId> {
+    let lower = text.to_ascii_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    ids.iter().copied().find(|id| {
+        let needle = id.to_string();
+        lower.match_indices(&needle).any(|(start, found)| {
+            let before = lower[..start].chars().next_back();
+            let after = lower[start + found.len()..].chars().next();
+            !word(before) && !word(after)
+        })
+    })
+}
+
+/// Why the executor's commits may not be made because they name a finding
+/// of this run (#585), or `None`: finding ids restart at `f1` in every run
+/// and mean nothing in the repository's history, so a subject or a body
+/// that carries one is sent back to be reworded in words.
+#[must_use]
+pub fn finding_refusal(commits: &[CommitProposal], ids: &[FindingId]) -> Option<String> {
+    for (n, commit) in commits.iter().enumerate() {
+        for (place, text) in [("subject", &commit.subject), ("body", &commit.body)] {
+            if let Some(id) = mentions_finding(text, ids) {
+                return Some(format!(
+                    "commit {} names the finding {id} in its {place}; finding ids mean nothing in the repository's history, so say in words what changed and why",
+                    n + 1
+                ));
+            }
         }
     }
     None
@@ -646,7 +679,7 @@ mod tests {
             commit(
                 &["src/a.rs"],
                 "fix(loop): stop at the last round",
-                "Fixes f1.\n\n\n",
+                "The loop ended one round late.\n\n\n",
             ),
             commit(
                 &[".github/workflows/ci.yml", "Cargo.toml"],
@@ -665,7 +698,7 @@ mod tests {
                 PlannedCommit {
                     paths: vec!["src/a.rs".to_owned()],
                     subject: "fix(loop): stop at the last round".to_owned(),
-                    body: "Fixes f1.".to_owned(),
+                    body: "The loop ended one round late.".to_owned(),
                 },
                 PlannedCommit {
                     paths: vec![
@@ -767,7 +800,8 @@ mod tests {
             .collect();
         assert!(proposal_refusal(&many).unwrap().contains("at most"));
         // Prose with a colon is not a trailer.
-        let prose = "Fixes f2: the loop stopped a round early.\nSee https://example.com/x.";
+        let prose =
+            "The reason is simple: the loop stopped a round early.\nSee https://example.com/x.";
         assert_eq!(
             proposal_refusal(&[commit(&["a.rs"], "fix: a", prose)]),
             None
@@ -775,24 +809,105 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_subject_names_the_findings_and_fits_on_a_line() {
-        let ids = |n: u32| -> Vec<FindingId> {
-            (1..=n)
-                .filter_map(|i| FindingId::parse(&i.to_string()))
-                .collect()
-        };
-        assert_eq!(fix_subject(&[]), "Fix review findings");
-        assert_eq!(fix_subject(&ids(2)), "Fix review findings f1, f2");
-        let many = fix_subject(&ids(30));
-        assert_eq!(many.chars().count(), MAX_SUBJECT);
-        assert!(many.ends_with("..."), "{many}");
+    fn the_fallback_subject_names_no_finding() {
+        assert_eq!(fix_subject(), "Fix review findings");
+        assert!(fix_subject().chars().count() <= MAX_SUBJECT);
+    }
+
+    fn ids(n: u32) -> Vec<FindingId> {
+        (1..=n)
+            .filter_map(|i| FindingId::parse(&i.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_finding_id_is_found_as_a_word_of_its_own_and_not_inside_another() {
+        let f1 = ids(1);
+        for text in [
+            "Fixes f1.",
+            "fixes f1",
+            "(f1)",
+            "see f1,f3",
+            "F1: the loop",
+            "f1",
+            "- f1\n- f2",
+            "#f1",
+            "ends in f1",
+        ] {
+            assert_eq!(mentions_finding(text, &f1), f1.first().copied(), "{text}");
+        }
+        for text in [
+            "f16",
+            "pf1",
+            "f1a",
+            "buf1",
+            "f1_value",
+            "the f16 register",
+            "f10 and f11",
+            "",
+            "Fix review findings",
+        ] {
+            assert_eq!(mentions_finding(text, &f1), None, "{text}");
+        }
+        // Only the ids given are looked for, and the first one named is
+        // returned.
+        assert_eq!(
+            mentions_finding("f2 and f1", &ids(4)),
+            ids(1).first().copied()
+        );
+        assert_eq!(mentions_finding("f2", &f1), None);
+        assert_eq!(mentions_finding("f1", &[]), None);
+        // A non-ASCII neighbour does not make it part of a word, and the
+        // search does not stop at a cut inside a character.
+        assert!(mentions_finding("caf\u{e9} f1\u{2019}s", &f1).is_some());
+    }
+
+    #[test]
+    fn a_proposal_naming_a_finding_of_the_run_is_refused_in_words() {
+        let run_ids = ids(4);
+        let clean = [commit(
+            &["a.rs"],
+            "fix(loop): stop at the last round",
+            "The loop ended one round late.",
+        )];
+        assert_eq!(finding_refusal(&clean, &run_ids), None);
+        assert_eq!(finding_refusal(&clean, &[]), None);
+
+        let in_body = [
+            commit(&["a.rs"], "fix: a", ""),
+            commit(
+                &["b.rs"],
+                "fix: b",
+                "The caller divides by it.\n\nFixes f1.",
+            ),
+        ];
+        let why = finding_refusal(&in_body, &run_ids).unwrap();
+        assert!(
+            why.starts_with("commit 2 names the finding f1 in its body"),
+            "{why}"
+        );
+        assert!(why.contains("say in words"), "{why}");
+        assert!(crate::text::is_in_style(&why), "{why}");
+
+        let in_subject = [commit(&["a.rs"], "fix: f3 is gone", "")];
+        let why = finding_refusal(&in_subject, &run_ids).unwrap();
+        assert!(
+            why.starts_with("commit 1 names the finding f3 in its subject"),
+            "{why}"
+        );
+
+        // An id of an earlier round of the run counts as well.
+        let earlier = [commit(&["a.rs"], "fix: a", "Same as f2.")];
+        assert!(finding_refusal(&earlier, &run_ids).is_some());
+        // Text that only looks like an id the run does not have does not.
+        assert_eq!(finding_refusal(&earlier, &ids(1)), None);
     }
 
     #[test]
     fn a_body_keeps_its_lines_and_the_trailers_stay_henks() {
         let message = commit_message(
             "fix(ci): pin the toolchain",
-            "\nThe build used whatever was newest.\n\n\n\nFixes f3.  \n",
+            "\nThe build used whatever was newest.\n\n\n\nThis keeps CI repeatable.  \n",
             &run(),
             None,
             &henk(),
@@ -803,7 +918,7 @@ mod tests {
             message,
             "fix(ci): pin the toolchain\n\n\
              The build used whatever was newest.\n\n\
-             Fixes f3.\n\n\
+             This keeps CI repeatable.\n\n\
              Henk-Run: r-20261006-0000beef\n\
              Signed-off-by: meneer-henk[bot] <1+meneer-henk[bot]@users.noreply.github.com>\n"
         );

@@ -65,14 +65,11 @@ impl Handoff {
         self.commits.lock().ok().and_then(|c| c.clone())
     }
 
-    /// The findings fixed but not pushed yet: this round's fixes.
+    /// The ids of every finding of the run so far: what no commit message
+    /// may name (#585), since they restart in every run.
     #[must_use]
-    pub fn unpushed_fixes(&self) -> Vec<FindingId> {
-        self.ledger()
-            .iter()
-            .filter(|f| matches!(f.verdict, Some(LoopVerdict::Fixed { commit: None, .. })))
-            .map(|f| f.id)
-            .collect()
+    pub fn finding_ids(&self) -> Vec<FindingId> {
+        self.ledger().iter().map(|f| f.id).collect()
     }
 
     /// Whether the reviewer called `finish_round` in the round under way.

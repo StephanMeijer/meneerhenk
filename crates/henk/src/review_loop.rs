@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use henk_agent::{AgentConfig, StopCause, ToolSet, prompts};
-use henk_domain::commit::{PlannedCommit, bullet_body, fix_subject, planned_commits};
+use henk_domain::commit::{
+    PlannedCommit, bullet_body, finding_refusal, fix_subject, planned_commits,
+};
 use henk_domain::diff::ReviewDiff;
 use henk_domain::identity::RequesterId;
 use henk_domain::push::push_refusal;
@@ -886,10 +888,25 @@ impl<'a> Rounds<'a> {
         Ok(Pushed::Commits { shas: short, patch })
     }
 
+    /// `proposed` as commits for a change of `paths`, or why not: the shape
+    /// and the files ([`planned_commits`]), and no finding of the run named
+    /// in a subject or a body (#585). The tool checks the same on the
+    /// executor's side; this is where the commits are made.
+    fn planned(
+        &self,
+        proposed: &[henk_domain::commit::CommitProposal],
+        paths: &[&str],
+    ) -> Result<Vec<PlannedCommit>, String> {
+        if let Some(why) = finding_refusal(proposed, &self.handoff.finding_ids()) {
+            return Err(why);
+        }
+        planned_commits(proposed, paths)
+    }
+
     /// The commits for this round's `changes`: the executor's, when they
-    /// hold every change once and are in shape, or else one commit whose
-    /// subject names the findings fixed, with why on the run's timeline
-    /// (#400).
+    /// hold every change once, are in shape and name no finding of the run
+    /// (#585), or else one commit, "Fix review findings", with why on the
+    /// run's timeline (#400).
     async fn round_commits(
         &self,
         pusher: &Pusher<'_>,
@@ -898,7 +915,7 @@ impl<'a> Rounds<'a> {
         let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
         let round = self.round;
         match self.handoff.proposed_commits() {
-            Some(proposed) => match planned_commits(&proposed, &paths) {
+            Some(proposed) => match self.planned(&proposed, &paths) {
                 Ok(planned) => return planned,
                 Err(why) => {
                     pusher
@@ -916,11 +933,11 @@ impl<'a> Rounds<'a> {
                     .await;
             }
         }
-        // Only ids and Henk's own words: no model's text reaches this
-        // commit's message.
+        // Only Henk's own words: no model's text reaches this commit's
+        // message, and no finding id (#585).
         vec![PlannedCommit {
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
-            subject: fix_subject(&self.handoff.unpushed_fixes()),
+            subject: fix_subject(),
             body: bullet_body(&[format!("review loop round {round}")]),
         }]
     }
@@ -959,6 +976,7 @@ fn executor_setup(
     tools.add(ProposeCommits {
         proposed: Arc::clone(&handoff.commits),
         workspace: Arc::clone(&fixing.workspace),
+        handoff: Arc::clone(handoff),
     });
     let tools = equip_and_grant(
         Role::Executor,

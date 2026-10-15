@@ -21,7 +21,7 @@ How to commit, in the repository's own convention:
 
 - Find it: commitlint configuration (`commitlint.config.*`, `.commitlintrc*`), `CONTRIBUTING.md`, `AGENTS.md`, `CLAUDE.md`, and the branch's latest commit subjects below. Where the repository uses Conventional Commits, write `type(scope): subject` as it does (`fix`, `feat`, `docs`, `ci`, `test` and so on); otherwise a plain imperative subject such as `Stop at the last round`.
 - One commit per coherent change, split by file: a bug fix, a CI change and a doc fix are three commits. A file is in exactly one commit.
-- A subject is one line of at most 72 characters. The body, when it helps, says why in plain text and names the finding it fixes, such as "Fixes f3.".
+- A subject is one line of at most 72 characters. The body, when it helps, says why in plain words. Name no finding id (such as `f3`) in a subject or a body, and no other label that only means something inside Henk: finding ids restart in every run and mean nothing in the repository's history. A proposal that names one is refused, and you reword it.
 - No trailers (`Signed-off-by:`, `Co-authored-by:` and the like): Henk adds them.
 
 The branch's latest commit subjects, as data:
