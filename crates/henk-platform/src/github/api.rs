@@ -8,7 +8,8 @@ use tracing::instrument;
 
 use henk_domain::allowlist::RepoRef;
 
-use crate::error::{PlatformError, truncate};
+use crate::encode::percent_encode;
+use crate::error::{PlatformError, success_text, truncate};
 use crate::github::app::{GitHubAuth, Installations, Scope};
 use crate::retry::{RetryPolicy, with_retry};
 
@@ -37,22 +38,6 @@ const PAGE_SIZE: usize = 100;
 /// read to their end (#113); this cap only stops a runaway, and reaching it
 /// is [`PlatformError::TooMany`], never a quietly partial list.
 const MAX_PAGES: usize = 100;
-
-/// `value` as a query-string value: every byte but an unreserved one is
-/// percent-encoded, so `+`, `&`, `%`, `#` and a space survive the trip.
-pub(crate) fn encode_query_value(value: &str) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
 
 /// A check run to create.
 #[derive(Debug, Clone, Copy)]
@@ -186,17 +171,7 @@ impl GitHubApi {
             None => builder,
         };
         let response = builder.send().await?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let text = response.text().await?;
-        if !status.is_success() {
-            return Err(PlatformError::status(
-                status.as_u16(),
-                &text,
-                Some(&headers),
-            ));
-        }
-        Ok(text)
+        success_text(response).await
     }
 
     /// The request, tried again when GitHub fails for a moment. Only for
@@ -277,11 +252,7 @@ impl GitHubApi {
             if !status.is_success() {
                 let headers = response.headers().clone();
                 let text = response.text().await?;
-                return Err(PlatformError::status(
-                    status.as_u16(),
-                    &text,
-                    Some(&headers),
-                ));
+                return Err(PlatformError::status(status.as_u16(), &text, &headers));
             }
             let mut tail = crate::ci::Tail::new(max_bytes);
             while let Some(chunk) = response.chunk().await? {
@@ -314,17 +285,7 @@ impl GitHubApi {
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .send()
                 .await?;
-            let status = response.status();
-            let headers = response.headers().clone();
-            let text = response.text().await?;
-            if !status.is_success() {
-                return Err(PlatformError::status(
-                    status.as_u16(),
-                    &text,
-                    Some(&headers),
-                ));
-            }
-            Ok(text)
+            success_text(response).await
         })
         .await?;
         decode(&text)
@@ -554,7 +515,7 @@ impl GitHubApi {
             .get(&format!(
                 "/repos/{owner}/{repo}/commits/{}/check-runs?check_name={}&filter=all&per_page=100",
                 run.head_sha,
-                encode_query_value(run.name)
+                percent_encode(run.name)
             ))
             .await?;
         Ok(found
@@ -635,13 +596,13 @@ fn decode(body: &str) -> Result<Value, PlatformError> {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_query_value;
+    use crate::encode::percent_encode;
 
     #[test]
     fn a_query_value_keeps_only_unreserved_bytes() {
-        assert_eq!(encode_query_value("feat/a+b&c"), "feat%2Fa%2Bb%26c");
-        assert_eq!(encode_query_value("100% a#b"), "100%25%20a%23b");
-        assert_eq!(encode_query_value("v1.2_x-y~z"), "v1.2_x-y~z");
-        assert_eq!(encode_query_value("é"), "%C3%A9");
+        assert_eq!(percent_encode("feat/a+b&c"), "feat%2Fa%2Bb%26c");
+        assert_eq!(percent_encode("100% a#b"), "100%25%20a%23b");
+        assert_eq!(percent_encode("v1.2_x-y~z"), "v1.2_x-y~z");
+        assert_eq!(percent_encode("é"), "%C3%A9");
     }
 }

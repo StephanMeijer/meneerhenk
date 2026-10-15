@@ -60,15 +60,11 @@ pub enum PlatformError {
 impl PlatformError {
     /// A status error from `status`, `body` (truncated here) and the
     /// response's `Retry-After`.
-    pub(crate) fn status(
-        status: u16,
-        body: &str,
-        headers: Option<&reqwest::header::HeaderMap>,
-    ) -> Self {
+    pub(crate) fn status(status: u16, body: &str, headers: &reqwest::header::HeaderMap) -> Self {
         Self::Status {
             status,
             body: truncate(body),
-            retry_after: headers.and_then(retry_after),
+            retry_after: retry_after(headers),
         }
     }
 
@@ -133,6 +129,18 @@ fn gitlab_transient(text: &str) -> bool {
         .is_some_and(|status| status >= 500 || status == 429)
 }
 
+/// The body of a 2xx answer, or the status error with what the platform
+/// said and how long it asked to wait.
+pub(crate) async fn success_text(response: reqwest::Response) -> Result<String, PlatformError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let text = response.text().await?;
+    if !status.is_success() {
+        return Err(PlatformError::status(status.as_u16(), &text, &headers));
+    }
+    Ok(text)
+}
+
 /// `Retry-After` in seconds; an HTTP date is ignored.
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
     let value = headers
@@ -148,10 +156,7 @@ pub(crate) fn truncate(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_owned();
     }
-    let mut end = LIMIT;
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = body.floor_char_boundary(LIMIT);
     format!("{}...", body.get(..end).unwrap_or_default())
 }
 

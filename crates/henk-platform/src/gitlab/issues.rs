@@ -7,27 +7,11 @@ use serde_json::{Value, json};
 
 use crate::error::PlatformError;
 use crate::gitlab::writer::GitLabWriter;
+use crate::gitlab::{number, text};
 use crate::issue::{
     CreatedSubIssue, IssueInfo, IssueRelation, IssueTarget, IssueUpdate, IssueWriter,
 };
 use crate::writer::PostedComment;
-
-/// A number GitLab may send as a JSON number or, from GraphQL, as a string.
-fn number(value: Option<&Value>) -> Option<u64> {
-    match value? {
-        Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
-}
-
-fn text(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned()
-}
 
 /// The fields a work item has now. A value Henk cannot read counts as empty.
 fn fields(value: &Value) -> TriageFields {
