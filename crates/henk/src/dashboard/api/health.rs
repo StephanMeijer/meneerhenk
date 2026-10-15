@@ -101,9 +101,9 @@ async fn health_rows(
         settings
             .models
             .keys()
-            .cloned()
+            .map(|id| format!("{id}: {}", settings.describe_model(id)))
             .collect::<Vec<_>>()
-            .join(", "),
+            .join("; "),
     ));
     rows.push((
         "MCP servers".to_owned(),
