@@ -562,6 +562,19 @@ impl Coordinator {
         self.slots_changed.send_replace(());
     }
 
+    /// Forgets the review held for a rebase of the pull request, when a
+    /// newer review takes it as `newer`: the rebase it waited for may have
+    /// been cancelled, and the held one would otherwise start later and
+    /// supersede the newer review with an older commit. Called with
+    /// `active` locked.
+    fn drop_held(&self, key: &Key, newer: &RunId) {
+        if let Ok(mut holding) = self.held.lock()
+            && let Some(older) = holding.remove(key)
+        {
+            info!(older = %older.run, newer = %newer, "a newer review replaces one waiting for a rebase");
+        }
+    }
+
     /// Records that a request joined `run`, off the lock: the store is
     /// async and the coordinator's guard is not.
     fn record_joined(&self, run: &RunId, trigger: &str) {
@@ -628,8 +641,12 @@ impl Coordinator {
                         }
                         predecessor = Some(old.ended);
                     }
+                    self.drop_held(&key, &run);
                 }
-                Decision::Start => predecessor = self.still_ending(&key),
+                Decision::Start => {
+                    predecessor = self.still_ending(&key);
+                    self.drop_held(&key, &run);
+                }
             }
             let asked = Asked {
                 repo: request.target.repo.path(),

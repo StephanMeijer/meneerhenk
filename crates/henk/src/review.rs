@@ -2615,6 +2615,47 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #580: a review held for a rebase that was cancelled is dropped when a
+    /// newer review of the pull request starts, so it never supersedes it.
+    #[tokio::test]
+    async fn a_newer_review_replaces_the_one_held_for_a_cancelled_rebase() {
+        use henk_domain::queue::Decision;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-held-replaced", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let target = request(&placeholder).target;
+
+        let (_, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
+        let (decision, held) = coordinator.submit_review(request(&placeholder), commit.clone());
+        assert_eq!(decision, Decision::After);
+        assert!(coordinator.cancel(&rebase, "github:1234".to_owned()));
+
+        let newer_commit = CommitSha::parse(&"b".repeat(40)).unwrap();
+        let (decision, newer) = coordinator.submit_review(request(&placeholder), newer_commit);
+        assert_eq!(decision, Decision::Start);
+        assert_eq!(coordinator.queued_reviews(), 1, "only the newer one waits");
+
+        // The cancelled rebase ends once its slot is free.
+        drop(taken);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            app.cancels.superseded_by(&newer),
+            None,
+            "the held review did not supersede the newer one"
+        );
+        assert!(
+            app.store.run(&held).await.unwrap().is_none(),
+            "the held review never started"
+        );
+        app.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn waiting_reviews_queue_in_order_with_who_asked_and_why_they_wait() {
         let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
