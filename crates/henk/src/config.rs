@@ -68,6 +68,9 @@ pub struct Config {
     /// Execute runs: an issue taken to a pull request (#329).
     #[serde(default)]
     pub execution: Option<ExecutionConfig>,
+    /// Autonomous ticket runs (#536).
+    #[serde(default)]
+    pub autonomous: Option<AutonomousConfig>,
     /// The address run's section before roles (#322), read only to refuse
     /// it with a message that says what replaced it.
     #[serde(default)]
@@ -860,6 +863,22 @@ pub struct ExecutionConfig {
     /// `henk/329-the-executor-takes-an-issue`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+}
+
+/// Autonomous ticket runs (#536): one action takes an issue through a plan,
+/// an execute run and a review of its pull request, with nobody starting
+/// each step. The section being there turns it on, since it lets Henk
+/// write and push code without a person between the plan and the pull
+/// request. It needs everything those three steps need: `[planning]`,
+/// `[execution]` and `[review.loop]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutonomousConfig {
+    /// The time one ticket run has in all, in seconds: its plan, its execute
+    /// run, the wait for a review slot and its review. Each of them keeps
+    /// its own limits as well.
+    #[serde(default = "default_autonomous_run_timeout_secs")]
+    pub run_timeout_secs: u64,
 }
 
 /// The agents Henk runs (#322), one section each. The review loop needs
@@ -1691,6 +1710,9 @@ fn default_sub_issue_cap() -> u32 {
 fn default_execution_run_timeout_secs() -> u64 {
     3600
 }
+fn default_autonomous_run_timeout_secs() -> u64 {
+    7200
+}
 fn default_branch_prefix() -> String {
     "henk/".to_owned()
 }
@@ -1884,6 +1906,8 @@ pub struct Settings {
     pub planning: Option<PlanningConfig>,
     /// Execute runs (#329).
     pub execution: Option<ExecutionConfig>,
+    /// Autonomous ticket runs (#536).
+    pub autonomous: Option<AutonomousConfig>,
     /// Where a model's tools and the project's checks run, per repository.
     pub workspace: WorkspacePolicy,
     /// The sandbox host of the `ssh` backend, when configured.
@@ -1910,6 +1934,26 @@ impl Config {
     /// Returns [`ConfigError::Syntax`] when the text is not valid or has unknown fields.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         Ok(toml::from_str(text)?)
+    }
+
+    /// The sections for the work Henk does, each against the roles it needs.
+    fn validate_work(&self) -> Result<(), ConfigError> {
+        validate_review(&self.review, &self.roles)?;
+        if let Some(planning) = &self.planning {
+            validate_planning(planning, &self.roles, &self.discord.team_lead_ids)?;
+        }
+        if let Some(execution) = &self.execution {
+            validate_execution(execution, &self.roles)?;
+        }
+        if let Some(autonomous) = &self.autonomous {
+            validate_autonomous(
+                autonomous,
+                self.planning.as_ref(),
+                self.execution.as_ref(),
+                &self.review,
+            )?;
+        }
+        Ok(())
     }
 
     /// Validates the configuration and builds domain values from it.
@@ -1944,13 +1988,7 @@ impl Config {
             &self.discord.team_lead_ids,
             &allowlist,
         )?;
-        validate_review(&self.review, &self.roles)?;
-        if let Some(planning) = &self.planning {
-            validate_planning(planning, &self.roles, &self.discord.team_lead_ids)?;
-        }
-        if let Some(execution) = &self.execution {
-            validate_execution(execution, &self.roles)?;
-        }
+        self.validate_work()?;
         validate_mcp_references(self.github.as_ref(), self.gitlab.as_ref(), &self.mcp)?;
         if let Some(github) = &self.github {
             github.validate(&self.mcp)?;
@@ -2012,6 +2050,7 @@ impl Config {
             roles: self.roles,
             planning: self.planning,
             execution: self.execution,
+            autonomous: self.autonomous,
             workspace,
             workspace_ssh,
             workspace_kubernetes,
@@ -2298,6 +2337,31 @@ fn validate_models(
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+/// An autonomous ticket run plans, executes and reviews, so it needs the
+/// three sections that do (#536); each of them has checked its own roles.
+fn validate_autonomous(
+    autonomous: &AutonomousConfig,
+    planning: Option<&PlanningConfig>,
+    execution: Option<&ExecutionConfig>,
+    review: &ReviewConfig,
+) -> Result<(), ConfigError> {
+    for (present, section) in [
+        (planning.is_some(), "[planning]"),
+        (execution.is_some(), "[execution]"),
+        (review.r#loop.is_some(), "[review.loop]"),
+    ] {
+        if !present {
+            return Err(ConfigError::Role(format!("[autonomous] needs {section}")));
+        }
+    }
+    if autonomous.run_timeout_secs == 0 {
+        return Err(ConfigError::Role(
+            "autonomous.run_timeout_secs must be at least 1".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2882,6 +2946,13 @@ impl Settings {
                 out,
                 "Execution:       executor takes issues to pull requests on {}<issue>-<title>; {}s each",
                 execution.branch_prefix, execution.run_timeout_secs
+            );
+        }
+        if let Some(autonomous) = &self.autonomous {
+            let _ = writeln!(
+                out,
+                "Autonomous:      an issue goes through plan, execute and review on its own; {}s in all",
+                autonomous.run_timeout_secs
             );
         }
         if let Some(executor) = &self.roles.executor {
@@ -3827,6 +3898,65 @@ github_owners = ["docspec"]
             out.contains("Execution:       executor takes issues to pull requests on bots/henk/<issue>-<title>; 3600s each"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn autonomous_runs_need_planning_execution_and_the_review_loop() {
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let autonomous = |extra: &str| {
+            Config::parse(&format!("{MINIMAL}{models}{extra}")).and_then(Config::into_settings)
+        };
+        let roles = "[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+        let planning = "[planning]\nrequester_id = 3\n";
+        let (execution, review_loop) = ("[execution]\n", "[review.loop]\n");
+
+        // Off unless the section is there.
+        let settings = autonomous(&format!("{planning}{execution}{review_loop}{roles}")).unwrap();
+        assert!(settings.autonomous.is_none());
+        let mut out = String::new();
+        settings.describe_agents(&mut out);
+        assert!(!out.contains("Autonomous:"), "{out}");
+
+        // On, with two hours in all unless it says otherwise.
+        let on = format!("[autonomous]\n{planning}{execution}{review_loop}{roles}");
+        let settings = autonomous(&on).unwrap();
+        assert_eq!(settings.autonomous.as_ref().unwrap().run_timeout_secs, 7200);
+        let mut out = String::new();
+        settings.describe_agents(&mut out);
+        assert!(
+            out.contains("Autonomous:      an issue goes through plan, execute and review on its own; 7200s in all"),
+            "{out}"
+        );
+        assert!(henk_domain::text::is_in_style(&out), "{out}");
+        let settings =
+            autonomous(&on.replace("[autonomous]\n", "[autonomous]\nrun_timeout_secs = 600\n"))
+                .unwrap();
+        assert_eq!(settings.autonomous.as_ref().unwrap().run_timeout_secs, 600);
+
+        // Each of the three it drives is needed.
+        for (left_out, section) in [
+            (planning, "[planning]"),
+            (execution, "[execution]"),
+            (review_loop, "[review.loop]"),
+        ] {
+            let without = on.replace(left_out, "");
+            let error = autonomous(&without).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("[autonomous] needs {section}"),
+                "{without}"
+            );
+        }
+        let error =
+            autonomous(&on.replace("[autonomous]\n", "[autonomous]\nrun_timeout_secs = 0\n"))
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "autonomous.run_timeout_secs must be at least 1"
+        );
+        let error = autonomous(&on.replace("[autonomous]\n", "[autonomous]\nmax_rounds = 3\n"))
+            .unwrap_err();
+        assert!(error.to_string().contains("max_rounds"), "{error}");
     }
 
     #[test]
