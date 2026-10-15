@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::debug;
 
-use crate::error::PlatformError;
+use crate::error::{PlatformError, success_text};
 use crate::retry::{RetryPolicy, with_retry};
 
 /// The App's identity and private key.
@@ -248,22 +248,16 @@ impl Installations {
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = response.text().await?;
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(PlatformError::NotInstalled {
-                repo: format!("{owner}/{name}"),
-                reason: "the App is not installed there".to_owned(),
-            });
-        }
-        if !status.is_success() {
-            return Err(PlatformError::status(
-                status.as_u16(),
-                &body,
-                Some(&headers),
-            ));
-        }
+        let body = success_text(response).await.map_err(|error| {
+            if error.http_status() == Some(404) {
+                PlatformError::NotInstalled {
+                    repo: format!("{owner}/{name}"),
+                    reason: "the App is not installed there".to_owned(),
+                }
+            } else {
+                error
+            }
+        })?;
         let value: Value =
             serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
         value
@@ -546,16 +540,7 @@ async fn mint_installation_token(
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await?;
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = response.text().await?;
-    if !status.is_success() {
-        return Err(PlatformError::status(
-            status.as_u16(),
-            &body,
-            Some(&headers),
-        ));
-    }
+    let body = success_text(response).await?;
     let value: Value =
         serde_json::from_str(&body).map_err(|e| PlatformError::Decode(e.to_string()))?;
     let token = value.get("token").and_then(Value::as_str).ok_or_else(|| {

@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use henk_domain::allowlist::RepoRef;
 
-use crate::error::{PlatformError, truncate};
+use crate::error::{PlatformError, success_text, truncate};
 use crate::github::app::{GitHubAuth, Installations, Scope};
 use crate::retry::{RetryPolicy, with_retry};
 
@@ -186,17 +186,7 @@ impl GitHubApi {
             None => builder,
         };
         let response = builder.send().await?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let text = response.text().await?;
-        if !status.is_success() {
-            return Err(PlatformError::status(
-                status.as_u16(),
-                &text,
-                Some(&headers),
-            ));
-        }
-        Ok(text)
+        success_text(response).await
     }
 
     /// The request, tried again when GitHub fails for a moment. Only for
@@ -277,11 +267,7 @@ impl GitHubApi {
             if !status.is_success() {
                 let headers = response.headers().clone();
                 let text = response.text().await?;
-                return Err(PlatformError::status(
-                    status.as_u16(),
-                    &text,
-                    Some(&headers),
-                ));
+                return Err(PlatformError::status(status.as_u16(), &text, &headers));
             }
             let mut tail = crate::ci::Tail::new(max_bytes);
             while let Some(chunk) = response.chunk().await? {
@@ -314,17 +300,7 @@ impl GitHubApi {
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .send()
                 .await?;
-            let status = response.status();
-            let headers = response.headers().clone();
-            let text = response.text().await?;
-            if !status.is_success() {
-                return Err(PlatformError::status(
-                    status.as_u16(),
-                    &text,
-                    Some(&headers),
-                ));
-            }
-            Ok(text)
+            success_text(response).await
         })
         .await?;
         decode(&text)
