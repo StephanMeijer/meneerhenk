@@ -208,12 +208,23 @@ request is a merge request.
    own before a push: the pull request's CI is the final word, and the
    reviewer sees the next round's state as usual. Where the executor has no
    shell, it runs no checks and CI decides.
-4. **One commit per round.** Henk applies the changeset to a clean
-   checkout that nothing ran in, commits it there as "Fix review findings",
-   with the run, and the requester when Henk knows who asked, in its
-   trailers, and pushes it. Only a
-   fast-forward, never a force push: if the branch moved since he read it,
-   nothing is pushed and the loop stops.
+4. **The executor's commits, in the repository's convention.** The
+   executor ends its round by proposing how its changes are committed: one
+   or more commits, each with the files it holds and a subject and body in
+   the repository's own commit convention (Conventional Commits where the
+   repository uses them, found from its commitlint configuration, its
+   contributor notes and the branch's latest subjects, which Henk shows
+   it). Henk checks the proposal: every changed file in exactly one
+   commit, no empty commit, a subject of one line of at most 72
+   characters, and a body of plain text with no line shaped like a
+   trailer. Trailers are Henk's alone. He applies the changeset to a
+   clean checkout that nothing ran in, makes the commits there in order,
+   each ending in his trailer block with the run, and the requester when
+   Henk knows who asked, and pushes them at once. A round with no usable
+   proposal is one commit, "Fix review findings" with the findings it
+   fixed, and the run's timeline says why. Only a fast-forward, never a
+   force push: if the branch moved since he read it, nothing is pushed
+   and the loop stops.
 5. **Nothing is posted.** No reply and no comment: the commit and the
    check (§3.3) are what the round leaves.
 
@@ -328,8 +339,10 @@ Henk then:
    changeset leaves the workspace, within the same limits. Henk runs no
    checks of his own; the pull request's CI decides.
 4. **Pushes a new branch** `henk/<issue>-<title>` (the prefix is
-   configurable) with one commit, "Resolve #N: <title>", with the run, and
-   the requester when Henk knows who asked, in its trailers. A branch of that name that exists already
+   configurable) with the commits the executor proposed, checked and
+   trailered as for a round (§3.5), or with one commit, "Resolve #N:
+   <title>", when it proposed none that hold. Every commit carries the
+   run, and the requester when Henk knows who asked, in its trailers. A branch of that name that exists already
    is never pushed over: the run picks the name before the session, and
    when origin has it, takes `-2`, `-3` and on. With ten names taken it
    stops before the session and says so on the issue.
@@ -752,6 +765,16 @@ surprising reading of the earlier wording; veto any that is wrong.
   review findings". The rule that a commit Henk pushed outside a loop is
   reviewed as usual (#298) goes with the address run. Old address runs
   stay readable.
+
+## Revision notes (2026-10-15)
+
+- §3.5, §4a: the executor proposes its commits, in the repository's own
+  commit convention, and Henk pushes them in order as one fast-forward
+  (#400), in place of one "Fix review findings" commit per round or one
+  "Resolve #N" commit per execute run. Henk checks that every changed
+  file is in exactly one commit and refuses a trailer in a body; the
+  trailers stay his. Without a usable proposal the change is one commit,
+  as before, whose subject names the findings fixed.
 
 ## Revision notes (2026-10-07)
 

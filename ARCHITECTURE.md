@@ -247,11 +247,14 @@ What the executor changed is checked before it is pushed (§3.5):
 files. Henk runs no checks of his own; the executor ran the repository's,
 and the pull request's CI is the final word. `push.rs`
 then applies the changeset to a fresh checkout that nothing ran in, commits
-it as Henk ("Fix review findings") and pushes it as a fast-forward, after
+it as Henk, as the commits the executor proposed with `propose_commits`
+once `henk_domain::commit::planned_commits` takes them, or as one "Fix
+review findings f1, f3" commit (#400), and pushes them as one
+fast-forward, after
 reading the branch again: a head that moved, or a branch Henk may no longer
-push to, refuses the push ("The push", below). The commit is recorded in
+push to, refuses the push ("The push", below). Every commit is recorded in
 `App::own_pushes` before it leaves, so the webhook about it starts no other
-review. The reviewer's next message carries the pushed commit's patch and the
+review. The reviewer's next message carries the round's patch and the
 executor's verdicts; a rejection may be contested once, with new evidence.
 
 The loop stops (`henk_domain::review_loop::LoopStop`) when a round has no new
@@ -372,8 +375,12 @@ sequenceDiagram
 execute run's (section 7b): the branch must start with `[execution]
 branch_prefix`, must not be the default branch and must not exist on the
 remote (`Checkout::remote_has_branch`), and the push of the new ref is never
-forced. The commit's subject is the caller's: "Fix review findings" for the
-loop, "Resolve #N: <title>" for an execute run.
+forced. The caller passes the commits, `PlannedCommit`s that each name
+their paths (`Checkout::commit_paths` stages only those): the executor's,
+when `planned_commits` takes them, or else one commit, "Fix review
+findings f1, f3" for the loop and "Resolve #N: <title>" for an execute
+run. Henk writes every trailer block; `proposal_refusal` refuses a body
+line shaped like a trailer.
 
 The rules of the changeset are pure functions in `henk-domain`:
 `henk_domain::workspace::changeset_refusal` (`.git`, escapes, links,
@@ -665,12 +672,12 @@ sequenceDiagram
     E->>K: clone_at the head, open_prepared (setup)
     E->>X: the issue as material, edit tools, bash, propose_pull_request
     X->>K: read, edit, bash (the repository's checks)
-    X->>E: propose_pull_request(summary, left_out)
+    X->>E: propose_pull_request(summary, left_out, commits)
     E->>K: export, checked_changeset
     alt no change, refused changeset or the branch exists
         E->>I: comment: no pull request, why, run link
     else
-        E->>P: commit_and_push(PushTo::NewBranch henk/N-title, "Resolve #N: title")
+        E->>P: commit_and_push(PushTo::NewBranch henk/N-title, the executor's commits or "Resolve #N: title")
         P->>W: push the new branch, never forced
         E->>W: open_pull_request: ready, "Closes #N", what changed and what was left out
         E-->>C: the pull request and its head
@@ -683,7 +690,8 @@ issue to its proposal, with a fixed prompt and tools (#321). Its workspace
 comes from `workspace::open_prepared`, shared with the review loop: a clone
 of the default branch's head, set up as the profile says. The executor's
 tools are the loop's edit tools plus `propose_pull_request`
-(`execute_tools.rs`); nothing it holds reaches git or the platform. Henk's
+(`execute_tools.rs`), whose `commits` are checked by `commit_tools.rs` as
+the loop's `propose_commits` are; nothing it holds reaches git or the platform. Henk's
 code then checks the changeset, and pushes and opens as above; it runs no
 checks of its own (#396). GitHub opens the pull request with `POST /repos/{repo}/pulls`;
 GitLab through the `gitlab-write` MCP server's `create_merge_request`.

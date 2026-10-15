@@ -44,8 +44,9 @@ what holds with its edit tools (`edit_file`, `write_file`, and `bash` on a
 backend apart from Henk, where it also runs the repository's own checks)
 and gives each its verdict with `give_verdict`: fixed, rejected (it does
 not hold) or won't fix. Henk runs no checks of his own: he checks the
-changeset (see "Pushing a review's fixes") and pushes it as one commit to
-the pull request's branch, and the pull request's CI is the final word. The
+changeset (see "Pushing a review's fixes") and pushes it to the pull
+request's branch as the commits the executor proposed with
+`propose_commits`, and the pull request's CI is the final word. The
 next round each resumes its own conversation: the reviewer sees the commit
 and the verdicts, may contest a rejection once with new evidence, and
 reviews again. The loop stops when the reviewer finds nothing more, at
@@ -214,7 +215,9 @@ has the tracker tools and `web_fetch`, only the reviewer has the CI tools
 who reviews plans too, have the MCP read tools; left out, a role gets its
 defaults. A role that lists `skills` keeps `load_skill` in its `tools`,
 and with `[review.loop]` the reviewer keeps `report_finding` and
-`finish_round` and the executor `list_findings` and `give_verdict`.
+`finish_round` and the executor `list_findings` and `give_verdict`. An
+executor whose `tools` leave out `propose_commits` pushes each round as
+one commit.
 `henk config check` lists each role, refuses a tool the role may not have,
 and says which roles reach the web.
 
@@ -741,10 +744,11 @@ MCP `start_execute`, `POST /execute` or `henk execute <issue-url>`. Nothing
 starts one on its own. The executor works in a workspace on the default
 branch's head, reads the issue and any plan in it, changes the code, runs
 the repository's own checks with `bash` where it has it, and ends with
-`propose_pull_request`: what it changed, which checks it ran, and what it
-left out. Henk then checks the changeset as for a review loop's round
-(below), commits it as "Resolve #N: <title>" with the same identity and
-trailers, pushes it to a new branch `henk/<issue>-<title>`, never over a
+`propose_pull_request`: what it changed, which checks it ran, what it
+left out, and how its changes are committed. Henk then checks the
+changeset and the commits as for a review loop's round (below), commits
+them, or one "Resolve #N: <title>" commit without a usable proposal, with
+the same identity and trailers, pushes it to a new branch `henk/<issue>-<title>`, never over a
 branch that exists, and opens a ready pull request whose description
 closes the issue. Then he asks for its review, a run of its own: the
 reviewer and the executor work on it as on any pull request, and its CI
@@ -793,8 +797,8 @@ to keep the reviewer away from CI.
 The review loop's executor (spec §3.5) is the only thing that changes code.
 It works in the review's workspace and runs the repository's own checks
 there with `bash` (#396). Henk trusts it: he runs no checks of his own, and
-after each round pushes one commit to the pull request's branch, whose CI
-is the final word. Only a changeset leaves the workspace: Henk
+after each round pushes the round's commits to the pull request's branch,
+whose CI is the final word. Only a changeset leaves the workspace: Henk
 refuses it whole when a path leads into `.git` or out of the repository,
 becomes a symbolic link or a submodule, or changes more files than
 `max_changed_files` allows, and otherwise applies it to a fresh checkout
@@ -823,7 +827,22 @@ the REST API with it in the `PRIVATE-TOKEN` header, because the MCP
 server's merge request leaves the project ids out. Without it GitLab
 reviews fail. The token's account needs Developer access to push.
 
-The commit's subject is "Fix review findings". It ends in a trailer block,
+The executor groups its changes into commits and writes their messages
+(#400): it ends its round with `propose_commits`, each commit with the
+files it holds, a subject and a body in the repository's own commit
+convention. It finds that convention in the repository's commitlint
+configuration, `CONTRIBUTING.md`, `AGENTS.md` and `CLAUDE.md`, and in the
+branch's latest 20 commit subjects, which Henk lists in its prompt. Henk
+checks the proposal: every changed file in exactly one commit (split by
+file, not by hunk), at most 10 commits, none empty, a subject of one line
+of at most 72 characters, and a body without emoji, em-dash or a line
+shaped like a trailer (`Key: value`), so the model cannot write a
+`Signed-off-by` or `Co-authored-by`. He makes the commits in order and
+pushes them as one fast-forward. Without a usable proposal the round is
+one commit, "Fix review findings f1, f3" naming the findings fixed, and
+the run's timeline says why.
+
+Every commit ends in a trailer block,
 in this order: `Henk-Run` (the run), `Requested-by` (who asked, by a
 stable id), the requester's `Co-authored-by` and `Signed-off-by`, and
 Henk's `Signed-off-by` last, as
