@@ -14,7 +14,9 @@
 
 mod dialect;
 mod runs;
+mod sessions;
 mod stages;
+mod timeline;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -254,6 +256,8 @@ mod tests {
     use henk_domain::run::RunKind;
     use sea_orm::DbBackend;
 
+    use time::format_description::well_known::Rfc3339;
+
     use super::runs::list_runs_query;
     use super::*;
     use crate::types::{Page, RunFilter, RunKey, RunStatus};
@@ -356,6 +360,50 @@ mod tests {
         assert!(
             postgres.contains("ORDER BY started_at DESC, \"id\" DESC"),
             "{postgres}"
+        );
+    }
+
+    /// The sessions of the newest reviews and the rounds of a run on each
+    /// database, without one: the instant orders the review picked and the
+    /// rounds listed, and `since` is only there when it was given.
+    #[test]
+    fn session_endings_and_rounds_are_one_builder_and_two_dialects() {
+        use super::sessions::{rounds_query, session_endings_query};
+
+        let since = Some(OffsetDateTime::parse("2026-10-01T10:00:00Z", &Rfc3339).unwrap());
+        let sql = |backend: DbBackend, since| {
+            let query = session_endings_query(backend.into(), since, 20).unwrap();
+            backend.build(&query).sql
+        };
+
+        let sqlite = sql(DbBackend::Sqlite, since);
+        assert!(sqlite.contains("substr(started_at, 1, 19)"), "{sqlite}");
+        assert!(sqlite.contains("AS \"at\""), "{sqlite}");
+        assert!(sqlite.contains("\"kind\" = ?"), "{sqlite}");
+        assert!(sqlite.contains("ORDER BY \"r\".\"at\" DESC"), "{sqlite}");
+
+        let postgres = sql(DbBackend::Postgres, since);
+        assert!(!postgres.contains("substr("), "{postgres}");
+        assert!(postgres.contains("\"kind\" = $1"), "{postgres}");
+        assert!(postgres.contains("(started_at) >= $"), "{postgres}");
+
+        let without = sql(DbBackend::Postgres, None);
+        assert!(!without.contains(">="), "{without}");
+
+        let run = henk_domain::run::RunId::parse("r-1").unwrap();
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres] {
+            let sql = backend.build(&rounds_query(backend.into(), &run)).sql;
+            assert!(
+                sql.ends_with("\"session\" ASC, \"round\" ASC"),
+                "{backend:?}: {sql}"
+            );
+        }
+        let sqlite = DbBackend::Sqlite
+            .build(&rounds_query(Dialect::Sqlite, &run))
+            .sql;
+        assert!(
+            sqlite.contains("ORDER BY substr(started_at, 1, 19)"),
+            "{sqlite}"
         );
     }
 

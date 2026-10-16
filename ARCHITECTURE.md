@@ -150,7 +150,10 @@ change is written in both places.
 
 The methods are moving to the new layer in groups (#605 to #607): the type
 `Store` in `crates/henk-store/src/db/` has them once, for both databases,
-with what differs between the two (the time) in one small `dialect.rs`.
+with what differs between the two (the time) in one small `dialect.rs`. The
+runs and stages (`runs.rs`, `stages.rs`) and the sessions, rounds,
+transcripts and timeline (`sessions.rs`, `timeline.rs`) are there; findings,
+drafts, tool calls, inbound events and statistics are still the old code.
 `SqliteStore` and `PgStore` still implement `RunStore` and hand the moved
 methods to a `Store` that opens the same database, so a database is shared by
 two libraries until the last group has moved. `SqliteStore::in_memory` is a

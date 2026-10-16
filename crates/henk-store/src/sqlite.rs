@@ -16,14 +16,12 @@ use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
-    MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
-    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, event_id, merge_days, now, round_record,
-    run_kind, run_platform, session_dots, session_endings, session_role, session_status, to_i64,
-    to_u64,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES, NewRun,
+    OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RoundRecord, RunFilter, RunRecord,
+    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    event_id, merge_days, now, run_kind, run_platform, to_i64, to_u64,
 };
 
 /// The run store over SQLite.
@@ -303,20 +301,7 @@ impl RunStore for SqliteStore {
         role: SessionRole,
         model: &str,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO sessions (run_id, name, role, model, status, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    run.as_str(),
-                    name,
-                    role.as_str(),
-                    model,
-                    SessionStatus::Running.as_str(),
-                    now()
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.start_session(run, name, role, model).await
     }
 
     async fn finish_session(
@@ -328,87 +313,13 @@ impl RunStore for SqliteStore {
         tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
-        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-        self.with(|c| {
-            c.execute(
-                "UPDATE sessions SET status = ?3, turns = ?4, input_tokens = ?5, output_tokens = ?6, finished_at = ?7, error = ?8,
-                 cache_read_tokens = ?9, cache_write_tokens = ?10, reasoning_tokens = ?11
-                 WHERE run_id = ?1 AND name = ?2",
-                params![
-                    run.as_str(),
-                    name,
-                    status.as_str(),
-                    count(turns),
-                    count(tokens.input),
-                    count(tokens.output),
-                    now(),
-                    error,
-                    count(tokens.cache_read),
-                    count(tokens.cache_write),
-                    count(tokens.reasoning),
-                ],
-            )?;
-            Ok(())
-        })
+        self.store
+            .finish_session(run, name, status, turns, tokens, error)
+            .await
     }
 
     async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
-        self.with(|c| {
-            let mut statement = c.prepare(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role, reasoning_tokens FROM sessions WHERE run_id = ?1 ORDER BY name",
-            )?;
-            let rows = statement.query_map(params![run.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, String>(11)?,
-                    row.get::<_, i64>(12)?,
-                ))
-            })?;
-            let mut sessions = Vec::new();
-            for row in rows {
-                let (
-                    name,
-                    model,
-                    status,
-                    turns,
-                    input_tokens,
-                    output_tokens,
-                    error,
-                    started_at,
-                    finished_at,
-                    cache_read,
-                    cache_write,
-                    role,
-                    reasoning,
-                ) = row?;
-                sessions.push(SessionRecord {
-                    name,
-                    role: session_role(role)?,
-                    model,
-                    status: session_status(status)?,
-                    turns: to_u64("sessions.turns", turns)?,
-                    input_tokens: to_u64("sessions.input_tokens", input_tokens)?,
-                    output_tokens: to_u64("sessions.output_tokens", output_tokens)?,
-                    cache_read_tokens: to_u64("sessions.cache_read_tokens", cache_read)?,
-                    cache_write_tokens: to_u64("sessions.cache_write_tokens", cache_write)?,
-                    reasoning_tokens: to_u64("sessions.reasoning_tokens", reasoning)?,
-                    error,
-                    started_at,
-                    finished_at,
-                });
-            }
-            Ok(sessions)
-        })
+        self.store.sessions(run).await
     }
 
     async fn record_finding(
@@ -538,45 +449,11 @@ impl RunStore for SqliteStore {
         run: &RunId,
         transcript: &TranscriptRecord,
     ) -> Result<(), StoreError> {
-        let at = at_or_now(&transcript.at);
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO transcripts (run_id, session, model, stop, turns, bytes, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    run.as_str(),
-                    transcript.session,
-                    transcript.model,
-                    transcript.stop,
-                    transcript.turns,
-                    i64::try_from(transcript.bytes).unwrap_or(i64::MAX),
-                    transcript.body,
-                    at
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.record_transcript(run, transcript).await
     }
 
     async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
-        let at = at_or_now(&round.started_at);
-        let handover_len = to_i64("session_rounds.handover_len", round.handover_len)?;
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO session_rounds (run_id, session, role, round, started_at, first_turn, handover, handover_len)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    run.as_str(),
-                    round.session,
-                    round.role.as_str(),
-                    round.round,
-                    at,
-                    round.first_turn,
-                    round.handover,
-                    handover_len,
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.start_round(run, round).await
     }
 
     async fn end_round(
@@ -586,55 +463,15 @@ impl RunStore for SqliteStore {
         round: u32,
         turns: u32,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE session_rounds SET ended_at = ?4, turns = ?5
-                 WHERE run_id = ?1 AND session = ?2 AND round = ?3",
-                params![run.as_str(), session, round, now(), turns],
-            )?;
-            Ok(())
-        })
+        self.store.end_round(run, session, round, turns).await
     }
 
     async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
-        self.with(|c| {
-            let rows = c
-                .prepare(ROUNDS)?
-                .query_map(params![run.as_str()], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                    ))
-                })?
-                .collect::<Result<Vec<RoundRow>, _>>()?;
-            rows.into_iter().map(round_record).collect()
-        })
+        self.store.rounds(run).await
     }
 
     async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {
-        self.with(|c| {
-            let mut statement = c.prepare(
-                "SELECT recorded_at, session, model, stop, turns, bytes FROM transcripts WHERE run_id = ?1 ORDER BY id",
-            )?;
-            let rows = statement.query_map(params![run.as_str()], |row| {
-                Ok(TranscriptSummary {
-                    at: row.get(0)?,
-                    session: row.get(1)?,
-                    model: row.get(2)?,
-                    stop: row.get(3)?,
-                    turns: row.get(4)?,
-                    bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
-        })
+        self.store.transcripts(run).await
     }
 
     async fn transcript(
@@ -642,23 +479,7 @@ impl RunStore for SqliteStore {
         run: &RunId,
         session: &str,
     ) -> Result<Option<TranscriptRecord>, StoreError> {
-        self.with(|c| {
-            let mut statement = c.prepare(
-                "SELECT recorded_at, session, model, stop, turns, bytes, body FROM transcripts WHERE run_id = ?1 AND session = ?2 ORDER BY id DESC LIMIT 1",
-            )?;
-            let mut rows = statement.query_map(params![run.as_str(), session], |row| {
-                Ok(TranscriptRecord {
-                    at: row.get(0)?,
-                    session: row.get(1)?,
-                    model: row.get(2)?,
-                    stop: row.get(3)?,
-                    turns: row.get(4)?,
-                    bytes: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
-                    body: row.get(6)?,
-                })
-            })?;
-            rows.next().transpose().map_err(StoreError::from)
-        })
+        self.store.transcript(run, session).await
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
@@ -806,39 +627,15 @@ impl RunStore for SqliteStore {
     }
 
     async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO events (run_id, at, level, message) VALUES (?1, ?2, ?3, ?4)",
-                params![run.as_str(), now(), level, message],
-            )?;
-            Ok(())
-        })
+        self.store.event(run, level, message).await
     }
 
     async fn events(&self, run: &RunId) -> Result<Vec<EventRecord>, StoreError> {
-        self.with(|c| {
-            let mut statement =
-                c.prepare("SELECT at, level, message FROM events WHERE run_id = ?1 ORDER BY id")?;
-            let rows = statement.query_map(params![run.as_str()], |row| {
-                Ok(EventRecord {
-                    at: row.get(0)?,
-                    level: row.get(1)?,
-                    message: row.get(2)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(StoreError::from)
-        })
+        self.store.events(run).await
     }
 
     async fn joined(&self, run: &RunId, source: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO requests (run_id, at, source) VALUES (?1, ?2, ?3)",
-                params![run.as_str(), now(), source],
-            )?;
-            Ok(())
-        })
+        self.store.joined(run, source).await
     }
 
     async fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
@@ -1015,22 +812,7 @@ impl RunStore for SqliteStore {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let marks = vec!["?"; runs.len()].join(", ");
-        self.with(|c| {
-            let rows = c
-                .prepare(&format!(
-                    "SELECT run_id, name, role, status FROM sessions WHERE run_id IN ({marks}) ORDER BY run_id, name"
-                ))?
-                .query_map(
-                    rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            session_dots(rows)
-        })
+        self.store.sessions_of(runs).await
     }
 
     async fn session_endings(
@@ -1038,27 +820,7 @@ impl RunStore for SqliteStore {
         since: Option<OffsetDateTime>,
         reviews: u32,
     ) -> Result<Vec<SessionEnding>, StoreError> {
-        let since = since
-            .map(|at| instant("since", &at.format(&Rfc3339).unwrap_or_default()))
-            .transpose()?;
-        let reviews = i64::from(reviews.min(MOST_SESSION_REVIEWS));
-        self.with(|c| {
-            let rows = c
-                .prepare(SESSION_ENDINGS)?
-                .query_map(params![since, reviews], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            session_endings(rows)
-        })
+        self.store.session_endings(since, reviews).await
     }
 
     async fn stages_of(
@@ -1193,24 +955,6 @@ fn window(
     Ok((since, until))
 }
 
-/// The sessions of the newest reviews that ended (#229), over parameters 1
-/// (since, an [`instant`], or null) and 2 (how many reviews). Ordered as
-/// instants, not as text, so runs started in the same second keep their
-/// order (#216).
-const SESSION_ENDINGS: &str = concat!(
-    "SELECT r.id, r.started_at, s.name, s.role, s.model, s.status, s.error
-     FROM (SELECT id, started_at, ",
-    instant_of!("started_at"),
-    " AS at FROM runs
-           WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
-             AND (?1 IS NULL OR ",
-    instant_of!("started_at"),
-    " >= ?1)
-           ORDER BY at DESC, id DESC LIMIT ?2) r
-     JOIN sessions s ON s.run_id = r.id
-     ORDER BY r.at DESC, r.id DESC, s.name"
-);
-
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
 /// RFC 3339, so the first ten characters are the day.
 const DAY_RUNS: &str = concat!(
@@ -1238,15 +982,6 @@ const DAY_DRAFTS: &str = concat!(
     "SELECT substr(created_at, 1, 10), COUNT(*) FROM drafts WHERE ",
     instant_of!("created_at"),
     " >= ?1 AND kind NOT IN ('loop_finding', 'plan_point', 'requirement_point') GROUP BY 1"
-);
-
-/// The rounds of a run (#374), over parameter 1, in the order they
-/// started: as instants, not as text (#216).
-const ROUNDS: &str = concat!(
-    "SELECT session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len
-     FROM session_rounds WHERE run_id = ?1 ORDER BY ",
-    instant_of!("started_at"),
-    ", session, round"
 );
 
 /// The session row of a tool call `c`, as `s`, for its role.

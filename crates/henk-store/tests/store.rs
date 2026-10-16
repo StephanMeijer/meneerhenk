@@ -20,7 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
 use henk_store::{
-    NewRun, RunFilter, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, StoreError,
+    NewRun, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore,
+    Stage, StageState, StageWrite, StoreError, TokenUsage, TranscriptRecord,
 };
 
 fn new_run(id: &str, target: u64) -> NewRun {
@@ -143,6 +144,27 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
                         .await
                         .unwrap();
                     store
+                        .start_session(&run.id, "reviewer", SessionRole::Reviewer, "m")
+                        .await
+                        .unwrap();
+                    store.event(&run.id, "info", "started").await.unwrap();
+                    store.joined(&run.id, "comment").await.unwrap();
+                    store
+                        .record_transcript(&run.id, &transcript("reviewer", "{}"))
+                        .await
+                        .unwrap();
+                    store
+                        .finish_session(
+                            &run.id,
+                            "reviewer",
+                            SessionStatus::Finished,
+                            3,
+                            TokenUsage::default(),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    store
                         .finish_run(&run.id, RunStatus::Finished, Some("done"), None)
                         .await
                         .unwrap();
@@ -154,6 +176,98 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
         writer.await.unwrap();
     }
     assert_eq!(store.count_runs(&RunFilter::default()).await.unwrap(), 160);
+    let run = RunId::parse("w3-7").unwrap();
+    assert_eq!(store.sessions(&run).await.unwrap().len(), 1);
+    assert_eq!(store.events(&run).await.unwrap().len(), 1);
+    assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
+}
+
+fn transcript(session: &str, body: &str) -> TranscriptRecord {
+    TranscriptRecord {
+        at: String::new(),
+        session: session.into(),
+        model: "m".into(),
+        stop: "EndTurn".into(),
+        turns: 1,
+        bytes: u64::try_from(body.len()).unwrap(),
+        body: body.into(),
+    }
+}
+
+fn round(started_at: &str) -> RoundRecord {
+    RoundRecord {
+        session: "reviewer".into(),
+        role: SessionRole::Reviewer,
+        round: 1,
+        started_at: started_at.into(),
+        ended_at: None,
+        first_turn: 1,
+        turns: 0,
+        handover: String::new(),
+        handover_len: 0,
+    }
+}
+
+/// #216: of two reviews that started in the same second, the one that started
+/// 0.4 s later is the newer, though its time sorts before the other as text.
+#[tokio::test]
+async fn the_newest_review_of_the_session_endings_is_the_newest_as_a_time() {
+    let file = File::new();
+    let store = SqliteStore::open(&file.0).unwrap();
+    for (id, at) in [
+        ("r-b", "2026-10-07T12:00:00Z"),
+        ("r-a", "2026-10-07T12:00:00.4Z"),
+    ] {
+        let run = new_run(id, 7);
+        store.create_run(&run).await.unwrap();
+        store
+            .start_session(&run.id, "reviewer", SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
+        store
+            .finish_run(&run.id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .execute("UPDATE runs SET started_at = ?1 WHERE id = ?2", [at, id])
+            .unwrap();
+    }
+
+    let newest = store.session_endings(None, 1).await.unwrap();
+
+    let ids: Vec<&str> = newest.iter().map(|e| e.run_id.as_str()).collect();
+    assert_eq!(ids, ["r-a"], "0.4 s later is newer, whatever the text says");
+    let both = store.session_endings(None, 2).await.unwrap();
+    let ids: Vec<&str> = both.iter().map(|e| e.run_id.as_str()).collect();
+    assert_eq!(ids, ["r-a", "r-b"], "newest first");
+}
+
+#[tokio::test]
+async fn a_time_that_is_not_rfc_3339_is_refused_not_stored() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.create_run(&new_run("r-1", 7)).await.unwrap();
+    let run = RunId::parse("r-1").unwrap();
+
+    let mut late = transcript("reviewer", "{}");
+    late.at = "yesterday".into();
+    let error = store.record_transcript(&run, &late).await.unwrap_err();
+    assert!(matches!(error, StoreError::Corrupt { .. }), "{error:?}");
+    let error = store.start_round(&run, &round("noon")).await.unwrap_err();
+    assert!(matches!(error, StoreError::Corrupt { .. }), "{error:?}");
+
+    // An empty time means now, and a real one is kept.
+    store
+        .record_transcript(&run, &transcript("a", "{}"))
+        .await
+        .unwrap();
+    store
+        .start_round(&run, &round("2026-10-01T10:00:00.4Z"))
+        .await
+        .unwrap();
+    let rounds = store.rounds(&run).await.unwrap();
+    assert_eq!(rounds[0].started_at, "2026-10-01T10:00:00.4Z");
+    assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
