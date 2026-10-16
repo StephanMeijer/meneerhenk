@@ -94,11 +94,10 @@ pub fn decide(running: Option<&Work>, requested: &Work) -> Decision {
             Decision::Join
         }
         (Some(Work::Rebase | Work::FixCi), Work::Review(_)) => Decision::After,
-        // The fix works on a head the rebase is about to replace.
-        (Some(Work::FixCi), Work::Rebase) => Decision::Supersede,
         (Some(Work::Review(active)), Work::Review(asked)) if active == asked => Decision::Join,
-        // A newer commit, or a rebase or a fix that replaces the commit.
-        (Some(Work::Review(_)), _) => Decision::Supersede,
+        // A newer commit, or a rebase or a fix that replaces the commit; or
+        // a rebase while the fix works on a head it is about to replace.
+        (Some(Work::Review(_)), _) | (Some(Work::FixCi), Work::Rebase) => Decision::Supersede,
     }
 }
 
