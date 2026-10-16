@@ -344,6 +344,92 @@ impl Checkout {
         Ok(checkout)
     }
 
+    /// Clones `branch` of `remote` into `dir` with its whole history but
+    /// no file contents until they are needed, checks that its head is
+    /// `now` (the head just read), and that `before` (the head some work was
+    /// done on) is in its history: a branch that moved on from `before`,
+    /// not one rewritten (#634).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when the clone fails, when the head is not `now`
+    /// (it moved again), or when `before` is not in the branch's history.
+    pub async fn clone_moved(
+        dir: ScratchDir,
+        remote: &str,
+        branch: &str,
+        (before, now): (&CommitSha, &CommitSha),
+        credential: Option<GitCredential>,
+    ) -> Result<Self, GitError> {
+        let checkout = Self { dir, credential };
+        run(
+            checkout.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--no-tags",
+                "--single-branch",
+                "--branch",
+                branch,
+                remote,
+                ".",
+            ],
+            checkout.credential.as_ref(),
+            None,
+        )
+        .await?;
+        let found = checkout.head().await?;
+        if !found.eq_ignore_ascii_case(now.as_str()) {
+            return Err(GitError::HeadMoved {
+                expected: now.as_str().to_owned(),
+                found,
+            });
+        }
+        if !matches!(checkout.is_ancestor(before.as_str()).await, Ok(true)) {
+            return Err(GitError::Failed {
+                command: "clone".to_owned(),
+                stderr: format!(
+                    "{branch} no longer holds {}; it was rewritten",
+                    before.short()
+                ),
+            });
+        }
+        Ok(checkout)
+    }
+
+    /// The files that differ between commits `from` and `to` of this
+    /// checkout, a renamed file under both names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitError`] when git cannot compare them.
+    pub async fn changed_between(
+        &self,
+        from: &CommitSha,
+        to: &CommitSha,
+    ) -> Result<std::collections::BTreeSet<String>, GitError> {
+        let listed = run(
+            self.path(),
+            &[
+                "diff",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                from.as_str(),
+                to.as_str(),
+            ],
+            self.credential.as_ref(),
+            None,
+        )
+        .await?;
+        Ok(listed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Replays the branch's commits onto `base` as fetched by
     /// [`Checkout::clone_for_rebase`]. Authors are kept; `identity` is the
     /// committer. Hooks do not run and nothing is signed.
@@ -1518,6 +1604,156 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert_eq!(count(at.path().to_owned()).await, "1", "no history");
+    }
+
+    /// Commits \`files\` to a clone of the remote's \`feature\` and pushes the
+    /// result to \`branch\`: somebody's merge, as far as a run can tell. A
+    /// file with \`None\` is removed. Returns the commit.
+    pub(crate) async fn push_files(
+        remote: &Path,
+        branch: &str,
+        name: &str,
+        files: &[(&str, Option<&str>)],
+    ) -> CommitSha {
+        let url = remote.to_string_lossy().into_owned();
+        let (head, _) = remote_feature(remote).await;
+        let later = Checkout::clone_at(
+            ScratchDir::new(&format!("{name}-later")).unwrap(),
+            &url,
+            "feature",
+            &CommitSha::parse(&head).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        for (path, content) in files {
+            let target = later.path().join(path);
+            match content {
+                Some(content) => {
+                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                    std::fs::write(&target, content).unwrap();
+                }
+                None => std::fs::remove_file(&target).unwrap(),
+            }
+        }
+        let sha = later
+            .commit(
+                &CommitIdentity {
+                    name: "Later".to_owned(),
+                    email: "later@example.com".to_owned(),
+                },
+                "Later\n",
+            )
+            .await
+            .unwrap();
+        later.push(branch).await.unwrap();
+        CommitSha::parse(&sha).unwrap()
+    }
+
+    /// #634: a default branch that moved on is taken at its new head, with
+    /// the files that changed between the two heads, a renamed one under both
+    /// names and a deleted one too.
+    #[tokio::test]
+    async fn a_branch_that_moved_on_is_taken_again_and_says_which_files_changed() {
+        let (remote, before) = bare_remote("henk-git-moved-on").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let first = push_files(
+            remote.path(),
+            "feature",
+            "henk-git-moved-on-1",
+            &[("src/a.rs", Some("changed\n")), ("src/old.rs", Some("x\n"))],
+        )
+        .await;
+        let now = push_files(
+            remote.path(),
+            "feature",
+            "henk-git-moved-on-2",
+            &[
+                ("src/a.rs", None),
+                ("src/old.rs", None),
+                ("src/renamed.rs", Some("x\n")),
+            ],
+        )
+        .await;
+
+        let checkout = Checkout::clone_moved(
+            ScratchDir::new("henk-git-moved-on-co").unwrap(),
+            &url,
+            "feature",
+            (&before, &now),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(checkout.head().await.unwrap(), now.as_str());
+        let since_first = checkout.changed_between(&first, &now).await.unwrap();
+        assert_eq!(
+            since_first.into_iter().collect::<Vec<_>>(),
+            ["src/a.rs", "src/old.rs", "src/renamed.rs"]
+        );
+        let since_before = checkout.changed_between(&before, &now).await.unwrap();
+        assert_eq!(
+            since_before.into_iter().collect::<Vec<_>>(),
+            ["src/a.rs", "src/renamed.rs"],
+            "old.rs did not exist before, so it is not a change from there"
+        );
+        assert!(
+            checkout
+                .changed_between(&now, &now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// #634: only a branch that moved ahead is replayed onto: one that moved
+    /// again since it was read, or that no longer holds the head the work began
+    /// on (it was rewritten), is refused.
+    #[tokio::test]
+    async fn a_branch_that_moved_again_or_was_rewritten_is_not_taken_again() {
+        let (remote, before) = bare_remote("henk-git-moved-refused").await;
+        let url = remote.path().to_string_lossy().into_owned();
+        let read = push_files(
+            remote.path(),
+            "feature",
+            "henk-git-moved-refused-1",
+            &[("src/b.rs", Some("b\n"))],
+        )
+        .await;
+        push_files(
+            remote.path(),
+            "feature",
+            "henk-git-moved-refused-2",
+            &[("src/c.rs", Some("c\n"))],
+        )
+        .await;
+        let again = Checkout::clone_moved(
+            ScratchDir::new("henk-git-moved-refused-a").unwrap(),
+            &url,
+            "feature",
+            (&before, &read),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(again, Err(GitError::HeadMoved { .. })),
+            "{again:?}"
+        );
+
+        let (now, _) = remote_feature(remote.path()).await;
+        let unrelated = CommitSha::parse(&"1".repeat(40)).unwrap();
+        let rewritten = Checkout::clone_moved(
+            ScratchDir::new("henk-git-moved-refused-b").unwrap(),
+            &url,
+            "feature",
+            (&unrelated, &CommitSha::parse(&now).unwrap()),
+            None,
+        )
+        .await;
+        let Err(GitError::Failed { stderr, .. }) = rewritten else {
+            panic!("expected a refusal, got {rewritten:?}");
+        };
+        assert!(stderr.contains("rewritten"), "{stderr}");
     }
 
     #[tokio::test]

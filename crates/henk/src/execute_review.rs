@@ -181,15 +181,11 @@ impl<'a> Review<'a> {
             .context("getting a credential for git")?;
         let dir = ScratchDir::new(&format!("henk-execute-{run}-review"))
             .context("making the checkout directory")?;
-        let checkout = Checkout::clone_at(
-            dir,
-            &base.remote,
-            &base.default_branch,
-            &base.head,
-            credential,
-        )
-        .await
-        .context("checking out the default branch to read the changes against")?;
+        // Only the commit the work began on: the diff is against it, and the
+        // default branch may have moved since (#634).
+        let checkout = Checkout::fetch_at(dir, &base.remote, &base.head, credential)
+            .await
+            .context("checking out the default branch to read the changes against")?;
         let diff = Arc::new(DiffFiles::new(Arc::new(ReviewDiff::default())));
 
         let reviewer_round = reviewer.timeout_secs(Role::Reviewer);
