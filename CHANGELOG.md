@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.13...v0.4.14) - 2026-10-16
+
+### Added
+
+- *(workspace)* the planner gets a copy and bash by default on ssh and kubernetes ([#479](https://github.com/StephanMeijer/meneerhenk/pull/479))
+- *(store)* findings, drafts, tool calls, inbound events and statistics on the new layer ([#607](https://github.com/StephanMeijer/meneerhenk/pull/607))
+- *(store)* sessions, rounds, transcripts and the timeline on the new layer ([#606](https://github.com/StephanMeijer/meneerhenk/pull/606))
+
+### Other
+
+- *(server)* wait for every listener's outcome, not for any three ([#607](https://github.com/StephanMeijer/meneerhenk/pull/607))
+- *(session)* do not pause the clock across store calls ([#606](https://github.com/StephanMeijer/meneerhenk/pull/606))
+- *(store)* drop what the three groups leave unused ([#607](https://github.com/StephanMeijer/meneerhenk/pull/607))
+- *(store)* inbound events by instant, pruning, and the wider writers ([#607](https://github.com/StephanMeijer/meneerhenk/pull/607))
+- *(store)* the newest ended review is the newest as a time ([#606](https://github.com/StephanMeijer/meneerhenk/pull/606))
+
 ## [0.4.13](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.12...v0.4.13) - 2026-10-16
 
 ### Added
