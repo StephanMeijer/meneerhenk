@@ -419,7 +419,7 @@ pub(crate) fn publish_start(
     hosts: &crate::urls::Hosts,
 ) -> Result<Started, ApiError> {
     let kind = Start::parse(&request.kind).ok_or_else(|| {
-        ApiError::bad_request("kind is one of review, plan, execute, rebase, ticket.")
+        ApiError::bad_request("kind is one of review, plan, execute, rebase, fix_ci, ticket.")
     })?;
     let given =
         |value: Option<&String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());

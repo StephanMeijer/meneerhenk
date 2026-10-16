@@ -86,6 +86,9 @@
     if (entry.reason === 'after_rebase') {
       return entry.waits_for === null ? 'after the rebase' : `after the rebase ${entry.waits_for}`;
     }
+    if (entry.reason === 'after_fix') {
+      return entry.waits_for === null ? 'after the fix' : `after the fix ${entry.waits_for}`;
+    }
     return entry.reason.replaceAll('_', ' ');
   }
 

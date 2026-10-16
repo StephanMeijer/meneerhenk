@@ -67,6 +67,13 @@ pub(crate) struct StartRebase {
     url: String,
 }
 
+/// A pull or merge request whose failing checks to fix.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub(crate) struct StartFixCi {
+    /// The pull or merge request's web address.
+    url: String,
+}
+
 /// A plan to start.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub(crate) struct StartWithNote {
@@ -96,8 +103,8 @@ pub(crate) struct QueueMove {
 /// What `list_runs` takes. Every filter is optional.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub(crate) struct ListRuns {
-    /// `review`, `plan`, `execute`, `rebase`, `ticket`, `address`, `discord_turn` or
-    /// `mail_reply`.
+    /// `review`, `plan`, `execute`, `rebase`, `fix_ci`, `ticket`, `address`,
+    /// `discord_turn` or `mail_reply`.
     kind: Option<String>,
     /// `running`, `finished`, `failed`, `cancelled` or `superseded`.
     status: Option<String>,
@@ -324,6 +331,23 @@ impl HenkMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let request = StartRequest {
             kind: "rebase".to_owned(),
+            url: input.url,
+            commit: None,
+            note: None,
+        };
+        self.start(&parts, &request).await
+    }
+
+    #[tool(
+        description = "Fix the failing checks of a GitHub pull request or GitLab merge request, as POST /fix-ci does: Henk reads the checks that failed on its head, the executor fixes the code in a workspace, Henk pushes the fix as a fast-forward and then reviews it. A failure that is not about the code (a lost runner, a service that was down) pushes nothing and Henk says so on the pull request. Answers the event id, and the run id once the run started."
+    )]
+    async fn start_fix_ci(
+        &self,
+        Parameters(input): Parameters<StartFixCi>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = StartRequest {
+            kind: "fix_ci".to_owned(),
             url: input.url,
             commit: None,
             note: None,

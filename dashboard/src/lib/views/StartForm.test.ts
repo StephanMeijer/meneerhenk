@@ -110,6 +110,32 @@ describe('StartForm', () => {
     });
   });
 
+  it("fixes a pull request's failing checks, with neither a commit nor a note (#583)", async () => {
+    const start = vi.fn(() => Promise.resolve({ event_id: 'e-12' }));
+    render(StartForm, { startable: ['review', 'fix_ci'], start, go: vi.fn() });
+    await settle();
+    choose('fix_ci');
+    await settle(1);
+    expect(label()).toBe('Pull request URL');
+    expect(button()?.textContent).toBe('Fix the checks');
+    expect(document.querySelector('textarea[name=note]')).toBeNull();
+    expect(document.querySelector('input[name=commit]')).toBeNull();
+    fill('url', 'https://github.com/docspec/app/issues/3');
+    await settle(1);
+    expect(check()).toBe('This is an issue. Fixing the failing checks needs a pull request URL.');
+    expect(button()?.disabled).toBe(true);
+    fill('url', 'https://github.com/docspec/app/pull/3');
+    await settle(1);
+    document.querySelector('form')?.requestSubmit();
+    await settle();
+    expect(start).toHaveBeenCalledWith({
+      kind: 'fix_ci',
+      url: 'https://github.com/docspec/app/pull/3',
+      commit: null,
+      note: null,
+    });
+  });
+
   it('says what the URL names, and why it does not fit, as you type', async () => {
     render(StartForm, { startable: ['review', 'plan'], start: vi.fn(), go: vi.fn() });
     await settle();

@@ -177,17 +177,18 @@ impl From<crate::workspace::SandboxHosts> for SandboxHosts {
     }
 }
 
-/// A review or rebase waiting for a slot (#251, #580), or a review
-/// waiting for a rebase of its pull request. It has its run id, but no run
-/// record until it starts.
+/// A review, rebase or fix of failing checks waiting for a slot (#251,
+/// #580, #583), or a review waiting for a rebase or a fix of its pull
+/// request. It has its run id, but no run record until it starts.
 #[derive(Debug, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct WaitingReview {
     /// The run it will be; cancel it with `POST /runs/{id}/cancel`.
     pub run_id: String,
-    /// `review` or `rebase`; plans join the queue with #79.
+    /// `review`, `rebase` or `fix_ci`; plans join the queue with #79.
     pub kind: String,
-    /// `rebase` waits ahead of every `review` (#580); a move keeps it so.
+    /// `rebase` waits ahead of `fix`, and `fix` ahead of every `review`
+    /// (#580, #583); a move keeps it so.
     pub priority: String,
     /// `github` or `gitlab`.
     pub platform: String,
@@ -197,7 +198,7 @@ pub struct WaitingReview {
     pub target: u64,
     /// A link to it, when one can be made.
     pub target_url: Option<String>,
-    /// The commit it will review; `null` for a rebase.
+    /// The commit it will review; `null` for a rebase or a fix.
     pub commit: Option<String>,
     /// What started it.
     pub trigger: String,
@@ -208,9 +209,10 @@ pub struct WaitingReview {
     /// Its place in the queue, from 1: the order it starts in.
     pub position: u64,
     /// Why it waits: `no_slot`, every slot is taken or a rebase waits
-    /// ahead; `after_rebase`, a rebase of its pull request comes first.
+    /// ahead; `after_rebase`, a rebase of its pull request comes first;
+    /// `after_fix`, so does a fix of its failing checks.
     pub reason: String,
-    /// The rebase it waits for, with `after_rebase`.
+    /// The rebase or fix it waits for, with `after_rebase` or `after_fix`.
     pub waits_for: Option<String>,
 }
 

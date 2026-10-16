@@ -387,11 +387,12 @@ export type WaitingReview = {
  */
 run_id: string, 
 /**
- * `review` or `rebase`; plans join the queue with #79.
+ * `review`, `rebase` or `fix_ci`; plans join the queue with #79.
  */
 kind: string, 
 /**
- * `rebase` waits ahead of every `review` (#580); a move keeps it so.
+ * `rebase` waits ahead of `fix`, and `fix` ahead of every `review`
+ * (#580, #583); a move keeps it so.
  */
 priority: string, 
 /**
@@ -411,7 +412,7 @@ target: number,
  */
 target_url: string | null, 
 /**
- * The commit it will review; `null` for a rebase.
+ * The commit it will review; `null` for a rebase or a fix.
  */
 commit: string | null, 
 /**
@@ -432,11 +433,12 @@ since: string,
 position: number, 
 /**
  * Why it waits: `no_slot`, every slot is taken or a rebase waits
- * ahead; `after_rebase`, a rebase of its pull request comes first.
+ * ahead; `after_rebase`, a rebase of its pull request comes first;
+ * `after_fix`, so does a fix of its failing checks.
  */
 reason: string, 
 /**
- * The rebase it waits for, with `after_rebase`.
+ * The rebase or fix it waits for, with `after_rebase` or `after_fix`.
  */
 waits_for: string | null, };
 

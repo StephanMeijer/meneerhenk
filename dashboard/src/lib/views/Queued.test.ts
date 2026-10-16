@@ -158,6 +158,28 @@ describe('Queued', () => {
     expect(move, 'a review dropped on a rebase moves nowhere').toHaveBeenCalledTimes(1);
   });
 
+  it('says a review waits for a fix of its pull request, and keeps the fix behind the rebases (#583)', async () => {
+    const move = vi.fn();
+    const fixing = {
+      limit: 1,
+      in_use: 1,
+      waiting: [
+        waitingReview('r-rebase', 6, 1, { kind: 'rebase', priority: 'rebase', commit: null }),
+        waitingReview('r-fix', 7, 2, { kind: 'fix_ci', priority: 'fix', commit: null }),
+        waitingReview('r-a', 8, 3),
+        waitingReview('r-held', 7, 4, { reason: 'after_fix', waits_for: 'r-fix' }),
+      ],
+    };
+    render(Queued, { slots: fixing, move, now: () => NOW });
+    await settle();
+    const rows = [...document.querySelectorAll('ol.queued > li')];
+    expect(rowText(rows[1]).slice(0, 3)).toEqual(['2', 'r-fix fix ci', 'docspec/app #7']);
+    expect(rows[3]?.querySelector('.why')?.textContent).toBe('after the fix r-fix');
+    expect(labelled('Move r-fix to the top'), 'not ahead of the rebase').toBeNull();
+    expect(labelled('Move r-fix to the bottom'), 'not behind a review').toBeNull();
+    expect(labelled('Move r-a to the top'), 'not ahead of the fix').toBeNull();
+  });
+
   it('says why a move did not go through', async () => {
     const move = vi.fn(() =>
       Promise.reject(new ApiError(409, 'conflict', 'That review is not waiting for a slot here.')),

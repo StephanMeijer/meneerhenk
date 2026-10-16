@@ -283,8 +283,8 @@ second rebase request joins the first.
 ### 3.7 Fixing a pull request's failing checks
 
 When a pull request's checks fail, anyone may ask Henk to fix them with the
-comment `@meneer-henk fix ci` (GitLab: `@meneerhenk fix ci`) (#583). A
-repository can turn it off (`fix_ci = false` in its
+comment `@meneer-henk fix ci` (GitLab: `@meneerhenk fix ci`), or through the
+API, the dashboard or MCP (#583). A repository can turn it off (`fix_ci = false` in its
 `[roles.executor.repositories]` entry); it is on by default.
 
 1. **He checks he may push**, as for any push (§3.5.1).
@@ -983,7 +983,8 @@ surprising reading of the earlier wording; veto any that is wrong.
   workspace and Henk pushes a fast-forward, or the executor says the failure
   is not about the code and nothing is pushed. The executor may now read a
   pull request's CI, as the reviewer does. On by default; a repository can
-  turn it off.
+  turn it off. It is asked for with a comment, `POST /fix-ci`, the MCP tool
+  `start_fix_ci` or the dashboard.
 
 ## Revision notes (2026-10-15)
 

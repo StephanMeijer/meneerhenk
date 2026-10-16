@@ -84,11 +84,11 @@ HENK_BLESS=1 cargo test -p henk api_types_are_current
 Who is signed in, the CSRF token their actions send, and the kinds of run
 `POST /runs` can start here, as configured: `review` with `[review.loop]`,
 `plan` with `[planning]`, `execute` with `[execution]` (#329),
-`rebase` with `[roles.executor]` (#579) and `ticket` with `[autonomous]`
-(#536).
+`rebase` and `fix_ci` with `[roles.executor]` (#579, #583) and `ticket`
+with `[autonomous]` (#536).
 
 ```json
-{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute", "rebase", "ticket"]}
+{"github_id": 1234, "login": "alice", "csrf": "q3Jx...", "startable": ["review", "plan", "execute", "rebase", "fix_ci", "ticket"]}
 ```
 
 ### `GET /health`
@@ -356,18 +356,20 @@ frees a sandbox host's slot, or a run starts or stops waiting for one
 (#403). `RunningMessage` in `types.ts` is the union.
 
 `slots` has `limit` (`review.max_concurrent`), `in_use`, and `waiting`:
-the reviews and rebases waiting for a slot, in the order they will start
-(#251), then the reviews waiting for a rebase of their pull request
-(#580). Each has `run_id`, `kind` (`review` or `rebase`), `priority`
-(`rebase` waits ahead of every `review`), `platform`, `repo`, `target`,
-`target_url`, `commit` (`null` for a rebase), `trigger`, `requester`,
-`since` (when it was requested), `position` (from 1), `reason` and
-`waits_for`. `reason` is `no_slot` (every slot is taken, or a rebase waits
-ahead) or `after_rebase` (a rebase of its pull request comes first;
-`waits_for` is its run id). Only one run works on a pull request at a
-time: a new commit supersedes a waiting review in its place in the queue,
-the same commit joins it, and a rebase supersedes it and moves up to where
-rebases wait. A waiting run has its run id but no run record until it
+the reviews, rebases and fixes of failing checks waiting for a slot, in
+the order they will start (#251), then the reviews waiting for a rebase or
+a fix of their pull request (#580, #583). Each has `run_id`, `kind`
+(`review`, `rebase` or `fix_ci`), `priority` (`rebase` waits ahead of
+`fix`, and `fix` ahead of every `review`), `platform`, `repo`, `target`,
+`target_url`, `commit` (`null` for a rebase or a fix), `trigger`,
+`requester`, `since` (when it was requested), `position` (from 1), `reason`
+and `waits_for`. `reason` is `no_slot` (every slot is taken, or a rebase
+or a fix waits ahead), `after_rebase` (a rebase of its pull request comes
+first; `waits_for` is its run id) or `after_fix` (so does a fix of its
+failing checks). Only one run works on a pull request at a time: a new
+commit supersedes a waiting review in its place in the queue, the same
+commit joins it, and a rebase or a fix supersedes it and moves up to where
+its kind waits; a rebase supersedes a fix. A waiting run has its run id but no run record until it
 starts; `POST /runs/{id}/queue` moves it to another place (#401), and
 `POST /runs/{id}/cancel` cancels it, and it then ends as cancelled while
 queued. Every `slots` message holds the whole list, so a client replaces
@@ -498,7 +500,7 @@ kept) and its outcomes.
 
 ### `POST /runs`
 
-Starts a review, a plan, an execute run, a ticket run or a rebase, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
+Starts a review, a plan, an execute run, a ticket run, a rebase or a fix of a pull request's failing checks, exactly as the dashboard's start form does. The request becomes an event like a webhook, and the listeners
 apply the allowlist and every refusal. Read the event to see what came of
 it.
 
@@ -506,10 +508,10 @@ it.
 {"kind": "review", "url": "https://github.com/o/r/pull/7", "commit": "abc1234"}
 ```
 
-`kind` is `review`, `plan`, `execute`, `ticket` or `rebase`. `url` is a pull
-request for a review or a rebase and an issue for the others. `commit`
-(reviews) and `note` (plans, execute runs and ticket runs) are optional; a
-rebase takes neither.
+`kind` is `review`, `plan`, `execute`, `ticket`, `rebase` or `fix_ci`. `url`
+is a pull request for a review, a rebase or a fix, and an issue for the
+others. `commit` (reviews) and `note` (plans, execute runs and ticket runs)
+are optional; a rebase and a fix take neither.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
 ### `POST /runs/{id}/cancel`

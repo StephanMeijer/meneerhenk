@@ -41,9 +41,10 @@ The Model Context Protocol at `POST /mcp` (Streamable HTTP), for agents. It answ
 - `start_execute`: takes an issue to a pull request, as `POST /execute` does: the executor makes the change on a new branch, Henk opens the pull request and then reviews it. Needs `write`.
 - `start_ticket`: takes an issue through a plan, an execute run and a review in one go, as `POST /ticket` does: Henk plans it, the executor makes the change and opens the pull request, and Henk reviews it, with no one starting each step. Needs `write`, and `[autonomous]`.
 - `start_rebase`: rebases a pull or merge request onto its base branch, as `POST /rebase` does: the executor resolves any conflict, Henk pushes with a lease so no one's commit is lost, then reviews the rebased commits. Needs `write`.
+- `start_fix_ci`: fixes the failing checks of a pull or merge request, as `POST /fix-ci` does: the executor reads the checks that failed on its head and fixes the code, Henk pushes the fix as a fast-forward, then reviews it. A failure that is not about the code pushes nothing. Needs `write`.
 - `cancel_run`: cancels a run this Henk process is running; a review ends cancelled with a neutral check. Needs `write`.
-- `list_queued_runs`: the slots in use and the reviews and rebases waiting for one, in the order they will start (rebases first), then the reviews waiting for a rebase of their pull request.
-- `move_queued_run`: moves a review or rebase waiting for a slot to another place in the queue, within its priority; position 1 starts next. Needs `write`.
+- `list_queued_runs`: the slots in use and the reviews, rebases and fixes waiting for one, in the order they will start (rebases first, then fixes), then the reviews waiting for a rebase or a fix of their pull request.
+- `move_queued_run`: moves a review, rebase or fix waiting for a slot to another place in the queue, within its priority; position 1 starts next. Needs `write`.
 - `list_runs`: runs, newest first, by kind, status, platform, repository, target and time.
 - `get_run`: one run in full: status, sessions, stages, the review loop's findings and their verdicts, tool usage, timeline and the requests that started it.
 - `get_run_events`: a run's timeline, in order.
@@ -65,7 +66,7 @@ The Model Context Protocol at `POST /mcp` (Streamable HTTP), for agents. It answ
 
 The first way to start work from outside, still there for scripts and CI that have no dashboard session or MCP client. Each takes a JSON body and the shared bearer token from the environment variable that `[server] api_token_env` names (`HENK_API_TOKEN` by default) as `Authorization: Bearer <token>`. Without the variable set they answer 503; with a wrong token, 401.
 
-- [Request bodies](https://github.com/StephanMeijer/meneerhenk/blob/main/README.md#run): `POST /review` starts a review, `POST /plan` a plan, `POST /execute` an execute run and `POST /ticket` a whole ticket run. Prefer the MCP server for agents and the dashboard API for people's scripts: each names who asked, where this token cannot.
+- [Request bodies](https://github.com/StephanMeijer/meneerhenk/blob/main/README.md#run): `POST /review` starts a review, `POST /plan` a plan, `POST /execute` an execute run, `POST /ticket` a whole ticket run, `POST /rebase` a rebase and `POST /fix-ci` a fix of a pull request's failing checks. Prefer the MCP server for agents and the dashboard API for people's scripts: each names who asked, where this token cannot.
 - `GET /healthz`: that the server is up, its listeners, and how many reviews run and wait, without sign-in.
 
 ## Optional

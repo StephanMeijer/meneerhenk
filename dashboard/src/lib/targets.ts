@@ -12,7 +12,7 @@ export interface Target {
 }
 
 /** What can be started, and what each needs. */
-export type Start = 'review' | 'plan' | 'execute' | 'rebase' | 'ticket';
+export type Start = 'review' | 'plan' | 'execute' | 'rebase' | 'fix_ci' | 'ticket';
 
 function split(url: string): { host: string; path: string } | null {
   const text = url.trim();
@@ -73,9 +73,16 @@ const ISSUE_WORK: Partial<Record<Start, string>> = {
   ticket: 'Taking one through plan, build and review',
 };
 
+/** How a pull-request-based start is named when it needs a pull request. */
+const PULL_WORK: Partial<Record<Start, string>> = {
+  review: 'A review',
+  rebase: 'A rebase',
+  fix_ci: 'Fixing the failing checks',
+};
+
 /** What `start` needs `url` to name. */
 export function needs(start: Start): Target['kind'] {
-  return start === 'review' || start === 'rebase' ? 'pull' : 'issue';
+  return start === 'review' || start === 'rebase' || start === 'fix_ci' ? 'pull' : 'issue';
 }
 
 export type Check = { ok: string } | { problem: string } | null;
@@ -97,7 +104,7 @@ export function checkUrl(start: Start, url: string): Check {
   if (target.kind !== wanted) {
     return wanted === 'issue'
       ? { problem: `This is a ${target.platform === 'gitlab' ? 'merge request' : 'pull request'}. ${ISSUE_WORK[start] ?? 'This'} needs an issue URL.` }
-      : { problem: `This is an issue. ${start === 'rebase' ? 'A rebase' : 'A review'} needs a pull request URL.` };
+      : { problem: `This is an issue. ${PULL_WORK[start] ?? 'This'} needs a pull request URL.` };
   }
   return { ok: targetText(target) };
 }
