@@ -23,6 +23,22 @@ pub trait ModelClient: Send + Sync {
     async fn complete(&self, request: &CompletionRequest) -> Result<Completion, LlmError>;
 }
 
+/// Where a model client gets its bearer when the credential is not a fixed
+/// key (#620): a sign-in that renews itself.
+#[async_trait::async_trait]
+pub trait TokenSource: Send + Sync {
+    /// The bearer to send now, renewed first when it is about to expire.
+    ///
+    /// # Errors
+    ///
+    /// Returns why no bearer can be had: the sign-in is gone, its file is
+    /// unusable, or the endpoint that renews it could not be reached.
+    async fn bearer(&self) -> Result<SecretString, LlmError>;
+
+    /// The endpoint refused `token`: renew rather than send it again.
+    async fn rejected(&self, token: &SecretString);
+}
+
 /// Which wire format an endpoint speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]

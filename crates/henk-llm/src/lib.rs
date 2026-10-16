@@ -14,6 +14,7 @@
 //! small, testable HTTP client.
 
 pub mod anthropic;
+pub mod chatgpt;
 pub mod client;
 pub mod error;
 pub mod http;
@@ -26,8 +27,8 @@ pub mod testing;
 pub mod types;
 
 pub use client::{
-    Api, Effort, MaxTokensParam, ModelClient, ModelConfig, Provider, client_for, client_with,
-    effort_param,
+    Api, Effort, MaxTokensParam, ModelClient, ModelConfig, Provider, TokenSource, client_for,
+    client_with, effort_param,
 };
 pub use error::LlmError;
 pub use http::{RetryPolicy, build_endpoint_client, ensure_tls_provider};
