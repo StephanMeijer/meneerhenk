@@ -1118,7 +1118,8 @@ nothing, and asks for a review of the fix himself.
 Only a check that ended in failure is fixed. A check that was cancelled or
 ran out of time is not a problem in the code, and Henk says so. A fix is a
 run of its own on the pull request, like a rebase: it supersedes a running
-review, a rebase supersedes it, and a review asked for meanwhile waits.
+review (which starts again if the fix pushes nothing), a rebase supersedes
+it, and a review asked for meanwhile waits.
 
 A ticket run with `land = true` does this by itself when a check fails
 (`land_max_ci_fixes`, 3 tries); `@meneer-henk fix ci` is the same run on

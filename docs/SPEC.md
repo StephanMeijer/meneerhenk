@@ -308,7 +308,8 @@ API, the dashboard or MCP (#583). A repository can turn it off (`fix_ci = false`
    commits, in a run Henk asks for himself, and its checks run as usual.
 
 A fix changes the pull request's head, so it is a run of its own in the
-queue of §3.6: it supersedes a review of the pull request, and a review
+queue of §3.6: it supersedes a review of the pull request, which starts
+again when the fix pushes nothing (as most fixes do not), and a review
 asked for meanwhile waits for it. A rebase supersedes a fix; a fix asked for
 while a rebase or another fix runs joins that run. It waits for a slot
 ahead of reviews and behind rebases.
