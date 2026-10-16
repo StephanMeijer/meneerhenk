@@ -1788,7 +1788,9 @@ name = "henk-llm"
 version = "0.4.13"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "reqwest",
+ "ring",
  "rustls",
  "secrecy",
  "serde",
