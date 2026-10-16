@@ -103,7 +103,7 @@ pub async fn openai(
         pending.redirect_uri()
     );
     eprintln!(
-        "On a server without a browser: forward the port from your own machine with\n  ssh -L {port}:127.0.0.1:{port} <server>\nand open the address there, or run this on a machine with a browser and copy\n{} to the server.",
+        "On a server without a browser, either forward the port from your own machine\n  ssh -L {port}:127.0.0.1:{port} <server>\nand open the address in your own browser, or sign in on a machine that has one\nand copy {} to the server.",
         file.display(),
         port = redirect_port(pending.redirect_uri())
     );
