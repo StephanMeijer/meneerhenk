@@ -2,7 +2,8 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
@@ -141,28 +142,54 @@ impl ClassifyName for serde_json::Error {
 ///
 /// Returns the I/O error.
 pub(super) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
-    if let Some(parent) = parent {
-        std::fs::create_dir_all(parent)?;
-    }
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    write_atomic_through(path, content, &temporary_path(path, serial))
+}
+
+/// The name of the file a write goes through: unique to the process and to
+/// the write.
+fn temporary_path(path: &Path, serial: u64) -> PathBuf {
     let name = path.file_name().map_or_else(
         || "credentials".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let temporary = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
+    path.with_file_name(format!(".{name}.{}.{serial}.tmp", std::process::id()))
+}
+
+/// Creates `temporary` new, owner-only. A file already there (left by a
+/// crash, or put there by someone else) is removed first, never reused: it
+/// would keep its own owner and permissions.
+fn create_new_private(temporary: &Path) -> std::io::Result<std::fs::File> {
+    let open = || {
+        std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(&temporary)?;
+            .open(temporary)
+    };
+    match open() {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(temporary)?;
+            open()
+        }
+        other => other,
+    }
+}
+
+fn write_atomic_through(path: &Path, content: &str, temporary: &Path) -> std::io::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent)?;
+    }
+    let result = (|| {
+        let mut file = create_new_private(temporary)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temporary, path)
+        std::fs::rename(temporary, path)
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+        let _ = std::fs::remove_file(temporary);
         return result;
     }
     if let Some(parent) = parent
@@ -172,4 +199,39 @@ pub(super) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
         let _ = directory.sync_all();
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn a_stale_temporary_file_is_replaced_not_reused() {
+        let dir = std::env::temp_dir().join(format!("henk-credentials-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("openai.json");
+        let temporary = temporary_path(&path, 7);
+        std::fs::write(&temporary, "stale").unwrap();
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomic_through(&path, "fresh", &temporary).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "owner only, whatever the stale file was"
+        );
+        assert!(!temporary.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_writes_do_not_share_a_temporary_name() {
+        let path = Path::new("/tmp/openai.json");
+        assert_ne!(temporary_path(path, 1), temporary_path(path, 2));
+    }
 }
