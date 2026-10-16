@@ -252,6 +252,32 @@ rebase it with the comment `@meneer-henk rebase` (GitLab:
 A repository can turn it off (`rebase = false` in its
 `[roles.executor.repositories]` entry); it is on by default.
 
+**By himself, when the base moves.** A repository can also have
+`rebase_when_behind = true` (off unless set; it needs `[execution]` and is
+refused with `rebase = false`). A push to the repository's default branch
+(a webhook the App must be subscribed to: GitHub's Push event, GitLab's
+push events) then makes Henk list the open pull requests into that branch
+that are behind it, and start a rebase of each one that is Henk's own: the
+branch is in the same repository, starts with `[execution] branch_prefix`
+and the pull request is not a draft. Other people's branches are never
+rebased by themselves; a person asks. A branch can only start to conflict
+when its base moves, so a conflict is found the same way. At most 20 pull
+requests are started per push; the slot queue (§3.1) paces them. Only the
+default branch counts: a push to another branch, a tag or a deletion is
+recorded and ignored.
+
+A rebase he starts himself records the head of the branch he saw, and
+leaves the branch alone if it is somewhere else when the run reads it
+(somebody pushed). It says nothing when the branch turns out to be up to
+date. When it pushes, it says that the base moved and what it rebased, and
+the rebased head is reviewed as after any rebase. When it fails, it says why
+and that he will not try again by himself until the branch changes: a
+failed rebase of his at the head a pull request has now is not started
+again at the next push, which would only say the same thing again. A
+person's request always runs. A second push to the base while a rebase of
+the same pull request runs joins it, so a move he did not see is picked up
+by the next push or by a request.
+
 1. **He checks he may push**, as for any push (§3.5.1): an open, unmerged
    pull request whose branch is in the same repository and is neither the
    default nor a protected branch.
@@ -889,6 +915,11 @@ surprising reading of the earlier wording; veto any that is wrong.
   stay readable.
 
 ## Revision notes (2026-10-15)
+
+- §3.6: Henk rebases his own pull requests by himself when their base
+  branch moves (#579), where a repository has `rebase_when_behind = true`.
+  A push to the default branch is an event; the platform says which of his
+  open pull requests are behind it. A failure is said once per head.
 
 - §3.5: no commit of a review loop names a finding id (#585). The prompt
   no longer suggests "Fixes f3."; a proposal whose subject or body names

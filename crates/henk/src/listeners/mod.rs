@@ -10,6 +10,7 @@ pub mod filter;
 pub mod mention;
 pub mod plan;
 pub mod rebase;
+pub mod rebase_on_move;
 pub mod review;
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,7 @@ pub use execute::ExecuteListener;
 pub use mention::MentionListener;
 pub use plan::PlanListener;
 pub use rebase::RebaseListener;
+pub use rebase_on_move::RebaseOnMoveListener;
 pub use review::ReviewListener;
 pub use ticket::TicketListener;
 

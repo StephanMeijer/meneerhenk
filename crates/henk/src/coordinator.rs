@@ -926,6 +926,30 @@ impl Coordinator {
         trigger: String,
         requester: Option<String>,
     ) -> (Decision, RunId) {
+        self.submit_rebase_as(target, trigger, requester, None)
+    }
+
+    /// [`Self::submit_rebase`] for a rebase Henk starts himself because the
+    /// base branch moved (#579): nobody asked, and `seen` is the head of the
+    /// branch he saw behind it. A review of the pull request running or
+    /// waiting is not superseded, as a requested rebase would: the call
+    /// joins it ([`Decision::Join`], the review's run) and starts no rebase.
+    pub fn submit_rebase_automatic(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        seen: CommitSha,
+    ) -> (Decision, RunId) {
+        self.submit_rebase_as(target, trigger, None, Some(seen))
+    }
+
+    fn submit_rebase_as(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+        automatic: Option<CommitSha>,
+    ) -> (Decision, RunId) {
         let key = Key::of(&target);
         let generation = self.next_generation();
         let run = new_run_id();
@@ -943,6 +967,16 @@ impl Coordinator {
                         .map_or_else(|| run.clone(), |a| a.run.clone());
                     info!(repo = %target.repo.path(), number = key.number, run = %joined, "joined the waiting or running rebase");
                     return (Decision::Join, joined);
+                }
+                Decision::Supersede if automatic.is_some() => {
+                    // Nobody asked for this rebase, and nobody would see a
+                    // review cancelled for it that then pushes nothing. The
+                    // review stands; the next move of the base tries again.
+                    let reviewing = active
+                        .get(&key)
+                        .map_or_else(|| run.clone(), |a| a.run.clone());
+                    info!(repo = %target.repo.path(), number = key.number, run = %reviewing, "left the review of a pull request that fell behind running; no rebase now");
+                    return (Decision::Join, reviewing);
                 }
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
@@ -979,6 +1013,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester: requester.clone(),
+            automatic,
         };
         let coordinator = Arc::clone(self);
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());

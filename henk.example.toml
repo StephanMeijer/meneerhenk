@@ -310,6 +310,13 @@ requester_id = 523456789012345678
 # Henk rebases a pull request onto its base branch when asked
 # (@meneer-henk rebase), on every repository unless it says no here.
 # rebase = false
+#
+# Henk can also rebase his own pull requests (the branches under
+# [execution] branch_prefix) by himself when their base branch moves. It
+# needs the GitHub App subscribed to Push events (GitLab: the webhook's
+# Push events), and [execution]. Off unless a repository says so:
+# [roles.executor.repositories."docspec/app"]
+# rebase_when_behind = true
 
 # Where the review loop's workspace is: the reviewer's and the executor's
 # file tools, and their bash, run there. Henk copies the pull request's files

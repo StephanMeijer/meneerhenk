@@ -44,6 +44,10 @@ use crate::roles::equip_and_grant;
 use crate::stages;
 use crate::workspace::{checked_changeset, open_prepared};
 
+/// What the trigger of a rebase Henk starts himself, when the base branch
+/// moved, begins with (#579).
+pub const MOVED_TRIGGER: &str = "base branch moved";
+
 /// How long one rebase run may take, conflicts and all.
 const RUN_TIMEOUT: Duration = Duration::from_mins(30);
 
@@ -63,6 +67,11 @@ pub struct RebaseRequest {
     /// Who asked, for the run record: a stable id such as `github:<id>`,
     /// a commenter's login, or nobody.
     pub requester: Option<String>,
+    /// Set for a rebase Henk started himself when the base branch moved
+    /// (#579): the head of the branch he saw then. It is recorded as the
+    /// run's commit; a branch that is somewhere else when the run reads it
+    /// is left alone, and the run says nothing when there was nothing to do.
+    pub automatic: Option<CommitSha>,
 }
 
 /// How a rebase run ended well.
@@ -96,8 +105,31 @@ impl RebaseReport {
     }
 }
 
+/// The branch is not where Henk saw it when he started a rebase by himself:
+/// somebody pushed to it since (#579). Not a failure.
+#[derive(Debug)]
+struct Moved {
+    seen: CommitSha,
+    now: CommitSha,
+}
+
+impl std::fmt::Display for Moved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the branch moved from {} to {} since I looked at it",
+            self.seen.short(),
+            self.now.short()
+        )
+    }
+}
+
+impl std::error::Error for Moved {}
+
 /// What a rebase did.
 enum Rebased {
+    /// The branch is not where a rebase Henk started himself saw it (#579).
+    Moved(String),
     /// The base was already in the branch.
     UpToDate { base: String },
     /// The branch was rebased and pushed.
@@ -110,9 +142,11 @@ enum Rebased {
 }
 
 impl Rebased {
-    /// What Henk says on the pull request.
-    fn said(&self) -> String {
+    /// What Henk says on the pull request. `automatic`: he started it
+    /// himself, because the base moved (#579).
+    fn said(&self, automatic: bool) -> String {
         match self {
+            Self::Moved(why) => format!("I left this pull request alone: {why}."),
             Self::UpToDate { base } => {
                 format!(
                     "This pull request is already up to date with `{base}`; there was nothing to rebase."
@@ -130,17 +164,28 @@ impl Rebased {
                     let files: Vec<String> = resolved.iter().map(|f| format!("`{f}`")).collect();
                     format!(" I resolved conflicts in {}.", files.join(", "))
                 };
+                let rebased = if automatic {
+                    format!("`{base}` moved, so I rebased this pull request onto it")
+                } else {
+                    format!("I rebased this pull request onto `{base}`")
+                };
                 format!(
-                    "I rebased this pull request onto `{base}`: {commits} commit(s), now at {}.{conflicts} A review of the rebased commits follows.",
+                    "{rebased}: {commits} commit(s), now at {}.{conflicts} A review of the rebased commits follows.",
                     head.short()
                 )
             }
         }
     }
 
+    /// Whether Henk has nothing to say on the pull request when he started
+    /// the rebase himself (#579): there was nothing to do.
+    fn is_quiet_when_automatic(&self) -> bool {
+        matches!(self, Self::Moved(_) | Self::UpToDate { .. })
+    }
+
     fn pushed(&self) -> Option<CommitSha> {
         match self {
-            Self::UpToDate { .. } => None,
+            Self::Moved(_) | Self::UpToDate { .. } => None,
             Self::Pushed { head, .. } => Some(head.clone()),
         }
     }
@@ -175,7 +220,10 @@ pub async fn run_rebase(
             platform: target.repo.platform(),
             repo: target.repo.path(),
             target: target.number,
-            commit: None,
+            commit: request
+                .automatic
+                .as_ref()
+                .map(|head| head.as_str().to_owned()),
             requester: request.requester.clone(),
             trigger: request.trigger.clone(),
             link: link.clone(),
@@ -207,8 +255,13 @@ pub async fn run_rebase(
     };
     match result {
         Ok(rebased) => {
-            let said = rebased.said();
-            on_pull.post(&said).await;
+            let automatic = request.automatic.is_some();
+            let said = rebased.said(automatic);
+            // A rebase Henk started himself says nothing when there was
+            // nothing to do; the run still records it.
+            if !(automatic && rebased.is_quiet_when_automatic()) {
+                on_pull.post(&said).await;
+            }
             stages::finished(&*app.store, &run, &said).await;
             app.store
                 .finish_run(&run, RunStatus::Finished, Some(&said), None)
@@ -225,8 +278,16 @@ pub async fn run_rebase(
                 return Err(ended);
             }
             let reason = format!("{failure:#}");
-            let comment =
+            let mut comment =
                 format!("I could not rebase this pull request: {reason}. Nothing was pushed.");
+            if request.automatic.is_some() {
+                // The guard that keeps him from trying at every push to the
+                // base: a branch he failed on is left to a person.
+                comment = format!(
+                    "{comment} I will not try again by myself until the branch changes; comment `{}` to try now.",
+                    henk_domain::review::rebase_command(target.repo.platform())
+                );
+            }
             Err(on_pull.failed(&comment, &reason).await)
         }
     }
@@ -274,6 +335,11 @@ impl Work<'_> {
         };
         let (facts, checkout) = match checked_out {
             Ok(checked_out) => checked_out,
+            Err(error) if error.downcast_ref::<Moved>().is_some() => {
+                let why = format!("{error:#}");
+                stages::mark(store, run, Stage::Checkout, StageState::Skipped, &why).await;
+                return Ok(Rebased::Moved(why));
+            }
             Err(error) => {
                 let why = format!("{error:#}");
                 stages::mark(store, run, Stage::Checkout, StageState::Failed, &why).await;
@@ -362,6 +428,15 @@ impl Work<'_> {
             return Err(anyhow!(
                 "the platform did not say which branch it merges into"
             ));
+        }
+        if let Some(seen) = &self.request.automatic
+            && facts.head != *seen
+        {
+            return Err(Moved {
+                seen: seen.clone(),
+                now: facts.head,
+            }
+            .into());
         }
         let credential = writer
             .git_credential()
@@ -780,6 +855,7 @@ requester_id = 3
             trigger: "test".to_owned(),
             run: Some(RunId::parse(run).unwrap()),
             requester: Some("github:1234".to_owned()),
+            automatic: None,
         }
     }
 
@@ -961,5 +1037,143 @@ requester_id = 3
             assert_eq!(feature_head(&f).await, before);
             assert!(comments(&f)[0].contains(why), "{name}: {:?}", comments(&f));
         }
+    }
+
+    /// [`request`] for a rebase Henk starts himself, having seen the branch
+    /// at `seen`.
+    async fn by_himself(f: &Fixture, run: &str, seen: Option<CommitSha>) -> RebaseRequest {
+        let seen = match seen {
+            Some(seen) => seen,
+            None => CommitSha::parse(&feature_head(f).await).unwrap(),
+        };
+        RebaseRequest {
+            trigger: "base branch moved: main is at 0123456".to_owned(),
+            requester: None,
+            automatic: Some(seen),
+            ..request(run)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rebase_he_starts_himself_says_that_the_base_moved_and_records_the_head_he_saw() {
+        let f = fixture("henk-rebase-auto", (false, false), "", vec![]).await;
+        let before = CommitSha::parse(&feature_head(&f).await).unwrap();
+        let asked = by_himself(&f, "r-rebase-auto", None).await;
+        let report = run_rebase(&f.app, asked, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(report.pushed.is_some());
+        let said = comments(&f);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("`main` moved, so I rebased this pull request onto it: 1 commit(s)"),
+            "{said:?}"
+        );
+        let run = f
+            .app
+            .store
+            .run(&RunId::parse("r-rebase-auto").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.commit.as_deref(),
+            Some(before.as_str()),
+            "the head he saw"
+        );
+        assert_eq!(run.requester, None);
+        // Then the rebased head is reviewed, as after a rebase asked for.
+        assert!(report.review(None).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_rebase_he_starts_himself_says_nothing_when_there_was_nothing_to_do() {
+        let f = fixture("henk-rebase-quiet", (false, false), "", vec![]).await;
+        // Up to date: rebased by a request, then again by himself.
+        run_rebase(&f.app, request("r-rebase-first"), CancellationToken::new())
+            .await
+            .unwrap();
+        let said_before = comments(&f).len();
+        let asked = by_himself(&f, "r-rebase-quiet", None).await;
+        let report = run_rebase(&f.app, asked, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.pushed, None);
+        assert_eq!(comments(&f).len(), said_before, "no comment");
+        assert_eq!(status(&f, "r-rebase-quiet").await, RunStatus::Finished);
+
+        // Somebody pushed since he looked: left alone, without a clone, and
+        // without a word.
+        let moved = by_himself(
+            &f,
+            "r-rebase-moved",
+            Some(CommitSha::parse(&"7".repeat(40)).unwrap()),
+        )
+        .await;
+        let head = feature_head(&f).await;
+        let report = run_rebase(&f.app, moved, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.pushed, None);
+        assert_eq!(feature_head(&f).await, head);
+        assert_eq!(comments(&f).len(), said_before, "no comment");
+        let run = f
+            .app
+            .store
+            .run(&RunId::parse("r-rebase-moved").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, RunStatus::Finished);
+        assert!(
+            run.summary
+                .as_deref()
+                .unwrap_or("")
+                .contains("the branch moved from 7777777 to"),
+            "{:?}",
+            run.summary
+        );
+        let stages = f.app.store.stages(&run.id).await.unwrap();
+        assert!(
+            stages.iter().any(|s| s.stage == henk_store::Stage::Checkout
+                && s.state == henk_store::StageState::Skipped),
+            "{stages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rebase_he_started_himself_that_fails_says_he_will_not_try_again_by_himself() {
+        let f = fixture("henk-rebase-auto-fail", (true, false), "", vec![done()]).await;
+        let before = feature_head(&f).await;
+        let asked = by_himself(&f, "r-rebase-auto-fail", None).await;
+        run_rebase(&f.app, asked, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(feature_head(&f).await, before, "nothing pushed");
+        assert_eq!(status(&f, "r-rebase-auto-fail").await, RunStatus::Failed);
+        let said = comments(&f);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("Nothing was pushed."), "{said:?}");
+        assert!(
+            said[0].contains(
+                "I will not try again by myself until the branch changes; comment `@meneer-henk rebase` to try now."
+            ),
+            "{said:?}"
+        );
+
+        // A rebase asked for does not say it.
+        let g = fixture("henk-rebase-asked-fail", (true, false), "", vec![done()]).await;
+        run_rebase(
+            &g.app,
+            request("r-rebase-asked-fail"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !comments(&g)[0].contains("will not try again"),
+            "{:?}",
+            comments(&g)
+        );
     }
 }
