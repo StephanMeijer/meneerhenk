@@ -1429,10 +1429,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_time_limit_ends_the_session_as_timed_out_not_as_dropped() {
-        // The store opens on its first call, on a thread of its own, which a
-        // paused clock would take for a pool that never answers: pause after.
+        // The clock runs: every store call waits on a pool thread, and a paused
+        // clock would jump past the pool's acquire timeout while it waits. The
+        // 50 ms limit ends the 30 s delay in real time.
         let store = store_with_run().await;
-        tokio::time::pause();
         let model: Arc<dyn ModelClient> =
             Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
         let mut spec = spec(model);
