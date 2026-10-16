@@ -40,10 +40,20 @@ hmac = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 ring = "0.17"
 rmcp = { version = "=3.5.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
-rusqlite_migration = "2.6"
+# Held at 0.39 while the run store moves to sea-orm (#598): sqlx's SQLite driver
+# links libsqlite3-sys below 0.38, and cargo allows one version of a `links`
+# crate. rusqlite 0.39 uses 0.37, 0.40 uses 0.38. #608 removes rusqlite and
+# lifts this; until then a bump to 0.40 fails to resolve.
+rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite_migration = "2.5"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
+# The run store's one layer over SQLite and PostgreSQL (#598, decision record
+# docs/decisions/0001-run-store-layer.md). sea-orm's own TLS feature pulls
+# webpki-roots and a CDLA licence that deny.toml refuses, so the runtime is
+# chosen here and TLS through the direct sqlx dependency below.
+sea-orm = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite", "sqlx-postgres", "macros", "with-time"] }
+sea-orm-migration = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite", "sqlx-postgres"] }
 secrecy = "0.10"
 # SSH to the sandbox host (workspace backend "ssh", #84). Pure Rust on ring,
 # so Henk's distroless image needs no ssh binary and deny.toml's aws-lc ban
@@ -63,6 +73,8 @@ regex = { version = "1.13", default-features = false, features = ["std", "unicod
 serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
+# rustls with ring and the platform's own roots, for sea-orm's PostgreSQL driver.
+sqlx = { version = "0.9", default-features = false, features = ["tls-rustls-ring-native-roots"] }
 subtle = "2.6"
 thiserror = "2.0"
 time = { version = "0.3", default-features = false, features = ["std", "formatting", "parsing", "macros"] }

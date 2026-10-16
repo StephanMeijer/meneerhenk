@@ -1,6 +1,6 @@
 # 0001: The run store on one implementation over sea-orm
 
-Status: proposed; it is decided when this pull request is merged. The paragraph on `henk-store` in `ARCHITECTURE.md` points here and says "proposed"; change it in the same pull request that changes this status.
+Status: accepted; it was decided when this record was merged in #613 (2026-10-16).
 Date: 2026-10-16. Issues: #598 (the move), #601 (this spike).
 
 ## The question
@@ -101,6 +101,8 @@ The two final schemas differ by more than types: PostgreSQL has indexes SQLite l
 ### How the spike did it with sea-orm
 
 Four steps: `m001_baseline` (every table of SQLite 019 / PostgreSQL 015, with its indexes, in the DSL), `m002_run_instant` (the expression index, raw, SQLite only), `m003_run_children` (the end of SQLite 020 / PostgreSQL 016), and `m004_run_indexes` (the three PostgreSQL-only indexes, for both). Adoption is one function run before the migrator: it reads `PRAGMA user_version` on SQLite and `henk_schema_migrations` on PostgreSQL, and when the database is at the end of the old history (20, or 16) it records the first three steps as applied in `seaql_migrations` and changes nothing else, so the old bookkeeping stays where it is (the previous Henk looks only at that bookkeeping, so it should still open the database; not tested). PostgreSQL takes an advisory lock around it, as the old migrator did, and a test starts two connections at once. A database at another version of the old history is refused with a message that names the version to reach.
+
+The implementation (#604) is these four steps plus a fifth, `m005_session_constraint_names`, which the schema comparison in the tests of #604 found a need for: a `PostgreSQL` database that went through the `lanes` era keeps `lanes_pkey` and `lanes_run_id_fkey` on `sessions`, and the step renames them so an adopted database and a fresh one have the same names (SQLite has nothing to rename).
 
 ### Decision left for the maintainers: the old history
 
