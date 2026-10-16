@@ -200,6 +200,7 @@ impl Listener for ReviewListener {
             EventKind::PlanRequested { .. }
             | EventKind::ExecuteRequested { .. }
             | EventKind::RebaseRequested { .. }
+            | EventKind::FixCiRequested { .. }
             | EventKind::TicketRequested { .. }
             | EventKind::BranchPushed { .. }
             | EventKind::Unmodelled { .. }

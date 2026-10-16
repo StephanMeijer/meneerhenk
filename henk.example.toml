@@ -275,7 +275,9 @@ requirements_max_rounds = 3
 # skills keeps load_skill. With [review.loop], the reviewer keeps
 # report_finding and finish_round, and the executor list_findings and
 # give_verdict. With [planning], the reviewer keeps raise_point and
-# finish_round, and the planner write_plan and answer_point. `henk config check` lists each role's tools when
+# finish_round, and the planner write_plan and answer_point. To fix failing
+# checks (@meneer-henk fix ci), the executor needs propose_fix; it then also
+# reads the pull request's CI, as the reviewer does. `henk config check` lists each role's tools when
 # they differ, and refuses a tool the role may not have. Moving from [address] and the old [review.loop] and [planning]
 # keys: README, "Migrating to roles".
 [roles.reviewer]
@@ -332,6 +334,9 @@ requester_id = 523456789012345678
 # Henk rebases a pull request onto its base branch when asked
 # (@meneer-henk rebase), on every repository unless it says no here.
 # rebase = false
+# Henk fixes the failing checks of a pull request when asked
+# (@meneer-henk fix ci), on every repository unless it says no here.
+# fix_ci = false
 
 # Where the review loop's workspace is: the reviewer's and the executor's
 # file tools, and their bash, run there. Henk copies the pull request's files

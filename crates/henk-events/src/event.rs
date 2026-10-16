@@ -182,6 +182,15 @@ pub enum EventKind {
         /// Who asked, as a stable id.
         requester: Option<String>,
     },
+    /// A pull/merge request was asked to have its failing checks fixed
+    /// (#583): API, dashboard or MCP. A comment asking for it is a
+    /// [`EventKind::Comment`].
+    FixCiRequested {
+        /// The pull/merge request.
+        target: ReviewTarget,
+        /// Who asked, as a stable id.
+        requester: Option<String>,
+    },
     /// A repository's default branch was pushed to (#579): what moves the
     /// base of every open pull request on it. A push to any other branch, a
     /// tag or a deletion is [`EventKind::Ignored`].
@@ -216,6 +225,7 @@ impl EventKind {
             Self::ExecuteRequested { .. } => "execute_requested",
             Self::TicketRequested { .. } => "ticket_requested",
             Self::RebaseRequested { .. } => "rebase_requested",
+            Self::FixCiRequested { .. } => "fix_ci_requested",
             Self::BranchPushed { .. } => "branch_pushed",
             Self::Unmodelled { .. } => "unmodelled",
             Self::Ignored(_) => "ignored",
@@ -229,9 +239,9 @@ impl EventKind {
             Self::PullRequest { repo, number, .. } | Self::Comment { repo, number, .. } => {
                 Some((repo, *number))
             }
-            Self::ReviewRequested { target, .. } | Self::RebaseRequested { target, .. } => {
-                Some((&target.repo, target.number))
-            }
+            Self::ReviewRequested { target, .. }
+            | Self::RebaseRequested { target, .. }
+            | Self::FixCiRequested { target, .. } => Some((&target.repo, target.number)),
             Self::PlanRequested { target, .. }
             | Self::ExecuteRequested { target, .. }
             | Self::TicketRequested { target, .. } => Some((&target.repo, target.number)),
