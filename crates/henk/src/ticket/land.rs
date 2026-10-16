@@ -477,7 +477,7 @@ mod tests {
     use crate::issue_runs::RunFailed;
     use crate::plan::{PlanReport, PlanRequest};
     use crate::rebase::RebaseReport;
-    use crate::review::{ReviewReport, Superseded};
+    use crate::review::{CancelledBy, ReviewReport, Superseded};
 
     fn job(name: &str, status: CiStatus, conclusion: Option<CiConclusion>) -> CiJob {
         CiJob {
@@ -583,6 +583,9 @@ mod tests {
         calls: Mutex<Vec<String>>,
         reviewed: Mutex<Vec<CommitSha>>,
         merged: Mutex<bool>,
+        /// The rebase never ends until it is stopped.
+        hang_rebase: Mutex<bool>,
+        held: Mutex<Option<oneshot::Sender<anyhow::Result<RebaseReport>>>>,
         stopped: Mutex<Vec<String>>,
     }
 
@@ -599,6 +602,8 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 reviewed: Mutex::new(Vec::new()),
                 merged: Mutex::new(false),
+                hang_rebase: Mutex::new(false),
+                held: Mutex::new(None),
                 stopped: Mutex::new(Vec::new()),
             }
         }
@@ -697,6 +702,11 @@ mod tests {
             calls.push("rebase".to_owned());
             assert!(trigger.contains(TICKET), "{trigger}");
             let run = RunId::parse(format!("r-rebase-{}", calls.len())).unwrap();
+            if *self.hang_rebase.lock().unwrap() {
+                let (tell, ended) = oneshot::channel();
+                *self.held.lock().unwrap() = Some(tell);
+                return (Decision::Start, run, ended);
+            }
             let result = if let Some(Err(error)) = self.rebases.lock().unwrap().pop_front() {
                 Err(error)
             } else {
@@ -738,6 +748,9 @@ mod tests {
 
         fn stop(&self, run: &RunId, by: String) -> bool {
             self.stopped.lock().unwrap().push(format!("{run} by {by}"));
+            if let Some(tell) = self.held.lock().unwrap().take() {
+                let _ = tell.send(Err(CancelledBy(by).into()));
+            }
             true
         }
     }
@@ -1068,6 +1081,36 @@ mod tests {
             }
         );
         assert_eq!(comments(&f).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_rebase_that_outlasts_the_stage_is_stopped_at_the_stage_s_time() {
+        let f = fixture();
+        // The whole run has a minute; the stage has one second.
+        let stages = Landing::new(|_| MergeState::NeedsRebase);
+        *stages.hang_rebase.lock().unwrap() = true;
+        let land = Land {
+            timeout: Duration::from_secs(1),
+            ..quick()
+        };
+        let began = std::time::Instant::now();
+        let report = go(&f, &stages, land).await;
+
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the stage's second ended it, not the run's minute"
+        );
+        assert_eq!(
+            report.ending,
+            Ending::Stopped {
+                step: Step::Land,
+                why: "the time limit of 1s for keeping the pull request landable was reached"
+                    .to_owned()
+            }
+        );
+        let stopped = stages.stopped.lock().unwrap().clone();
+        assert_eq!(stopped.len(), 1, "{stopped:?}");
+        assert!(stopped[0].ends_with(" by ticket:time-limit"), "{stopped:?}");
     }
 
     #[tokio::test]
