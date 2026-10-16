@@ -3720,6 +3720,25 @@ github_owners = ["docspec"]
     }
 
     #[test]
+    fn the_examples_chatgpt_endpoint_is_valid_once_uncommented() {
+        let on = EXAMPLE
+            .replace("# [endpoints.chatgpt]", "[endpoints.chatgpt]")
+            .replace(
+                "# provider = \"openai\"\n# base_url = \"https://api.openai.com/v1\"\n# auth = \"chatgpt\"",
+                "provider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"",
+            )
+            .replace(
+                "# auth_file = \"/var/lib/henk/openai-auth.json\"",
+                "auth_file = \"/var/lib/henk/openai-auth.json\"",
+            );
+        assert_ne!(on, EXAMPLE, "the example has the endpoint");
+        let settings = Config::parse(&on)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(settings.endpoints["chatgpt"].signs_in_with_chatgpt());
+    }
+
+    #[test]
     fn container_example_is_valid() {
         let text = include_str!("../../../deploy/henk.container.example.toml");
         let settings = Config::parse(text)
