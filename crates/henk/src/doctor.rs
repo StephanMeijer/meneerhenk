@@ -619,12 +619,7 @@ async fn check_sign_in(settings: &Settings, id: &str, file: &Path, probe: bool) 
         });
         (credentials, mode)
     });
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs()),
-    )
-    .unwrap_or(i64::MAX);
+    let now = unix_now();
     let check = sign_in_check(id, &loaded, now);
     if check.is_failure() || !probe {
         return check;
@@ -682,6 +677,33 @@ async fn check_sign_in(settings: &Settings, id: &str, file: &Path, probe: bool) 
 
 /// Seconds the access token must have left for a live call from `doctor`.
 const PROBE_MIN_LEFT: i64 = 600;
+
+/// Seconds since the epoch.
+fn unix_now() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+/// Whether a live call on this endpoint could renew its ChatGPT sign-in:
+/// the access token has [`PROBE_MIN_LEFT`] seconds or less left, or the file
+/// cannot be read. Any other endpoint is never renewed from here.
+fn probe_could_renew(settings: &Settings, endpoint_id: &str) -> bool {
+    let Some(file) = settings
+        .endpoints
+        .get(endpoint_id)
+        .filter(|endpoint| endpoint.signs_in_with_chatgpt())
+        .and_then(|endpoint| endpoint.sign_in_file())
+    else {
+        return false;
+    };
+    Credentials::load(file).map_or(true, |credentials| {
+        credentials.expires_at.saturating_sub(unix_now()) <= PROBE_MIN_LEFT
+    })
+}
 
 /// The text of a check's verdict.
 fn detail_of(check: &Check) -> &str {
@@ -785,6 +807,17 @@ async fn check_model(settings: &Settings, id: &str, probe: bool) -> Check {
     };
     if !probe {
         return Check::ok(name, format!("{} on {}", model.model, model.endpoint));
+    }
+    // The call would renew the sign-in and could race a running Henk (see
+    // `check_sign_in`); the endpoint check has said why.
+    if probe_could_renew(settings, &model.endpoint) {
+        return Check::warn(
+            name,
+            format!(
+                "{} on {}: not probed, because the sign-in is due for renewal and a running Henk may be renewing it",
+                model.model, model.endpoint
+            ),
+        );
     }
     let client = match settings
         .client_config(id, env_var)
@@ -1340,6 +1373,7 @@ mod tests {
         credentials.refreshed_at = now - 86_400;
         credentials.expires_at = now + 120;
         credentials.save(&file).unwrap();
+        let before = std::fs::read(&file).unwrap();
         let checks = check_models(&settings, false).await;
         let endpoint = checks.iter().find(|c| c.name == "endpoint c").unwrap();
         assert_eq!(verdict(endpoint).0, "ok", "{endpoint:?}");
@@ -1348,6 +1382,20 @@ mod tests {
         let endpoint = probed.iter().find(|c| c.name == "endpoint c").unwrap();
         assert_eq!(verdict(endpoint).0, "warn", "{endpoint:?}");
         assert!(verdict(endpoint).1.contains("no live call from here"));
+        // Nor does the model check call, so the file is as it was.
+        let model = probed.iter().find(|c| c.name == "model m").unwrap();
+        assert_eq!(verdict(model).0, "warn", "{model:?}");
+        assert!(verdict(model).1.contains("not probed"), "{model:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // An expired access token is the likeliest case, and the same.
+        credentials.expires_at = now - 3600;
+        credentials.save(&file).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let probed = check_models(&settings, true).await;
+        let model = probed.iter().find(|c| c.name == "model m").unwrap();
+        assert_eq!(verdict(model).0, "warn", "{model:?}");
+        assert!(verdict(model).1.contains("not probed"), "{model:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
         let rendered = render(&probed);
         for secret in SECRETS {
             assert!(!rendered.contains(secret), "{rendered}");
