@@ -47,6 +47,7 @@ mod review_many;
 mod roles;
 mod runs;
 mod server;
+mod sign_ins;
 mod skill_tools;
 mod skills;
 mod slot_queue;

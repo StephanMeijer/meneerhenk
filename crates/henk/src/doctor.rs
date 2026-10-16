@@ -604,7 +604,7 @@ fn probe_cap(settings: &Settings, model: &crate::config::ModelFileConfig) -> Opt
     let responses = settings
         .endpoints
         .get(&model.endpoint)
-        .is_some_and(|endpoint| endpoint.api == Some(henk_llm::Api::Responses));
+        .is_some_and(|endpoint| endpoint.api_in_use() == henk_llm::Api::Responses);
     (model.effort.is_none() && !responses).then_some(16)
 }
 
