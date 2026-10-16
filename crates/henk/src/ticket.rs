@@ -940,6 +940,14 @@ requester_id = 3
         async fn user_login(&self, _: u64) -> Result<String, henk_platform::PlatformError> {
             Err(unused())
         }
+        async fn open_pulls_behind(
+            &self,
+            _: &RepoRef,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<henk_platform::push::BehindPull>, henk_platform::PlatformError> {
+            Err(unused())
+        }
     }
 
     struct Fixture {
