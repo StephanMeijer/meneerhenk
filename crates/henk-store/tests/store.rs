@@ -18,11 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use henk_domain::allowlist::Platform;
-use henk_domain::run::{RunId, RunKind};
+use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::migrator::Migrator;
 use henk_store::{
-    NewRun, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore,
-    Stage, StageState, StageWrite, StoreError, TokenUsage, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventKey, EventWithOutcomes, FindingAction, InboundEvent, NewRun, OutcomeRecord, Page, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite, StoreError, TokenUsage, ToolCallRecord, TranscriptRecord,
 };
 use sea_orm_migration::MigratorTrait as _;
 
@@ -131,6 +130,154 @@ async fn opening_a_path_that_cannot_be_created_fails_at_once() {
     assert!(matches!(error, StoreError::Database(_)), "{error:?}");
 }
 
+fn inbound(id: &str, received_at: &str) -> InboundEvent {
+    InboundEvent {
+        id: EventId::parse(id).unwrap(),
+        received_at: received_at.into(),
+        source: "github_webhook".into(),
+        kind: "pull_request".into(),
+        repo: Some("o/r".into()),
+        target: Some(7),
+        payload: Some("{}".into()),
+        requester: None,
+    }
+}
+
+fn outcome(event: &str, run: &str) -> OutcomeRecord {
+    OutcomeRecord {
+        event_id: EventId::parse(event).unwrap(),
+        listener: "review".into(),
+        outcome: "started".into(),
+        detail: String::new(),
+        run_id: Some(run.into()),
+        at: String::new(),
+    }
+}
+
+fn draft(id: &str) -> DraftRecord {
+    DraftRecord {
+        at: String::new(),
+        draft: id.into(),
+        session: "reviewer".into(),
+        model: "m".into(),
+        kind: "finding".into(),
+        path: "src/a.rs".into(),
+        line: 3,
+        target: "t".into(),
+        body: "b".into(),
+        decision: None,
+    }
+}
+
+fn decision() -> DraftDecision {
+    DraftDecision {
+        at: String::new(),
+        verdict: DraftVerdict::Confirmed,
+        checker: "checker".into(),
+        reason: "r".into(),
+        same_as: String::new(),
+        comment_id: "c-1".into(),
+    }
+}
+
+fn tool_call() -> ToolCallRecord {
+    ToolCallRecord {
+        at: String::new(),
+        session: "reviewer".into(),
+        model: "m".into(),
+        turn: 1,
+        tool: "read_file".into(),
+        origin: "builtin".into(),
+        outcome: "ok".into(),
+        arguments: "{}".into(),
+        arguments_len: 2,
+        result_chars: 5,
+        elapsed_ms: 3,
+    }
+}
+
+/// #216 for inbound events: of two events received in the same second, the
+/// one received 0.4 s later is the newer, though its time sorts before the
+/// other as text. The listing, its keyset and the events of a run all say so.
+#[tokio::test]
+async fn inbound_events_are_ordered_by_when_they_were_received_as_a_time() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.create_run(&new_run("r-1", 7)).await.unwrap();
+    let run = RunId::parse("r-1").unwrap();
+    for (id, at) in [
+        ("e-b", "2026-10-07T12:00:00Z"),
+        ("e-a", "2026-10-07T12:00:00.4Z"),
+        ("e-c", "2026-10-07T12:00:01Z"),
+    ] {
+        store.record_event(&inbound(id, at)).await.unwrap();
+        store.record_outcome(&outcome(id, "r-1")).await.unwrap();
+    }
+    let ids = |events: &[EventWithOutcomes]| {
+        events
+            .iter()
+            .map(|e| e.event.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let all = store
+        .list_inbound_events(&EventFilter::default(), Page::new(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(ids(&all), ["e-c", "e-a", "e-b"], "newest first, as a time");
+
+    let after_a = EventFilter {
+        before: Some(EventKey {
+            received_at: "2026-10-07T12:00:00.4Z".into(),
+            id: "e-a".into(),
+        }),
+        ..EventFilter::default()
+    };
+    let rest = store
+        .list_inbound_events(&after_a, Page::new(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(ids(&rest), ["e-b"], "the page after e-a");
+
+    let of_run: Vec<_> = store
+        .inbound_events_for_run(&run)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id.as_str().to_owned())
+        .collect();
+    assert_eq!(of_run, ["e-b", "e-a", "e-c"], "oldest first, as a time");
+}
+
+#[tokio::test]
+async fn pruning_deletes_the_old_events_with_their_outcomes_and_keeps_the_rest() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.create_run(&new_run("r-1", 7)).await.unwrap();
+    for (id, at) in [
+        ("e-old", "2020-01-01T00:00:00Z"),
+        ("e-new", "2099-01-01T00:00:00Z"),
+    ] {
+        store.record_event(&inbound(id, at)).await.unwrap();
+        store.record_outcome(&outcome(id, "r-1")).await.unwrap();
+    }
+
+    let pruned = store
+        .prune_events(time::OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (pruned.events, pruned.outcomes, pruned.transcripts),
+        (1, 1, 0)
+    );
+    let left = store
+        .list_inbound_events(&EventFilter::default(), Page::new(10, 0))
+        .await
+        .unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].event.id.as_str(), "e-new");
+    assert_eq!(left[0].outcomes.len(), 1);
+}
+
 /// Eight writers, each making runs and writing their stages, heartbeats and
 /// ends through one store: nothing fails with "database is locked".
 async fn eight_writers(store: Arc<dyn RunStore>) {
@@ -170,6 +317,28 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
                         )
                         .await
                         .unwrap();
+                        .record_finding(
+                            &run.id,
+                            "reviewer",
+                            "src/a.rs",
+                            3,
+                            "c-1",
+                            FindingAction::Posted,
+                        )
+                        .await
+                        .unwrap();
+                    store.record_draft(&run.id, &draft("d-1")).await.unwrap();
+                    store
+                        .decide_draft(&run.id, "d-1", &decision())
+                        .await
+                        .unwrap();
+                    store.record_tool_call(&run.id, &tool_call()).await.unwrap();
+                    let event = format!("e-w{writer}-{n}");
+                    store.record_event(&inbound(&event, "")).await.unwrap();
+                    store
+                        .record_outcome(&outcome(&event, run.id.as_str()))
+                        .await
+                        .unwrap();
                     store
                         .finish_run(&run.id, RunStatus::Finished, Some("done"), None)
                         .await
@@ -186,6 +355,14 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
     assert_eq!(store.sessions(&run).await.unwrap().len(), 1);
     assert_eq!(store.events(&run).await.unwrap().len(), 1);
     assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
+    assert_eq!(store.findings(&run).await.unwrap().len(), 1);
+    let drafts = store.drafts(&run).await.unwrap();
+    assert_eq!(
+        drafts[0].decision.as_ref().map(|d| d.verdict),
+        Some(DraftVerdict::Confirmed)
+    );
+    assert_eq!(store.tool_calls(&run).await.unwrap().len(), 1);
+    assert_eq!(store.inbound_events_for_run(&run).await.unwrap().len(), 1);
 }
 
 fn transcript(session: &str, body: &str) -> TranscriptRecord {
