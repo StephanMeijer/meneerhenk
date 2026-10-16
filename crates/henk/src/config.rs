@@ -3735,7 +3735,13 @@ github_owners = ["docspec"]
         let settings = Config::parse(&on)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert!(settings.endpoints["chatgpt"].signs_in_with_chatgpt());
+        assert!(
+            settings
+                .endpoints
+                .get("chatgpt")
+                .unwrap()
+                .signs_in_with_chatgpt()
+        );
     }
 
     #[test]
