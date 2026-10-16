@@ -973,6 +973,17 @@ pub(crate) mod tests {
     /// `feature` changed the same line of `src/a.rs` too. The head of
     /// `feature` is returned.
     pub(crate) async fn diverged_remote(name: &str, clash: bool) -> (ScratchDir, CommitSha) {
+        diverged_remote_clashing(name, usize::from(clash)).await
+    }
+
+    /// [`diverged_remote`] where `clashes` commits of `feature` stop on a
+    /// conflict when it is rebased: the first changes the line of `src/a.rs`
+    /// that `main` changed, each later one the line of its own file
+    /// `src/c<n>.rs` that `main` changed.
+    pub(crate) async fn diverged_remote_clashing(
+        name: &str,
+        clashes: usize,
+    ) -> (ScratchDir, CommitSha) {
         let remote = ScratchDir::new(&format!("{name}-remote")).unwrap();
         let seed = ScratchDir::new(&format!("{name}-seed")).unwrap();
         let s = seed.path().to_path_buf();
@@ -1003,15 +1014,28 @@ pub(crate) mod tests {
         };
         std::fs::create_dir_all(s.join("src")).unwrap();
         std::fs::write(s.join("src/a.rs"), "let x = 1;\n").unwrap();
+        for n in 2..=clashes {
+            std::fs::write(s.join(format!("src/c{n}.rs")), format!("let c{n} = 1;\n")).unwrap();
+        }
         seeded.commit(&author, "Seed\n").await.unwrap();
         git(words("checkout --quiet -b feature")).await;
         std::fs::write(s.join("src/b.rs"), "let y = 2;\n").unwrap();
-        if clash {
+        if clashes > 0 {
             std::fs::write(s.join("src/a.rs"), "let x = 3;\n").unwrap();
         }
-        let head = seeded.commit(&author, "Add b\n").await.unwrap();
+        let mut head = seeded.commit(&author, "Add b\n").await.unwrap();
+        for n in 2..=clashes {
+            std::fs::write(s.join(format!("src/c{n}.rs")), format!("let c{n} = 3;\n")).unwrap();
+            head = seeded
+                .commit(&author, &format!("Change c{n} on feature\n"))
+                .await
+                .unwrap();
+        }
         git(words("checkout --quiet main")).await;
         std::fs::write(s.join("src/a.rs"), "let x = 2;\n").unwrap();
+        for n in 2..=clashes {
+            std::fs::write(s.join(format!("src/c{n}.rs")), format!("let c{n} = 2;\n")).unwrap();
+        }
         seeded.commit(&author, "Change a\n").await.unwrap();
         let url = remote.path().to_string_lossy().into_owned();
         for branch in ["main", "feature"] {
