@@ -6,8 +6,6 @@ use std::fmt;
 use henk_domain::allowlist::Platform;
 use henk_domain::role::Role;
 use henk_domain::run::{EventId, RunId, RunKind};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 /// Why a store operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -1352,16 +1350,6 @@ pub enum OutcomeFilter {
     Problems,
 }
 
-impl OutcomeFilter {
-    /// The text a query parameter takes.
-    pub(crate) fn param(filter: Option<&Self>) -> Option<&str> {
-        filter.map(|f| match f {
-            Self::Is(outcome) => outcome.as_str(),
-            Self::Problems => "problems",
-        })
-    }
-}
-
 /// Where a tool call sits in a newest-first listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallKey {
@@ -1475,14 +1463,6 @@ pub(crate) fn attach_outcomes(
 
 /// Payloads larger than this are not recorded; the event still is.
 pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
-
-/// Now, as RFC 3339.
-#[must_use]
-pub(crate) fn now() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
-}
 
 pub(crate) fn kind_str(kind: RunKind) -> &'static str {
     match kind {

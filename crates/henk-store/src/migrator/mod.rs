@@ -5,6 +5,7 @@ mod m002_run_instant;
 mod m003_run_children;
 mod m004_run_indexes;
 mod m005_session_constraint_names;
+mod m006_inbound_events_instant;
 
 use async_trait::async_trait;
 use sea_orm::{
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m003_run_children::Step),
             Box::new(m004_run_indexes::Step),
             Box::new(m005_session_constraint_names::Step),
+            Box::new(m006_inbound_events_instant::Step),
         ]
     }
 }

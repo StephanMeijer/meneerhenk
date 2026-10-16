@@ -427,7 +427,7 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn adopting_adds_three_indexes_to_what_the_old_store_made_and_nothing_else() {
+    async fn adopting_adds_four_indexes_to_what_the_old_store_made_and_nothing_else() {
         let file = File::new();
         made_by_the_old_store(&file);
         let db = connect(&file.0).await;
@@ -442,6 +442,7 @@ mod sqlite {
             [
                 "index events.events_run unique=0 partial=0 (run_id ASC)",
                 "index findings.findings_run unique=0 partial=0 (run_id ASC)",
+                "index inbound_events.inbound_events_received_instant unique=0 partial=0 (<expression> ASC, id ASC)",
                 "index sessions.sessions_run unique=0 partial=0 (run_id ASC)",
             ]
         );

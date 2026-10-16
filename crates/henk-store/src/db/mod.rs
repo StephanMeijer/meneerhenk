@@ -12,10 +12,14 @@
 //! here, `SqliteStore` and `PgStore` implement the trait and hand the moved
 //! methods to a [`Store`] that opens the same database.
 
+mod calls;
 mod dialect;
+mod findings;
+mod inbound;
 mod runs;
 mod sessions;
 mod stages;
+mod stats;
 mod timeline;
 
 use std::fmt;
@@ -260,7 +264,7 @@ mod tests {
 
     use super::runs::list_runs_query;
     use super::*;
-    use crate::types::{Page, RunFilter, RunKey, RunStatus};
+    use crate::types::{EventFilter, Page, RunFilter, RunKey, RunStatus};
 
     fn mode(url: &str) -> PgSslMode {
         harden_tls(url.parse().unwrap()).get_ssl_mode()
@@ -445,6 +449,116 @@ mod tests {
             plan.iter()
                 .any(|step| step.contains("USING INDEX runs_started_instant")),
             "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+
+    /// The events page on each database, without one: the instant orders the
+    /// listing on SQLite, and the day of a time is one raw expression per
+    /// database.
+    #[test]
+    fn the_events_listing_and_the_day_of_a_time_are_one_builder_and_two_dialects() {
+        use super::inbound::list_inbound_events_query;
+
+        let sql = |backend: DbBackend| {
+            let query = list_inbound_events_query(
+                backend.into(),
+                &EventFilter::default(),
+                Page::new(20, 0),
+            )
+            .unwrap();
+            backend.build(&query).sql
+        };
+        let sqlite = sql(DbBackend::Sqlite);
+        assert!(
+            sqlite.contains("ORDER BY substr(received_at, 1, 19)")
+                && sqlite.contains("DESC, \"id\" DESC"),
+            "{sqlite}"
+        );
+        let postgres = sql(DbBackend::Postgres);
+        assert!(
+            postgres.contains("ORDER BY received_at DESC, \"id\" DESC")
+                && !postgres.contains("substr("),
+            "{postgres}"
+        );
+
+        let day = |backend: DbBackend| {
+            let mut query = sea_orm::sea_query::Query::select();
+            query
+                .expr(Dialect::from(backend).day("started_at"))
+                .from("runs");
+            backend.build(&query).sql
+        };
+        assert!(day(DbBackend::Sqlite).contains("substr(started_at, 1, 10)"));
+        assert!(
+            day(DbBackend::Postgres)
+                .contains("to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')")
+        );
+    }
+
+    /// #216 for inbound events: the listing walks the instant index
+    /// (`m006_inbound_events_instant`) instead of sorting the table, so the
+    /// expression built here and the index stay the same text.
+    #[tokio::test]
+    async fn the_events_listing_walks_the_instant_index_instead_of_sorting() {
+        use super::inbound::list_inbound_events_query;
+
+        let path = std::env::temp_dir().join(format!(
+            "henk-plan-events-{}-{}.db",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = Store::sqlite(&path);
+        let db = store.connection().await.unwrap();
+        // The planner picks by what it expects of the table: give it one that
+        // is not empty, as the page's is.
+        db.execute_unprepared(
+            "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 2000)
+             INSERT INTO inbound_events (id, received_at, source, kind)
+             SELECT 'e-' || n, strftime('%Y-%m-%dT%H:%M:%SZ', 1790000000 + n, 'unixepoch'), 'github_webhook', 'push'
+             FROM c",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared("ANALYZE").await.unwrap();
+        let query =
+            list_inbound_events_query(Dialect::Sqlite, &EventFilter::default(), Page::new(50, 0))
+                .unwrap();
+        let statement = DbBackend::Sqlite.build(&query);
+        let plan: Vec<String> = db
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                format!("EXPLAIN QUERY PLAN {}", statement.sql),
+                statement.values.map_or_else(Vec::new, |values| values.0),
+            ))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(3).unwrap())
+            .collect();
+        let indexes: Vec<String> = db
+            .query_all_raw(sea_orm::Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'inbound_events'",
+            ))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get_by_index::<String>(0).unwrap())
+            .collect();
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("USING INDEX inbound_events_received_instant")),
+            "{plan:?} {indexes:?} for {}",
+            statement.sql
         );
         assert!(
             !plan.iter().any(|step| step.contains("TEMP B-TREE")),

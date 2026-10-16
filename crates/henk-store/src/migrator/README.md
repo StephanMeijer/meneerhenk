@@ -17,14 +17,16 @@ One file per step, `m001_baseline.rs` onwards, registered in order in
   never got; now both have them.
 - `m005_session_constraint_names`: `PostgreSQL` only; the `sessions` table was
   `lanes` once, and a rename keeps the old names of its constraints.
+- `m006_inbound_events_instant`: SQLite only; the expression index the events
+  page lists by (#216 for inbound events), as `m002` is for runs.
 
 # Adding a migration
 
-1. Create `m<next number>_<what_it_does>.rs` next to the others (`m006_...`
-   after `m005`): a unit struct `Step` that implements `MigrationName` (the
+1. Create `m<next number>_<what_it_does>.rs` next to the others (`m007_...`
+   after `m006`): a unit struct `Step` that implements `MigrationName` (the
    file's name, without `.rs`) and `MigrationTrait`. Copy `m004_run_indexes.rs`;
    it is the smallest.
-2. Add `mod m006_<what_it_does>;` and `Box::new(m006_<what_it_does>::Step)` at
+2. Add `mod m007_<what_it_does>;` and `Box::new(m007_<what_it_does>::Step)` at
    the **end** of [`Migrator::migrations`]. Never edit, reorder or remove a
    step that has shipped: a database that ran it keeps its name, and a
    changed step runs only on new databases.

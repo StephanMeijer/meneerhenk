@@ -50,6 +50,30 @@ impl Dialect {
         }
     }
 
+    /// The UTC day of a stored time, as `YYYY-MM-DD` text.
+    ///
+    /// RAW: SQLite's stored times are UTC RFC 3339, so the first ten
+    /// characters are the day; `PostgreSQL` formats its timestamp.
+    pub(crate) fn day(self, column: &str) -> Expr {
+        match self {
+            Self::Sqlite => Expr::cust(format!("substr({column}, 1, 10)")),
+            Self::Postgres => Expr::cust(format!(
+                "to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+            )),
+        }
+    }
+
+    /// The order a table without a key column of its own is read in:
+    /// recording order, which on SQLite is the implicit `rowid`.
+    ///
+    /// RAW: `rowid` is not a column the query builder knows.
+    pub(crate) fn recorded_order(self) -> Expr {
+        Expr::cust(match self {
+            Self::Sqlite => "rowid",
+            Self::Postgres => "id",
+        })
+    }
+
     /// A bound to compare with [`Self::instant`], from RFC 3339 text.
     ///
     /// # Errors

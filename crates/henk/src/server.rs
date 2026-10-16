@@ -456,16 +456,20 @@ github_owners = ["docspec"]
         (status, String::from_utf8_lossy(&body).into_owned())
     }
 
-    async fn wait_for_outcomes(app: &Arc<App>, event: &str) -> usize {
+    /// Waits until `expected` listeners have recorded what they did with
+    /// `event`, and returns how many have. Waiting for any three is not
+    /// enough: the outcomes arrive one by one.
+    async fn wait_for_outcomes(app: &Arc<App>, event: &str, expected: usize) -> usize {
         let id = EventId::parse(event).unwrap();
-        for _ in 0..100 {
-            let n = app.store.outcomes(&id).await.map_or(0, |o| o.len());
-            if n >= 3 {
+        let mut n = 0;
+        for _ in 0..300 {
+            n = app.store.outcomes(&id).await.map_or(0, |o| o.len());
+            if n >= expected {
                 return n;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        0
+        n
     }
 
     #[tokio::test]
@@ -715,7 +719,7 @@ github_owners = ["docspec"]
             .unwrap()
             .to_owned();
         assert_eq!(
-            wait_for_outcomes(&app, &event).await,
+            wait_for_outcomes(&app, &event, 6).await,
             6,
             "every listener recorded an outcome"
         );
@@ -977,7 +981,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event, 6).await, 6);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1031,7 +1035,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event, 6).await, 6);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1055,7 +1059,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event, 6).await, 6);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())

@@ -9,8 +9,6 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use henk_domain::run::{EventId, RunId};
 use rustls_platform_verifier::BuilderVerifierExt as _;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use tokio_postgres::Row;
 use tokio_postgres::config::Host;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -18,12 +16,11 @@ use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RoundRecord, RunFilter, RunRecord,
-    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
-    event_id, merge_days, run_kind, run_platform, to_i64, to_u32, to_u64,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
+    PruneCounts, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -58,9 +55,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The run store over `PostgreSQL`.
 #[derive(Debug)]
 pub struct PgStore {
-    pool: Pool,
-    /// The methods that have moved to the new layer (#598) go here, to a
-    /// second pool on the same database; the rest still use `pool`.
+    /// Every method of the trait goes here (#598). The old migrations ran
+    /// through a pool of their own when the store was connected, and it is
+    /// gone again.
     store: Store,
 }
 
@@ -113,7 +110,7 @@ impl PgStore {
         Self::migrate(&pool, version).await?;
         // The new layer second: it adopts what the migrations above leave.
         let store = Store::postgres(url, migrate_new).await?;
-        Ok(Self { pool, store })
+        Ok(Self { store })
     }
 
     /// Applies the migrations up to `upto` the database lacks.
@@ -158,10 +155,6 @@ impl PgStore {
         }
         transaction.commit().await?;
         Ok(())
-    }
-
-    async fn client(&self) -> Result<deadpool_postgres::Object, StoreError> {
-        Ok(self.pool.get().await?)
     }
 }
 
@@ -211,73 +204,6 @@ fn tls() -> Result<MakeRustlsConnect, StoreError> {
     .map_err(|error| StoreError::Connect(error.to_string()))?
     .with_no_client_auth();
     Ok(MakeRustlsConnect::new(config))
-}
-
-fn now() -> OffsetDateTime {
-    OffsetDateTime::now_utc()
-}
-
-fn text(at: OffsetDateTime) -> String {
-    at.format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
-}
-
-/// A caller-supplied RFC 3339 time; empty means now.
-fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, StoreError> {
-    if value.is_empty() {
-        return Ok(now());
-    }
-    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| StoreError::Corrupt {
-        column,
-        value: value.to_owned(),
-    })
-}
-
-/// The time bounds of a tool call count or listing.
-fn window(
-    since: Option<&String>,
-    until: Option<&String>,
-) -> Result<(Option<OffsetDateTime>, Option<OffsetDateTime>), StoreError> {
-    let time = |column, value: Option<&String>| value.map(|v| parse_time(column, v)).transpose();
-    Ok((time("since", since)?, time("until", until)?))
-}
-
-/// The session row of a tool call `c`, as `s`, for its role.
-const CALL_SESSION: &str = "LEFT JOIN sessions s ON s.run_id = c.run_id AND s.name = c.session";
-
-/// The role of the session that made a tool call `c`, over
-/// [`CALL_SESSION`]. A call whose session has no row counts as a lane's.
-const CALL_ROLE: &str = "COALESCE(s.role, 'lane')";
-
-/// The tool a call `c` counts under, as [`crate::types::counted_as`] says:
-/// every tool that does not exist, which is every call with no origin, as
-/// one (#341). [`CALL_FILTER`] matches a tool the same way.
-const CALL_TOOL: &str = "CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END";
-
-/// The `WHERE` of a tool call tally or listing over `tool_calls c` and
-/// [`CALL_SESSION`], over parameters 1 to 5: tool, model, session role,
-/// since and until. A tool is matched as [`CALL_TOOL`]
-/// counts it.
-const CALL_FILTER: &str = "($1::text IS NULL OR CASE WHEN c.origin = '' THEN '(unknown)' ELSE c.tool END = $1) AND ($2::text IS NULL OR c.model = $2)
-     AND ($3::text IS NULL OR COALESCE(s.role, 'lane') = $3)
-     AND ($4::timestamptz IS NULL OR c.at >= $4)
-     AND ($5::timestamptz IS NULL OR c.at < $5)";
-
-fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
-    let id = event_id(row.try_get(0)?)?;
-    let target: Option<i64> = row.try_get(5)?;
-    Ok(InboundEvent {
-        id,
-        received_at: text(row.try_get(1)?),
-        source: row.try_get(2)?,
-        kind: row.try_get(3)?,
-        repo: row.try_get(4)?,
-        target: target
-            .map(|t| to_u64("inbound_events.target", t))
-            .transpose()?,
-        payload: row.try_get(6)?,
-        requester: row.try_get(7)?,
-    })
 }
 
 #[async_trait]
@@ -341,56 +267,7 @@ impl RunStore for PgStore {
     }
 
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
-        let client = self.client().await?;
-        let day = |column: &str| format!("to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD')");
-        let runs = client
-            .query(
-                &format!(
-                    "SELECT {}, COUNT(*), COUNT(*) FILTER (WHERE status = 'finished'),
-                        COUNT(*) FILTER (WHERE status = 'failed')
-                     FROM runs WHERE started_at >= $1 GROUP BY 1",
-                    day("started_at")
-                ),
-                &[&since],
-            )
-            .await?
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get(0)?,
-                    row.try_get(1)?,
-                    row.try_get(2)?,
-                    row.try_get(3)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        let findings = client
-            .query(
-                &format!(
-                    "SELECT {}, COUNT(*) FROM findings
-                     WHERE action IN ('posted', 'unverified') AND created_at >= $1 GROUP BY 1",
-                    day("created_at")
-                ),
-                &[&since],
-            )
-            .await?
-            .iter()
-            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        let drafts = client
-            .query(
-                &format!(
-                    "SELECT {}, COUNT(*) FROM drafts
-                     WHERE created_at >= $1 AND kind NOT IN ('loop_finding', 'plan_point', 'requirement_point') GROUP BY 1",
-                    day("created_at")
-                ),
-                &[&since],
-            )
-            .await?
-            .iter()
-            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        Ok(merge_days(runs, findings, drafts))
+        self.store.daily_stats(since).await
     }
 
     async fn sessions_of(
@@ -477,45 +354,13 @@ impl RunStore for PgStore {
         comment_id: &str,
         action: FindingAction,
     ) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO findings (run_id, session, path, line, comment_id, action, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                &[
-                    &run.as_str(),
-                    &session,
-                    &path,
-                    &i64::from(line_number),
-                    &comment_id,
-                    &action.as_str(),
-                    &now(),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store
+            .record_finding(run, session, path, line_number, comment_id, action)
+            .await
     }
 
     async fn record_draft(&self, run: &RunId, draft: &DraftRecord) -> Result<(), StoreError> {
-        let at = parse_time("drafts.created_at", &draft.at)?;
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO drafts (run_id, draft, session, model, kind, path, line, target, body, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (run_id, draft) DO UPDATE SET kind = excluded.kind, target = excluded.target, body = excluded.body",
-                &[
-                    &run.as_str(),
-                    &draft.draft,
-                    &draft.session,
-                    &draft.model,
-                    &draft.kind,
-                    &draft.path,
-                    &i64::from(draft.line),
-                    &draft.target,
-                    &draft.body,
-                    &at,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.record_draft(run, draft).await
     }
 
     async fn decide_draft(
@@ -524,67 +369,11 @@ impl RunStore for PgStore {
         draft: &str,
         decision: &DraftDecision,
     ) -> Result<(), StoreError> {
-        let at = parse_time("drafts.decided_at", &decision.at)?;
-        self.client()
-            .await?
-            .execute(
-                "UPDATE drafts SET verdict = $3, checker = $4, reason = $5, same_as = $6, comment_id = $7, decided_at = $8 WHERE run_id = $1 AND draft = $2",
-                &[
-                    &run.as_str(),
-                    &draft,
-                    &decision.verdict.as_str(),
-                    &decision.checker,
-                    &decision.reason,
-                    &decision.same_as,
-                    &decision.comment_id,
-                    &at,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.decide_draft(run, draft, decision).await
     }
 
     async fn drafts(&self, run: &RunId) -> Result<Vec<DraftRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT created_at, draft, session, model, kind, path, line, target, body, verdict, checker, reason, same_as, comment_id, decided_at FROM drafts WHERE run_id = $1 ORDER BY id",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                let line: i64 = row.try_get(6)?;
-                let verdict: Option<String> = row.try_get(9)?;
-                let decision = match verdict {
-                    Some(verdict) => Some(DraftDecision {
-                        at: row
-                            .try_get::<_, Option<OffsetDateTime>>(14)?
-                            .map(text)
-                            .unwrap_or_default(),
-                        verdict: draft_verdict(&verdict)?,
-                        checker: row.try_get(10)?,
-                        reason: row.try_get(11)?,
-                        same_as: row.try_get(12)?,
-                        comment_id: row.try_get(13)?,
-                    }),
-                    None => None,
-                };
-                Ok(DraftRecord {
-                    at: text(row.try_get(0)?),
-                    draft: row.try_get(1)?,
-                    session: row.try_get(2)?,
-                    model: row.try_get(3)?,
-                    kind: row.try_get(4)?,
-                    path: row.try_get(5)?,
-                    line: to_u32("drafts.line", line)?,
-                    target: row.try_get(7)?,
-                    body: row.try_get(8)?,
-                    decision,
-                })
-            })
-            .collect()
+        self.store.drafts(run).await
     }
 
     async fn record_transcript(
@@ -626,92 +415,15 @@ impl RunStore for PgStore {
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
-        let at = parse_time("tool_calls.at", &call.at)?;
-        let number = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO tool_calls (run_id, session, model, turn, tool, origin, outcome, arguments, arguments_len, result_chars, elapsed_ms, at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-                &[
-                    &run.as_str(),
-                    &call.session,
-                    &call.model,
-                    &i64::from(call.turn),
-                    &call.tool,
-                    &call.origin,
-                    &call.outcome,
-                    &call.arguments,
-                    &number(call.arguments_len),
-                    &number(call.result_chars),
-                    &number(call.elapsed_ms),
-                    &at,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.record_tool_call(run, call).await
     }
 
     async fn tool_calls(&self, run: &RunId) -> Result<Vec<ToolCallRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT at, session, model, turn, tool, origin, outcome, arguments, arguments_len, result_chars, elapsed_ms FROM tool_calls WHERE run_id = $1 ORDER BY id",
-                &[&run.as_str()],
-            )
-            .await?;
-        let number = |n: i64| u64::try_from(n).unwrap_or_default();
-        rows.iter()
-            .map(|row| {
-                let turn: i64 = row.try_get(3)?;
-                Ok(ToolCallRecord {
-                    at: text(row.try_get(0)?),
-                    session: row.try_get(1)?,
-                    model: row.try_get(2)?,
-                    turn: to_u32("tool_calls.turn", turn)?,
-                    tool: row.try_get(4)?,
-                    origin: row.try_get(5)?,
-                    outcome: row.try_get(6)?,
-                    arguments: row.try_get(7)?,
-                    arguments_len: number(row.try_get(8)?),
-                    result_chars: number(row.try_get(9)?),
-                    elapsed_ms: number(row.try_get(10)?),
-                })
-            })
-            .collect()
+        self.store.tool_calls(run).await
     }
 
     async fn tool_usage(&self, filter: &ToolCallFilter) -> Result<Vec<ToolUsage>, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let role = filter.role.map(SessionRole::as_str);
-        let rows = self
-            .client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT c.model, {CALL_ROLE}, {CALL_TOOL}, c.outcome, COUNT(*),
-                            COALESCE(SUM(c.elapsed_ms), 0)::BIGINT
-                     FROM tool_calls c {CALL_SESSION} WHERE {CALL_FILTER}
-                     GROUP BY c.model, 2, 3, c.outcome"
-                ),
-                &[&filter.tool, &filter.model, &role, &since, &until],
-            )
-            .await?;
-        let number = |n: i64| u64::try_from(n).unwrap_or_default();
-        let rows = rows
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get(0)?,
-                    row.try_get(1)?,
-                    row.try_get(2)?,
-                    row.try_get(3)?,
-                    number(row.try_get(4)?),
-                    number(row.try_get(5)?),
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        Ok(ToolUsage::across_runs(rows))
+        self.store.tool_usage(filter).await
     }
 
     async fn list_tool_calls(
@@ -719,101 +431,11 @@ impl RunStore for PgStore {
         filter: &ToolCallFilter,
         page: Page,
     ) -> Result<Vec<ToolCallListing>, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        let role = filter.role.map(SessionRole::as_str);
-        let outcome = OutcomeFilter::param(filter.outcome.as_ref());
-        let before_at = filter
-            .before
-            .as_ref()
-            .map(|k| parse_time("at", &k.at))
-            .transpose()?;
-        let before_id = filter.before.as_ref().map(|k| k.id);
-        let rows = self
-            .client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT c.id, c.run_id, r.repo, r.target, r.platform, c.at, c.session, c.model,
-                            c.turn, c.tool, c.origin, c.outcome, c.arguments, c.arguments_len,
-                            c.result_chars, c.elapsed_ms,
-                            EXISTS (SELECT 1 FROM transcripts t
-                                    WHERE t.run_id = c.run_id AND t.session = c.session),
-                            r.kind
-                     FROM tool_calls c JOIN runs r ON r.id = c.run_id {CALL_SESSION}
-                     WHERE {CALL_FILTER}
-                       AND ($6::text IS NULL OR ($6 = 'problems' AND c.outcome <> 'ok') OR c.outcome = $6)
-                       AND ($7::timestamptz IS NULL OR c.at < $7 OR (c.at = $7 AND c.id < $8::bigint))
-                     ORDER BY c.at DESC, c.id DESC LIMIT $9 OFFSET $10"
-                ),
-                &[
-                    &filter.tool,
-                    &filter.model,
-                    &role,
-                    &since,
-                    &until,
-                    &outcome,
-                    &before_at,
-                    &before_id,
-                    &i64::from(page.limit()),
-                    &i64::from(page.offset()),
-                ],
-            )
-            .await?;
-        let number = |n: i64| u64::try_from(n).unwrap_or_default();
-        rows.iter()
-            .map(|row| {
-                let target: i64 = row.try_get(3)?;
-                let platform: String = row.try_get(4)?;
-                let turn: i64 = row.try_get(8)?;
-                let kind: String = row.try_get(17)?;
-                Ok(ToolCallListing {
-                    id: row.try_get(0)?,
-                    run_id: row.try_get(1)?,
-                    repo: row.try_get(2)?,
-                    target: to_u64("runs.target", target)?,
-                    platform: run_platform(platform)?,
-                    kind: run_kind(kind)?,
-                    call: ToolCallRecord {
-                        at: text(row.try_get(5)?),
-                        session: row.try_get(6)?,
-                        model: row.try_get(7)?,
-                        turn: to_u32("tool_calls.turn", turn)?,
-                        tool: row.try_get(9)?,
-                        origin: row.try_get(10)?,
-                        outcome: row.try_get(11)?,
-                        arguments: row.try_get(12)?,
-                        arguments_len: number(row.try_get(13)?),
-                        result_chars: number(row.try_get(14)?),
-                        elapsed_ms: number(row.try_get(15)?),
-                    },
-                    transcript_kept: row.try_get(16)?,
-                })
-            })
-            .collect()
+        self.store.list_tool_calls(filter, page).await
     }
 
     async fn findings(&self, run: &RunId) -> Result<Vec<FindingRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT created_at, session, path, line, comment_id, action FROM findings WHERE run_id = $1 ORDER BY id",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                let line: i64 = row.try_get(3)?;
-                Ok(FindingRecord {
-                    at: text(row.try_get(0)?),
-                    session: row.try_get(1)?,
-                    path: row.try_get(2)?,
-                    line: to_u32("findings.line", line)?,
-                    comment_id: row.try_get(4)?,
-                    action: row.try_get(5)?,
-                })
-            })
-            .collect()
+        self.store.findings(run).await
     }
 
     async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
@@ -829,147 +451,31 @@ impl RunStore for PgStore {
     }
 
     async fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
-        let payload = event
-            .payload
-            .as_deref()
-            .filter(|p| p.len() <= MAX_PAYLOAD_BYTES);
-        let target = event
-            .target
-            .map(|t| to_i64("inbound_events.target", t))
-            .transpose()?;
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO inbound_events (id, received_at, source, kind, repo, target, payload, requester) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &event.id.as_str(),
-                    &parse_time("inbound_events.received_at", &event.received_at)?,
-                    &event.source,
-                    &event.kind,
-                    &event.repo,
-                    &target,
-                    &payload,
-                    &event.requester,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.record_event(event).await
     }
 
     async fn record_outcome(&self, outcome: &OutcomeRecord) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO event_outcomes (event_id, listener, outcome, detail, run_id, at) VALUES ($1, $2, $3, $4, $5, $6)",
-                &[
-                    &outcome.event_id.as_str(),
-                    &outcome.listener,
-                    &outcome.outcome,
-                    &outcome.detail,
-                    &outcome.run_id,
-                    &parse_time("event_outcomes.at", &outcome.at)?,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.record_outcome(outcome).await
     }
 
     async fn inbound_event(&self, id: &EventId) -> Result<Option<InboundEvent>, StoreError> {
-        self.client()
-            .await?
-            .query_opt(
-                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events WHERE id = $1",
-                &[&id.as_str()],
-            )
-            .await?
-            .map(|row| inbound_event(&row))
-            .transpose()
+        self.store.inbound_event(id).await
     }
 
     async fn event_facets(&self) -> Result<EventFacets, StoreError> {
-        let client = self.client().await?;
-        let mut facets = EventFacets::default();
-        for (column, values) in [("source", &mut facets.sources), ("kind", &mut facets.kinds)] {
-            *values = client
-                .query(
-                    &format!("SELECT DISTINCT {column} FROM inbound_events ORDER BY 1"),
-                    &[],
-                )
-                .await?
-                .iter()
-                .map(|row| row.try_get(0))
-                .collect::<Result<Vec<String>, _>>()?;
-        }
-        Ok(facets)
+        self.store.event_facets().await
     }
 
     async fn outcomes(&self, id: &EventId) -> Result<Vec<OutcomeRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT listener, outcome, detail, run_id, at FROM event_outcomes WHERE event_id = $1 ORDER BY id",
-                &[&id.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(OutcomeRecord {
-                    event_id: id.clone(),
-                    listener: row.try_get(0)?,
-                    outcome: row.try_get(1)?,
-                    detail: row.try_get(2)?,
-                    run_id: row.try_get(3)?,
-                    at: text(row.try_get(4)?),
-                })
-            })
-            .collect()
+        self.store.outcomes(id).await
     }
 
     async fn prune_events(&self, older_than: OffsetDateTime) -> Result<PruneCounts, StoreError> {
-        let mut client = self.client().await?;
-        let transaction = client.transaction().await?;
-        let outcomes = transaction
-            .execute(
-                "DELETE FROM event_outcomes WHERE event_id IN
-                 (SELECT id FROM inbound_events WHERE received_at < $1)",
-                &[&older_than],
-            )
-            .await?;
-        let events = transaction
-            .execute(
-                "DELETE FROM inbound_events WHERE received_at < $1",
-                &[&older_than],
-            )
-            .await?;
-        let transcripts = transaction
-            .execute(
-                "DELETE FROM transcripts WHERE recorded_at < $1",
-                &[&older_than],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(PruneCounts {
-            events,
-            outcomes,
-            transcripts,
-        })
+        self.store.prune_events(older_than).await
     }
 
     async fn inbound_events_for_run(&self, run: &RunId) -> Result<Vec<InboundEvent>, StoreError> {
-        // One query, unlike SQLite's lookup per id: here each lookup is a round trip.
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT e.id, e.received_at, e.source, e.kind, e.repo, e.target, e.payload, e.requester
-                 FROM inbound_events e
-                 WHERE e.id IN (SELECT o.event_id FROM event_outcomes o WHERE o.run_id = $1)
-                 ORDER BY e.received_at, e.id",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter().map(inbound_event).collect()
+        self.store.inbound_events_for_run(run).await
     }
 
     async fn list_runs(
@@ -989,58 +495,6 @@ impl RunStore for PgStore {
         filter: &EventFilter,
         page: Page,
     ) -> Result<Vec<EventWithOutcomes>, StoreError> {
-        let before_at = filter
-            .before
-            .as_ref()
-            .map(|k| parse_time("received_at", &k.received_at))
-            .transpose()?;
-        let before_id = filter.before.as_ref().map(|k| k.id.as_str());
-        let client = self.client().await?;
-        let events = client
-            .query(
-                "SELECT id, received_at, source, kind, repo, target, payload, requester FROM inbound_events
-                 WHERE ($1::text IS NULL OR source = $1) AND ($2::text IS NULL OR kind = $2)
-                   AND ($3::text IS NULL OR repo = $3)
-                   AND ($4::timestamptz IS NULL OR received_at < $4
-                        OR (received_at = $4 AND id < $5::text))
-                 ORDER BY received_at DESC, id DESC LIMIT $6 OFFSET $7",
-                &[
-                    &filter.source,
-                    &filter.kind,
-                    &filter.repo,
-                    &before_at,
-                    &before_id,
-                    &i64::from(page.limit()),
-                    &i64::from(page.offset()),
-                ],
-            )
-            .await?
-            .iter()
-            .map(inbound_event)
-            .collect::<Result<Vec<_>, _>>()?;
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-        // One query for every outcome of the page, not one per event.
-        let ids: Vec<String> = events.iter().map(|e| e.id.as_str().to_owned()).collect();
-        let rows = client
-            .query(
-                "SELECT event_id, listener, outcome, detail, run_id, at FROM event_outcomes
-                 WHERE event_id = ANY($1) ORDER BY id",
-                &[&ids],
-            )
-            .await?;
-        let mut outcomes = Vec::with_capacity(rows.len());
-        for row in &rows {
-            outcomes.push(OutcomeRow {
-                event_id: row.try_get(0)?,
-                listener: row.try_get(1)?,
-                outcome: row.try_get(2)?,
-                detail: row.try_get(3)?,
-                run_id: row.try_get(4)?,
-                at: text(row.try_get(5)?),
-            });
-        }
-        Ok(attach_outcomes(events, &outcomes))
+        self.store.list_inbound_events(filter, page).await
     }
 }
