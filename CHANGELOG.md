@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.11](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.10...v0.4.11) - 2026-10-16
+
+### Fixed
+
+- *(ticket)* drop the second open_pulls_behind on the NoPush test double ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- *(ticket)* the test push writer answers open_pulls_behind
+
+### Other
+
+- autonomous ticket runs ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+
 ## [0.4.10](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.9...v0.4.10) - 2026-10-16
 
 ### Added
