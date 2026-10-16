@@ -71,6 +71,27 @@ pub enum LlmError {
     /// The configuration cannot produce a client.
     #[error("invalid model configuration: {0}")]
     InvalidConfig(String),
+    /// The ChatGPT sign-in of an endpoint is gone: OpenAI will not renew it,
+    /// or there is none yet (#620). Not retried; a new sign-in fixes it.
+    #[error(
+        "the ChatGPT sign-in of endpoint {endpoint} cannot be used ({reason}); sign in again with `henk auth openai`"
+    )]
+    SignedOut {
+        /// The endpoint, as configuration names it.
+        endpoint: String,
+        /// A short word for why: OpenAI's error code, or that there is no
+        /// sign-in file yet. Never a token.
+        reason: String,
+    },
+    /// The file that holds an endpoint's ChatGPT sign-in cannot be read or
+    /// written (#620). Not retried.
+    #[error("the sign-in file of endpoint {endpoint} cannot be used: {problem}")]
+    CredentialFile {
+        /// The endpoint, as configuration names it.
+        endpoint: String,
+        /// What is wrong, never including a token.
+        problem: String,
+    },
 }
 
 impl LlmError {
@@ -87,7 +108,9 @@ impl LlmError {
             | Self::EffortRejected { .. }
             | Self::Decode(_)
             | Self::RetriesExhausted { .. }
-            | Self::InvalidConfig(_) => false,
+            | Self::InvalidConfig(_)
+            | Self::SignedOut { .. }
+            | Self::CredentialFile { .. } => false,
         }
     }
 
