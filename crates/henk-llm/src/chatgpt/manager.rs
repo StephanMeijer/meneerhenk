@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 
 use super::credentials::{Credentials, write_atomic};
@@ -48,13 +48,18 @@ fn system_clock() -> Clock {
 
 /// Keeps one endpoint's ChatGPT sign-in valid. See the module documentation
 /// for what it promises.
+///
+/// Cloning gives another handle on the same state. A renewal runs in a task
+/// of its own with such a handle, so that a caller who gives up does not
+/// lose the tokens a renewal already brought.
+#[derive(Clone)]
 pub struct TokenManager {
     endpoint: String,
     path: PathBuf,
     token_url: String,
     http: reqwest::Client,
     clock: Clock,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
 }
 
 impl fmt::Debug for TokenManager {
@@ -104,7 +109,7 @@ impl TokenManager {
             token_url: TOKEN_URL.to_owned(),
             http,
             clock: system_clock(),
-            state: Mutex::new(State::default()),
+            state: Arc::new(Mutex::new(State::default())),
         }
     }
 
@@ -145,11 +150,17 @@ impl TokenManager {
         let metadata = match tokio::fs::metadata(&self.path).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if state.credentials.is_some() {
-                    // Keep going from memory, and write the file again.
-                    state.unsaved = true;
-                    state.stamp = None;
+                state.stamp = None;
+                if state.credentials.is_some() && !state.unsaved {
+                    // The file was removed, to sign out or to replace it: it
+                    // is not written back. A new file revives the endpoint.
+                    warn!(endpoint = %self.endpoint, "the sign-in file was removed");
+                    state.credentials = None;
+                    state.force = false;
+                    state.signed_out = Some("sign-in file removed".to_owned());
                 }
+                // Tokens that are not saved yet are kept, and written at the
+                // next call.
                 return Ok(());
             }
             Err(error) => {
@@ -284,29 +295,13 @@ struct Renewed {
     earliest_refresh_at: Option<Value>,
 }
 
-#[async_trait::async_trait]
-impl TokenSource for TokenManager {
-    async fn bearer(&self) -> Result<SecretString, LlmError> {
-        // The lock is held through a renewal: callers that arrive meanwhile
-        // wait, then find the new token and take it.
-        let mut state = self.state.lock().await;
-        self.reload(&mut state).await?;
-        if let Some(reason) = state.signed_out.clone() {
-            return Err(self.signed_out(&reason));
-        }
-        if state.credentials.is_none() {
-            return Err(self.signed_out("no sign-in file yet"));
-        }
-        if state.unsaved {
-            self.save(&mut state).await?;
-        }
-        let Some(current) = state.credentials.clone() else {
-            return Err(self.signed_out("no sign-in file yet"));
-        };
-        if !state.force && self.now().saturating_add(RENEW_BEFORE) < current.expires_at {
-            return Ok(current.access_token);
-        }
-        debug!(endpoint = %self.endpoint, "renewing the ChatGPT sign-in");
+impl TokenManager {
+    /// Renews `current`, saves the new pair, and returns the new access token.
+    async fn renew_and_save(
+        &self,
+        mut state: OwnedMutexGuard<State>,
+        current: Credentials,
+    ) -> Result<SecretString, LlmError> {
         match self.renew(&current).await {
             Ok(next) => {
                 state.credentials = Some(next.clone());
@@ -327,6 +322,39 @@ impl TokenSource for TokenManager {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenSource for TokenManager {
+    async fn bearer(&self) -> Result<SecretString, LlmError> {
+        // The lock is held through a renewal: callers that arrive meanwhile
+        // wait, then find the new token and take it.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
+        self.reload(&mut state).await?;
+        if let Some(reason) = state.signed_out.clone() {
+            return Err(self.signed_out(&reason));
+        }
+        if state.credentials.is_none() {
+            return Err(self.signed_out("no sign-in file yet"));
+        }
+        if state.unsaved {
+            self.save(&mut state).await?;
+        }
+        let Some(current) = state.credentials.clone() else {
+            return Err(self.signed_out("no sign-in file yet"));
+        };
+        if !state.force && self.now().saturating_add(RENEW_BEFORE) < current.expires_at {
+            return Ok(current.access_token);
+        }
+        debug!(endpoint = %self.endpoint, "renewing the ChatGPT sign-in");
+        // The renewal and the save run in a task of their own, holding the
+        // lock: if this caller is dropped meanwhile, the rotated tokens are
+        // still saved.
+        let this = self.clone();
+        tokio::spawn(async move { this.renew_and_save(state, current).await })
+            .await
+            .map_err(|error| self.file_problem(format!("the renewal did not finish: {error}")))?
     }
 
     async fn rejected(&self, token: &SecretString) {

@@ -390,3 +390,69 @@ async fn no_sign_in_file_and_an_unusable_one_are_told_apart() {
     let error = manager.bearer().await.unwrap_err();
     assert!(error.to_string().contains("version 2"), "{error}");
 }
+
+#[tokio::test]
+async fn a_caller_that_gives_up_mid_renewal_does_not_lose_the_new_pair() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(renewal("access-2", "refresh-2").set_delay(Duration::from_millis(300)))
+        .mount(&server)
+        .await;
+    let dir = Dir::new();
+    let (manager, _) = manager(
+        &server,
+        &dir,
+        &credentials("access-1", "refresh-1", NOW - 10),
+    );
+
+    let caller = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move { manager.bearer().await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+
+    let mut saved = String::new();
+    for _ in 0..100 {
+        saved = text(&read(&dir.file()).refresh_token).to_owned();
+        if saved == "refresh-2" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(saved, "refresh-2", "saved although nobody waited for it");
+
+    assert_eq!(text(&manager.bearer().await.unwrap()), "access-2");
+    assert_eq!(requests(&server).await.len(), 1, "not renewed again");
+}
+
+#[tokio::test]
+async fn a_removed_sign_in_file_signs_out_and_is_not_written_back() {
+    let server = MockServer::start().await;
+    let dir = Dir::new();
+    let (manager, _) = manager(
+        &server,
+        &dir,
+        &credentials("access-1", "refresh-1", NOW + 3000),
+    );
+    assert_eq!(text(&manager.bearer().await.unwrap()), "access-1");
+
+    std::fs::remove_file(dir.file()).unwrap();
+
+    let error = manager.bearer().await.unwrap_err();
+    assert!(
+        matches!(&error, LlmError::SignedOut { reason, .. } if reason == "sign-in file removed"),
+        "{error:?}"
+    );
+    assert!(!dir.file().exists(), "not written back");
+    assert!(manager.bearer().await.is_err(), "and it stays so");
+    assert!(!dir.file().exists());
+
+    save(
+        &dir.file(),
+        &credentials("access-9", "refresh-9", NOW + 3000),
+    );
+    assert_eq!(text(&manager.bearer().await.unwrap()), "access-9");
+}
