@@ -130,7 +130,7 @@ configuration.
 | Crate | Purpose |
 |---|---|
 | `henk-domain` | The spec's vocabulary and rules, no I/O: identities and standing, allowlist, findings, markers, scope guard, review outcomes, plan sections, queue decisions, style rules, skills |
-| `henk-llm` | `ModelClient` with the OpenAI-compatible and Anthropic adapters, retries, schema cleaning |
+| `henk-llm` | `ModelClient` with the OpenAI-compatible, Responses and Anthropic adapters, retries, schema cleaning, the ChatGPT plan sign-in |
 | `henk-mcp` | MCP sessions over stdio child processes or streamable HTTP, tool-name mapping, an in-process fake server for tests |
 | `henk-agent` | The tool-calling loop with turn limit, deadline and cancellation; prompts |
 | `henk-session` | One way to run a model session: `SessionSpec`, `run_session` with run bookkeeping, scope-guarded platform tools |
@@ -199,7 +199,8 @@ reported as nothing to review.
 
 Models are declared in two layers (#368). An `[endpoints.<id>]` says where
 and how they are reached: `provider` (`openai` or `anthropic`), `base_url`,
-`api_key_env`, and optionally `headers` sent with every request and, on an
+`api_key_env` (or `auth = "chatgpt"`, see "Paying with a ChatGPT plan"
+below), and optionally `headers` sent with every request and, on an
 `openai` endpoint, `api` (see "OpenAI's Responses API" below). Declare
 one per server or account, as many of one provider as there are. A
 `[models.<id>]` says which model on which endpoint and how to call it:
@@ -543,6 +544,92 @@ rest (`henk runs show`, the run page). `henk config check` names each
 OpenAI endpoint's API. `henk doctor --probe` lets a model on the Responses
 API answer within its configured cap, so a reasoning model is not cut off
 while it thinks.
+
+### Paying with a ChatGPT plan
+
+An `openai` endpoint can be paid by the plan of a ChatGPT account instead of
+an API key (#620). This is OpenAI's "Sign in with ChatGPT" for apps that run
+on the user's own machine or server, a preview since 2026-09-29: Henk signs
+the user in with OAuth in a browser, keeps the login in a file, renews it
+itself, and calls the public Responses API with it.
+
+**Your own plan, on your own server.** One sign-in is one person's account.
+OpenAI documents the path for "open-source and locally hosted apps"; a paid
+or remotely hosted app, or commercial use, is something OpenAI wants to
+hear about first (its interest form). Henk does nothing to share one plan
+among several people, and this section is not legal advice: read OpenAI's
+terms for your own use.
+
+```toml
+[endpoints.chatgpt]
+provider = "openai"
+base_url = "https://api.openai.com/v1"   # the only address a sign-in is for
+auth = "chatgpt"                         # instead of api_key_env
+auth_file = "/var/lib/henk/openai-auth.json"
+
+[models.gpt]
+endpoint = "chatgpt"
+model = "gpt-6.1-sol"                    # henk llm models --endpoint chatgpt
+```
+
+`api` is `responses` by itself here (a plan is used through the Responses
+API only), and `api_key_env` is refused beside `auth`. One `auth_file`
+belongs to one endpoint of one Henk: every renewal replaces the refresh
+token, so two Henks, or two endpoints, sharing a file would lock each other
+out. `henk config check` refuses the second.
+
+**Sign in once** where a browser is:
+
+```sh
+henk auth openai --config henk.toml --endpoint chatgpt
+```
+
+It prints an address (and tries to open it), you sign in to ChatGPT and
+choose the workspace, the browser comes back to `127.0.0.1:1455` on the
+machine that runs the command (`--port` picks another), and the sign-in is
+written to `auth_file`, owner-only. Nothing but the account is printed.
+OpenAI has no device-code sign-in, so on a server without a browser:
+
+- forward the port, `ssh -L 1455:127.0.0.1:1455 <server>`, run the command
+  on the server and open the address in your own browser; or
+- sign in on your laptop with a `henk.toml` whose `auth_file` is a local
+  path, then `scp` that file to the server's `auth_file` and treat it as
+  moved: do not use the laptop's copy afterwards, because the server's first
+  renewal replaces the refresh token in it.
+
+Run the command again at any time to sign in again (it keeps the file's
+client and host, and refuses another account than the one in the file: remove
+the file to sign in as someone else). A Henk that is running picks the new
+file up by itself.
+
+**How it behaves.**
+
+- The access token lasts an hour and Henk renews it before it runs out. The
+  refresh token lasts 30 days from the last renewal, so a Henk that makes no
+  model call for 30 days has to be signed in again. `henk doctor` shows the
+  account and how long ago the sign-in was renewed, and warns when it is
+  about to lapse.
+- Each renewal's new refresh token is on disk before the new access token is
+  used. When OpenAI says a sign-in is gone, every call fails at once with the
+  endpoint's name and "sign in again", and Henk does not ask OpenAI again
+  until the file changes. A network failure is not a sign-out.
+- A plan's calls are streamed and carry no output cap and no temperature
+  (OpenAI does not take them), so `max_tokens` has no effect on such a
+  model. Only function tools are sent; none of OpenAI's hosted tools are.
+- When the plan's usage is spent the call fails with "the ChatGPT plan's
+  usage limit is reached" and is not retried. OpenAI gives no reset time and
+  no usage windows, so Henk shows none. An account that may not use its plan
+  through an app is told so the same way.
+- `henk doctor --probe` lists the models the plan offers. It makes that call
+  only while the access token has more than ten minutes left: a renewal from
+  `doctor` could meet a running Henk's and one of them would be left with a
+  refresh token OpenAI no longer takes.
+- The file holds tokens: keep it out of git and backups you do not trust. On
+  a repeat sign-in the address `henk auth openai` prints carries the previous
+  ID token, which OpenAI asks for, so the browser can skip the account choice.
+
+It is a preview: OpenAI may change the parameters, the models and the error
+codes.
 
 ### Serving several GitHub accounts
 

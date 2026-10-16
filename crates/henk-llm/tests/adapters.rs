@@ -31,6 +31,7 @@ fn config(provider: Provider, base_url: &str) -> ModelConfig {
         api: Api::default(),
         base_url: base_url.to_owned(),
         api_key: "secret-key".to_owned().into(),
+        token_source: None,
         model: "test-model".to_owned(),
         max_tokens: 1024,
         timeout: Duration::from_secs(5),

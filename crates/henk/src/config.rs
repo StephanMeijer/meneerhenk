@@ -514,11 +514,61 @@ pub struct EndpointFileConfig {
     pub api: Option<Api>,
     /// Base URL.
     pub base_url: String,
-    /// Env var with the API key.
+    /// Env var with the API key. Left out with `auth = "chatgpt"`.
+    #[serde(default)]
     pub api_key_env: String,
+    /// `chatgpt` pays with the plan of a ChatGPT account the operator signed
+    /// in with `henk auth openai`, instead of an API key (#620).
+    #[serde(default)]
+    pub auth: Option<EndpointAuth>,
+    /// The file the ChatGPT sign-in is kept in (`auth = "chatgpt"`). Henk
+    /// renews the sign-in there; one file belongs to one endpoint of one
+    /// Henk.
+    #[serde(default)]
+    pub auth_file: Option<String>,
     /// Extra headers sent with every request, such as an organisation.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+}
+
+/// How an endpoint is paid for, when not with an API key (#620).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAuth {
+    /// The plan of a ChatGPT account, through OpenAI's "Sign in with
+    /// ChatGPT".
+    Chatgpt,
+}
+
+/// The only base URL a ChatGPT sign-in is for.
+pub const CHATGPT_BASE_URL: &str = "https://api.openai.com/v1";
+
+impl EndpointFileConfig {
+    /// The API the endpoint is called through: as configured, else the one
+    /// its auth needs, else Chat Completions.
+    #[must_use]
+    pub fn api_in_use(&self) -> Api {
+        match (self.api, self.auth) {
+            (Some(api), _) => api,
+            (None, Some(EndpointAuth::Chatgpt)) => Api::Responses,
+            (None, None) => Api::default(),
+        }
+    }
+
+    /// Whether the endpoint is paid by a ChatGPT sign-in.
+    #[must_use]
+    pub fn signs_in_with_chatgpt(&self) -> bool {
+        self.auth == Some(EndpointAuth::Chatgpt)
+    }
+
+    /// The sign-in file of a ChatGPT endpoint.
+    #[must_use]
+    pub fn sign_in_file(&self) -> Option<&std::path::Path> {
+        self.auth_file
+            .as_deref()
+            .filter(|file| !file.trim().is_empty())
+            .map(std::path::Path::new)
+    }
 }
 
 /// One model: what it is, on which endpoint, called how.
@@ -2028,6 +2078,8 @@ pub struct Settings {
     pub gitlab: Option<GitLabConfig>,
     /// Endpoints by id, without their secrets (#368).
     pub endpoints: BTreeMap<String, EndpointFileConfig>,
+    /// The token managers of the endpoints that sign in with ChatGPT (#620).
+    pub sign_ins: crate::sign_ins::SignIns,
     /// Models by id, each on one of `endpoints`.
     pub models: BTreeMap<String, ModelFileConfig>,
     /// Reviews: the loop, its limits and what it leaves out.
@@ -2177,6 +2229,7 @@ impl Config {
             github: self.github,
             gitlab: self.gitlab,
             endpoints: self.endpoints,
+            sign_ins: crate::sign_ins::SignIns::default(),
             models: self.models,
             review: self.review,
             roles: self.roles,
@@ -2396,14 +2449,62 @@ fn declared<'a>(ids: impl Iterator<Item = &'a String>) -> String {
 /// Each endpoint (#368): an `http(s)://` base URL, a key variable, and
 /// headers a request can carry.
 fn validate_endpoints(endpoints: &BTreeMap<String, EndpointFileConfig>) -> Result<(), ConfigError> {
+    let mut files: BTreeMap<std::path::PathBuf, &str> = BTreeMap::new();
     for (id, endpoint) in endpoints {
         let fail = |why: String| Err(ConfigError::Endpoint(id.clone(), why));
         if !(endpoint.base_url.starts_with("https://") || endpoint.base_url.starts_with("http://"))
         {
             return fail("base_url must start with http(s)://".to_owned());
         }
-        if endpoint.api_key_env.trim().is_empty() {
-            return fail("api_key_env is empty".to_owned());
+        match endpoint.auth {
+            Some(EndpointAuth::Chatgpt) => {
+                if !endpoint.api_key_env.trim().is_empty() {
+                    return fail(
+                        "api_key_env and auth = \"chatgpt\" exclude each other: the ChatGPT plan pays, not a key"
+                            .to_owned(),
+                    );
+                }
+                if endpoint.provider != Provider::OpenAi {
+                    return fail(
+                        "auth = \"chatgpt\" applies to provider \"openai\" only".to_owned(),
+                    );
+                }
+                if endpoint.api.is_some_and(|api| api != Api::Responses) {
+                    return fail(
+                        "a ChatGPT sign-in works with api = \"responses\" only; leave api out"
+                            .to_owned(),
+                    );
+                }
+                if endpoint.base_url.trim_end_matches('/') != CHATGPT_BASE_URL {
+                    return fail(format!(
+                        "a ChatGPT sign-in is for {CHATGPT_BASE_URL}; base_url is {}",
+                        endpoint.base_url
+                    ));
+                }
+                let Some(file) = endpoint.sign_in_file() else {
+                    return fail(
+                        "auth_file is missing: name the file `henk auth openai` writes the sign-in to"
+                            .to_owned(),
+                    );
+                };
+                let file: std::path::PathBuf = file.components().collect();
+                if let Some(other) = files.insert(file, id.as_str()) {
+                    return fail(format!(
+                        "auth_file is also endpoint {other}'s; every renewal replaces the refresh token, so one file belongs to one endpoint"
+                    ));
+                }
+            }
+            None => {
+                if endpoint.auth_file.is_some() {
+                    return fail("auth_file belongs with auth = \"chatgpt\"".to_owned());
+                }
+                if endpoint.api_key_env.trim().is_empty() {
+                    return fail(
+                        "api_key_env is empty (or name a ChatGPT sign-in with auth = \"chatgpt\")"
+                            .to_owned(),
+                    );
+                }
+            }
         }
         if endpoint.api.is_some() && endpoint.provider != Provider::OpenAi {
             return fail(format!(
@@ -2467,7 +2568,7 @@ fn validate_models(
                 "model name is empty".to_owned(),
             ));
         }
-        if model.max_tokens_param.is_some() && endpoint.api == Some(Api::Responses) {
+        if model.max_tokens_param.is_some() && endpoint.api_in_use() == Api::Responses {
             return Err(ConfigError::Model(
                 id.clone(),
                 format!(
@@ -2824,13 +2925,31 @@ impl Settings {
             .endpoints
             .get(id)
             .ok_or_else(|| format!("endpoint {id:?} is not configured"))?;
-        let key = lookup_env(&endpoint.api_key_env)
-            .ok_or_else(|| format!("environment variable {} is not set", endpoint.api_key_env))?;
+        let (api_key, token_source) = match (endpoint.auth, endpoint.sign_in_file()) {
+            (Some(EndpointAuth::Chatgpt), Some(file)) => {
+                let manager = self
+                    .sign_ins
+                    .manager(id, file)
+                    .map_err(|why| format!("endpoint {id}: {why}"))?;
+                let source: std::sync::Arc<dyn henk_llm::TokenSource> = manager;
+                (String::new(), Some(source))
+            }
+            (Some(EndpointAuth::Chatgpt), None) => {
+                return Err(format!("endpoint {id} has no auth_file"));
+            }
+            (None, _) => {
+                let key = lookup_env(&endpoint.api_key_env).ok_or_else(|| {
+                    format!("environment variable {} is not set", endpoint.api_key_env)
+                })?;
+                (key, None)
+            }
+        };
         Ok(henk_llm::ModelConfig {
             provider: endpoint.provider,
-            api: endpoint.api.unwrap_or_default(),
+            api: endpoint.api_in_use(),
             base_url: endpoint.base_url.clone(),
-            api_key: key.into(),
+            api_key: api_key.into(),
+            token_source,
             model: String::new(),
             max_tokens: default_max_tokens(),
             timeout: Duration::from_secs(default_model_timeout_secs()),
@@ -3335,8 +3454,7 @@ impl Settings {
             if let Some(endpoint) = self.endpoints.get(&model.endpoint)
                 && let Some(wire) = effort.wire(endpoint.provider)
             {
-                let param =
-                    henk_llm::effort_param(endpoint.provider, endpoint.api.unwrap_or_default());
+                let param = henk_llm::effort_param(endpoint.provider, endpoint.api_in_use());
                 let _ = write!(line, " (sent as {param}: {wire})");
             }
         }
@@ -3354,18 +3472,22 @@ impl Settings {
                 n => format!(", {n} headers"),
             };
             let api = match endpoint.provider {
-                Provider::OpenAi => format!(
-                    " ({})",
-                    endpoint.api.unwrap_or_default().as_str().replace('_', " ")
-                ),
+                Provider::OpenAi => {
+                    format!(" ({})", endpoint.api_in_use().as_str().replace('_', " "))
+                }
                 Provider::Anthropic => String::new(),
+            };
+            let credential = match endpoint.sign_in_file() {
+                Some(file) if endpoint.signs_in_with_chatgpt() => {
+                    format!("ChatGPT plan sign-in in {}", file.display())
+                }
+                _ => format!("key from ${}", endpoint.api_key_env),
             };
             let _ = writeln!(
                 out,
-                "  {id}: {}{api} at {} (key from ${}{headers})",
+                "  {id}: {}{api} at {} ({credential}{headers})",
                 endpoint.provider.as_str(),
                 endpoint.base_url,
-                endpoint.api_key_env
             );
         }
         let _ = writeln!(out, "Models:");
@@ -3695,6 +3817,31 @@ github_owners = ["docspec"]
             assert_eq!(autonomous.land_max_rebases, 3);
             assert_eq!(autonomous.land_max_ci_fixes, 3);
         }
+    }
+
+    #[test]
+    fn the_examples_chatgpt_endpoint_is_valid_once_uncommented() {
+        let on = EXAMPLE
+            .replace("# [endpoints.chatgpt]", "[endpoints.chatgpt]")
+            .replace(
+                "# provider = \"openai\"\n# base_url = \"https://api.openai.com/v1\"\n# auth = \"chatgpt\"",
+                "provider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"",
+            )
+            .replace(
+                "# auth_file = \"/var/lib/henk/openai-auth.json\"",
+                "auth_file = \"/var/lib/henk/openai-auth.json\"",
+            );
+        assert_ne!(on, EXAMPLE, "the example has the endpoint");
+        let settings = Config::parse(&on)
+            .and_then(Config::into_settings)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            settings
+                .endpoints
+                .get("chatgpt")
+                .unwrap()
+                .signs_in_with_chatgpt()
+        );
     }
 
     #[test]
@@ -5671,6 +5818,129 @@ github_owners = ["docspec"]
                 .replace("model = \"x\"", "model = \"gpt-5.5\"")
         );
         assert!(Config::parse(&both).and_then(Config::into_settings).is_ok());
+    }
+
+    /// A ChatGPT endpoint `c` with `extra` lines, and a model on it.
+    fn chatgpt(extra: &str) -> Result<Settings, ConfigError> {
+        let text = format!(
+            "{MINIMAL}\n[endpoints.c]\nprovider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"\nauth_file = \"/var/lib/henk/openai.json\"\n{extra}[models.m]\nendpoint = \"c\"\nmodel = \"gpt-6.1-sol\"\n[models.n]\nendpoint = \"c\"\nmodel = \"gpt-6.1-sol\"\n"
+        );
+        Config::parse(&text).and_then(Config::into_settings)
+    }
+
+    #[test]
+    fn a_chatgpt_endpoint_needs_no_key_and_speaks_responses() {
+        let settings = chatgpt("").unwrap();
+        // No environment variable is read for it.
+        let config = settings.client_config("m", |_| None).unwrap();
+        assert_eq!(config.api, Api::Responses);
+        assert!(config.token_source.is_some());
+        assert!(secrecy::ExposeSecret::expose_secret(&config.api_key).is_empty());
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        // A trailing slash is the same URL, and `api = "responses"` is allowed.
+        assert!(
+            chatgpt("api = \"responses\"\n")
+                .unwrap()
+                .client_config("m", |_| None)
+                .is_ok()
+        );
+        let text = settings.describe();
+        assert!(
+            text.contains(
+                "  c: openai (responses) at https://api.openai.com/v1 (ChatGPT plan sign-in in /var/lib/henk/openai.json)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("key from"), "{text}");
+    }
+
+    #[test]
+    fn the_models_of_a_chatgpt_endpoint_share_one_sign_in() {
+        let settings = chatgpt("").unwrap();
+        let m = settings.client_config("m", |_| None).unwrap();
+        let n = settings.client_config("n", |_| None).unwrap();
+        let (m, n) = (m.token_source.unwrap(), n.token_source.unwrap());
+        assert!(std::ptr::addr_eq(
+            std::sync::Arc::as_ptr(&m),
+            std::sync::Arc::as_ptr(&n)
+        ));
+        // And so does a copy of the settings, which is how they are passed on.
+        let copy = settings.clone().client_config("m", |_| None).unwrap();
+        assert!(std::ptr::addr_eq(
+            std::sync::Arc::as_ptr(&m),
+            std::sync::Arc::as_ptr(&copy.token_source.unwrap())
+        ));
+    }
+
+    #[test]
+    fn a_chatgpt_endpoint_is_refused_what_it_cannot_do() {
+        for (extra, said) in [
+            ("api_key_env = \"K\"\n", "exclude each other"),
+            ("api = \"chat_completions\"\n", "api = \"responses\" only"),
+        ] {
+            let error = chatgpt(extra).unwrap_err().to_string();
+            assert!(error.contains(said), "{extra}: {error}");
+        }
+        let text = |old: &str, new: &str| {
+            let base = format!(
+                "{MINIMAL}\n[endpoints.c]\nprovider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"\nauth_file = \"/f.json\"\n[models.m]\nendpoint = \"c\"\nmodel = \"x\"\n"
+            );
+            Config::parse(&base.replace(old, new)).and_then(Config::into_settings)
+        };
+        for (old, new, said) in [
+            (
+                "provider = \"openai\"",
+                "provider = \"anthropic\"",
+                "provider \"openai\" only",
+            ),
+            (
+                "https://api.openai.com/v1",
+                "https://proxy.test/v1",
+                "is for https://api.openai.com/v1",
+            ),
+            ("auth_file = \"/f.json\"\n", "", "auth_file is missing"),
+            (
+                "auth_file = \"/f.json\"",
+                "auth_file = \"  \"",
+                "auth_file is missing",
+            ),
+            ("auth = \"chatgpt\"", "auth = \"oauth\"", "unknown variant"),
+        ] {
+            let error = text(old, new).unwrap_err().to_string();
+            assert!(error.contains(said), "{old} -> {new}: {error}");
+        }
+        assert!(text("https://api.openai.com/v1", "https://api.openai.com/v1/").is_ok());
+    }
+
+    #[test]
+    fn a_key_endpoint_is_refused_a_sign_in_file_and_a_missing_key() {
+        let error = on_api("auth_file = \"/f.json\"\n", "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("auth_file belongs with auth"), "{error}");
+        let text = format!(
+            "{MINIMAL}\n[endpoints.o]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\n[models.m]\nendpoint = \"o\"\nmodel = \"gpt\"\n"
+        );
+        let error = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("api_key_env is empty"), "{error}");
+    }
+
+    #[test]
+    fn one_sign_in_file_belongs_to_one_endpoint() {
+        let text = format!(
+            "{MINIMAL}\n[endpoints.a]\nprovider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"\nauth_file = \"/var/lib/henk/./openai.json\"\n[endpoints.b]\nprovider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"\nauth_file = \"/var/lib/henk/openai.json\"\n[models.m]\nendpoint = \"a\"\nmodel = \"x\"\n"
+        );
+        let error = Config::parse(&text)
+            .and_then(Config::into_settings)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("endpoint \"b\"") && error.contains("also endpoint a's"),
+            "{error}"
+        );
     }
 
     #[test]

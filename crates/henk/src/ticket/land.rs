@@ -23,7 +23,9 @@
 //!   stage reviews the fix like any head and waits for the new checks. A fix
 //!   that pushes nothing, a failure the executor calls not about the code,
 //!   checks that were cancelled or timed out, and the limit all stop the
-//!   stage, with a comment saying which.
+//!   stage, with a comment saying which. A fix run that finds no check
+//!   failing (the checks changed since the stage read them) tried nothing:
+//!   it costs no try, and the stage looks again after a nap.
 //!
 //! The stage ends in "ready to merge"; merging stays a person's.
 
@@ -301,10 +303,14 @@ impl Ticket<'_> {
     /// Has the executor fix the failing checks `failing` of `head` and waits
     /// for it. `None` to look again, or the ending.
     ///
-    /// Every try counts, whatever came of it: the limit is on the tries. A
-    /// fix that pushed has its head reviewed on the next look, and its checks
+    /// The limit is on real tries: a fix that pushed counts. A fix that
+    /// found no fix or no fault in the code ends the stage. A fix that
+    /// pushed has its head reviewed on the next look, and its checks
     /// read after that. One that pushed nothing ends the stage, since the
-    /// same head would only be tried again.
+    /// same head would only be tried again. The exception is a run that found
+    /// nothing failing (the checks changed since the stage read them): it
+    /// counts for nothing, and the stage looks again after a nap, until its
+    /// own time is up.
     async fn fix_ci(
         &self,
         land: Land,
@@ -341,7 +347,6 @@ impl Ticket<'_> {
                 Some(self.ended(Step::Land, from_error(Step::Land, &error)).await)
             }
             Stepped::Returned(Ok(report)) => {
-                watch.ledger.ci_fixes += 1;
                 let named = failing.join(", ");
                 match report.outcome {
                     FixOutcome::Pushed {
@@ -349,6 +354,7 @@ impl Ticket<'_> {
                         commits,
                         ..
                     } => {
+                        watch.ledger.ci_fixes += 1;
                         self.note(&format!(
                             "land: fixed the failing checks ({named}), run {run}: {commits} commit(s), head {} is now {}",
                             head.short(),
@@ -364,6 +370,10 @@ impl Ticket<'_> {
                             head.short()
                         ))
                         .await;
+                        // The fix run read the checks differently from the
+                        // stage (a re-run, a lagging platform): nothing was
+                        // tried, so no try is spent. Look again after a nap.
+                        self.nap(land.poll, deadline).await;
                         None
                     }
                     FixOutcome::NotCode { reason, .. } => Some(
@@ -513,8 +523,10 @@ impl Ticket<'_> {
 }
 
 /// What the checks on a head say. A head just pushed has none for a moment,
-/// so no jobs count as pending until `age` passes [`CI_GRACE`]. A cancelled
-/// or timed out job is as red as a failed one: the head did not pass.
+/// so no jobs count as pending until `age` passes [`CI_GRACE`]. A failed job
+/// is red, and is sent to the fixer. A cancelled or timed out job is
+/// interrupted, not red: it counts only once nothing is still running, since
+/// a newer run of the same workflow may follow it.
 fn ci_state(jobs: &[CiJob], age: Duration) -> CiState {
     if jobs.is_empty() {
         return if age < CI_GRACE {
@@ -1313,6 +1325,29 @@ mod tests {
 
         assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
         assert_eq!(stages.fixes_asked(), 3);
+    }
+
+    /// A fix run that finds nothing failing disagrees with the stage's read:
+    /// it fixed nothing, so it costs no try, and the stage looks again.
+    #[tokio::test]
+    async fn a_fix_that_finds_nothing_failing_costs_no_try_and_the_stage_looks_again() {
+        let f = fixture();
+        let idle = || Fix::Ends(FixOutcome::Idle("no check fails".to_owned()));
+        let stages = Landing::mergeable()
+            .with_fix(idle())
+            .with_fix(idle())
+            .with_fix(Fix::Pushes);
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        let one = Land {
+            max_ci_fixes: 1,
+            ..quick()
+        };
+        let report = go(&f, &stages, one).await;
+
+        assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
+        assert_eq!(stages.fixes_asked(), 3);
+        let events = land_events(&f).await;
+        assert!(events[0].contains("found nothing to fix"), "{events:?}");
     }
 
     #[tokio::test]

@@ -511,7 +511,9 @@ most every `land_poll_secs` (60), and each time does one thing:
 It is bounded. The stage has a time of its own, `land_timeout_secs` (four
 hours), from when it starts, since it waits for checks and for other pull
 requests; at most `land_max_rebases` (3) rebases; at most `land_max_ci_fixes`
-(3) tries to fix failing checks, each counted whatever came of it; and a head
+(3) tries to fix failing checks, each counted when it pushed a fix (a run that
+finds no check failing, because the checks changed since the stage read them,
+is no try: the stage looks again after a pause); and a head
 a rebase just left is not rebased again for two looks, while the platform
 catches up. The stage stops with one comment when the tries are spent, when
 a fix pushes nothing or the executor says the failure is not about the code

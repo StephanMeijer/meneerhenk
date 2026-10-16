@@ -38,7 +38,7 @@ const GONE: [&str; 6] = [
 /// The time, in seconds since the epoch. Tests set their own.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-fn system_clock() -> Clock {
+pub(super) fn system_clock() -> Clock {
     Arc::new(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -378,7 +378,7 @@ impl fmt::Debug for dyn TokenSource {
 /// The `error` of an OAuth error body, as a short word: the string itself
 /// or the `code` inside an object. Only letters, digits and underscores are
 /// kept, so nothing the server sends is echoed.
-fn error_code(body: &str) -> Option<String> {
+pub(super) fn error_code(body: &str) -> Option<String> {
     let value: Value = serde_json::from_str(body).ok()?;
     let error = value.get("error")?;
     let code = error
@@ -414,7 +414,7 @@ fn scrub(body: &str, credentials: &Credentials) -> String {
 }
 
 /// `value` as `application/x-www-form-urlencoded` text.
-fn form_encoded(value: &str) -> String {
+pub(super) fn form_encoded(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
