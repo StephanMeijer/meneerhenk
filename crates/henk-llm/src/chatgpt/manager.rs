@@ -1,6 +1,6 @@
 //! The token manager: renews a ChatGPT sign-in and hands out its bearer.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -370,7 +370,10 @@ fn scrub(body: &str, credentials: &Credentials) -> String {
     for secret in [
         Some(credentials.access_token.expose_secret()),
         Some(credentials.refresh_token.expose_secret()),
-        credentials.id_token.as_ref().map(|t| t.expose_secret()),
+        credentials
+            .id_token
+            .as_ref()
+            .map(secrecy::ExposeSecret::expose_secret),
     ]
     .into_iter()
     .flatten()
@@ -389,7 +392,7 @@ fn form_encoded(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(byte));
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _ = write!(out, "%{byte:02X}");
         }
     }
     out

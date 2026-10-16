@@ -2,6 +2,13 @@
 //! is a file of its own: `tracing` remembers per call site whether anyone
 //! listens, and tests that run beside this one would decide that for it.
 
+#![allow(
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
+
 mod common;
 
 use std::io::Write;
