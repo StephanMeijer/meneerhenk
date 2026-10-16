@@ -939,3 +939,75 @@ async fn without_the_token_a_gitlab_writer_reviews_but_does_not_push() {
     assert!(error.to_string().contains("token"), "{error}");
     assert!(writer.git_credential().await.is_err());
 }
+
+/// #637: one read of the merge request says whether GitLab would merge it,
+/// and the words of `detailed_merge_status` come to the states a land stage
+/// acts on.
+#[tokio::test]
+async fn a_merge_request_stands_where_gitlabs_detailed_status_says() {
+    use henk_domain::land::MergeState;
+    use henk_platform::push::PushWriter as _;
+
+    for (status, draft, expected) in [
+        ("mergeable", false, MergeState::Mergeable),
+        ("need_rebase", false, MergeState::NeedsRebase),
+        ("conflict", false, MergeState::Conflicts),
+        ("ci_still_running", false, MergeState::Waiting),
+        ("checking", false, MergeState::Unknown),
+        ("unchecked", false, MergeState::Unknown),
+        ("draft_status", false, MergeState::Draft),
+        ("mergeable", true, MergeState::Draft),
+        (
+            "ci_must_pass",
+            false,
+            MergeState::Blocked("its pipeline has not passed".to_owned()),
+        ),
+        (
+            "not_approved",
+            false,
+            MergeState::Blocked("it needs an approval".to_owned()),
+        ),
+        (
+            "something_new",
+            false,
+            MergeState::Blocked("GitLab says something_new".to_owned()),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{PROJECT}/merge_requests/{}",
+                target().number
+            )))
+            .and(header("PRIVATE-TOKEN", TOKEN))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": "opened", "sha": SHA, "draft": draft,
+                "detailed_merge_status": status,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (_fake, writer) = push_writer(&server).await;
+        let standing = writer.pull_standing(&target()).await.unwrap();
+        assert_eq!(standing.state, expected, "{status} (draft {draft})");
+        assert!(standing.open && !standing.merged, "{status}");
+        assert_eq!(standing.head.as_str(), SHA);
+    }
+
+    for (state, open, merged) in [("merged", false, true), ("closed", false, false)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{PROJECT}/merge_requests/{}",
+                target().number
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": state, "sha": SHA, "detailed_merge_status": "not_open",
+            })))
+            .mount(&server)
+            .await;
+        let (_fake, writer) = push_writer(&server).await;
+        let standing = writer.pull_standing(&target()).await.unwrap();
+        assert_eq!((standing.open, standing.merged), (open, merged), "{state}");
+    }
+}

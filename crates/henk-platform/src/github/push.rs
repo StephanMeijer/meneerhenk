@@ -1,5 +1,6 @@
 //! What pushing to a pull request needs from GitHub beyond the review writer.
 
+use henk_domain::land::{MergeState, Standing};
 use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::{Value, json};
@@ -26,6 +27,30 @@ fn text(value: &Value, pointer: &str) -> String {
 /// would end or garble the path.
 fn path_segment(branch: &str) -> String {
     branch.replace('%', "%25").replace('#', "%23")
+}
+
+/// What GitHub's `mergeable` and `mergeable_state` come to (#637).
+/// `behind` is only reported where the base demands a branch that is up to
+/// date; `unstable` is a pull request that can merge though a check that
+/// is not required has not passed, which the checks themselves report.
+fn merge_state(mergeable: Option<bool>, state: &str, draft: bool) -> MergeState {
+    if draft || state == "draft" {
+        return MergeState::Draft;
+    }
+    if mergeable == Some(false) || state == "dirty" {
+        return MergeState::Conflicts;
+    }
+    match (state, mergeable) {
+        ("behind", _) => MergeState::NeedsRebase,
+        ("blocked", _) => MergeState::Blocked(
+            "a check or a review the base requires has not passed yet".to_owned(),
+        ),
+        ("clean" | "has_hooks" | "unstable", Some(true)) => MergeState::Mergeable,
+        // GitHub works `mergeable` out when it is first asked, and says
+        // `null` until it has.
+        ("" | "unknown" | "clean" | "has_hooks" | "unstable", _) => MergeState::Unknown,
+        (other, _) => MergeState::Blocked(format!("GitHub says {other}")),
+    }
 }
 
 #[async_trait::async_trait]
@@ -236,6 +261,35 @@ impl PushWriter for GitHubWriter {
             }
         }
         Ok(behind)
+    }
+
+    async fn pull_standing(&self, target: &ReviewTarget) -> Result<Standing, PlatformError> {
+        let pr = self
+            .api()
+            .get(&format!(
+                "/repos/{}/pulls/{}",
+                target.repo.path(),
+                target.number
+            ))
+            .await?;
+        let head = pr
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| CommitSha::parse(sha).ok())
+            .ok_or_else(|| PlatformError::Decode("pull request without head sha".to_owned()))?;
+        let merged = crate::github::merged(&pr);
+        Ok(Standing {
+            open: pr.get("state").and_then(Value::as_str) == Some("open") && !merged,
+            merged,
+            head,
+            state: merge_state(
+                pr.get("mergeable").and_then(Value::as_bool),
+                pr.get("mergeable_state")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                pr.get("draft").and_then(Value::as_bool).unwrap_or(false),
+            ),
+        })
     }
 
     async fn user_login(&self, id: u64) -> Result<String, PlatformError> {
