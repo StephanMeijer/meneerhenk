@@ -128,6 +128,8 @@ pub enum RunKind {
     Execute,
     /// One pull request rebased onto its base branch (§3.6, #579).
     Rebase,
+    /// One pull request's failing checks fixed by the executor (§3.7, #583).
+    FixCi,
     /// One issue driven through a plan, an execute run and a review of the
     /// pull request by one autonomous run (#536). The three are runs of
     /// their own; this one owns them.
@@ -156,6 +158,7 @@ impl fmt::Display for RunKind {
             Self::Plan => "plan",
             Self::Execute => "execute",
             Self::Rebase => "rebase",
+            Self::FixCi => "fix ci",
             Self::Ticket => "ticket",
             Self::DiscordTurn => "discord turn",
             Self::MailReply => "mail reply",
@@ -179,6 +182,7 @@ mod tests {
         assert!(RunKind::Execute.is_about_an_issue());
         assert!(!RunKind::Review.is_about_an_issue());
         assert!(!RunKind::Rebase.is_about_an_issue());
+        assert!(!RunKind::FixCi.is_about_an_issue());
         assert_eq!(RunKind::Ticket.to_string(), "ticket");
     }
 

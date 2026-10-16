@@ -574,6 +574,7 @@ const KINDS: &[(&str, RunKind)] = &[
     ("plan", RunKind::Plan),
     ("execute", RunKind::Execute),
     ("rebase", RunKind::Rebase),
+    ("fix_ci", RunKind::FixCi),
     ("ticket", RunKind::Ticket),
     ("discord_turn", RunKind::DiscordTurn),
     ("mail_reply", RunKind::MailReply),

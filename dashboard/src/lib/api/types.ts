@@ -36,8 +36,8 @@ export type RunSummary = {
  */
 id: string, 
 /**
- * `review`, `plan`, `execute`, `rebase`, `ticket`, `address`, `discord_turn` or
- * `mail_reply`.
+ * `review`, `plan`, `execute`, `rebase`, `fix_ci`, `ticket`, `address`,
+ * `discord_turn` or `mail_reply`.
  */
 kind: string, 
 /**
