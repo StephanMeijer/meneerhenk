@@ -1606,9 +1606,9 @@ pub(crate) mod tests {
         assert_eq!(count(at.path().to_owned()).await, "1", "no history");
     }
 
-    /// Commits \`files\` to a clone of the remote's \`feature\` and pushes the
-    /// result to \`branch\`: somebody's merge, as far as a run can tell. A
-    /// file with \`None\` is removed. Returns the commit.
+    /// Commits `files` to a clone of the remote's `feature` and pushes the
+    /// result to `branch`: somebody's merge, as far as a run can tell. A
+    /// file with `None` is removed. Returns the commit.
     pub(crate) async fn push_files(
         remote: &Path,
         branch: &str,

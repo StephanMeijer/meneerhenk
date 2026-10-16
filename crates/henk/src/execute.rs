@@ -909,7 +909,7 @@ requester_id = 3
     }
 
     /// A push to the remote, made when git is asked for a credential for the
-    /// \`at\`th time. A run asks once when it begins, once when it checks the
+    /// `at`th time. A run asks once when it begins, once when it checks the
     /// default branch out to commit on, and once more for each time it takes
     /// that branch again.
     #[derive(Clone)]
@@ -1377,7 +1377,7 @@ requester_id = 3
         head
     }
 
-    /// Has the default branch get \`pushes\` while the run works, and runs it.
+    /// Has the default branch get `pushes` while the run works, and runs it.
     async fn run_while_drifting(
         name: &str,
         pushes: Vec<Drift>,
