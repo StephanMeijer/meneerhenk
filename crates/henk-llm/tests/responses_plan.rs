@@ -229,6 +229,58 @@ async fn a_turn_is_streamed_and_sends_none_of_the_parameters_a_plan_refuses() {
 }
 
 #[tokio::test]
+async fn items_delivered_by_output_item_done_fill_an_empty_output() {
+    let full = fixture("reasoning_tool_call.json");
+    let items = full["output"].as_array().unwrap().clone();
+    let mut bare = full.clone();
+    bare["output"] = json!([]);
+    // Delivered out of order: the output index puts them right.
+    let events = vec![
+        json!({"type": "response.created", "response": {"id": "resp_1", "status": "in_progress"}}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": items[1]}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": items[0]}),
+        json!({"type": "response.completed", "response": bare}),
+    ];
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(&events))
+        .mount(&server)
+        .await;
+    let source = Source::new(&["plan-token"], false);
+    let client = client_for(config(&format!("{}/v1", server.uri()), &source)).unwrap();
+
+    let completion = client.complete(&request()).await.unwrap();
+
+    assert_eq!(completion.stop, StopReason::ToolUse);
+    assert!(matches!(completion.message.blocks[0], Block::Opaque(_)));
+    assert!(
+        matches!(&completion.message.blocks[1], Block::ToolCall(c) if c.name == "get_pull_request")
+    );
+}
+
+#[tokio::test]
+async fn items_fill_a_completed_response_without_an_output_field() {
+    let full = fixture("reasoning_tool_call.json");
+    let mut bare = full.clone();
+    bare.as_object_mut().unwrap().remove("output");
+    let events = vec![
+        json!({"type": "response.output_item.done", "output_index": 0, "item": full["output"][1]}),
+        json!({"type": "response.completed", "response": bare}),
+    ];
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(sse(&events))
+        .mount(&server)
+        .await;
+    let source = Source::new(&["plan-token"], false);
+    let client = client_for(config(&format!("{}/v1", server.uri()), &source)).unwrap();
+
+    let completion = client.complete(&request()).await.unwrap();
+
+    assert_eq!(completion.stop, StopReason::ToolUse);
+}
+
+#[tokio::test]
 async fn an_endpoint_with_a_key_still_sends_the_cap_and_does_not_stream() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

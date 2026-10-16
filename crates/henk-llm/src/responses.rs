@@ -443,10 +443,11 @@ fn plan_error_for_status(
 async fn read_completed(mut response: reqwest::Response) -> Result<Value, LlmError> {
     let mut events = EventStream::default();
     let mut seen = 0_usize;
+    let mut items = Vec::new();
     loop {
         while let Some(data) = events.next_data() {
             seen += 1;
-            if let Some(done) = terminal(&data)? {
+            if let Some(done) = terminal(&data, &mut items)? {
                 return Ok(done);
             }
         }
@@ -471,7 +472,12 @@ async fn read_completed(mut response: reqwest::Response) -> Result<Value, LlmErr
 /// What one event of the stream ends, if it ends the reply: the final
 /// response object, or the error it failed with. Progress events, and data
 /// that is not an event at all, end nothing.
-fn terminal(data: &str) -> Result<Option<Value>, LlmError> {
+///
+/// The plan's backend may end the stream with a response whose `output` is
+/// empty or missing and deliver the items in `response.output_item.done`
+/// events instead. `items` collects those, and they stand in for the
+/// output of the final response, in `output_index` order, when it has none.
+fn terminal(data: &str, items: &mut Vec<(u64, Value)>) -> Result<Option<Value>, LlmError> {
     let Ok(event) = serde_json::from_str::<Value>(data) else {
         tracing::debug!(
             bytes = data.len(),
@@ -480,10 +486,33 @@ fn terminal(data: &str) -> Result<Option<Value>, LlmError> {
         return Ok(None);
     };
     match event.get("type").and_then(Value::as_str) {
+        Some("response.output_item.done") => {
+            if let Some(item) = event.get("item") {
+                let at = event
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(items.len() as u64);
+                items.push((at, item.clone()));
+            }
+            Ok(None)
+        }
         Some("response.completed" | "response.incomplete") => {
-            event.get("response").cloned().map(Some).ok_or_else(|| {
+            let mut response = event.get("response").cloned().ok_or_else(|| {
                 LlmError::Decode("a final stream event without a response".to_owned())
-            })
+            })?;
+            let has_output = response
+                .get("output")
+                .and_then(Value::as_array)
+                .is_some_and(|output| !output.is_empty());
+            if !has_output
+                && !items.is_empty()
+                && let Some(object) = response.as_object_mut()
+            {
+                items.sort_by_key(|(at, _)| *at);
+                let output = items.drain(..).map(|(_, item)| item).collect();
+                object.insert("output".to_owned(), Value::Array(output));
+            }
+            Ok(Some(response))
         }
         Some("response.failed") => Err(failure(
             event
