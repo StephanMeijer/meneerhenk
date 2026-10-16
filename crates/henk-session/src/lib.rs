@@ -1427,9 +1427,12 @@ mod tests {
         assert!(store.transcripts(&run_id()).await.unwrap().is_empty());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_time_limit_ends_the_session_as_timed_out_not_as_dropped() {
+        // The store opens on its first call, on a thread of its own, which a
+        // paused clock would take for a pool that never answers: pause after.
         let store = store_with_run().await;
+        tokio::time::pause();
         let model: Arc<dyn ModelClient> =
             Arc::new(ScriptedClient::new("m", [text("late")]).with_delay(Duration::from_secs(30)));
         let mut spec = spec(model);

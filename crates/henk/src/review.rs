@@ -1663,10 +1663,17 @@ requester_id = 3
             }
         }
         assert_eq!(status, Some(RunStatus::Cancelled));
-        assert!(
-            !coordinator.cancel(&run, "github:1234".to_owned()),
-            "an ended run is not cancellable"
-        );
+        // The status is stored before the coordinator forgets the run, and a
+        // store call now yields in between: wait for it to let go.
+        let mut cancellable = true;
+        for _ in 0..200 {
+            cancellable = coordinator.cancel(&run, "github:1234".to_owned());
+            if !cancellable {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!cancellable, "an ended run is not cancellable");
         app.shutdown.cancel();
     }
 
