@@ -1,8 +1,9 @@
 //! The migrator (#604): the schema as one sequence of steps, and the adoption
 //! of databases the previous migrator made.
 //!
-//! The old stores are the reference. They make the database that is adopted
-//! (`SqliteStore::open`, `PgStore::connect`), and what they leave is compared
+//! The old migrations are the reference. They make the database that is adopted
+//! (`SqliteStore::open_at`, `PgStore::connect_at`, at their last version, which
+//! leaves the new migrator out of it), and what they leave is compared
 //! with what the new sequence makes on an empty database: tables, columns in
 //! order, types, nullability, defaults, keys, foreign keys and indexes. The
 //! only differences are the ones the sequence adds on purpose, and they are
@@ -361,9 +362,10 @@ mod sqlite {
         Database::connect(options).await.unwrap()
     }
 
-    /// A database the old store made at its last schema, and nothing else.
+    /// A database the old migrations made at their last schema, and nothing
+    /// else: opened at 20, so the new migrator has not looked at it.
     fn made_by_the_old_store(file: &File) {
-        drop(SqliteStore::open(&file.0).unwrap());
+        drop(SqliteStore::open_at(&file.0, 20).unwrap());
     }
 
     fn user_version(path: &Path) -> i64 {
@@ -709,10 +711,11 @@ mod postgres {
         Database::connect(options).await.unwrap()
     }
 
-    /// A schema the old store made at its last version, and nothing else.
+    /// A schema the old migrations made at their last version, and nothing
+    /// else: connected at 16, so the new migrator has not looked at it.
     async fn made_by_the_old_store() -> Schema {
         let schema = schema().await;
-        drop(PgStore::connect(&schema.url).await.unwrap());
+        drop(PgStore::connect_at(&schema.url, 16).await.unwrap());
         schema
     }
 

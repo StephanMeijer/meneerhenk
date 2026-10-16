@@ -1,33 +1,67 @@
 //! SQLite: one connection behind a mutex. Writes take microseconds, so the
 //! async methods run them in place.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use henk_domain::run::{EventId, RunId, RunKind};
+use henk_domain::run::{EventId, RunId};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use rusqlite_migration::{M, Migrations};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
     MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RawRun, RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    RoundRecord, RoundRow, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
     SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, child_records, draft_verdict, event_id, kind_str,
-    merge_days, now, platform_str, round_record, run_kind, run_platform, session_dots,
-    session_endings, session_role, session_status, stage_dots, stage_records, to_i64, to_u64,
+    TranscriptSummary, attach_outcomes, draft_verdict, event_id, merge_days, now, round_record,
+    run_kind, run_platform, session_dots, session_endings, session_role, session_status, to_i64,
+    to_u64,
 };
 
 /// The run store over SQLite.
+///
+/// The methods that have moved to the new layer (#598) go to `store`, which
+/// opens the same file; the rest still use `connection`. Both are on the one
+/// database, so the file is shared by two libraries until the last group
+/// moves.
 #[derive(Debug)]
 pub struct SqliteStore {
     connection: Mutex<Connection>,
+    store: Store,
+    /// The file behind [`SqliteStore::in_memory`], removed with the store.
+    /// Declared last so the connections close before the file goes.
+    _temporary: Option<TemporaryFile>,
+}
+
+/// A database file under the temp directory, removed (with its WAL files)
+/// when it is dropped.
+#[derive(Debug)]
+struct TemporaryFile(PathBuf);
+
+impl TemporaryFile {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!("henk-store-memory-{}-{n}.db", std::process::id())))
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.0.clone().into_os_string();
+            path.push(suffix);
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// A stored time column as an [`instant`], so it compares as a time.
@@ -75,22 +109,33 @@ fn migrations() -> Migrations<'static> {
 }
 
 impl SqliteStore {
-    /// Opens or creates the database at `path` and migrates it.
+    /// Opens or creates the database at `path` and migrates it. The name
+    /// `:memory:` is a store that is gone when it is dropped, as SQLite
+    /// itself reads it (see [`Self::in_memory`]).
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the file cannot be opened or migrated.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open(path)?)
+        if path == Path::new(":memory:") {
+            return Self::in_memory();
+        }
+        Self::migrated(Connection::open(path)?, None, Store::sqlite(path), None)
     }
 
-    /// An in-memory store, for tests and probes.
+    /// A store that is gone when it is dropped, for tests and probes. While
+    /// two libraries share the database (#598) it is a file of its own under
+    /// the temp directory, not memory: an in-memory database cannot be opened
+    /// by both.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when SQLite cannot create the database.
     pub fn in_memory() -> Result<Self, StoreError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        let file = TemporaryFile::new();
+        let connection = Connection::open(&file.0)?;
+        let store = Store::sqlite(&file.0);
+        Self::migrated(connection, None, store, Some(file))
     }
 
     /// Opens or creates the database at `path` and migrates it only up to
@@ -102,16 +147,22 @@ impl SqliteStore {
     /// Returns [`StoreError`] when the file cannot be opened or migrated.
     #[cfg(feature = "testing")]
     pub fn open_at(path: &Path, version: usize) -> Result<Self, StoreError> {
-        Self::migrated(Connection::open(path)?, Some(version))
-    }
-
-    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
-        Self::migrated(connection, None)
+        Self::migrated(
+            Connection::open(path)?,
+            Some(version),
+            Store::sqlite(path).unmigrated(),
+            None,
+        )
     }
 
     /// The store over `connection`, migrated up to `version`, or to the
     /// latest schema when `None`.
-    fn migrated(mut connection: Connection, version: Option<usize>) -> Result<Self, StoreError> {
+    fn migrated(
+        mut connection: Connection,
+        version: Option<usize>,
+        store: Store,
+        temporary: Option<TemporaryFile>,
+    ) -> Result<Self, StoreError> {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         match version {
@@ -120,6 +171,8 @@ impl SqliteStore {
         }
         Ok(Self {
             connection: Mutex::new(connection),
+            store,
+            _temporary: temporary,
         })
     }
 
@@ -135,27 +188,7 @@ impl SqliteStore {
 #[async_trait]
 impl RunStore for SqliteStore {
     async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
-        let target = to_i64("runs.target", run.target)?;
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link, heartbeat_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?10)",
-                params![
-                    run.id.as_str(),
-                    kind_str(run.kind),
-                    platform_str(run.platform),
-                    run.repo,
-                    target,
-                    run.commit,
-                    run.requester,
-                    run.trigger,
-                    RunStatus::Running.as_str(),
-                    now(),
-                    run.link,
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.create_run(run).await
     }
 
     async fn finish_run(
@@ -165,111 +198,38 @@ impl RunStore for SqliteStore {
         summary: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE runs SET status = ?2, finished_at = ?3, summary = ?4, error = ?5 WHERE id = ?1",
-                params![id.as_str(), status.as_str(), now(), summary, error],
-            )?;
-            Ok(())
-        })
+        self.store.finish_run(id, status, summary, error).await
     }
 
     async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE runs SET status = ?2, finished_at = ?3, error = ?4, superseded_by = ?5 WHERE id = ?1",
-                params![
-                    id.as_str(),
-                    RunStatus::Superseded.as_str(),
-                    now(),
-                    reason,
-                    by.as_str()
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.supersede_run(id, by, reason).await
     }
 
     async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
-        self.with(|c| {
-            c.query_row(
-                &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?1"),
-                params![id.as_str()],
-                raw_run,
-            )
-            .optional()?
-            .map(RawRun::into_record)
-            .transpose()
-        })
+        self.store.run(id).await
     }
 
     async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE runs SET heartbeat_at = ?2 WHERE id = ?1",
-                params![id.as_str(), now()],
-            )?;
-            Ok(())
-        })
+        self.store.heartbeat(id).await
     }
 
     async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE runs SET loop_stop = ?2, loop_rounds = ?3 WHERE id = ?1",
-                params![id.as_str(), stop, rounds],
-            )?;
-            Ok(())
-        })
+        self.store.end_loop(id, stop, rounds).await
     }
 
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE runs SET check_id = ?2 WHERE id = ?1",
-                params![id.as_str(), check_id],
-            )?;
-            Ok(())
-        })
+        self.store.set_check(id, check_id).await
     }
 
     async fn orphaned_runs(
         &self,
         stale_before: OffsetDateTime,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let cutoff = instant(
-            "stale_before",
-            &stale_before.format(&Rfc3339).unwrap_or_default(),
-        )?;
-        self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs WHERE {ORPHANED}
-                 ORDER BY {started}, id",
-                started = instant_of!("started_at"),
-            ))?;
-            let raw = statement
-                .query_map(params![RunStatus::Running.as_str(), cutoff], raw_run)?
-                .collect::<Result<Vec<_>, _>>()?;
-            raw.into_iter().map(RawRun::into_record).collect()
-        })
+        self.store.orphaned_runs(stale_before).await
     }
 
     async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
-        let since = instant(
-            "since",
-            &since
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
-        )?;
-        self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM ({LATEST_REVIEWS}) ORDER BY at, id"
-            ))?;
-            let raw = statement
-                .query_map(params![kind_str(RunKind::Review), since], raw_run)?
-                .collect::<Result<Vec<_>, _>>()?;
-            raw.into_iter().map(RawRun::into_record).collect()
-        })
+        self.store.latest_reviews(since).await
     }
 
     async fn claim_resume(
@@ -278,80 +238,19 @@ impl RunStore for SqliteStore {
         interrupted: &str,
         resumed: &str,
     ) -> Result<bool, StoreError> {
-        self.with(|c| {
-            let changed = c.execute(
-                "UPDATE runs SET error = ?4 WHERE id = ?1 AND status = ?2 AND error = ?3",
-                params![
-                    run.as_str(),
-                    RunStatus::Failed.as_str(),
-                    interrupted,
-                    resumed
-                ],
-            )?;
-            Ok(changed == 1)
-        })
+        self.store.claim_resume(run, interrupted, resumed).await
     }
 
     async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
-        let at = |time: Option<OffsetDateTime>| {
-            time.map_or_else(now, |t| t.format(&Rfc3339).unwrap_or_else(|_| now()))
-        };
-        let started = at(write.started_at);
-        let ended = write.state.ended().then(|| at(write.ended_at));
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO stages (run_id, stage, state, started_at, ended_at, detail)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT (run_id, stage) DO UPDATE SET
-                     state = excluded.state, ended_at = excluded.ended_at, detail = excluded.detail",
-                params![
-                    run.as_str(),
-                    write.stage.as_str(),
-                    write.state.as_str(),
-                    started,
-                    ended,
-                    write.detail
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.stage(run, write).await
     }
 
     async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE stages SET state = ?2, ended_at = ?3, detail = ?4
-                 WHERE run_id = ?1 AND state = ?5",
-                params![
-                    run.as_str(),
-                    StageState::Failed.as_str(),
-                    now(),
-                    reason,
-                    StageState::Running.as_str()
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.fail_running_stages(run, reason).await
     }
 
     async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
-        self.with(|c| {
-            let mut statement = c.prepare(
-                "SELECT stage, state, started_at, ended_at, detail FROM stages WHERE run_id = ?1",
-            )?;
-            let rows = statement
-                .query_map(params![run.as_str()], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            stage_records(rows)
-        })
+        self.store.stages(run).await
     }
 
     async fn link_child(
@@ -360,44 +259,15 @@ impl RunStore for SqliteStore {
         stage: Stage,
         child: &RunId,
     ) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO run_children (parent, stage, child) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (parent, stage) DO UPDATE SET child = excluded.child",
-                params![parent.as_str(), stage.as_str(), child.as_str()],
-            )?;
-            Ok(())
-        })
+        self.store.link_child(parent, stage, child).await
     }
 
     async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
-        self.with(|c| {
-            let mut statement =
-                c.prepare("SELECT stage, child FROM run_children WHERE parent = ?1")?;
-            let rows = statement
-                .query_map(params![parent.as_str()], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            child_records(rows)
-        })
+        self.store.children(parent).await
     }
 
     async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE sessions SET status = ?2, finished_at = ?3, error = ?4
-                 WHERE run_id = ?1 AND status = ?5",
-                params![
-                    run.as_str(),
-                    SessionStatus::DidNotFinish.as_str(),
-                    now(),
-                    reason,
-                    SessionStatus::Running.as_str()
-                ],
-            )?;
-            Ok(())
-        })
+        self.store.drop_running_sessions(run, reason).await
     }
 
     async fn start_session(
@@ -1091,37 +961,7 @@ impl RunStore for SqliteStore {
         filter: &RunFilter,
         page: Page,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(RunStatus::as_str);
-        let platform = filter.platform.map(platform_str);
-        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
-        let (before_at, before_id) = run_key(filter)?;
-        let (since, until) = run_window(filter)?;
-        self.with(|c| {
-            let mut statement = c.prepare(&format!(
-                "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
-                 ORDER BY {RUN_ORDER} LIMIT ?10 OFFSET ?11"
-            ))?;
-            let raw = statement
-                .query_map(
-                    params![
-                        kind,
-                        status,
-                        platform,
-                        filter.repo,
-                        target,
-                        since,
-                        until,
-                        before_at,
-                        before_id,
-                        page.limit(),
-                        page.offset()
-                    ],
-                    raw_run,
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            raw.into_iter().map(RawRun::into_record).collect()
-        })
+        self.store.list_runs(filter, page).await
     }
 
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
@@ -1199,49 +1039,11 @@ impl RunStore for SqliteStore {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let marks = vec!["?"; runs.len()].join(", ");
-        self.with(|c| {
-            let rows = c
-                .prepare(&format!(
-                    "SELECT run_id, stage, state FROM stages WHERE run_id IN ({marks})"
-                ))?
-                .query_map(
-                    rusqlite::params_from_iter(runs.iter().map(RunId::as_str)),
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?
-                .collect::<Result<Vec<_>, _>>()?;
-            stage_dots(rows)
-        })
+        self.store.stages_of(runs).await
     }
 
     async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
-        let kind = filter.kind.map(kind_str);
-        let status = filter.status.map(RunStatus::as_str);
-        let platform = filter.platform.map(platform_str);
-        let target = filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX));
-        let (before_at, before_id) = run_key(filter)?;
-        let (since, until) = run_window(filter)?;
-        self.with(|c| {
-            let count: i64 = c.query_row(
-                &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
-                params![
-                    kind,
-                    status,
-                    platform,
-                    filter.repo,
-                    target,
-                    since,
-                    until,
-                    before_at,
-                    before_id
-                ],
-                |row| row.get(0),
-            )?;
-            Ok(u64::try_from(count).unwrap_or_default())
-        })
+        self.store.count_runs(filter).await
     }
 
     async fn list_inbound_events(
@@ -1350,38 +1152,6 @@ impl RawInbound {
     }
 }
 
-/// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
-/// platform, repo, target, since, until, and the keyset (time, id).
-/// `since`, `until` and the keyset's time are [`instant`]s, compared to
-/// `started_at` as one too: as text, "12:00:00.4Z" sorts before
-/// "12:00:00Z" (#216).
-const RUN_FILTER: &str = concat!(
-    "(?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR status = ?2)
-     AND (?3 IS NULL OR platform = ?3) AND (?4 IS NULL OR repo = ?4)
-     AND (?5 IS NULL OR target = ?5)
-     AND (?6 IS NULL OR ",
-    instant_of!("started_at"),
-    " >= ?6) AND (?7 IS NULL OR ",
-    instant_of!("started_at"),
-    " < ?7) AND (?8 IS NULL OR ",
-    instant_of!("started_at"),
-    " < ?8 OR (",
-    instant_of!("started_at"),
-    " = ?8 AND id < ?9))"
-);
-
-/// The `WHERE` of the orphaned runs, over parameters 1 (the running
-/// status) and 2 (the cutoff, an [`instant`]): no heartbeat, or one before
-/// the cutoff as a time.
-const ORPHANED: &str = concat!(
-    "status = ?1 AND (heartbeat_at IS NULL OR ",
-    instant_of!("heartbeat_at"),
-    " < ?2)"
-);
-
-/// The order of a run listing: newest first as a time, then by id.
-const RUN_ORDER: &str = concat!(instant_of!("started_at"), " DESC, id DESC");
-
 /// A caller-supplied time, as given; empty means now.
 fn at_or_now(at: &str) -> String {
     if at.is_empty() { now() } else { at.to_owned() }
@@ -1413,31 +1183,6 @@ const SESSION_ENDINGS: &str = concat!(
            ORDER BY at DESC, id DESC LIMIT ?2) r
      JOIN sessions s ON s.run_id = r.id
      ORDER BY r.at DESC, r.id DESC, s.name"
-);
-
-/// The newest review of each pull request that started at or after ?2 (an
-/// [`instant`]), over parameter 1 (the review kind), with its start as the
-/// instant `at` (#160). Compared as instants, not as text, so runs started
-/// in the same second keep their order: as text, "12:00:00Z" sorts after
-/// "12:00:00.4Z".
-const LATEST_REVIEWS: &str = concat!(
-    "SELECT r.*, ",
-    instant_of!("r.started_at"),
-    " AS at FROM runs r WHERE r.kind = ?1 AND ",
-    instant_of!("r.started_at"),
-    " >= ?2 AND NOT EXISTS (
-         SELECT 1 FROM runs n
-         WHERE n.kind = r.kind AND n.platform = r.platform
-           AND n.repo = r.repo AND n.target = r.target
-           AND (",
-    instant_of!("n.started_at"),
-    " > ",
-    instant_of!("r.started_at"),
-    " OR (",
-    instant_of!("n.started_at"),
-    " = ",
-    instant_of!("r.started_at"),
-    " AND n.id > r.id)))"
 );
 
 /// Per-UTC-day counts for the overview (#225); stored times are UTC
@@ -1559,8 +1304,8 @@ impl CallRow {
 }
 
 /// An RFC 3339 time as a fixed-width UTC text that sorts as the time does:
-/// `2026-10-07T12:00:00` and nine digits of nanoseconds. `RUN_FILTER` turns
-/// a stored `started_at` (UTC, from [`now`]) into the same shape.
+/// `2026-10-07T12:00:00` and nine digits of nanoseconds. [`instant_of!`] turns
+/// a stored time (UTC, from [`now`]) into the same shape.
 fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
     let at = OffsetDateTime::parse(value, &Rfc3339)
         .map_err(|_| StoreError::Corrupt {
@@ -1578,50 +1323,6 @@ fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
         at.second(),
         at.nanosecond()
     ))
-}
-
-/// The time bounds of a run listing, as [`instant`]s.
-fn run_window(filter: &RunFilter) -> Result<(Option<String>, Option<String>), StoreError> {
-    window(filter.since.as_deref(), filter.until.as_deref())
-}
-
-/// The keyset of a run listing, as two parameters: the time as an
-/// [`instant`], so a key compares as a time whatever its fraction.
-fn run_key(filter: &RunFilter) -> Result<(Option<String>, Option<&str>), StoreError> {
-    let Some(key) = filter.before.as_ref() else {
-        return Ok((None, None));
-    };
-    Ok((
-        Some(instant("before", &key.started_at)?),
-        Some(key.id.as_str()),
-    ))
-}
-
-/// The columns [`raw_run`] reads, in order.
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by, loop_stop, loop_rounds";
-
-fn raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
-    Ok(RawRun {
-        id: row.get(0)?,
-        kind: row.get(1)?,
-        platform: row.get(2)?,
-        repo: row.get(3)?,
-        target: row.get(4)?,
-        commit: row.get(5)?,
-        requester: row.get(6)?,
-        trigger: row.get(7)?,
-        status: row.get(8)?,
-        started_at: row.get(9)?,
-        finished_at: row.get(10)?,
-        link: row.get(11)?,
-        summary: row.get(12)?,
-        error: row.get(13)?,
-        heartbeat_at: row.get(14)?,
-        check_id: row.get(15)?,
-        superseded_by: row.get(16)?,
-        loop_stop: row.get(17)?,
-        loop_rounds: row.get(18)?,
-    })
 }
 
 #[cfg(test)]
@@ -1748,50 +1449,6 @@ mod tests {
             sources,
             ["comment", "webhook"],
             "one row per join, in order"
-        );
-    }
-
-    /// The plan of a run listing, one line per step.
-    fn run_listing_plan(store: &SqliteStore) -> Vec<String> {
-        store
-            .with(|c| {
-                let mut statement = c.prepare(&format!(
-                    "EXPLAIN QUERY PLAN SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
-                     ORDER BY {RUN_ORDER} LIMIT ?10 OFFSET ?11"
-                ))?;
-                let rows = statement.query_map(
-                    params![
-                        None::<String>,
-                        None::<String>,
-                        None::<String>,
-                        None::<String>,
-                        None::<i64>,
-                        None::<String>,
-                        None::<String>,
-                        None::<String>,
-                        None::<String>,
-                        50,
-                        0
-                    ],
-                    |row| row.get::<_, String>(3),
-                )?;
-                Ok(rows.collect::<Result<_, _>>()?)
-            })
-            .unwrap()
-    }
-
-    #[test]
-    fn the_run_listing_walks_the_instant_index_instead_of_sorting() {
-        let store = SqliteStore::in_memory().unwrap();
-        let plan = run_listing_plan(&store);
-        assert!(
-            plan.iter()
-                .any(|step| step.contains("USING INDEX runs_started_instant")),
-            "{plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
-            "{plan:?}"
         );
     }
 }

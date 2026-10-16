@@ -2062,6 +2062,10 @@ requester_id = 3
             "Waiting for a review slot: all 1 are in use. Henk starts this review when one frees."
         );
         assert!(henk_domain::text::is_in_style(&summary));
+        until("A's check starts", || {
+            !writer.started.lock().unwrap().is_empty()
+        })
+        .await;
         assert_eq!(
             *writer.started.lock().unwrap(),
             [None],

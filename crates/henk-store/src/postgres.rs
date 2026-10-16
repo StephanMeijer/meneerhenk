@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use henk_domain::run::{EventId, RunId, RunKind};
+use henk_domain::run::{EventId, RunId};
 use rustls_platform_verifier::BuilderVerifierExt as _;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -14,17 +14,18 @@ use tokio_postgres::Row;
 use tokio_postgres::config::Host;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
+use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
     EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
     MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RawRun, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
-    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
+    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
     ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, child_records, draft_verdict, event_id, kind_str,
-    merge_days, platform_str, round_record, run_kind, run_platform, session_dots, session_endings,
-    session_role, session_status, stage_dots, stage_records, to_i64, to_u32, to_u64,
+    TranscriptSummary, attach_outcomes, draft_verdict, event_id, merge_days, round_record,
+    run_kind, run_platform, session_dots, session_endings, session_role, session_status, to_i64,
+    to_u32, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -60,6 +61,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub struct PgStore {
     pool: Pool,
+    /// The methods that have moved to the new layer (#598) go here, to a
+    /// second pool on the same database; the rest still use `pool`.
+    store: Store,
 }
 
 impl PgStore {
@@ -71,7 +75,7 @@ impl PgStore {
     /// Returns [`StoreError`] when the URL does not parse, the server cannot
     /// be reached, or migrating fails. The URL itself is never in the error.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
-        Self::connect_up_to(url, MIGRATIONS.len()).await
+        Self::connect_up_to(url, MIGRATIONS.len(), true).await
     }
 
     /// Connects like [`Self::connect`], but migrates only up to schema
@@ -83,10 +87,16 @@ impl PgStore {
     /// As [`Self::connect`].
     #[cfg(feature = "testing")]
     pub async fn connect_at(url: &str, version: usize) -> Result<Self, StoreError> {
-        Self::connect_up_to(url, version.min(MIGRATIONS.len())).await
+        Self::connect_up_to(url, version.min(MIGRATIONS.len()), false).await
     }
 
-    async fn connect_up_to(url: &str, version: usize) -> Result<Self, StoreError> {
+    /// `migrate_new` says whether the new layer migrates too: off for a
+    /// database that is left at an old schema on purpose.
+    async fn connect_up_to(
+        url: &str,
+        version: usize,
+        migrate_new: bool,
+    ) -> Result<Self, StoreError> {
         let mut config = parse_url(url)?;
         if config.get_connect_timeout().is_none() {
             config.connect_timeout(CONNECT_TIMEOUT);
@@ -102,14 +112,15 @@ impl PgStore {
             .max_size(POOL_SIZE)
             .build()
             .map_err(|error| StoreError::Connect(error.to_string()))?;
-        let store = Self { pool };
-        store.migrate(version).await?;
-        Ok(store)
+        Self::migrate(&pool, version).await?;
+        // The new layer second: it adopts what the migrations above leave.
+        let store = Store::postgres(url, migrate_new).await?;
+        Ok(Self { pool, store })
     }
 
     /// Applies the migrations up to `upto` the database lacks.
-    async fn migrate(&self, upto: usize) -> Result<(), StoreError> {
-        let mut client = self.pool.get().await?;
+    async fn migrate(pool: &Pool, upto: usize) -> Result<(), StoreError> {
+        let mut client = pool.get().await?;
         let transaction = client.transaction().await?;
         transaction
             .execute("SELECT pg_advisory_xact_lock($1)", &[&MIGRATION_LOCK])
@@ -254,77 +265,6 @@ const CALL_FILTER: &str = "($1::text IS NULL OR CASE WHEN c.origin = '' THEN '(u
      AND ($4::timestamptz IS NULL OR c.at >= $4)
      AND ($5::timestamptz IS NULL OR c.at < $5)";
 
-/// The `WHERE` of a run listing, over parameters 1 to 9: kind, status,
-/// platform, repo, target, since, until, and the keyset (time, id).
-const RUN_FILTER: &str = "($1::text IS NULL OR kind = $1) AND ($2::text IS NULL OR status = $2)
-     AND ($3::text IS NULL OR platform = $3) AND ($4::text IS NULL OR repo = $4)
-     AND ($5::bigint IS NULL OR target = $5)
-     AND ($6::timestamptz IS NULL OR started_at >= $6)
-     AND ($7::timestamptz IS NULL OR started_at < $7)
-     AND ($8::timestamptz IS NULL OR started_at < $8 OR (started_at = $8 AND id < $9::text))";
-
-/// A run filter as query parameters.
-struct RunParams<'a> {
-    kind: Option<&'static str>,
-    status: Option<&'static str>,
-    platform: Option<&'static str>,
-    target: Option<i64>,
-    since: Option<OffsetDateTime>,
-    until: Option<OffsetDateTime>,
-    before_at: Option<OffsetDateTime>,
-    before_id: Option<&'a str>,
-}
-
-impl<'a> RunParams<'a> {
-    fn of(filter: &'a RunFilter) -> Result<Self, StoreError> {
-        let (since, until) = window(filter.since.as_ref(), filter.until.as_ref())?;
-        Ok(Self {
-            kind: filter.kind.map(kind_str),
-            status: filter.status.map(RunStatus::as_str),
-            platform: filter.platform.map(platform_str),
-            target: filter.target.map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
-            since,
-            until,
-            before_at: filter
-                .before
-                .as_ref()
-                .map(|k| parse_time("started_at", &k.started_at))
-                .transpose()?,
-            before_id: filter.before.as_ref().map(|k| k.id.as_str()),
-        })
-    }
-}
-
-const RUN_COLUMNS: &str = "id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, finished_at, link, summary, error, heartbeat_at, check_id, superseded_by, loop_stop, loop_rounds";
-
-fn raw_run(row: &Row) -> Result<RawRun, StoreError> {
-    let at = |i: usize| -> Result<String, StoreError> { Ok(text(row.try_get(i)?)) };
-    let maybe_at = |i: usize| -> Result<Option<String>, StoreError> {
-        Ok(row.try_get::<_, Option<OffsetDateTime>>(i)?.map(text))
-    };
-    Ok(RawRun {
-        id: row.try_get(0)?,
-        kind: row.try_get(1)?,
-        platform: row.try_get(2)?,
-        repo: row.try_get(3)?,
-        target: row.try_get(4)?,
-        commit: row.try_get(5)?,
-        requester: row.try_get(6)?,
-        trigger: row.try_get(7)?,
-        status: row.try_get(8)?,
-        started_at: at(9)?,
-        finished_at: maybe_at(10)?,
-        link: row.try_get(11)?,
-        summary: row.try_get(12)?,
-        error: row.try_get(13)?,
-        heartbeat_at: maybe_at(14)?,
-        check_id: row.try_get(15)?,
-        superseded_by: row.try_get(16)?,
-        loop_stop: row.try_get(17)?,
-        loop_rounds: row.try_get::<_, Option<i32>>(18)?.map(i64::from),
-    })
-}
-
 fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
     let id = event_id(row.try_get(0)?)?;
     let target: Option<i64> = row.try_get(5)?;
@@ -345,28 +285,7 @@ fn inbound_event(row: &Row) -> Result<InboundEvent, StoreError> {
 #[async_trait]
 impl RunStore for PgStore {
     async fn create_run(&self, run: &NewRun) -> Result<(), StoreError> {
-        let started = now();
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO runs (id, kind, platform, repo, target, commit_sha, requester, trigger, status, started_at, link, heartbeat_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $10)",
-                &[
-                    &run.id.as_str(),
-                    &kind_str(run.kind),
-                    &platform_str(run.platform),
-                    &run.repo,
-                    &to_i64("runs.target", run.target)?,
-                    &run.commit,
-                    &run.requester,
-                    &run.trigger,
-                    &RunStatus::Running.as_str(),
-                    &started,
-                    &run.link,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.create_run(run).await
     }
 
     async fn finish_run(
@@ -376,119 +295,38 @@ impl RunStore for PgStore {
         summary: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE runs SET status = $2, finished_at = $3, summary = $4, error = $5 WHERE id = $1",
-                &[&id.as_str(), &status.as_str(), &now(), &summary, &error],
-            )
-            .await?;
-        Ok(())
+        self.store.finish_run(id, status, summary, error).await
     }
 
     async fn supersede_run(&self, id: &RunId, by: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE runs SET status = $2, finished_at = $3, error = $4, superseded_by = $5 WHERE id = $1",
-                &[
-                    &id.as_str(),
-                    &RunStatus::Superseded.as_str(),
-                    &now(),
-                    &reason,
-                    &by.as_str(),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.supersede_run(id, by, reason).await
     }
 
     async fn run(&self, id: &RunId) -> Result<Option<RunRecord>, StoreError> {
-        self.client()
-            .await?
-            .query_opt(
-                &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = $1"),
-                &[&id.as_str()],
-            )
-            .await?
-            .map(|row| raw_run(&row)?.into_record())
-            .transpose()
+        self.store.run(id).await
     }
 
     async fn heartbeat(&self, id: &RunId) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE runs SET heartbeat_at = $2 WHERE id = $1",
-                &[&id.as_str(), &now()],
-            )
-            .await?;
-        Ok(())
+        self.store.heartbeat(id).await
     }
 
     async fn end_loop(&self, id: &RunId, stop: &str, rounds: u32) -> Result<(), StoreError> {
-        let rounds = i32::try_from(rounds).unwrap_or(i32::MAX);
-        self.client()
-            .await?
-            .execute(
-                "UPDATE runs SET loop_stop = $2, loop_rounds = $3 WHERE id = $1",
-                &[&id.as_str(), &stop, &rounds],
-            )
-            .await?;
-        Ok(())
+        self.store.end_loop(id, stop, rounds).await
     }
 
     async fn set_check(&self, id: &RunId, check_id: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE runs SET check_id = $2 WHERE id = $1",
-                &[&id.as_str(), &check_id],
-            )
-            .await?;
-        Ok(())
+        self.store.set_check(id, check_id).await
     }
 
     async fn orphaned_runs(
         &self,
         stale_before: OffsetDateTime,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT {RUN_COLUMNS} FROM runs
-                     WHERE status = $1 AND (heartbeat_at IS NULL OR heartbeat_at < $2)
-                     ORDER BY started_at, id"
-                ),
-                &[&RunStatus::Running.as_str(), &stale_before],
-            )
-            .await?
-            .iter()
-            .map(|row| raw_run(row)?.into_record())
-            .collect()
+        self.store.orphaned_runs(stale_before).await
     }
 
     async fn latest_reviews(&self, since: OffsetDateTime) -> Result<Vec<RunRecord>, StoreError> {
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT {RUN_COLUMNS} FROM runs r
-                     WHERE r.kind = $1 AND r.started_at >= $2 AND NOT EXISTS (
-                         SELECT 1 FROM runs n
-                         WHERE n.kind = r.kind AND n.platform = r.platform
-                           AND n.repo = r.repo AND n.target = r.target
-                           AND (n.started_at > r.started_at
-                                OR (n.started_at = r.started_at AND n.id > r.id)))
-                     ORDER BY r.started_at, r.id"
-                ),
-                &[&kind_str(RunKind::Review), &since],
-            )
-            .await?
-            .iter()
-            .map(|row| raw_run(row)?.into_record())
-            .collect()
+        self.store.latest_reviews(since).await
     }
 
     async fn claim_resume(
@@ -497,38 +335,11 @@ impl RunStore for PgStore {
         interrupted: &str,
         resumed: &str,
     ) -> Result<bool, StoreError> {
-        let changed = self
-            .client()
-            .await?
-            .execute(
-                "UPDATE runs SET error = $4 WHERE id = $1 AND status = $2 AND error = $3",
-                &[
-                    &run.as_str(),
-                    &RunStatus::Failed.as_str(),
-                    &interrupted,
-                    &resumed,
-                ],
-            )
-            .await?;
-        Ok(changed == 1)
+        self.store.claim_resume(run, interrupted, resumed).await
     }
 
     async fn drop_running_sessions(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE sessions SET status = $2, finished_at = $3, error = $4
-                 WHERE run_id = $1 AND status = $5",
-                &[
-                    &run.as_str(),
-                    &SessionStatus::DidNotFinish.as_str(),
-                    &now(),
-                    &reason,
-                    &SessionStatus::Running.as_str(),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.drop_running_sessions(run, reason).await
     }
 
     async fn daily_stats(&self, since: OffsetDateTime) -> Result<Vec<DayCounts>, StoreError> {
@@ -653,90 +464,19 @@ impl RunStore for PgStore {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, Stage, StageState)>, StoreError> {
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<&str> = runs.iter().map(RunId::as_str).collect();
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT run_id, stage, state FROM stages WHERE run_id = ANY($1)",
-                &[&ids],
-            )
-            .await?
-            .iter()
-            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?, row.try_get(2)?)))
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        stage_dots(rows)
+        self.store.stages_of(runs).await
     }
 
     async fn stage(&self, run: &RunId, write: &StageWrite) -> Result<(), StoreError> {
-        let started = write.started_at.unwrap_or_else(now);
-        let ended = write
-            .state
-            .ended()
-            .then(|| write.ended_at.unwrap_or_else(now));
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO stages (run_id, stage, state, started_at, ended_at, detail)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (run_id, stage) DO UPDATE SET
-                     state = excluded.state, ended_at = excluded.ended_at, detail = excluded.detail",
-                &[
-                    &run.as_str(),
-                    &write.stage.as_str(),
-                    &write.state.as_str(),
-                    &started,
-                    &ended,
-                    &write.detail,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.stage(run, write).await
     }
 
     async fn fail_running_stages(&self, run: &RunId, reason: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE stages SET state = $2, ended_at = $3, detail = $4
-                 WHERE run_id = $1 AND state = $5",
-                &[
-                    &run.as_str(),
-                    &StageState::Failed.as_str(),
-                    &now(),
-                    &reason,
-                    &StageState::Running.as_str(),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.fail_running_stages(run, reason).await
     }
 
     async fn stages(&self, run: &RunId) -> Result<Vec<StageRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT stage, state, started_at, ended_at, detail FROM stages WHERE run_id = $1",
-                &[&run.as_str()],
-            )
-            .await?;
-        let rows = rows
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<_, String>(0)?,
-                    row.try_get::<_, String>(1)?,
-                    text(row.try_get(2)?),
-                    row.try_get::<_, Option<OffsetDateTime>>(3)?.map(text),
-                    row.try_get::<_, String>(4)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        stage_records(rows)
+        self.store.stages(run).await
     }
 
     async fn link_child(
@@ -745,31 +485,11 @@ impl RunStore for PgStore {
         stage: Stage,
         child: &RunId,
     ) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO run_children (parent, stage, child) VALUES ($1, $2, $3)
-                 ON CONFLICT (parent, stage) DO UPDATE SET child = excluded.child",
-                &[&parent.as_str(), &stage.as_str(), &child.as_str()],
-            )
-            .await?;
-        Ok(())
+        self.store.link_child(parent, stage, child).await
     }
 
     async fn children(&self, parent: &RunId) -> Result<Vec<(Stage, RunId)>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT stage, child FROM run_children WHERE parent = $1",
-                &[&parent.as_str()],
-            )
-            .await?;
-        let rows = rows
-            .iter()
-            .map(|row| Ok((row.try_get::<_, String>(0)?, row.try_get::<_, String>(1)?)))
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        child_records(rows)
+        self.store.children(parent).await
     }
 
     async fn start_session(
@@ -1512,56 +1232,11 @@ impl RunStore for PgStore {
         filter: &RunFilter,
         page: Page,
     ) -> Result<Vec<RunRecord>, StoreError> {
-        let p = RunParams::of(filter)?;
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "SELECT {RUN_COLUMNS} FROM runs WHERE {RUN_FILTER}
-                     ORDER BY started_at DESC, id DESC LIMIT $10 OFFSET $11"
-                ),
-                &[
-                    &p.kind,
-                    &p.status,
-                    &p.platform,
-                    &filter.repo,
-                    &p.target,
-                    &p.since,
-                    &p.until,
-                    &p.before_at,
-                    &p.before_id,
-                    &i64::from(page.limit()),
-                    &i64::from(page.offset()),
-                ],
-            )
-            .await?
-            .iter()
-            .map(|row| raw_run(row)?.into_record())
-            .collect()
+        self.store.list_runs(filter, page).await
     }
 
     async fn count_runs(&self, filter: &RunFilter) -> Result<u64, StoreError> {
-        let p = RunParams::of(filter)?;
-        let count: i64 = self
-            .client()
-            .await?
-            .query_one(
-                &format!("SELECT COUNT(*) FROM runs WHERE {RUN_FILTER}"),
-                &[
-                    &p.kind,
-                    &p.status,
-                    &p.platform,
-                    &filter.repo,
-                    &p.target,
-                    &p.since,
-                    &p.until,
-                    &p.before_at,
-                    &p.before_id,
-                ],
-            )
-            .await?
-            .try_get(0)?;
-        Ok(u64::try_from(count).unwrap_or_default())
+        self.store.count_runs(filter).await
     }
 
     async fn list_inbound_events(

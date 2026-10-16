@@ -21,6 +21,7 @@ sea-orm-migration = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
+tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tokio-postgres-rustls = { workspace = true }
 

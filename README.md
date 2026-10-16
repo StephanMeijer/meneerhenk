@@ -180,7 +180,10 @@ Run records live in one SQLite file by default (`[database] backend =
 "sqlite"`, `path`). With `backend = "postgres"` they go to a PostgreSQL
 database instead; `url_env` names the variable holding the URL, for example
 `postgres://henk:...@db.internal/henk?sslmode=verify-full`. TLS is rustls
-with the platform's certificate store, and `sslmode` works as usual. Henk
+with the platform's certificate store. Once TLS is asked for, the server's
+certificate and host name are always checked: `sslmode=require` and
+`verify-ca` mean `verify-full` here, where `psql` would only encrypt. Use
+`disable` or `prefer` if the server has no certificate you can verify. Henk
 creates and migrates the schema on start, safely when several processes
 start at once. A new PostgreSQL database starts empty: earlier SQLite
 records stay in their file, readable with `henk runs show` by pointing
