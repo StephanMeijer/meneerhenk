@@ -91,6 +91,15 @@ api_key_env = "ANTHROPIC_API_KEY"
 # api_key_env = "OPENAI_API_KEY"
 # api = "responses"
 
+# Pay with a ChatGPT plan instead of an API key (#620). Sign in once with
+# `henk auth openai`, which writes the sign-in to auth_file; Henk renews it
+# there. For your own plan on your own server; see the README.
+# [endpoints.chatgpt]
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# auth = "chatgpt"
+# auth_file = "/var/lib/henk/openai-auth.json"
+
 # Models: what each model is and on which endpoint. The roles (the
 # reviewer, the executor and the planner) refer to one of these by id.
 [models.proxy-fast]

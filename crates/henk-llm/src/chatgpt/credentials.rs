@@ -118,6 +118,62 @@ impl Credentials {
     }
 }
 
+/// Why a sign-in file could not be loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum LoadError {
+    /// There is no file there.
+    #[error("there is no sign-in file at {0}")]
+    Missing(PathBuf),
+    /// The file cannot be read, or is not a sign-in file this Henk reads.
+    /// The reason never quotes the file.
+    #[error("{path}: {problem}")]
+    Unusable {
+        /// The file.
+        path: PathBuf,
+        /// What is wrong.
+        problem: String,
+    },
+}
+
+impl Credentials {
+    /// Reads the sign-in file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Missing`] when there is no such file, and
+    /// [`LoadError::Unusable`] when it cannot be read or is not a sign-in
+    /// file.
+    pub fn load(path: &Path) -> Result<Self, LoadError> {
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                LoadError::Missing(path.to_owned())
+            } else {
+                LoadError::Unusable {
+                    path: path.to_owned(),
+                    problem: format!("cannot be read ({})", error.kind()),
+                }
+            }
+        })?;
+        Self::from_json(&text).map_err(|problem| LoadError::Unusable {
+            path: path.to_owned(),
+            problem,
+        })
+    }
+
+    /// Writes the sign-in file at `path`, owner-only, so that a reader sees
+    /// the old file or the new one.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the file cannot be written.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let content = self
+            .to_json()
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))?;
+        write_atomic(path, &content)
+    }
+}
+
 /// A word for what is wrong with unreadable JSON, without the JSON.
 trait ClassifyName {
     fn classify_name(&self) -> &'static str;

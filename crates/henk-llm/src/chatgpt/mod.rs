@@ -19,10 +19,17 @@
 //! - **A network failure is not a sign-out.** The file is left alone and the
 //!   error is the kind the caller retries.
 //!
+//! [`SignIn`] is the other half: the browser sign-in that makes the file in
+//! the first place (authorization code with PKCE on a loopback port, the ID
+//! token checked as OpenAI asks).
+//!
 //! A token value is never in an error, a log line or a `Debug` text.
 
 mod credentials;
+mod idtoken;
 mod manager;
+mod signin;
 
-pub use credentials::Credentials;
+pub use credentials::{Credentials, LoadError};
 pub use manager::{Clock, TOKEN_URL, TokenManager};
+pub use signin::{DEFAULT_PORT, Pending, SignIn, SignInError};
