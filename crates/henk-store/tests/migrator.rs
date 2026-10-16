@@ -10,8 +10,8 @@
 //!
 //! SQLite runs in the plain test run. `PostgreSQL` has the same tests,
 //! `#[ignore]`d, for a server named by `HENK_TEST_DATABASE_URL`
-//! (`cargo test -p henk-store --test migrator -- --ignored`); the `postgres`
-//! CI job runs them until it goes (#608).
+//! (`cargo test -p henk-store --test migrator -- --ignored`). Nothing in CI
+//! starts a server (#598); run them by hand, as `src/migrator/README.md` says.
 
 #![allow(
     clippy::panic,

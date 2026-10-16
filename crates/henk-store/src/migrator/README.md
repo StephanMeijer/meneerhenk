@@ -61,10 +61,9 @@ database with no history of either kind is new, and every step runs.
 
 # Checking `PostgreSQL`
 
-The `PostgreSQL` tests are `#[ignore]`d and need a server. Run them by hand
-against a throwaway container before a release and after any change here (CI's
-`postgres` job runs them too until #608 removes it, since CI is to have no
-`PostgreSQL`, #598):
+The `PostgreSQL` tests are `#[ignore]`d and need a server, and CI starts none
+(#598). Run them by hand against a throwaway container before a release and
+after any change to this module or to the store:
 
 ```text
 docker run -d --rm --name henk-pg -e POSTGRES_PASSWORD=henk-ci -p 127.0.0.1:55436:5432 postgres:17-alpine

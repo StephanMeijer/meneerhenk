@@ -29,6 +29,15 @@ the last tag releases, not only the merge of a release PR. That makes a
 missed release heal on the next push, and it means a version bump outside a
 release PR releases on merge. Keep version bumps in release PRs.
 
+## Checks CI does not make
+
+CI starts no PostgreSQL server (#598). The run store's PostgreSQL tests are
+`#[ignore]`d and run by hand. Before merging a release PR that follows a
+change in `crates/henk-store/` (or to what the store is given, such as the
+`[database]` settings), run them once against a throwaway container; the
+commands are in `crates/henk-store/src/migrator/README.md`, under "Checking
+PostgreSQL".
+
 ## What is published
 
 - `ghcr.io/stephanmeijer/meneerhenk:X.Y.Z`, `:X.Y` and `:latest` (not for a
