@@ -36,7 +36,9 @@ use tracing::{info, instrument};
 /// What varies between sessions.
 pub struct SessionSpec {
     /// Session name for the run page, unique in the run: `planner`,
-    /// `reviewer`, `executor`.
+    /// `reviewer`, `executor`. The store refuses a second start of one
+    /// name, so a run that starts several sessions of a role numbers them
+    /// (`executor`, `executor-2`).
     pub name: String,
     /// The role that runs it, recorded with the session (#324).
     pub role: Role,

@@ -408,7 +408,7 @@ impl Work<'_> {
                         ));
                     }
                     stop_if_cancelled(cancel)?;
-                    self.resolve(checkout, base, &commit, &files, cancel)
+                    self.resolve(checkout, base, &commit, &files, conflicts, cancel)
                         .await
                         .with_context(|| {
                             format!("replaying \"{commit}\" conflicts in {}", files.join(", "))
@@ -423,15 +423,16 @@ impl Work<'_> {
         }
     }
 
-    /// Has the executor resolve one commit's conflicts in a workspace of
-    /// the checkout, and takes its changes back once they are only to the
-    /// conflicted files and leave no marker.
+    /// Has the executor resolve the conflicts of the `nth` commit that stops
+    /// on one, in a workspace of the checkout, and takes its changes back once
+    /// they are only to the conflicted files and leave no marker.
     async fn resolve(
         &self,
         checkout: &Checkout,
         base: &str,
         commit: &str,
         files: &[String],
+        nth: usize,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let (app, store, run) = (self.app, &*self.app.store, self.run);
@@ -455,7 +456,7 @@ impl Work<'_> {
                 .map_or(EditFormat::Replace, ModelFileConfig::edit_format),
             state: Mutex::new(EditState::default()),
         });
-        let spec = self.session(&editing, base, commit, files);
+        let spec = self.session(&editing, base, commit, files, nth);
         let outcome = run_session(store, run, spec, cancel.clone()).await;
         let result = match session_result(outcome.stop) {
             Ok(()) => workspace.export().await.context("listing the resolutions"),
@@ -482,13 +483,15 @@ impl Work<'_> {
         Ok(())
     }
 
-    /// The executor's session for one commit's conflicts.
+    /// The executor's session for the conflicts of the `nth` commit that
+    /// stops on one.
     fn session(
         &self,
         editing: &Arc<EditContext>,
         base: &str,
         commit: &str,
         files: &[String],
+        nth: usize,
     ) -> SessionSpec {
         let target = &self.request.target;
         let listed: Vec<String> = files.iter().map(|f| format!("- `{f}`")).collect();
@@ -524,7 +527,7 @@ impl Work<'_> {
         );
         let settings = &self.app.settings;
         SessionSpec {
-            name: "executor".to_owned(),
+            name: conflict_session_name(nth),
             role: Role::Executor,
             model: Arc::clone(&self.model),
             system,
@@ -542,6 +545,16 @@ impl Work<'_> {
             continuation: None,
             turn_warning: None,
         }
+    }
+}
+
+/// The name of the session that resolves the `nth` (1-based) commit's
+/// conflicts. A run's sessions are unique by name (#630), and a branch whose
+/// commits conflict one after the other has one session for each.
+fn conflict_session_name(nth: usize) -> String {
+    match nth {
+        0 | 1 => "executor".to_owned(),
+        n => format!("executor-{n}"),
     }
 }
 
@@ -581,13 +594,14 @@ mod tests {
     };
     use henk_platform::push::{BehindPull, GitCredential, NewPull, OpenedPull, RepoHead};
     use henk_platform::{PlatformError, PlatformWriter};
-    use henk_store::RunStatus;
+    use henk_store::{RunStatus, SessionStatus};
     use serde_json::json;
 
     use super::*;
     use crate::config::Config;
     use crate::git::tests::{
-        diverged_remote, remote_branch_file, remote_branch_log, remote_feature,
+        diverged_remote, diverged_remote_clashing, remote_branch_file, remote_branch_log,
+        remote_feature,
     };
     use crate::listeners::testing::FakeWriter;
     use crate::workspace::fake::FakeProvider;
@@ -711,6 +725,23 @@ requester_id = 3
         script: Vec<Completion>,
     ) -> Fixture {
         let (remote, _) = diverged_remote(name, clash).await;
+        fixture_of(config, remote, fork, extra, script)
+    }
+
+    /// [`fixture`] for a branch with `clashes` commits that stop on a
+    /// conflict (see [`diverged_remote_clashing`]).
+    async fn fixture_clashing(name: &str, clashes: usize, script: Vec<Completion>) -> Fixture {
+        let (remote, _) = diverged_remote_clashing(name, clashes).await;
+        fixture_of(CONFIG, remote, false, "", script)
+    }
+
+    fn fixture_of(
+        config: &str,
+        remote: ScratchDir,
+        fork: bool,
+        extra: &str,
+        script: Vec<Completion>,
+    ) -> Fixture {
         let settings = Config::parse(&format!("{config}{extra}"))
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -876,6 +907,48 @@ requester_id = 3
             "{:?}",
             comments(&f)
         );
+    }
+
+    /// #630: a branch whose commits conflict one after the other has a
+    /// session for each, named so that the run records every start.
+    #[tokio::test]
+    async fn every_commit_that_conflicts_has_a_session_of_its_own() {
+        let script = vec![
+            call(
+                "write_file",
+                json!({"path": "src/a.rs", "content": "let x = 3;\n"}),
+            ),
+            done(),
+            call(
+                "write_file",
+                json!({"path": "src/c2.rs", "content": "let c2 = 3;\n"}),
+            ),
+            done(),
+        ];
+        let f = fixture_clashing("henk-rebase-two-clashes", 2, script).await;
+        let report = run_rebase(
+            &f.app,
+            request("r-rebase-two-clashes"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(report.pushed.is_some());
+
+        let run = RunId::parse("r-rebase-two-clashes").unwrap();
+        let sessions = f.app.store.sessions(&run).await.unwrap();
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["executor", "executor-2"], "{sessions:?}");
+        for session in &sessions {
+            assert_eq!(session.status, SessionStatus::Finished, "{session:?}");
+            assert!(session.turns > 0, "{session:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_conflict_keeps_the_executors_name_and_later_ones_count_up() {
+        let names: Vec<String> = (1..=3).map(conflict_session_name).collect();
+        assert_eq!(names, ["executor", "executor-2", "executor-3"]);
     }
 
     #[tokio::test]
