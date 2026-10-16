@@ -126,7 +126,7 @@ flowchart TB
 | Crate | Modules | Depends on |
 |---|---|---|
 | `henk-domain` | `identity`, `allowlist`, `review`, `review_loop`, `role`, `marker`, `scope`, `queue`, `plan`, `plan_review`, `run`, `text`, `skill`, `workspace`, `path`, `push`, `commit`, `discord`, `mail` | serde, thiserror, serde_json |
-| `henk-llm` | `types`, `client`, `openai`, `anthropic`, `http`, `schema`, `testing` | reqwest with rustls (ring) |
+| `henk-llm` | `types`, `client`, `openai`, `responses`, `anthropic`, `http`, `schema`, `chatgpt`, `testing` | reqwest with rustls (ring) |
 | `henk-mcp` | `session`, `config`, `names`, `testing` | rmcp 3.5 (client features only) |
 | `henk-agent` | `agent`, `tool`, `mcp_tools`, `prompts` and `prompts/*.md` | domain, llm, mcp |
 | `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
