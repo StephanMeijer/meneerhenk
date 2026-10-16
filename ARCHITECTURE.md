@@ -157,6 +157,13 @@ two libraries until the last group has moved. `SqliteStore::in_memory` is a
 temporary file for that time, because an in-memory database cannot be opened
 by both.
 
+TLS to PostgreSQL is checked, not only encrypted. sqlx reads `sslmode` like
+`psql`, where `prefer` accepts any certificate, so `Store` raises `require` and
+`verify-ca` to `verify-full` and refuses `prefer`, `allow` and a URL with no
+`sslmode` at connect (`refuse_unverified_tls`). The old driver verified under
+`prefer`; refusing is the only way not to downgrade that silently. A server
+without TLS needs `sslmode=disable` in its URL.
+
 ## 3. A review, end to end
 
 A `synchronize` webhook from GitHub, start to finish. The GitLab path is the

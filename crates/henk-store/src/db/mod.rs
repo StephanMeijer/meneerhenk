@@ -170,6 +170,11 @@ async fn connect_sqlite(path: &Path) -> Result<DatabaseConnection, StoreError> {
 }
 
 async fn connect_postgres(url: &str) -> Result<DatabaseConnection, StoreError> {
+    // A URL that does not parse is left to the connection, which reports it
+    // without quoting the URL.
+    if let Ok(parsed) = url.parse::<PgConnectOptions>() {
+        refuse_unverified_tls(&parsed)?;
+    }
     let mut options = ConnectOptions::new(url);
     options
         .max_connections(POOL_SIZE)
@@ -185,11 +190,30 @@ async fn connect_postgres(url: &str) -> Result<DatabaseConnection, StoreError> {
 /// server's certificate is checked against the platform's roots and the host
 /// name. sqlx reads `sslmode` the way `psql` does, where `require` only
 /// encrypts and `verify-ca` skips the name; both are raised to `verify-full`.
-/// `disable`, `allow`, `prefer` and `verify-full` stay as they are.
+/// `disable` and `verify-full` stay as they are. `allow` and `prefer` (which
+/// is also the default) are refused first, see [`refuse_unverified_tls`].
 fn harden_tls(options: PgConnectOptions) -> PgConnectOptions {
     match options.get_ssl_mode() {
         PgSslMode::Require | PgSslMode::VerifyCa => options.ssl_mode(PgSslMode::VerifyFull),
         _ => options,
+    }
+}
+
+/// Refuses the modes that sqlx cannot make safe. Under `prefer` sqlx uses TLS
+/// when the server offers it but accepts any certificate and any host name,
+/// and `allow` sends plaintext. The old driver checked the certificate under
+/// `prefer`, so letting these through would be a silent downgrade for every
+/// URL without an `sslmode`. The caller has to say what it wants: `disable`
+/// for a server without TLS, or a mode that verifies.
+fn refuse_unverified_tls(options: &PgConnectOptions) -> Result<(), StoreError> {
+    match options.get_ssl_mode() {
+        PgSslMode::Allow | PgSslMode::Prefer => Err(StoreError::Connect(
+            "the database URL needs an explicit sslmode: `verify-full` (also `require` and \
+             `verify-ca`, which mean the same here) checks the server certificate, \
+             `disable` turns TLS off; `prefer`, `allow` and no sslmode are not accepted"
+                .to_owned(),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -252,20 +276,30 @@ mod tests {
     }
 
     #[test]
-    fn disable_allow_and_prefer_are_left_alone() {
+    fn disable_is_left_alone() {
         assert!(matches!(
             mode("postgres://u@h/d?sslmode=disable"),
             PgSslMode::Disable
         ));
-        assert!(matches!(
-            mode("postgres://u@h/d?sslmode=allow"),
-            PgSslMode::Allow
-        ));
-        assert!(matches!(
-            mode("postgres://u@h/d?sslmode=prefer"),
-            PgSslMode::Prefer
-        ));
-        assert!(matches!(mode("postgres://u@h/d"), PgSslMode::Prefer));
+    }
+
+    #[test]
+    fn prefer_allow_and_no_sslmode_are_refused() {
+        for url in [
+            "postgres://u@h/d",
+            "postgres://u@h/d?sslmode=prefer",
+            "postgres://u@h/d?sslmode=allow",
+        ] {
+            let error = refuse_unverified_tls(&url.parse().unwrap()).unwrap_err();
+            assert!(error.to_string().contains("sslmode"), "{url}");
+        }
+        for sslmode in ["disable", "require", "verify-ca", "verify-full"] {
+            let url = format!("postgres://u@h/d?sslmode={sslmode}");
+            assert!(
+                refuse_unverified_tls(&url.parse().unwrap()).is_ok(),
+                "{sslmode}"
+            );
+        }
     }
 
     #[test]
