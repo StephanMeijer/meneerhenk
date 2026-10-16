@@ -19,7 +19,7 @@ use crate::execute::{ExecuteRequest, run_execute};
 use crate::ids::new_run_id;
 use crate::issue_runs::Comments;
 use crate::plan::{PlanRequest, run_plan};
-use crate::rebase::{RebaseRequest, run_rebase};
+use crate::rebase::{RebaseReport, RebaseRequest, run_rebase};
 use crate::review::{
     CancelledBy, Interrupted, ReviewReport, ReviewRequest, Superseded,
     report_cancelled_while_queued, report_interrupted_while_queued, run_review,
@@ -265,6 +265,35 @@ fn waiting(key: &Key, active: &Active) -> Waiting {
         position: 0,
         reason: Reason::NoSlot,
         waits_for: None,
+    }
+}
+
+/// What follows a rebase that ended: the review of its head for the
+/// coordinator to ask for, and whether the caller that waited reviews it
+/// (#637). A caller whose receiver is gone, or none, cannot review, so the
+/// coordinator asks for the review itself.
+fn after_report(
+    report: anyhow::Result<RebaseReport>,
+    tell: Option<oneshot::Sender<anyhow::Result<RebaseReport>>>,
+    requester: Option<String>,
+) -> (Option<ReviewRequest>, bool) {
+    match (report, tell) {
+        (Ok(report), None) => (report.review(requester), false),
+        (Ok(report), Some(tell)) => {
+            let follow_up = report.review(requester);
+            if tell.send(Ok(report)).is_ok() {
+                (None, follow_up.is_some())
+            } else {
+                (follow_up, false)
+            }
+        }
+        (Err(error), tell) => {
+            warn!(%error, "rebase ended with an error");
+            if let Some(tell) = tell {
+                let _ = tell.send(Err(error));
+            }
+            (None, false)
+        }
     }
 }
 
@@ -571,6 +600,18 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn take_a_slot(&self) -> Option<Slot> {
         self.review_slots.take_any()
+    }
+
+    /// What follows a rebase of `target` that ended, for a test to drive
+    /// without a rebase that pushes.
+    #[cfg(test)]
+    pub(crate) fn after_rebase_of(
+        &self,
+        target: &ReviewTarget,
+        rebased: Option<ReviewRequest>,
+        caller_reviews: bool,
+    ) {
+        self.review_after_rebase(&Key::of(target), rebased, caller_reviews);
     }
 
     /// Wakes when a run starts waiting, takes or frees a slot, or leaves
@@ -926,6 +967,39 @@ impl Coordinator {
         trigger: String,
         requester: Option<String>,
     ) -> (Decision, RunId) {
+        self.submit_rebase_as(target, trigger, requester, None)
+    }
+
+    /// [`Self::submit_rebase`] for a caller that waits for the rebase and
+    /// reviews what it pushed itself (#637): the coordinator asks for no
+    /// review of the rebased head, and drops a review that waited for the
+    /// rebase, since it was of the head the rebase replaced.
+    ///
+    /// The receiver answers only when the decision is `Start` or
+    /// `Supersede`. On `Join` the rebase is another run's, which nobody here
+    /// waits on: the receiver is closed and the run id names that run.
+    pub fn submit_rebase_awaited(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<RebaseReport>>,
+    ) {
+        let (tell, ended) = oneshot::channel();
+        let (decision, run) = self.submit_rebase_as(target, trigger, requester, Some(tell));
+        (decision, run, ended)
+    }
+
+    fn submit_rebase_as(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+        tell: Option<oneshot::Sender<anyhow::Result<RebaseReport>>>,
+    ) -> (Decision, RunId) {
         let key = Key::of(&target);
         let generation = self.next_generation();
         let run = new_run_id();
@@ -1010,26 +1084,30 @@ impl Coordinator {
                 generation,
                 &coordinator.slots_changed,
             );
-            let rebased = match report {
-                Ok(report) => report.review(requester),
-                Err(error) => {
-                    warn!(%error, "rebase ended with an error");
-                    None
-                }
-            };
-            coordinator.review_after_rebase(&key, rebased);
+            let (rebased, caller_reviews) = after_report(report, tell, requester);
+            coordinator.review_after_rebase(&key, rebased, caller_reviews);
         });
         (decision, run)
     }
 
     /// Once a rebase of the pull request has ended: the review of the head
     /// it pushed, or else the review asked for while it ran, if any.
-    fn review_after_rebase(&self, key: &Key, rebased: Option<ReviewRequest>) {
+    ///
+    /// With `caller_reviews`, the run that asked for the rebase waited for
+    /// it and reviews the head itself (#637): a review that waited for the
+    /// rebase was of the head it replaced, and is dropped.
+    fn review_after_rebase(&self, key: &Key, rebased: Option<ReviewRequest>, caller_reviews: bool) {
         let waited = self
             .held
             .lock()
             .ok()
             .and_then(|mut holding| holding.remove(key));
+        if caller_reviews {
+            if let Some(waited) = waited {
+                info!(run = %waited.run, "the review that waited for the rebase is dropped: the head it was of is gone");
+            }
+            return;
+        }
         match (rebased, waited) {
             (Some(review), waited) => {
                 if let Some(waited) = waited {
@@ -1186,5 +1264,41 @@ mod tests {
             },
         );
         assert_eq!(waiting(&key, &active).repo, "Owner/Repo");
+    }
+
+    fn report(pushed: bool) -> RebaseReport {
+        RebaseReport {
+            run: new_run_id(),
+            target: target(Platform::GitHub, "o/r", 7),
+            pushed: pushed.then(|| CommitSha::parse(&"b".repeat(40)).unwrap()),
+        }
+    }
+
+    /// #637: a caller that is gone cannot review what the rebase pushed, so
+    /// the coordinator asks for that review, as when nobody waits.
+    #[test]
+    fn a_rebase_whose_caller_is_gone_is_followed_by_the_review_of_its_head() {
+        let (tell, ended) = oneshot::channel();
+        drop(ended);
+        let (review, caller_reviews) = after_report(Ok(report(true)), Some(tell), None);
+        assert!(!caller_reviews);
+        assert_eq!(
+            review.and_then(|r| r.commit),
+            Some(CommitSha::parse(&"b".repeat(40)).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_rebase_its_caller_still_waits_for_is_reviewed_by_the_caller() {
+        let (tell, mut ended) = oneshot::channel();
+        let (review, caller_reviews) = after_report(Ok(report(true)), Some(tell), None);
+        assert!(review.is_none());
+        assert!(caller_reviews);
+        assert!(ended.try_recv().is_ok());
+
+        let (tell, _ended) = oneshot::channel();
+        let (review, caller_reviews) = after_report(Ok(report(false)), Some(tell), None);
+        assert!(review.is_none());
+        assert!(!caller_reviews, "nothing was pushed, nothing to review");
     }
 }

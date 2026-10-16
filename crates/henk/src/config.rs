@@ -1007,6 +1007,21 @@ pub struct AutonomousConfig {
     /// its own limits as well.
     #[serde(default = "default_autonomous_run_timeout_secs")]
     pub run_timeout_secs: u64,
+    /// Whether a ticket run, once its pull request is reviewed and passed,
+    /// keeps it landable (#637): rebased when the base has moved, reviewed
+    /// again, until it is ready to merge. Default off.
+    #[serde(default)]
+    pub land: bool,
+    /// The time the land stage has in all, in seconds, from when it starts.
+    /// It waits for checks and for other pull requests, so it has its own.
+    #[serde(default = "default_land_timeout_secs")]
+    pub land_timeout_secs: u64,
+    /// How often the land stage looks at the pull request, in seconds.
+    #[serde(default = "default_land_poll_secs")]
+    pub land_poll_secs: u64,
+    /// How many times the land stage rebases the pull request in all.
+    #[serde(default = "default_land_max_rebases")]
+    pub land_max_rebases: u32,
 }
 
 /// The agents Henk runs (#322), one section each. The review loop needs
@@ -1848,6 +1863,15 @@ fn default_execution_run_timeout_secs() -> u64 {
 fn default_autonomous_run_timeout_secs() -> u64 {
     7200
 }
+fn default_land_timeout_secs() -> u64 {
+    14400
+}
+fn default_land_poll_secs() -> u64 {
+    60
+}
+fn default_land_max_rebases() -> u32 {
+    3
+}
 fn default_branch_prefix() -> String {
     "henk/".to_owned()
 }
@@ -2573,8 +2597,26 @@ fn validate_autonomous(
             "autonomous.run_timeout_secs must be at least 1".to_owned(),
         ));
     }
+    if autonomous.land_timeout_secs == 0 {
+        return Err(ConfigError::Role(
+            "autonomous.land_timeout_secs must be at least 1".to_owned(),
+        ));
+    }
+    if autonomous.land_poll_secs < MIN_LAND_POLL_SECS {
+        return Err(ConfigError::Role(format!(
+            "autonomous.land_poll_secs must be at least {MIN_LAND_POLL_SECS}: each look costs a few platform requests"
+        )));
+    }
+    if autonomous.land_max_rebases == 0 {
+        return Err(ConfigError::Role(
+            "autonomous.land_max_rebases must be at least 1".to_owned(),
+        ));
+    }
     Ok(())
 }
+
+/// The shortest time between two looks of a land stage at its pull request.
+const MIN_LAND_POLL_SECS: u64 = 10;
 
 /// Execute runs need the executor, and a branch prefix git takes and no
 /// person's branch is likely to use (#329).
@@ -3222,6 +3264,15 @@ impl Settings {
                 "Autonomous:      an issue goes through plan, execute and review on its own; {}s in all",
                 autonomous.run_timeout_secs
             );
+            if autonomous.land {
+                let _ = writeln!(
+                    out,
+                    "Land:            then the pull request is kept landable until it is ready to merge: rebased up to {} times, reviewed again, looked at every {}s, {}s at most",
+                    autonomous.land_max_rebases,
+                    autonomous.land_poll_secs,
+                    autonomous.land_timeout_secs
+                );
+            }
         }
         if let Some(executor) = &self.roles.executor {
             let _ = writeln!(
@@ -3704,18 +3755,32 @@ github_owners = ["docspec"]
     /// is valid and turns ticket runs on.
     #[test]
     fn the_examples_autonomous_section_is_valid_once_uncommented() {
-        for text in [
-            EXAMPLE,
-            include_str!("../../../deploy/henk.container.example.toml"),
+        for (text, has_land) in [
+            (EXAMPLE, true),
+            (
+                include_str!("../../../deploy/henk.container.example.toml"),
+                false,
+            ),
         ] {
             let on = text
                 .replace("# [autonomous]", "[autonomous]")
-                .replace("# run_timeout_secs = 7200", "run_timeout_secs = 7200");
+                .replace("# run_timeout_secs = 7200", "run_timeout_secs = 7200")
+                .replace("# land = false", "land = true")
+                .replace("# land_timeout_secs = 14400", "land_timeout_secs = 14400")
+                .replace("# land_poll_secs = 60", "land_poll_secs = 60")
+                .replace("# land_max_rebases = 3", "land_max_rebases = 3");
             assert_ne!(on, text, "the example has the section");
             let settings = Config::parse(&on)
                 .and_then(Config::into_settings)
                 .unwrap_or_else(|e| panic!("{e}"));
-            assert!(settings.autonomous.is_some());
+            let autonomous = settings.autonomous.as_ref().unwrap();
+            assert_eq!(
+                autonomous.land, has_land,
+                "land is in the example: {has_land}"
+            );
+            assert_eq!(autonomous.land_timeout_secs, 14400);
+            assert_eq!(autonomous.land_poll_secs, 60);
+            assert_eq!(autonomous.land_max_rebases, 3);
         }
     }
 
@@ -4363,6 +4428,60 @@ github_owners = ["docspec"]
         let error = autonomous(&on.replace("[autonomous]\n", "[autonomous]\nmax_rounds = 3\n"))
             .unwrap_err();
         assert!(error.to_string().contains("max_rounds"), "{error}");
+    }
+
+    /// #637: the land stage is off unless `land = true`, says so in `config
+    /// check`, and refuses limits that would make it useless or costly.
+    #[test]
+    fn the_land_stage_is_off_unless_asked_for_and_its_limits_are_checked() {
+        let models = ADDRESS.split("[[people]]").next().unwrap();
+        let autonomous = |extra: &str| {
+            Config::parse(&format!(
+                "{MINIMAL}{models}[autonomous]\n{extra}[planning]\nrequester_id = 3\n[execution]\n[review.loop]\n[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n"
+            ))
+            .and_then(Config::into_settings)
+        };
+        let off = autonomous("").unwrap();
+        let config = off.autonomous.as_ref().unwrap();
+        assert!(!config.land);
+        assert_eq!(
+            (
+                config.land_timeout_secs,
+                config.land_poll_secs,
+                config.land_max_rebases
+            ),
+            (14400, 60, 3)
+        );
+        let mut out = String::new();
+        off.describe_agents(&mut out);
+        assert!(!out.contains("Land:"), "{out}");
+
+        let on = autonomous("land = true\nland_poll_secs = 30\nland_max_rebases = 5\n").unwrap();
+        let mut out = String::new();
+        on.describe_agents(&mut out);
+        assert!(
+            out.contains("Land:            then the pull request is kept landable until it is ready to merge: rebased up to 5 times, reviewed again, looked at every 30s, 14400s at most"),
+            "{out}"
+        );
+        assert!(henk_domain::text::is_in_style(&out), "{out}");
+
+        for (extra, why) in [
+            (
+                "land_timeout_secs = 0\n",
+                "autonomous.land_timeout_secs must be at least 1",
+            ),
+            (
+                "land_poll_secs = 9\n",
+                "autonomous.land_poll_secs must be at least 10",
+            ),
+            (
+                "land_max_rebases = 0\n",
+                "autonomous.land_max_rebases must be at least 1",
+            ),
+        ] {
+            let error = autonomous(extra).unwrap_err().to_string();
+            assert!(error.starts_with(why), "{extra}: {error}");
+        }
     }
 
     #[test]

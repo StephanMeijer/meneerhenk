@@ -4,6 +4,7 @@
 //! request for an issue the executor took on (#329).
 
 use henk_domain::allowlist::RepoRef;
+use henk_domain::land::Standing;
 use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use secrecy::SecretString;
@@ -165,4 +166,18 @@ pub trait PushWriter: Send + Sync {
         base: &str,
         head_prefix: &str,
     ) -> Result<Vec<BehindPull>, PlatformError>;
+
+    /// Where the pull request stands now: open or not, its head, and
+    /// whether the platform would merge it (#637). One read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformError`] when the platform cannot be read, or
+    /// [`PlatformError::Unsupported`] when this writer cannot say.
+    async fn pull_standing(&self, target: &ReviewTarget) -> Result<Standing, PlatformError> {
+        let _ = target;
+        Err(PlatformError::Unsupported(
+            "this platform writer cannot say whether a pull request can merge".to_owned(),
+        ))
+    }
 }

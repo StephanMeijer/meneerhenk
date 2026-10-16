@@ -241,8 +241,21 @@ requirements_max_rounds = 3
 # lets Henk write and push code unattended; the only human step is merging.
 # It needs [planning], [execution] and [review.loop]. run_timeout_secs is the
 # time one ticket run has in all, on top of each step's own.
+# With land = true (#637), a ticket run does not stop at the passed review:
+# it keeps the pull request landable. When the base has moved and the
+# platform says the branch must catch up or conflicts, Henk rebases it
+# (not if the repository has rebase = false), has the new head reviewed, and
+# waits for the checks, until the platform would merge it: then the run ends
+# "ready to merge", and merging stays a person's. It looks every
+# land_poll_secs, rebases at most land_max_rebases times, and has
+# land_timeout_secs in all from when it starts. A push by somebody else, a
+# merge or a close ends it. Failing checks stop it with a comment for now.
 # [autonomous]
 # run_timeout_secs = 7200
+# land = false
+# land_timeout_secs = 14400
+# land_poll_secs = 60
+# land_max_rebases = 3
 
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then

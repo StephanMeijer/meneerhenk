@@ -997,3 +997,86 @@ async fn a_queued_review_s_check_is_created_queued_then_started_in_place() {
     assert_eq!(started, Some(queued), "the same check, not a second one");
     // The POST mock expects exactly one call: none was made for the start.
 }
+
+/// #637: one read of the pull request says whether GitHub would merge it,
+/// and the words of `mergeable_state` come to the states a land stage acts
+/// on.
+#[tokio::test]
+async fn a_pull_request_stands_where_githubs_merge_state_says() {
+    use henk_domain::land::MergeState;
+    use henk_platform::push::PushWriter as _;
+
+    let blocked =
+        MergeState::Blocked("a check or a review the base requires has not passed yet".to_owned());
+    for (mergeable, state, draft, expected) in [
+        (json!(true), "clean", false, MergeState::Mergeable),
+        (json!(true), "has_hooks", false, MergeState::Mergeable),
+        (json!(true), "unstable", false, MergeState::Mergeable),
+        (json!(true), "behind", false, MergeState::NeedsRebase),
+        (json!(false), "dirty", false, MergeState::Conflicts),
+        (json!(true), "blocked", false, blocked),
+        (json!(null), "unknown", false, MergeState::Unknown),
+        (json!(null), "clean", false, MergeState::Unknown),
+        (json!(true), "clean", true, MergeState::Draft),
+        (json!(true), "draft", false, MergeState::Draft),
+        (
+            json!(true),
+            "something_new",
+            false,
+            MergeState::Blocked("GitHub says something_new".to_owned()),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/docspec/app/pulls/{}",
+                target().number
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": "open", "merged": false, "draft": draft,
+                "mergeable": mergeable, "mergeable_state": state,
+                "head": {"sha": SHA, "ref": "henk/7-x"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let standing = push_writer(&server).pull_standing(&target()).await.unwrap();
+        assert_eq!(standing.state, expected, "{state} (draft {draft})");
+        assert!(standing.open && !standing.merged, "{state}");
+        assert_eq!(standing.head.as_str(), SHA);
+    }
+}
+
+/// #637: merged and closed read differently, so a land stage can tell the
+/// work landed from the work abandoned.
+#[tokio::test]
+async fn a_merged_pull_request_stands_merged_and_a_closed_one_closed() {
+    use henk_platform::push::PushWriter as _;
+
+    for (state, merged, merged_at, open, landed) in [
+        ("open", false, Value::Null, true, false),
+        ("closed", true, json!("2026-10-16T09:00:00Z"), false, true),
+        ("closed", false, json!("2026-10-16T09:00:00Z"), false, true),
+        ("closed", false, Value::Null, false, false),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/docspec/app/pulls/{}",
+                target().number
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "state": state, "merged": merged, "merged_at": merged_at,
+                "mergeable": null, "mergeable_state": "unknown",
+                "head": {"sha": SHA, "ref": "henk/7-x"},
+            })))
+            .mount(&server)
+            .await;
+        let standing = push_writer(&server).pull_standing(&target()).await.unwrap();
+        assert_eq!(
+            (standing.open, standing.merged),
+            (open, landed),
+            "{state} merged={merged} merged_at={merged_at}"
+        );
+    }
+}

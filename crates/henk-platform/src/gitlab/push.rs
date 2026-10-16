@@ -4,6 +4,7 @@
 //! out the project ids.
 
 use henk_domain::commit::noreply;
+use henk_domain::land::{MergeState, Standing};
 use henk_domain::push::PushFacts;
 use henk_domain::review::CommitSha;
 use serde_json::{Value, json};
@@ -22,6 +23,27 @@ use crate::writer::ReviewTarget;
 
 fn flag(value: &Value, key: &str) -> Option<bool> {
     value.get(key).and_then(Value::as_bool)
+}
+
+/// What GitLab's `detailed_merge_status` comes to (#637).
+fn merge_state(status: &str, draft: bool) -> MergeState {
+    if draft {
+        return MergeState::Draft;
+    }
+    match status {
+        "mergeable" => MergeState::Mergeable,
+        "need_rebase" => MergeState::NeedsRebase,
+        "conflict" => MergeState::Conflicts,
+        "draft_status" => MergeState::Draft,
+        "ci_still_running" | "external_status_checks" => MergeState::Waiting,
+        "" | "unchecked" | "checking" | "preparing" | "approvals_syncing" => MergeState::Unknown,
+        "ci_must_pass" => MergeState::Blocked("its pipeline has not passed".to_owned()),
+        "not_approved" => MergeState::Blocked("it needs an approval".to_owned()),
+        "discussions_not_resolved" => {
+            MergeState::Blocked("its discussions are not resolved".to_owned())
+        }
+        other => MergeState::Blocked(format!("GitLab says {other}")),
+    }
 }
 
 #[async_trait::async_trait]
@@ -185,6 +207,30 @@ impl PushWriter for GitLabWriter {
         Ok(OpenedPull {
             number,
             url: text(&opened, "web_url"),
+        })
+    }
+
+    async fn pull_standing(&self, target: &ReviewTarget) -> Result<Standing, PlatformError> {
+        let mr = self
+            .rest()?
+            .get(&format!(
+                "/projects/{}/merge_requests/{}",
+                path_segment(&target.repo.path()),
+                target.number
+            ))
+            .await?;
+        let head = mr
+            .get("sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| CommitSha::parse(sha).ok())
+            .ok_or_else(|| PlatformError::Decode("merge request without head sha".to_owned()))?;
+        let state = mr.get("state").and_then(Value::as_str);
+        let draft = flag(&mr, "draft") == Some(true) || flag(&mr, "work_in_progress") == Some(true);
+        Ok(Standing {
+            open: state == Some("opened"),
+            merged: state == Some("merged"),
+            head,
+            state: merge_state(&text(&mr, "detailed_merge_status"), draft),
         })
     }
 
