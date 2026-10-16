@@ -25,7 +25,8 @@
 //!   checks that were cancelled or timed out, and the limit all stop the
 //!   stage, with a comment saying which. A fix run that finds no check
 //!   failing (the checks changed since the stage read them) tried nothing:
-//!   it costs no try, and the stage looks again after a nap.
+//!   it costs no try, and the stage looks again after a nap; after a few in
+//!   a row, each with its comment, it stops with a comment saying so.
 //!
 //! The stage ends in "ready to merge"; merging stays a person's.
 
@@ -60,6 +61,10 @@ const QUIET_LOOKS: u32 = 10;
 /// How often it looks then.
 const QUIET_POLL: Duration = Duration::from_mins(5);
 
+/// Fix runs in a row that may find nothing failing before the stage gives
+/// up. Each one posts a comment on the pull request, so they are few.
+const MAX_IDLE_FIXES: u32 = 3;
+
 /// What the stage knows as it goes.
 struct Watch {
     ledger: Ledger,
@@ -74,6 +79,9 @@ struct Watch {
     failures: u32,
     /// What the last look waited for, and how many looks in a row.
     waited_for: Option<(String, u32)>,
+    /// Fix runs in a row that found nothing failing. A fix that pushed
+    /// resets it.
+    idle_fixes: u32,
 }
 
 impl Ticket<'_> {
@@ -103,6 +111,7 @@ impl Ticket<'_> {
             head_since: None,
             failures: 0,
             waited_for: None,
+            idle_fixes: 0,
         };
         self.mark_land(
             StageState::Running,
@@ -310,7 +319,7 @@ impl Ticket<'_> {
     /// same head would only be tried again. The exception is a run that found
     /// nothing failing (the checks changed since the stage read them): it
     /// counts for nothing, and the stage looks again after a nap, until its
-    /// own time is up.
+    /// own time is up, or until [`MAX_IDLE_FIXES`] such runs follow each other.
     async fn fix_ci(
         &self,
         land: Land,
@@ -355,6 +364,7 @@ impl Ticket<'_> {
                         ..
                     } => {
                         watch.ledger.ci_fixes += 1;
+                        watch.idle_fixes = 0;
                         self.note(&format!(
                             "land: fixed the failing checks ({named}), run {run}: {commits} commit(s), head {} is now {}",
                             head.short(),
@@ -372,7 +382,18 @@ impl Ticket<'_> {
                         .await;
                         // The fix run read the checks differently from the
                         // stage (a re-run, a lagging platform): nothing was
-                        // tried, so no try is spent. Look again after a nap.
+                        // tried, so no try is spent. Look again after a nap,
+                        // but only a few times: every run comments on the
+                        // pull request.
+                        watch.idle_fixes += 1;
+                        if watch.idle_fixes >= MAX_IDLE_FIXES {
+                            return Some(
+                                self.stuck(format!(
+                                    "checks failed: {named}; the fix run does not see the failure I see: {why}"
+                                ))
+                                .await,
+                            );
+                        }
                         self.nap(land.poll, deadline).await;
                         None
                     }
@@ -1348,6 +1369,29 @@ mod tests {
         assert_eq!(stages.fixes_asked(), 3);
         let events = land_events(&f).await;
         assert!(events[0].contains("found nothing to fix"), "{events:?}");
+    }
+
+    /// A fix run that keeps finding nothing failing posts a comment each
+    /// time: the stage gives up instead of asking for ever.
+    #[tokio::test]
+    async fn fix_runs_that_keep_finding_nothing_failing_end_the_stage() {
+        let f = fixture();
+        let idle = || Fix::Ends(FixOutcome::Idle("no check fails".to_owned()));
+        let stages = Landing::mergeable()
+            .with_fix(idle())
+            .with_fix(idle())
+            .with_fix(idle())
+            .with_fix(idle())
+            .with_fix(Fix::Pushes);
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        let report = go(&f, &stages, quick()).await;
+
+        assert!(
+            matches!(&report.ending, Ending::Stopped { step: Step::Land, why } if why.contains("does not see the failure")),
+            "{:?}",
+            report.ending
+        );
+        assert_eq!(stages.fixes_asked(), 3);
     }
 
     #[tokio::test]
