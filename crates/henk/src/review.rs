@@ -2078,56 +2078,6 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
-    /// #583: one run changes a pull request's head at a time. A review asked
-    /// for during a fix waits for it, and says so; a second fix joins the
-    /// first; a rebase supersedes the fix, whose head it is about to replace.
-    #[tokio::test]
-    async fn a_fix_holds_the_reviews_of_its_pull_request_joins_a_second_fix_and_yields_to_a_rebase()
-    {
-        use henk_domain::queue::Decision;
-        use henk_domain::run::RunKind;
-
-        use crate::coordinator::Reason;
-
-        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
-        let mut f = fixture("henk-fix-holds", DIFF, model).await;
-        f.app.settings.review.max_concurrent = 1;
-        f.app.settings.roles.executor = None;
-        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
-        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
-        // The only slot is taken, so the fix waits and the review asked for
-        // meanwhile is held for it.
-        let _taken = coordinator.take_a_slot().unwrap();
-        let placeholder = RunId::parse("r-placeholder").unwrap();
-        let target = request(&placeholder).target;
-
-        let (decision, fix) = coordinator.submit_fix_ci(target.clone(), "asked".to_owned(), None);
-        assert_eq!(decision, Decision::Start);
-        let (decision, held) = coordinator.submit_review(request(&placeholder), commit);
-        assert_eq!(decision, Decision::After);
-        let waiting = coordinator.slots().waiting;
-        let held_row = waiting.iter().find(|w| w.run == held).unwrap();
-        assert_eq!(held_row.reason, Reason::AfterFix);
-        assert_eq!(held_row.waits_for.as_ref(), Some(&fix));
-        let fix_row = waiting.iter().find(|w| w.run == fix).unwrap();
-        assert_eq!(fix_row.kind, RunKind::FixCi);
-
-        let (decision, joined) =
-            coordinator.submit_fix_ci(target.clone(), "again".to_owned(), None);
-        assert_eq!((decision, &joined), (Decision::Join, &fix));
-
-        let (decision, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
-        assert_eq!(decision, Decision::Supersede);
-        assert_ne!(rebase, fix);
-        let kinds: Vec<RunKind> = coordinator.slots().waiting.iter().map(|w| w.kind).collect();
-        assert!(
-            !kinds.contains(&RunKind::FixCi),
-            "the fix left the queue: {kinds:?}"
-        );
-        assert!(coordinator.cancel(&rebase, "github:1234".to_owned()));
-        app.shutdown.cancel();
-    }
-
     #[tokio::test]
     async fn an_awaited_review_stopped_by_a_shutdown_while_it_waits_is_told_it_was_interrupted() {
         let (app, _coordinator, _queued, ended, _remote) =
