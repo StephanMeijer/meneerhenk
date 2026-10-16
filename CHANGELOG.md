@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.15](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.14...v0.4.15) - 2026-10-16
+
+### Added
+
+- henk auth openai and a doctor check for a ChatGPT sign-in ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(config)* an endpoint can sign in with a ChatGPT plan ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(llm)* the Responses API paid by a ChatGPT plan ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(domain)* the queue and the executor know a CI fix ([#583](https://github.com/StephanMeijer/meneerhenk/pull/583))
+- *(domain)* decide what a pull request needs to land ([#637](https://github.com/StephanMeijer/meneerhenk/pull/637))
+- *(llm)* list a plan's models with its bearer ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(llm)* the browser sign-in for a ChatGPT plan ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(llm)* a token manager for a ChatGPT sign-in ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- a land stage in the ticket run ([#637](https://github.com/StephanMeijer/meneerhenk/pull/637))
+
+### Fixed
+
+- *(doctor)* do not probe a model when the sign-in would be renewed
+- *(auth)* say the server route more plainly ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(domain)* rebase a head again once the platform has had time to see the last rebase ([#637](https://github.com/StephanMeijer/meneerhenk/pull/637))
+- *(llm)* keep tokens out of the sign-in URL, pause on accept errors
+- *(llm)* keep a renewal alive without its caller, honour a removed file
+- *(llm)* write the sign-in file through a fresh private temp file
+
+### Other
+
+- Merge pull request #642 from StephanMeijer/feat/fix-ci-domain
+- Merge pull request #640 from StephanMeijer/feat/land-decision
+- Merge pull request #635 from StephanMeijer/feat/chatgpt-plan-responses
+- satisfy clippy in the ChatGPT tests ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- paying with a ChatGPT plan ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- satisfy clippy in the queue decision ([#583](https://github.com/StephanMeijer/meneerhenk/pull/583))
+- Merge pull request #636 from StephanMeijer/feat/chatgpt-sign-in
+- *(llm)* say what a ChatGPT sign-in changes in the Responses client ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+- *(llm)* satisfy clippy in the ChatGPT sign-in module ([#620](https://github.com/StephanMeijer/meneerhenk/pull/620))
+
 ## [0.4.14](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.13...v0.4.14) - 2026-10-16
 
 ### Added
