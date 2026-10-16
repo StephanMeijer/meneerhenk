@@ -58,6 +58,8 @@ pub fn parse_gitlab(event: &str, payload: &Value) -> EventKind {
                 },
             )
         }
+        // GitLab names a tag push apart from a branch push.
+        "tag_push" => EventKind::Ignored("push: not a branch".to_owned()),
         other => EventKind::Unmodelled {
             name: other.to_owned(),
         },

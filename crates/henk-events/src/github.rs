@@ -449,8 +449,10 @@ mod tests {
             parse_gitlab("Push Hook", &gitlab_push("refs/heads/feature", SHA)),
             EventKind::Ignored("push: feature is not the default branch".to_owned())
         );
+        let mut tag = gitlab_push("refs/tags/v1", SHA);
+        tag["object_kind"] = json!("tag_push");
         assert_eq!(
-            parse_gitlab("Tag Push Hook", &gitlab_push("refs/tags/v1", SHA)),
+            parse_gitlab("Tag Push Hook", &tag),
             EventKind::Ignored("push: not a branch".to_owned())
         );
         assert_eq!(
