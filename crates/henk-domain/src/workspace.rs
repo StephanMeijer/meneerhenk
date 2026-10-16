@@ -38,6 +38,16 @@ impl BackendKind {
         !matches!(self, Self::Host)
     }
 
+    /// Whether a profile on this backend gives the planner a workspace unless
+    /// it says `plan = false` (#419). It does wherever a model may run
+    /// commands apart from Henk: a planner that cannot read the code or run
+    /// anything in it plans from the platform's tools alone. On the host
+    /// backend it never does, and `plan = true` there is refused.
+    #[must_use]
+    pub const fn plans_by_default(self) -> bool {
+        self.runs_model_commands()
+    }
+
     /// Whether the backend keeps the workspace's processes away from Henk's
     /// own: its files, its user and its network.
     #[must_use]
@@ -143,7 +153,9 @@ pub struct Profile {
     pub review: bool,
     /// Whether the planner gets a workspace too (#172): one copy of the
     /// repository at its default branch, set up as for any run, never
-    /// exported. Off by default, and never on the host backend.
+    /// exported. A configuration that leaves it out gets it on a backend
+    /// apart from Henk and not on the host ([`BackendKind::plans_by_default`],
+    /// #419); `plan = false` turns it off, and it is never on the host.
     pub plan: bool,
     /// The sandbox hosts of the ssh backend this profile may use, by id
     /// (#389). Empty: every host.
@@ -565,6 +577,31 @@ mod tests {
         assert!(policy.default.serves(EnvLane::Review));
         policy.default.image = Some(" ".to_owned());
         assert!(policy.validate().is_err(), "an empty image");
+    }
+
+    #[test]
+    fn a_planner_gets_a_workspace_by_default_wherever_a_model_may_run_commands() {
+        assert!(!BackendKind::Host.plans_by_default());
+        assert!(BackendKind::Ssh.plans_by_default());
+        assert!(BackendKind::Kubernetes.plans_by_default());
+        let profile = Profile {
+            backend: BackendKind::Ssh,
+            plan: BackendKind::Ssh.plans_by_default(),
+            ..Profile::default()
+        };
+        assert!(profile.serves(EnvLane::Plan));
+        let off = Profile {
+            plan: false,
+            ..profile
+        };
+        assert!(
+            !off.serves(EnvLane::Plan),
+            "plan = false still turns it off"
+        );
+        assert!(
+            !Profile::default().serves(EnvLane::Plan),
+            "the default profile is on the host"
+        );
     }
 
     #[test]

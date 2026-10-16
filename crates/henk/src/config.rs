@@ -1285,8 +1285,9 @@ pub struct WorkspaceConfig {
     /// workspace whether or not this is set (#284).
     pub review: bool,
     /// Whether the planner gets a workspace too (#172), at the default
-    /// branch.
-    pub plan: bool,
+    /// branch. Left out: on a backend apart from Henk, off on the host
+    /// (#419); `plan = false` turns it off.
+    pub plan: Option<bool>,
     /// The sandbox hosts the default profile may use (ssh backend, #389);
     /// empty: every host.
     #[serde(default)]
@@ -1649,7 +1650,8 @@ impl Default for WorkspaceConfig {
             setup: profile.setup,
             toolchain: profile.toolchain,
             review: profile.review,
-            plan: profile.plan,
+            // Left to the backend: see `into_policy`.
+            plan: None,
             hosts: profile.hosts,
             profiles: BTreeMap::new(),
             repositories: BTreeMap::new(),
@@ -1740,7 +1742,9 @@ impl WorkspaceConfig {
             setup: self.setup,
             toolchain: self.toolchain,
             review: self.review,
-            plan: self.plan,
+            // What a profile leaves out follows its backend (#419): the
+            // planner gets a workspace wherever a model may run commands.
+            plan: self.plan.unwrap_or(self.backend.plans_by_default()),
             hosts: self.hosts,
         };
         let profiles = self
@@ -1748,8 +1752,9 @@ impl WorkspaceConfig {
             .into_iter()
             .map(|(name, p)| {
                 let base = &default;
+                let backend = p.backend.unwrap_or(base.backend);
                 let profile = Profile {
-                    backend: p.backend.unwrap_or(base.backend),
+                    backend,
                     image: p.image.or_else(|| base.image.clone()),
                     limits: Limits {
                         command_secs: p.command_secs.unwrap_or(base.limits.command_secs),
@@ -1763,7 +1768,9 @@ impl WorkspaceConfig {
                     setup: p.setup.unwrap_or_else(|| base.setup.clone()),
                     toolchain: p.toolchain.or(base.toolchain),
                     review: p.review.unwrap_or(base.review),
-                    plan: p.plan.unwrap_or(base.plan),
+                    // Its own setting, else the default profile's if that
+                    // said, else what its own backend does by default.
+                    plan: p.plan.or(self.plan).unwrap_or(backend.plans_by_default()),
                     hosts: p.hosts.unwrap_or_else(|| base.hosts.clone()),
                 };
                 (name, profile)
@@ -4586,25 +4593,90 @@ github_owners = ["docspec"]
         }
     }
 
-    #[test]
-    fn the_planner_gets_a_workspace_where_a_profile_on_a_sandbox_says_so() {
-        let ssh = format!(
+    fn ssh_sandbox() -> String {
+        format!(
             "[workspace.ssh]\nhost = \"sandbox.example\"\nhost_key = \"{}\"\n",
             host_key_line()
+        )
+    }
+
+    /// #419: the planner gets a workspace wherever a model may run commands
+    /// apart from Henk, unless the configuration says `plan = false`.
+    #[test]
+    fn the_planner_gets_a_workspace_on_a_sandbox_unless_the_profile_says_not() {
+        use henk_domain::workspace::EnvLane;
+
+        let ssh = ssh_sandbox();
+
+        let settings = database(&format!("[workspace]\nbackend = \"ssh\"\n{ssh}")).unwrap();
+        assert!(settings.workspace.default.plan, "ssh, no plan key");
+        assert!(
+            settings.workspace.default.serves(EnvLane::Plan),
+            "so the planner is served"
         );
-        let settings = database(&format!(
-            "[workspace.profiles.planned]\nbackend = \"ssh\"\nplan = true\n[workspace.profiles.inherits]\nbackend = \"ssh\"\n{ssh}"
-        ))
-        .unwrap();
-        let policy = &settings.workspace;
-        assert!(!policy.default.plan, "off by default");
-        assert!(policy.profiles.get("planned").unwrap().plan);
-        assert!(!policy.profiles.get("inherits").unwrap().plan);
         let text = settings.describe();
         assert!(text.contains(", plans in a workspace"), "{text}");
+
+        let off = database(&format!(
+            "[workspace]\nbackend = \"ssh\"\nplan = false\n{ssh}"
+        ))
+        .unwrap();
+        assert!(!off.workspace.default.plan);
+        assert!(!off.workspace.default.serves(EnvLane::Plan));
+        assert!(!off.describe().contains("plans in a workspace"));
+
+        let host = database("").unwrap();
+        assert!(!host.workspace.default.plan, "the host backend");
+        assert!(!host.workspace.default.serves(EnvLane::Plan));
         let refused = database("[workspace]\nplan = true\n")
             .unwrap_err()
             .to_string();
+        assert!(
+            refused.contains("plan = true needs a backend apart from Henk"),
+            "{refused}"
+        );
+        let explicit_off = database("[workspace]\nplan = false\n").unwrap();
+        assert!(!explicit_off.workspace.default.plan);
+    }
+
+    #[test]
+    fn a_profile_without_a_plan_key_follows_its_own_backend() {
+        let ssh = ssh_sandbox();
+
+        // A sandbox profile under a host default: the planner gets a copy.
+        let settings = database(&format!(
+            "[workspace.profiles.sandbox]\nbackend = \"ssh\"\n[workspace.profiles.sandbox-off]\nbackend = \"ssh\"\nplan = false\n{ssh}"
+        ))
+        .unwrap();
+        let profiles = &settings.workspace.profiles;
+        assert!(!settings.workspace.default.plan, "the default is the host");
+        assert!(profiles.get("sandbox").unwrap().plan);
+        assert!(!profiles.get("sandbox-off").unwrap().plan);
+
+        // A host profile under a sandbox default: none, and no refusal.
+        let settings = database(&format!(
+            "[workspace]\nbackend = \"ssh\"\n[workspace.profiles.local]\nbackend = \"host\"\n{ssh}"
+        ))
+        .unwrap();
+        assert!(settings.workspace.default.plan);
+        assert!(!settings.workspace.profiles.get("local").unwrap().plan);
+
+        // What the default says outright is inherited, as it always was.
+        let settings = database(&format!(
+            "[workspace]\nbackend = \"ssh\"\nplan = false\n[workspace.profiles.inherits]\nbackend = \"ssh\"\n[workspace.profiles.asks]\nbackend = \"ssh\"\nplan = true\n{ssh}"
+        ))
+        .unwrap();
+        let profiles = &settings.workspace.profiles;
+        assert!(!profiles.get("inherits").unwrap().plan);
+        assert!(profiles.get("asks").unwrap().plan);
+
+        // An outright `plan = true` on the default still reaches a host
+        // profile and is refused there.
+        let refused = database(&format!(
+            "[workspace]\nbackend = \"ssh\"\nplan = true\n[workspace.profiles.local]\nbackend = \"host\"\n{ssh}"
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(
             refused.contains("plan = true needs a backend apart from Henk"),
             "{refused}"
@@ -4651,7 +4723,9 @@ github_owners = ["docspec"]
             "{text}"
         );
         assert!(
-            text.contains(", image big:2, reviews in a workspace, memory 4096 MiB"),
+            text.contains(
+                ", image big:2, reviews in a workspace, plans in a workspace, memory 4096 MiB"
+            ),
             "{text}"
         );
         assert!(
