@@ -7,6 +7,7 @@
 )]
 
 mod app;
+mod auth;
 mod cancel;
 mod ci_tools;
 mod code_tools;
@@ -91,6 +92,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Sign an endpoint in to a provider's account, instead of giving it a key.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Check secrets, models, the GitHub App, MCP servers and the database.
     Doctor {
         /// Also send one short prompt to every configured model.
@@ -149,6 +155,24 @@ enum Command {
     Runs {
         #[command(subcommand)]
         command: RunsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Pay an endpoint with a ChatGPT plan: sign in in a browser, and keep
+    /// the sign-in in the endpoint's `auth_file` (#620).
+    Openai {
+        /// The endpoint (one with `auth = "chatgpt"`); optional when only
+        /// one has it.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// The port the browser comes back to, on 127.0.0.1.
+        #[arg(long, default_value_t = henk_llm::chatgpt::DEFAULT_PORT)]
+        port: u16,
+        /// Only print the address; do not try to open a browser.
+        #[arg(long)]
+        no_browser: bool,
     },
 }
 
@@ -309,6 +333,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             print!("{}", config::EXAMPLE);
             Ok(())
+        }
+        Command::Auth {
+            command:
+                AuthCommand::Openai {
+                    endpoint,
+                    port,
+                    no_browser,
+                },
+        } => {
+            let settings = load_settings(&cli.config)?;
+            auth::openai(&settings, endpoint.as_deref(), port, no_browser).await
         }
         Command::Doctor { probe } => {
             let settings = load_settings(&cli.config)?;

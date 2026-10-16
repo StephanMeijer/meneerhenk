@@ -4,10 +4,12 @@
 //! secret does not hide the next problem.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use henk_domain::workspace::{BackendKind, Toolchain, WorkspacePolicy};
+use henk_llm::chatgpt::{Credentials, LoadError};
 use henk_mcp::{McpSession as _, RmcpSession};
 use henk_platform::github::{AppCredentials, GitHubApi, GitHubAuth, Installations};
 
@@ -553,6 +555,14 @@ async fn check_models(settings: &Settings, probe: bool) -> Vec<Check> {
 /// should include those configured on it.
 async fn check_endpoint(settings: &Settings, id: &str, probe: bool) -> Check {
     let name = format!("endpoint {id}");
+    if let Some(file) = settings
+        .endpoints
+        .get(id)
+        .filter(|endpoint| endpoint.signs_in_with_chatgpt())
+        .and_then(|endpoint| endpoint.sign_in_file())
+    {
+        return check_sign_in(settings, id, file, probe).await;
+    }
     let config = match settings.endpoint_config(id, env_var) {
         Ok(config) => config,
         Err(why) => return Check::fail(name, why),
@@ -593,6 +603,166 @@ async fn check_endpoint(settings: &Settings, id: &str, probe: bool) -> Check {
         Ok(Err(error)) => Check::warn(name, format!("could not list its models: {error}")),
         Err(_) => Check::warn(name, "no model list within 60s"),
     }
+}
+
+/// An endpoint paid by a ChatGPT sign-in (#620): the sign-in file, and with
+/// `probe` the models the plan lists.
+///
+/// The live call is made only while the access token has more than ten
+/// minutes left. A renewal from here could meet the renewal of a running
+/// Henk, and each renewal replaces the refresh token; the one that loses the
+/// race would have a token OpenAI no longer takes.
+async fn check_sign_in(settings: &Settings, id: &str, file: &Path, probe: bool) -> Check {
+    let loaded = Credentials::load(file).map(|credentials| {
+        let mode = std::fs::metadata(file).ok().map(|metadata| {
+            std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o777
+        });
+        (credentials, mode)
+    });
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()),
+    )
+    .unwrap_or(i64::MAX);
+    let check = sign_in_check(id, &loaded, now);
+    if check.is_failure() || !probe {
+        return check;
+    }
+    let Ok((credentials, _)) = &loaded else {
+        return check;
+    };
+    let name = format!("endpoint {id}");
+    if credentials.expires_at.saturating_sub(now) <= PROBE_MIN_LEFT {
+        return Check::warn(
+            name,
+            format!(
+                "{}; no live call from here, because the access token is due for renewal and a running Henk may be renewing it. Run it again after Henk made a request, or right after signing in",
+                detail_of(&check)
+            ),
+        );
+    }
+    let config = match settings.endpoint_config(id, env_var) {
+        Ok(config) => config,
+        Err(why) => return Check::fail(name, why),
+    };
+    match tokio::time::timeout(Duration::from_mins(1), henk_llm::list_models(&config)).await {
+        Ok(Ok(served)) => {
+            let missing: Vec<&str> = settings
+                .models
+                .values()
+                .filter(|m| m.endpoint == id && !served.contains(&m.model))
+                .map(|m| m.model.as_str())
+                .collect();
+            if missing.is_empty() {
+                Check::ok(
+                    name,
+                    format!(
+                        "{}; the plan lists {} models",
+                        detail_of(&check),
+                        served.len()
+                    ),
+                )
+            } else {
+                Check::warn(
+                    name,
+                    format!(
+                        "{}; the plan lists {} models, but not {}",
+                        detail_of(&check),
+                        served.len(),
+                        missing.join(", ")
+                    ),
+                )
+            }
+        }
+        Ok(Err(error)) => Check::fail(name, format!("the plan could not be called: {error}")),
+        Err(_) => Check::warn(name, "no model list within 60s"),
+    }
+}
+
+/// Seconds the access token must have left for a live call from `doctor`.
+const PROBE_MIN_LEFT: i64 = 600;
+
+/// The text of a check's verdict.
+fn detail_of(check: &Check) -> &str {
+    match &check.verdict {
+        Verdict::Ok(detail) | Verdict::Warn(detail) | Verdict::Fail(detail) => detail,
+    }
+}
+
+/// What a ChatGPT sign-in file says, without a live call: whose it is, how
+/// long its tokens last, and whether it needs attention. `loaded` is the
+/// file and its permission bits; `now` is in seconds since the epoch.
+fn sign_in_check(
+    id: &str,
+    loaded: &Result<(Credentials, Option<u32>), LoadError>,
+    now: i64,
+) -> Check {
+    /// A refresh token lasts 30 days from the renewal that issued it.
+    const REFRESH_DAYS: i64 = 30;
+    const WARN_AFTER_DAYS: i64 = 25;
+    let name = format!("endpoint {id}");
+    let sign_in = format!("henk auth openai --endpoint {id}");
+    let (credentials, mode) = match loaded {
+        Ok(loaded) => loaded,
+        Err(LoadError::Missing(file)) => {
+            return Check::fail(
+                name,
+                format!(
+                    "not signed in: {} does not exist; run `{sign_in}`",
+                    file.display()
+                ),
+            );
+        }
+        Err(error @ LoadError::Unusable { .. }) => {
+            return Check::fail(name, format!("{error}; run `{sign_in}`"));
+        }
+    };
+    let account = credentials
+        .account
+        .as_deref()
+        .unwrap_or("an unnamed account");
+    if !credentials
+        .scopes
+        .iter()
+        .any(|scope| scope == "chatgpt.tokens.use.direct")
+    {
+        return Check::fail(
+            name,
+            format!(
+                "signed in as {account} without the scope that lets the plan pay; run `{sign_in}`"
+            ),
+        );
+    }
+    let left = credentials.expires_at.saturating_sub(now);
+    let access = if left > 0 {
+        format!("access token valid for {} min", left / 60)
+    } else {
+        "access token expired (renewed on first use)".to_owned()
+    };
+    let age_days = now.saturating_sub(credentials.refreshed_at) / 86_400;
+    let detail = format!(
+        "ChatGPT plan sign-in as {account}; {access}; renewed {age_days} days ago (a sign-in lapses {REFRESH_DAYS} days after its last renewal)"
+    );
+    if age_days >= REFRESH_DAYS {
+        return Check::fail(
+            name,
+            format!("{detail}; it has most likely lapsed: run `{sign_in}`"),
+        );
+    }
+    if age_days >= WARN_AFTER_DAYS {
+        return Check::warn(
+            name,
+            format!("{detail}; it lapses soon unless a model call renews it, or run `{sign_in}`"),
+        );
+    }
+    if let Some(mode) = mode.filter(|mode| mode & 0o077 != 0) {
+        return Check::warn(
+            name,
+            format!("{detail}; the file is readable by others (mode {mode:o}): chmod 600 it"),
+        );
+    }
+    Check::ok(name, detail)
 }
 
 /// One model on a usable endpoint; with `probe`, one short call.
@@ -1052,6 +1222,137 @@ mod tests {
             unused.verdict,
             Verdict::Warn("configured but used by no role: spare".to_owned())
         );
+    }
+
+    const SIGNED_IN_AT: i64 = 1_790_000_000;
+    const SECRETS: [&str; 3] = ["access-secret-1", "refresh-secret-1", "id-secret-1"];
+
+    fn sign_in(refreshed_days_ago: i64, expires_in: i64) -> Credentials {
+        Credentials {
+            client_id: "oaiapp_x".to_owned(),
+            ext_agent_host_id: "urn:uuid:1".to_owned(),
+            access_token: SECRETS[0].to_owned().into(),
+            refresh_token: SECRETS[1].to_owned().into(),
+            id_token: Some(SECRETS[2].to_owned().into()),
+            expires_at: SIGNED_IN_AT + expires_in,
+            earliest_refresh_at: None,
+            refreshed_at: SIGNED_IN_AT - refreshed_days_ago * 86_400,
+            scopes: vec![
+                "offline_access".to_owned(),
+                "chatgpt.tokens.use.direct".to_owned(),
+            ],
+            account: Some("someone@example.com".to_owned()),
+        }
+    }
+
+    fn verdict(check: &Check) -> (&'static str, &str) {
+        match &check.verdict {
+            Verdict::Ok(detail) => ("ok", detail),
+            Verdict::Warn(detail) => ("warn", detail),
+            Verdict::Fail(detail) => ("fail", detail),
+        }
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_is_described_by_its_file_alone() {
+        let check = sign_in_check("c", &Ok((sign_in(3, 1800), Some(0o600))), SIGNED_IN_AT);
+        let (kind, detail) = verdict(&check);
+        assert_eq!(kind, "ok", "{detail}");
+        assert!(detail.contains("someone@example.com"), "{detail}");
+        assert!(detail.contains("valid for 30 min"), "{detail}");
+        assert!(detail.contains("renewed 3 days ago"), "{detail}");
+        for secret in SECRETS {
+            assert!(!detail.contains(secret), "{detail}");
+        }
+        // An expired access token is fine: it is renewed on first use.
+        let stale = sign_in_check("c", &Ok((sign_in(3, -50), Some(0o600))), SIGNED_IN_AT);
+        assert_eq!(verdict(&stale).0, "ok");
+        assert!(verdict(&stale).1.contains("renewed on first use"));
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_that_needs_attention_says_what_to_do() {
+        let at = |loaded: Result<(Credentials, Option<u32>), LoadError>| {
+            let check = sign_in_check("c", &loaded, SIGNED_IN_AT);
+            let (kind, detail) = verdict(&check);
+            (kind, detail.to_owned())
+        };
+        let (kind, detail) = at(Err(LoadError::Missing("/v/openai.json".into())));
+        assert_eq!(kind, "fail");
+        assert!(
+            detail.contains("not signed in") && detail.contains("henk auth openai --endpoint c"),
+            "{detail}"
+        );
+        let (kind, detail) = at(Err(LoadError::Unusable {
+            path: "/v/openai.json".into(),
+            problem: "not JSON".to_owned(),
+        }));
+        assert_eq!(
+            (kind, detail.contains("run `henk auth openai")),
+            ("fail", true)
+        );
+        let mut without_scope = sign_in(1, 1800);
+        without_scope.scopes = vec!["offline_access".to_owned()];
+        let (kind, detail) = at(Ok((without_scope, Some(0o600))));
+        assert_eq!(kind, "fail");
+        assert!(detail.contains("without the scope"), "{detail}");
+        let (kind, detail) = at(Ok((sign_in(31, 1800), Some(0o600))));
+        assert_eq!(kind, "fail");
+        assert!(detail.contains("most likely lapsed"), "{detail}");
+        let (kind, detail) = at(Ok((sign_in(26, 1800), Some(0o600))));
+        assert_eq!(kind, "warn");
+        assert!(detail.contains("lapses soon"), "{detail}");
+        let (kind, detail) = at(Ok((sign_in(2, 1800), Some(0o644))));
+        assert_eq!(kind, "warn");
+        assert!(
+            detail.contains("readable by others") && detail.contains("644"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_reads_a_chatgpt_endpoints_file_and_shows_no_token() {
+        let dir = std::env::temp_dir().join(format!("henk-doctor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("openai.json");
+        let endpoints = format!(
+            "[endpoints.c]\nprovider = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\nauth = \"chatgpt\"\nauth_file = \"{}\"\n[models.m]\nendpoint = \"c\"\nmodel = \"gpt-6.1-sol\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n",
+            file.display()
+        );
+        let settings = settings(&endpoints);
+
+        // No file yet.
+        let checks = check_models(&settings, false).await;
+        let endpoint = checks.iter().find(|c| c.name == "endpoint c").unwrap();
+        assert_eq!(verdict(endpoint).0, "fail");
+        let model = checks.iter().find(|c| c.name == "model m").unwrap();
+        assert!(verdict(model).1.contains("endpoint c is not usable"));
+
+        // Signed in a day ago, the access token about to lapse.
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let mut credentials = sign_in(0, 0);
+        credentials.refreshed_at = now - 86_400;
+        credentials.expires_at = now + 120;
+        credentials.save(&file).unwrap();
+        let checks = check_models(&settings, false).await;
+        let endpoint = checks.iter().find(|c| c.name == "endpoint c").unwrap();
+        assert_eq!(verdict(endpoint).0, "ok", "{endpoint:?}");
+        // With --probe it does not renew from here, and says why.
+        let probed = check_models(&settings, true).await;
+        let endpoint = probed.iter().find(|c| c.name == "endpoint c").unwrap();
+        assert_eq!(verdict(endpoint).0, "warn", "{endpoint:?}");
+        assert!(verdict(endpoint).1.contains("no live call from here"));
+        let rendered = render(&probed);
+        for secret in SECRETS {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A missing key fails its endpoint once, and each model on it says
