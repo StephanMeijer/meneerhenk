@@ -229,9 +229,13 @@ impl From<PlatformArg> for Platform {
 fn main() -> ExitCode {
     // kube-client logs every failed API request at ERROR without saying
     // which; Henk logs a failed workspace request itself, with the run,
-    // session, Pod and operation (#339).
+    // session, Pod and operation (#339). The migrator says "no pending
+    // migrations" at info on every start; a step it applies is still an
+    // error or a warning if it fails.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,rmcp=warn,henk=debug,kube_client::client::builder=off")
+        EnvFilter::new(
+            "info,rmcp=warn,henk=debug,kube_client::client::builder=off,sea_orm_migration=warn",
+        )
     });
     if std::env::var("HENK_LOG_JSON").is_ok_and(|v| v == "1") {
         tracing_subscriber::fmt()

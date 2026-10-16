@@ -132,7 +132,7 @@ flowchart TB
 | `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `push`, `issue`, `github/{app,api,writer,push,issues}`, `gitlab/{writer,push,issues}` | domain, llm, mcp, ring, hmac |
-| `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/`, `migrator/` | rusqlite (bundled), tokio-postgres with deadpool, sea-orm (the migrator), rustls (ring) |
+| `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/`, `db/` (the new `Store`), `migrator/` | rusqlite (bundled), tokio-postgres with deadpool, sea-orm (the migrator), rustls (ring) |
 | `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan,execute}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `plan_pairing`, `plan_review_tools`, `execute`, `execute_tools`, `issue_runs`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
@@ -147,6 +147,22 @@ and PostgreSQL, `m001_baseline.rs` onwards, which also adopts a database the
 old migrations made; its README says how to add a step. Until the old stores
 are removed (#608) they still run `migrations/{sqlite,postgres}/`, so a schema
 change is written in both places.
+
+The methods are moving to the new layer in groups (#605 to #607): the type
+`Store` in `crates/henk-store/src/db/` has them once, for both databases,
+with what differs between the two (the time) in one small `dialect.rs`.
+`SqliteStore` and `PgStore` still implement `RunStore` and hand the moved
+methods to a `Store` that opens the same database, so a database is shared by
+two libraries until the last group has moved. `SqliteStore::in_memory` is a
+temporary file for that time, because an in-memory database cannot be opened
+by both.
+
+TLS to PostgreSQL is checked, not only encrypted. sqlx reads `sslmode` like
+`psql`, where `prefer` accepts any certificate, so `Store` raises `require` and
+`verify-ca` to `verify-full` and refuses `prefer`, `allow` and a URL with no
+`sslmode` at connect (`refuse_unverified_tls`). The old driver verified under
+`prefer`; refusing is the only way not to downgrade that silently. A server
+without TLS needs `sslmode=disable` in its URL.
 
 ## 3. A review, end to end
 

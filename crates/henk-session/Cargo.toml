@@ -26,6 +26,9 @@ async-trait = { workspace = true }
 henk-llm = { workspace = true, features = ["testing"] }
 henk-mcp = { workspace = true, features = ["testing"] }
 rmcp = { workspace = true, features = ["server"] }
+# A paused clock in the time limit test; the workspace build gets it from
+# henk-agent's tests, a build of this crate alone does not.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

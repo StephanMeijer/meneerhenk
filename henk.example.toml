@@ -19,7 +19,8 @@ keep_events_days = 30
 backend = "sqlite"
 path = "/var/lib/henk/henk.db"
 # ... or PostgreSQL. The URL holds the password, so only the variable that
-# has it goes here. Use sslmode=require (or verify-full) outside localhost.
+# has it goes here. Use sslmode=require (or verify-full) outside localhost;
+# either one checks the server's certificate and host name.
 # backend = "postgres"
 # url_env = "HENK_DATABASE_URL"
 

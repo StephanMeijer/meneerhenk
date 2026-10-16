@@ -12,12 +12,12 @@ use time::format_description::well_known::Rfc3339;
 /// Why a store operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// SQLite said no.
+    /// The database said no. The text is the driver's own message.
     #[error("database error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Database(String),
     /// The schema could not be brought up to date.
     #[error("migration error: {0}")]
-    Migration(#[from] rusqlite_migration::Error),
+    Migration(String),
     /// `PostgreSQL` said no, or no connection could be had. The text is the
     /// whole cause chain: the driver's own `Display` is only "db error".
     #[error("PostgreSQL: {0}")]
@@ -39,6 +39,18 @@ pub enum StoreError {
         /// What was there.
         value: String,
     },
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error.to_string())
+    }
+}
+
+impl From<rusqlite_migration::Error> for StoreError {
+    fn from(error: rusqlite_migration::Error) -> Self {
+        Self::Migration(error.to_string())
+    }
 }
 
 impl From<tokio_postgres::Error> for StoreError {

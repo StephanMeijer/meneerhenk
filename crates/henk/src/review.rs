@@ -1663,10 +1663,17 @@ requester_id = 3
             }
         }
         assert_eq!(status, Some(RunStatus::Cancelled));
-        assert!(
-            !coordinator.cancel(&run, "github:1234".to_owned()),
-            "an ended run is not cancellable"
-        );
+        // The status is stored before the coordinator forgets the run, and a
+        // store call now yields in between: wait for it to let go.
+        let mut cancellable = true;
+        for _ in 0..200 {
+            cancellable = coordinator.cancel(&run, "github:1234".to_owned());
+            if !cancellable {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!cancellable, "an ended run is not cancellable");
         app.shutdown.cancel();
     }
 
@@ -2062,6 +2069,10 @@ requester_id = 3
             "Waiting for a review slot: all 1 are in use. Henk starts this review when one frees."
         );
         assert!(henk_domain::text::is_in_style(&summary));
+        until("A's check starts", || {
+            !writer.started.lock().unwrap().is_empty()
+        })
+        .await;
         assert_eq!(
             *writer.started.lock().unwrap(),
             [None],
@@ -3196,7 +3207,18 @@ requester_id = 3
         let (report, ()) = tokio::join!(
             run_review(&f.app, request(&run), CancellationToken::new()),
             async {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // Make room once the review has said it waits, however long
+                // it takes to get there.
+                for _ in 0..1000 {
+                    if messages(&f.app, &run)
+                        .await
+                        .iter()
+                        .any(|m| m.starts_with("waiting for a sandbox host"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 held.close().await;
             }
         );
