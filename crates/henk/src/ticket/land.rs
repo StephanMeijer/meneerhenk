@@ -120,11 +120,14 @@ impl Ticket<'_> {
                 }
             };
             watch.failures = 0;
+            let head = facts.standing.head.clone();
+            let action = decide(&facts, &watch.ledger, &tries);
+            // Counted after `decide`, so the look just made is one the
+            // platform had to catch up in, not one it is judged by.
             if watch.ledger.rebased.is_some() {
                 watch.ledger.rebase_looks += 1;
             }
-            let head = facts.standing.head.clone();
-            match decide(&facts, &watch.ledger, &tries) {
+            match action {
                 Action::Ready => return self.ended(Step::Land, Ending::Ready).await,
                 Action::End(End::HandedOver(why)) => {
                     return self.ended(Step::Land, Ending::HandedOver(why)).await;
@@ -460,8 +463,9 @@ mod tests {
 
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use henk_domain::land::Standing;
+    use henk_domain::land::{REBASE_LAG_LOOKS, Standing};
     use henk_domain::review::ReviewOutcome;
     use henk_domain::run::RunId;
     use henk_platform::CiJobId;
@@ -1018,6 +1022,28 @@ mod tests {
         );
         let rebases = stages.calls().iter().filter(|c| *c == "rebase").count();
         assert_eq!(rebases, 2);
+    }
+
+    #[tokio::test]
+    async fn a_platform_that_is_slow_to_see_a_rebase_gets_the_looks_to_catch_up() {
+        let f = fixture();
+        // After the rebase the platform says "must catch up" for as many
+        // looks as it has to, then sees the new head.
+        let looks = AtomicUsize::new(0);
+        let lag = usize::try_from(REBASE_LAG_LOOKS).unwrap();
+        let stages = Landing::new(move |rebased| {
+            let behind = rebased == 0 || looks.fetch_add(1, Ordering::SeqCst) < lag;
+            if behind {
+                MergeState::NeedsRebase
+            } else {
+                MergeState::Mergeable
+            }
+        });
+        let report = go(&f, &stages, quick()).await;
+
+        assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
+        let rebases = stages.calls().iter().filter(|c| *c == "rebase").count();
+        assert_eq!(rebases, 1, "the rebased head was rebased again");
     }
 
     #[tokio::test]
