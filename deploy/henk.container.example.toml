@@ -89,6 +89,11 @@ model = "claude"
 # Issues taken to pull requests on request (#329); needs the executor.
 [execution]
 
+# Issues taken through plan, execute and review in one go (#536): off unless
+# this is there, since it lets Henk write and push code with no person
+# between the plan and the pull request.
+# [autonomous]
+
 # The executor pushes, for this Team Lead.
 [roles.executor]
 model = "claude"

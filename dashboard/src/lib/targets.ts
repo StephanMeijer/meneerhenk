@@ -66,6 +66,13 @@ export function targetText(target: Target): string {
   return `${what} ${target.repo} #${target.number}`;
 }
 
+/** How an issue-based start is named when it needs an issue. */
+const ISSUE_WORK: Partial<Record<Start, string>> = {
+  plan: 'A plan',
+  execute: 'Taking one to a pull request',
+  ticket: 'Taking one through plan, build and review',
+};
+
 /** What `start` needs `url` to name. */
 export function needs(start: Start): Target['kind'] {
   return start === 'review' || start === 'rebase' ? 'pull' : 'issue';
@@ -89,7 +96,7 @@ export function checkUrl(start: Start, url: string): Check {
   }
   if (target.kind !== wanted) {
     return wanted === 'issue'
-      ? { problem: `This is a ${target.platform === 'gitlab' ? 'merge request' : 'pull request'}. ${start === 'plan' ? 'A plan' : start === 'ticket' ? 'A ticket run' : 'Taking one to a pull request'} needs an issue URL.` }
+      ? { problem: `This is a ${target.platform === 'gitlab' ? 'merge request' : 'pull request'}. ${ISSUE_WORK[start] ?? 'This'} needs an issue URL.` }
       : { problem: `This is an issue. ${start === 'rebase' ? 'A rebase' : 'A review'} needs a pull request URL.` };
   }
   return { ok: targetText(target) };

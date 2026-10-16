@@ -549,7 +549,7 @@ flowchart LR
     subgraph hooks["Hooks (henk/hooks)"]
         GHH["GitHubHook<br/>POST /webhooks/github"]
         GLH["GitLabHook<br/>POST /webhooks/gitlab"]
-        API["ApiHook<br/>POST /review, /plan, /execute"]
+        API["ApiHook<br/>POST /review, /plan, /execute, /ticket"]
         LATER["Discord, mail, timers"]:::later
     end
     BUS["EventBus<br/>record, deliver, record outcomes"]
@@ -559,6 +559,7 @@ flowchart LR
         ML["MentionListener"]
         PL["PlanListener"]
         EL["ExecuteListener"]
+        TL["TicketListener"]
     end
     COORD["Coordinator"]
     GHH --> BUS
@@ -570,16 +571,18 @@ flowchart LR
     BUS --> ML
     BUS --> PL
     BUS --> EL
+    BUS --> TL
     RL --> COORD
     PL --> COORD
     EL --> COORD
+    TL --> COORD
     classDef later stroke-dasharray: 5 5,fill:none
 ```
 
 The event model (`henk-events`): `Event { id, received_at, source, kind, payload }`,
 `EventSource` (GitHub webhook with delivery id, GitLab webhook, API with
 requester), `EventKind` (pull request change, comment, review requested, plan
-requested, execute requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
+requested, execute requested, ticket requested, unmodelled, ignored) and `Handled` (ignored, started, joined,
 superseded, greeted, failed with a reason). A webhook kind no parser models is
 `Unmodelled` and still recorded, so a future listener can be written against
 real recordings. Recordings never leave the service.
@@ -716,6 +719,24 @@ event is still dropped as Henk's own by the filter (section 9). A run that
 opens nothing ends on the issue the way a plan does (`issue_runs.rs`): one
 comment for a failure or a cancel, nothing for a shutdown.
 
+### Ticket runs
+
+A ticket run (`ticket.rs`, #536) drives one issue through the three runs
+above. It is a run of its own, kind `ticket`, with `plan`, `execute` and
+`review` stages, and it links the runs it starts in `run_children`. The
+`TicketListener` hands the request to `Coordinator::submit_ticket`, which
+keeps one ticket run per issue and spawns `run_ticket`.
+
+`run_ticket` calls the stages through a small seam, `Stages`: `Live` runs
+`run_plan` and `run_execute` directly, with `Comments::Caller` so they end
+in the store without a comment, and starts the review with
+`Coordinator::submit_review_awaited`, so it goes through the slot queue and
+tells the ticket run how it ended. Each step is raced against the ticket run's
+cancel token and its deadline; a stage told to stop (`Coordinator::cancel`,
+with `ticket:time-limit` as the canceller when the time is up) is waited for,
+so it writes its own ending. Only the ticket run comments on the issue, once,
+through the same `OnRun` the plan and the execute run end with.
+
 ## 8. Run records
 
 ```mermaid
@@ -731,7 +752,7 @@ erDiagram
     event_outcomes }o--o| runs : led_to
     runs {
         text id PK "r-YYYYMMDD-xxxxxxxx"
-        text kind "review or plan (address in old runs)"
+        text kind "review, plan, execute, rebase or ticket (address in old runs)"
         text platform
         text repo
         int target "PR, MR or issue number"

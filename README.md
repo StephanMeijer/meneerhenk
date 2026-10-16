@@ -231,7 +231,8 @@ trailers apply to every commit the loop pushes. Those commits name the
 requester who asked, when Henk knows them by id, and nobody otherwise (see
 "Pushing a review's fixes").
 Planning needs `[planning]` with `[roles.planner]` and `[roles.reviewer]`;
-execute runs need `[execution]` with `[roles.executor]`.
+execute runs need `[execution]` with `[roles.executor]`; ticket runs need
+`[autonomous]` and all of those.
 Without `[review.loop]`
 reviews are off: `config check`
 prints `Reviews:         off (no [review.loop])` and `henk doctor` fails its
@@ -714,6 +715,7 @@ henk review URL1 URL2 URL3                        # several: at most 50, max_con
 henk review https://gitlab.example/group/project/-/merge_requests/5
 henk plan https://github.com/owner/repo/issues/9 --note "keep it small"
 henk execute https://github.com/owner/repo/issues/9   # issue to pull request, then its review
+henk ticket https://github.com/owner/repo/issues/9    # plan, pull request and review in one go
 henk llm probe --model proxy-fast                  # one prompt to a model
 henk llm models --endpoint proxy                   # what that endpoint serves
 henk mcp probe --server github --show pull_request_read
@@ -731,13 +733,6 @@ proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 `POST /ticket {"url", "note"?}` and `POST /rebase {"url"}` with
 `Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
-
-`POST /ticket` takes an issue through a plan, an execute run and a review
-of the pull request it opens, with nobody starting each step (#536). It
-takes the same body as `/execute` and works only when the `[autonomous]`
-section is in the configuration, since it lets Henk write and push code
-without a person between the plan and the pull request. It needs
-`[planning]`, `[execution]` and `[review.loop]` as well.
 
 Every inbound event is recorded in Henk's own database with what each listener
 did with it, and the payload as received (up to 256 KB). Recordings stay in
@@ -813,6 +808,43 @@ needs `Pull requests: write`. On GitLab Henk opens the merge request
 through the `gitlab-write` MCP server, so `create_merge_request` must be in
 its `GITLAB_TOOLS`. The bot's own "opened" event is ignored as Henk's own;
 the review starts because the execute run asks for it.
+
+### Autonomous ticket runs
+
+With `[autonomous]` configured, a colleague can ask Henk to take an open
+issue all the way (spec §4b, #536): a plan, a pull request and its review,
+with nobody starting each step. Ask from the dashboard's start form, MCP
+`start_ticket`, `POST /ticket` or `henk ticket <issue-url>`. Nothing starts
+one on its own, and the only human step left is merging the pull request.
+
+```toml
+[autonomous]
+run_timeout_secs = 7200   # the time one ticket run has in all
+```
+
+The section being there turns it on, since it lets Henk write and push code
+with no person between the plan and the pull request. It needs `[planning]`,
+`[execution]` and `[review.loop]`, with their roles, and `config check`
+says when it is on. The run is a run of its own that owns three: a plan, an
+execute run and a review keep their own runs, and the ticket run links them
+and shows the three as stages.
+
+- **The plan goes on only if its review converged.** The reviewer must have
+  raised nothing more. A plan that ran out of rounds or time stays on the
+  issue with its points still open, and the run stops there.
+- **The execute run builds from the plan on the issue**, opens the pull
+  request, and the review starts through the same queue as any review: it
+  waits for a slot, and a newer commit replaces it.
+- **It ends in one of four ways.** The review passed, and nothing more is
+  said. A person's push or another review took the pull request over, and
+  the run ends well. A step failed or hit a limit, and one comment on the
+  issue says which and why. A person cancelled it, and the issue hears it
+  once.
+- **Limits.** Each step keeps its own (`planning.run_timeout_secs`,
+  `execution.run_timeout_secs`, the review loop's). `run_timeout_secs` caps
+  the whole run, including the wait for a review slot.
+- **One at a time per issue.** Asking again while one runs joins it. A
+  ticket run is not resumed after a restart; it ends as interrupted.
 
 ### The reviewer reads CI
 
@@ -1258,8 +1290,8 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
   `git` runs where Henk does and how many recent reviews got the
   workspaces their profile asks for;
 - a form that starts what this Henk is configured for: a review, a plan,
-  an issue taken to a pull request (#329), a whole ticket run (#536), or a
-rebase (#579); and a
+  an issue taken to a pull request (#329), an issue taken through plan,
+  build and review (#536), or a rebase (#579); and a
   button that cancels a running one.
 
 Starting works exactly like `POST /review`, `/plan`, `/execute`, `/ticket`
@@ -1406,6 +1438,11 @@ line in `docs/SPEC.md` once the team confirms it.
 - §4 A plan has an hour in all (`planning.run_timeout_secs`), and each
   turn the role's own `timeout_secs`; its review has at most 3 rounds
   (`planning.max_rounds`).
+- §4b A ticket run needs no person between its steps (#536): the only human
+  step is merging. It goes on from the plan only when the plan review
+  converged, has two hours in all by default (`autonomous.run_timeout_secs`),
+  and leaves one comment on the issue when a step fails or hits a limit.
+  A per-repository gate, or a stop after the plan, is a later decision.
 - §4 On GitHub, triage sets labels, type and links; priority, effort and
   target date are not set in this version.
 - Everywhere: the only rate limit is `review.max_concurrent`. On GitHub, a

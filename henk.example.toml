@@ -224,6 +224,16 @@ run_timeout_secs = 3600
 branch_prefix = "henk/"
 requirements_max_rounds = 3
 
+# Taking an issue through plan, execute and review in one go (#536), on
+# request only: Henk plans the issue, goes on only if the plan review
+# converged, has the executor open the pull request and has it reviewed, with
+# no person between the steps. Off unless this section is there, since it
+# lets Henk write and push code unattended; the only human step is merging.
+# It needs [planning], [execution] and [review.loop]. run_timeout_secs is the
+# time one ticket run has in all, on top of each step's own.
+# [autonomous]
+# run_timeout_secs = 7200
+
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then
 # Markdown). dir is relative to this file. A role gets only the skills it

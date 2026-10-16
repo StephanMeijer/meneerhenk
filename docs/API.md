@@ -111,7 +111,7 @@ Runs, newest first, each with its `sessions` (`name`, `role`, `status`) and
 
 | Query | Meaning |
 |---|---|
-| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `rebase` (a pull request rebased onto its base branch, #579), `address` (runs from before #327), `discord_turn` or `mail_reply` |
+| `kind` | `review`, `plan`, `execute` (an issue taken to a pull request, #329), `rebase` (a pull request rebased onto its base branch, #579), `ticket` (an issue taken through plan, execute and review by one run, #536), `address` (runs from before #327), `discord_turn` or `mail_reply` |
 | `status` | `running`, `finished`, `failed`, `cancelled` or `superseded` |
 | `platform` | `github` or `gitlab` |
 | `repo` | `owner/name`, exactly |
@@ -202,7 +202,11 @@ One run with everything the run record holds about it:
   loop or a plan's review stopped. An execute run goes `requested`,
   `started`, `checkout`, `session` (the executor), `commit` (the
   changeset), `push` (the new branch), `publish` (the pull request
-  opened), `done`; its `summary` names the pull request. An address run, from before
+  opened), `done`; its `summary` names the pull request. A ticket run goes
+  `requested`, `started`, `plan`, `execute`, `review`, `done`; each of the
+  three has the run it started in its `detail` (`run r-...`) and how it
+  ended, and a step the run never reached is `skipped`. Its `summary` names
+  the pull request, or says the run was handed over. An address run, from before
   #327, went `requested`, `started`, `workspace`, `session`, `commit`,
   `push`, `replies`, `done`.
   Runs from before stages were kept have none.
@@ -504,8 +508,8 @@ it.
 
 `kind` is `review`, `plan`, `execute`, `ticket` or `rebase`. `url` is a pull
 request for a review or a rebase and an issue for the others. `commit`
-(reviews) and `note` (plans, execute runs and ticket runs) are optional; a rebase takes
-neither.
+(reviews) and `note` (plans, execute runs and ticket runs) are optional; a
+rebase takes neither.
 Answers `202` with `{"event_id": "e-..."}`, or `400` saying what is wrong.
 
 ### `POST /runs/{id}/cancel`

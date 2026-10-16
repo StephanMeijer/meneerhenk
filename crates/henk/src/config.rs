@@ -3571,6 +3571,25 @@ github_owners = ["docspec"]
         ));
     }
 
+    /// #536: the examples show `[autonomous]` commented out; uncommented it
+    /// is valid and turns ticket runs on.
+    #[test]
+    fn the_examples_autonomous_section_is_valid_once_uncommented() {
+        for text in [
+            EXAMPLE,
+            include_str!("../../../deploy/henk.container.example.toml"),
+        ] {
+            let on = text
+                .replace("# [autonomous]", "[autonomous]")
+                .replace("# run_timeout_secs = 7200", "run_timeout_secs = 7200");
+            assert_ne!(on, text, "the example has the section");
+            let settings = Config::parse(&on)
+                .and_then(Config::into_settings)
+                .unwrap_or_else(|e| panic!("{e}"));
+            assert!(settings.autonomous.is_some());
+        }
+    }
+
     #[test]
     fn container_example_is_valid() {
         let text = include_str!("../../../deploy/henk.container.example.toml");

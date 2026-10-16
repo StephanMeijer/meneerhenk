@@ -31,7 +31,8 @@ branch.
 
 | Term | Meaning |
 |---|---|
-| **Run** | One execution of a review, a plan, an execute run (§4a), a Discord turn or a mail reply. Every run has a link. Address runs from before #327 stay readable as runs. |
+| **Run** | One execution of a review, a plan, an execute run (§4a), a ticket run (§4b), a Discord turn or a mail reply. Every run has a link. Address runs from before #327 stay readable as runs. |
+| **Ticket run** | A run that takes one issue through a plan, an execute run and a review of the pull request, and owns the three (§4b). |
 | **Review loop** | What a review is: a reviewer and an executor taking turns on one pull request (§3.2). |
 | **Reviewer** | The model session in a review loop that reviews the change and hands its findings to the executor (§3.2). |
 | **Executor** | The model session that changes code: in a review loop it checks each finding against the code and fixes the ones that hold (§3.2); in an execute run it takes an issue to a pull request (§4a). |
@@ -365,8 +366,9 @@ change stays within that issue and its relations.
 
 A colleague asks Henk to take an open issue to a pull request: from the
 dashboard, the MCP server, the API or the command line, with an optional
-note. Nothing starts one on its own. The repository must be on the
-allowlist, and this Henk must be configured for it (`[execution]`).
+note. Nothing starts one on its own, apart from the execute run a ticket
+run starts for the person who asked for that (§4b). The repository must be
+on the allowlist, and this Henk must be configured for it (`[execution]`).
 
 Henk then:
 
@@ -418,6 +420,63 @@ the requirements review did not accept the changes, with the points still
 open), with a link to the run. A review that is not satisfied in time
 discards the executor's work: nothing is pushed. A cancel says so on the issue; a
 run that does not finish within its time limit has failed.
+
+---
+
+## 4b. Taking an issue through plan, execute and review
+
+A colleague asks Henk to take an open issue all the way: from the dashboard,
+the MCP server, the API or the command line, with an optional note. It is
+the three steps above, one after the other, with nobody starting each. Nothing
+starts one on its own. The repository must be on the allowlist, and this
+Henk must be configured for it (`[autonomous]`, which needs `[planning]`,
+`[execution]` and `[review.loop]`). It is off unless that section is there,
+since it lets Henk write and push code with no person between the plan and
+the pull request.
+
+A **ticket run** is a run of its own that owns three. The plan, the execute
+run and the review keep their own runs, stages and sessions; the ticket run
+starts them in order, links them, and records where it stands in stages of
+its own: `plan`, `execute` and `review`.
+
+1. **The plan** (§4), with its review. The run goes on only if that review
+   converged: the reviewer raised nothing more. A plan published with its
+   points still open, because the rounds or the time ran out or a session
+   broke off, ends the ticket run; the plan stays on the issue. Questions
+   the planner asked on the issue do not stop it: the plan says what it
+   assumed.
+2. **The execute run** (§4a), from the plan on the issue, with the same
+   note.
+3. **The review** (§3.2) of the pull request it opened, a run of its own
+   with fresh sessions. It is asked for through the same queue as any
+   review, so it waits for a slot, and a newer commit replaces it.
+
+**How it ends.**
+
+- **The review passed.** Nothing more is said; the pull request closes the
+  issue. A person merges it: Henk never does (§8.2).
+- **A person or another run took over the pull request.** A newer commit,
+  a rebase or another review of the same commit replaced or covers the
+  review. The ticket run's job is done and it ends well, saying so.
+- **A step failed or hit a limit.** One comment on the issue says which and
+  why, with the run link, and names what exists: the plan, or the pull
+  request. The plan and the execute run are started quiet, so this is the
+  only comment. A review that left findings open or did not complete is
+  such a stop.
+- **A person cancels it.** The step in progress stops and the issue hears it
+  once, as in §4. A pull request already opened stays open. Henk stopping
+  says nothing.
+
+**Limits.** Each step keeps its own: the plan's (§4), the execute run's
+(§4a) and the review loop's (§3.2). The whole run has
+`[autonomous] run_timeout_secs`, two hours by default, counted from when it
+starts and including the wait for a review slot. A step told to stop for it
+or for a cancel is waited for, so it writes its own ending.
+
+**One at a time.** An issue has one ticket run at a time; a second request
+joins the first. A ticket run is not resumed after a restart, as a plan or
+an execute run is not: the run that was going ends as interrupted. A review
+it had started is resumed on its own (§3.1).
 
 ---
 
@@ -596,7 +655,7 @@ These hold everywhere:
    never start work, and his replies never mention himself. The platform's
    events about his own pull requests and pushes start nothing; the review
    of a pull request an execute run opened is asked for by that run, as
-   part of the same request (§4a).
+   part of the same request (§4a, §4b).
 2. **Henk is advisory.** A review never fails or blocks a pull/merge request
    or pipeline. He never approves, requests changes or merges. He pushes
    only as the executor: in a review loop (§3.2, §3.5) only to that pull
@@ -844,6 +903,14 @@ surprising reading of the earlier wording; veto any that is wrong.
   review that is not satisfied opens no pull request. Its verdict is
   stored with the run as the points of a plan review are, and is in the
   pull request's description.
+
+- §1.1, §4a, §4b, §8 hard rule 1: Henk takes an issue through a plan, an
+  execute run and a review by himself (#536). One request starts a ticket
+  run, which goes on from the plan only if its review converged, opens the
+  pull request, has it reviewed, and ends with one comment on the issue
+  when a step fails or hits a limit. Off unless `[autonomous]` is
+  configured. No person is asked between the steps: the only human step is
+  merging.
 
 - §3.1, §3.6: one run per pull request at a time, of any kind (#580). A
   rebase waits for a slot ahead of every review, supersedes a review of
