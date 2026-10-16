@@ -612,7 +612,12 @@ impl Ticket<'_> {
         );
         self.settled(Step::Execute, detail).await;
 
-        // The review of that pull request.
+        self.review_and_land(&opened, &pull).await
+    }
+
+    /// The review of the pull request the execute run opened, and with the
+    /// land stage on, what follows a passed one.
+    async fn review_and_land(&self, opened: &ExecuteReport, pull: &OpenedPullRequest) -> Ending {
         if let Some(ending) = self.halted(Step::Review) {
             return ending;
         }
@@ -645,11 +650,11 @@ impl Ticket<'_> {
             (Reviewed::Passed(commit), Some(land)) => {
                 self.settled(Step::Review, "the review passed".to_owned())
                     .await;
-                self.land(land, &pull, Some(commit)).await
+                self.land(land, pull, Some(commit)).await
             }
             (Reviewed::Replaced(why), Some(land)) => {
                 self.settled(Step::Review, why).await;
-                self.land(land, &pull, None).await
+                self.land(land, pull, None).await
             }
             (reviewed, _) => self.ended(Step::Review, reviewed.into_ending()).await,
         }

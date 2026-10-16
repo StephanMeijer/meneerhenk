@@ -41,7 +41,7 @@ use crate::stages;
 
 /// How long a head may have no checks before it counts as having none:
 /// they appear a moment after a push.
-const CI_GRACE: Duration = Duration::from_secs(120);
+const CI_GRACE: Duration = Duration::from_mins(2);
 
 /// Reads of the platform that may fail in a row before the stage gives up.
 const MAX_READ_FAILURES: u32 = 5;
@@ -697,17 +697,16 @@ mod tests {
             calls.push("rebase".to_owned());
             assert!(trigger.contains(TICKET), "{trigger}");
             let run = RunId::parse(format!("r-rebase-{}", calls.len())).unwrap();
-            let result = match self.rebases.lock().unwrap().pop_front() {
-                Some(Err(error)) => Err(error),
-                _ => {
-                    let mut rebased = self.rebased.lock().unwrap();
-                    *rebased += 1;
-                    Ok(RebaseReport {
-                        run: run.clone(),
-                        target: opened().pull.target,
-                        pushed: Some(head(*rebased)),
-                    })
-                }
+            let result = if let Some(Err(error)) = self.rebases.lock().unwrap().pop_front() {
+                Err(error)
+            } else {
+                let mut rebased = self.rebased.lock().unwrap();
+                *rebased += 1;
+                Ok(RebaseReport {
+                    run: run.clone(),
+                    target: opened().pull.target,
+                    pushed: Some(head(*rebased)),
+                })
             };
             let (tell, ended) = oneshot::channel();
             let _ = tell.send(result);
@@ -786,15 +785,12 @@ mod tests {
             record.summary.as_deref(),
             Some("pull request #12 is ready to merge: https://github.com/o/r/pull/12")
         );
-        let states = stage_states(&f).await;
+        let rows = stage_states(&f).await;
         assert!(
-            states.contains(&(Stage::Review, StageState::Done)),
-            "{states:?}"
+            rows.contains(&(Stage::Review, StageState::Done)),
+            "{rows:?}"
         );
-        assert!(
-            states.contains(&(Stage::Land, StageState::Done)),
-            "{states:?}"
-        );
+        assert!(rows.contains(&(Stage::Land, StageState::Done)), "{rows:?}");
     }
 
     #[tokio::test]
@@ -940,10 +936,10 @@ mod tests {
             posted[0]
         );
         assert_eq!(record(&f).await.status, RunStatus::Failed);
-        let states = stage_states(&f).await;
+        let rows = stage_states(&f).await;
         assert!(
-            states.contains(&(Stage::Land, StageState::Failed)),
-            "{states:?}"
+            rows.contains(&(Stage::Land, StageState::Failed)),
+            "{rows:?}"
         );
     }
 
@@ -1031,10 +1027,10 @@ mod tests {
         assert_eq!(*step, Step::Review);
         assert!(why.contains("1 issue found"), "{why}");
         assert_eq!(comments(&f).len(), 1);
-        let states = stage_states(&f).await;
+        let rows = stage_states(&f).await;
         assert!(
-            states.contains(&(Stage::Land, StageState::Failed)),
-            "{states:?}"
+            rows.contains(&(Stage::Land, StageState::Failed)),
+            "{rows:?}"
         );
     }
 
@@ -1132,10 +1128,10 @@ mod tests {
             .unwrap();
         assert_eq!(report.ending, Ending::Passed);
         assert_eq!(*stages.reads.lock().unwrap(), 0, "the platform is not read");
-        let states = stage_states(&f).await;
+        let rows = stage_states(&f).await;
         assert!(
-            !states.iter().any(|(stage, _)| *stage == Stage::Land),
-            "{states:?}"
+            !rows.iter().any(|(stage, _)| *stage == Stage::Land),
+            "{rows:?}"
         );
     }
 }
