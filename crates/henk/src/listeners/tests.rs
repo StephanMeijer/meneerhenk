@@ -23,8 +23,8 @@ use henk_store::RunStore;
 
 use super::testing::{FakeWriter, FakeWriters};
 use super::{
-    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, TicketListener,
-    Writers,
+    ExecuteListener, FixCiListener, MentionListener, PlanListener, RebaseListener, ReviewListener,
+    TicketListener, Writers,
 };
 use crate::app::App;
 use crate::config::Config;
@@ -83,6 +83,10 @@ impl Harness {
                     Arc::clone(&writers),
                 )),
                 Arc::new(RebaseListener::new(
+                    Arc::clone(&coordinator),
+                    Arc::clone(&writers),
+                )),
+                Arc::new(FixCiListener::new(
                     Arc::clone(&coordinator),
                     Arc::clone(&writers),
                 )),
@@ -255,7 +259,7 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
     let outcomes = h.store.outcomes(&out.id).await.unwrap();
-    assert_eq!(outcomes.len(), 6, "one per listener");
+    assert_eq!(outcomes.len(), 7, "one per listener");
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
     assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
@@ -674,4 +678,70 @@ async fn a_rebase_command_or_request_starts_a_rebase_and_nothing_else() {
     assert!(matches!(outside.of("rebase"), Handled::Ignored(r) if r.contains("allowlist")));
     let recorded = h.store.inbound_event(&direct.id).await.unwrap().unwrap();
     assert_eq!(recorded.kind, "rebase_requested");
+}
+
+/// #583: `@meneer-henk fix ci` starts a fix of the failing checks where the
+/// executor is configured, and is neither a review command, a rebase
+/// command nor a mention; a direct request does too, on the allowlist only.
+#[tokio::test]
+async fn a_fix_ci_command_or_request_starts_a_fix_and_nothing_else() {
+    let h = Harness::new().await;
+    let off = h
+        .deliver(comment("@meneer-henk fix ci", person("alice")))
+        .await;
+    assert!(
+        matches!(off.of("fix_ci"), Handled::Ignored(r) if r == "fixing checks needs [roles.executor]"),
+        "{:?}",
+        off.by_listener
+    );
+
+    let executor = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\n[models.m]\nendpoint = \"m\"\nmodel = \"m\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    let h = Harness::configured(
+        FakeWriter {
+            head: SHA.to_owned(),
+            ..FakeWriter::default()
+        },
+        &format!("{CONFIG}{executor}"),
+    )
+    .await;
+    let out = h
+        .deliver(comment("@meneer-henk fix ci", person("alice")))
+        .await;
+    assert!(
+        matches!(out.of("fix_ci"), Handled::Started(_)),
+        "{:?}",
+        out.by_listener
+    );
+    assert!(matches!(out.of("review"), Handled::Ignored(r) if r.contains("not a review command")));
+    assert!(matches!(out.of("rebase"), Handled::Ignored(r) if r == "not a rebase command"));
+    assert!(matches!(out.of("mention"), Handled::Ignored(r) if r.contains("fix ci command")));
+
+    for other in ["@meneer-henk review", "@meneer-henk rebase"] {
+        let other = h.deliver(comment(other, person("alice"))).await;
+        assert!(
+            matches!(other.of("fix_ci"), Handled::Ignored(r) if r == "not a fix ci command"),
+            "{:?}",
+            other.by_listener
+        );
+    }
+
+    let request = |path: &str| EventKind::FixCiRequested {
+        target: ReviewTarget {
+            repo: repo(path),
+            number: 7,
+        },
+        requester: Some("github:523".into()),
+    };
+    let direct = h.deliver(request("docspec/app")).await;
+    assert!(matches!(
+        direct.of("fix_ci"),
+        Handled::Started(_) | Handled::Joined(_)
+    ));
+    for other in ["review", "plan", "execute", "rebase", "mention"] {
+        assert!(matches!(direct.of(other), Handled::Ignored(_)), "{other}");
+    }
+    let outside = h.deliver(request("evil/app")).await;
+    assert!(matches!(outside.of("fix_ci"), Handled::Ignored(r) if r.contains("allowlist")));
+    let recorded = h.store.inbound_event(&direct.id).await.unwrap().unwrap();
+    assert_eq!(recorded.kind, "fix_ci_requested");
 }

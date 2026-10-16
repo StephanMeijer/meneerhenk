@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::app::App;
 use crate::execute::{ExecuteRequest, run_execute};
+use crate::fix_ci::{FixCiReport, FixCiRequest, run_fix_ci};
 use crate::ids::new_run_id;
 use crate::issue_runs::Comments;
 use crate::plan::{PlanRequest, run_plan};
@@ -179,6 +180,77 @@ async fn ended(predecessor: Option<&watch::Receiver<()>>) {
     }
 }
 
+/// A run that changes a pull request's head: a rebase (#579) or a fix of its
+/// failing checks (#583). The coordinator treats them alike: one per pull
+/// request, a review of the pushed head after.
+trait Changed {
+    /// The request that starts it.
+    type Request: Send + 'static;
+
+    /// The request for a run `run` on `target`.
+    fn request(
+        target: ReviewTarget,
+        trigger: String,
+        run: RunId,
+        requester: Option<String>,
+    ) -> Self::Request;
+
+    /// The review of the head it pushed, when it pushed one.
+    fn review(&self, requester: Option<String>) -> Option<ReviewRequest>;
+}
+
+impl Changed for RebaseReport {
+    type Request = RebaseRequest;
+
+    fn request(
+        target: ReviewTarget,
+        trigger: String,
+        run: RunId,
+        requester: Option<String>,
+    ) -> RebaseRequest {
+        RebaseRequest {
+            target,
+            trigger,
+            run: Some(run),
+            requester,
+        }
+    }
+
+    fn review(&self, requester: Option<String>) -> Option<ReviewRequest> {
+        Self::review(self, requester)
+    }
+}
+
+impl Changed for FixCiReport {
+    type Request = FixCiRequest;
+
+    fn request(
+        target: ReviewTarget,
+        trigger: String,
+        run: RunId,
+        requester: Option<String>,
+    ) -> FixCiRequest {
+        FixCiRequest {
+            target,
+            trigger,
+            run: Some(run),
+            requester,
+        }
+    }
+
+    fn review(&self, requester: Option<String>) -> Option<ReviewRequest> {
+        Self::review(self, requester)
+    }
+}
+
+/// What a request to change a pull request's head names.
+struct Changing {
+    work: Work,
+    target: ReviewTarget,
+    trigger: String,
+    requester: Option<String>,
+}
+
 /// The slots for runs on pull requests: how many there are, how many are taken, and what
 /// waits for one (#225).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +274,9 @@ pub enum Reason {
     /// A rebase of its pull request runs or waits; it starts after that
     /// (#580).
     AfterRebase,
+    /// A fix of its pull request's failing checks runs or waits; it starts
+    /// after that (#583).
+    AfterFix,
 }
 
 impl Reason {
@@ -211,6 +286,7 @@ impl Reason {
         match self {
             Self::NoSlot => "no_slot",
             Self::AfterRebase => "after_rebase",
+            Self::AfterFix => "after_fix",
         }
     }
 }
@@ -269,13 +345,13 @@ fn waiting(key: &Key, active: &Active) -> Waiting {
     }
 }
 
-/// What follows a rebase that ended: the review of its head for the
+/// What follows a rebase or a fix that ended: the review of its head for the
 /// coordinator to ask for, and whether the caller that waited reviews it
 /// (#637). A caller whose receiver is gone, or none, cannot review, so the
 /// coordinator asks for the review itself.
-fn after_report(
-    report: anyhow::Result<RebaseReport>,
-    tell: Option<oneshot::Sender<anyhow::Result<RebaseReport>>>,
+fn after_report<R: Changed>(
+    report: anyhow::Result<R>,
+    tell: Option<oneshot::Sender<anyhow::Result<R>>>,
     requester: Option<String>,
 ) -> (Option<ReviewRequest>, bool) {
     match (report, tell) {
@@ -289,7 +365,7 @@ fn after_report(
             }
         }
         (Err(error), tell) => {
-            warn!(%error, "rebase ended with an error");
+            warn!(%error, "a run changing a pull request ended with an error");
             if let Some(tell) = tell {
                 let _ = tell.send(Err(error));
             }
@@ -298,8 +374,9 @@ fn after_report(
     }
 }
 
-/// A review held for a rebase as the queue shows it.
-fn held(key: &Key, held: &Held, rebase: Option<&Active>) -> Waiting {
+/// A review held for a rebase or a fix as the queue shows it; `running` is
+/// the run it waits for.
+fn held(key: &Key, held: &Held, running: Option<&Active>) -> Waiting {
     let request = &held.request;
     Waiting {
         run: held.run.clone(),
@@ -313,8 +390,11 @@ fn held(key: &Key, held: &Held, rebase: Option<&Active>) -> Waiting {
         requester: request.requester.clone(),
         since: held.since,
         position: 0,
-        reason: Reason::AfterRebase,
-        waits_for: rebase.map(|a| a.run.clone()),
+        reason: match running.map(|a| &a.work) {
+            Some(Work::FixCi) => Reason::AfterFix,
+            _ => Reason::AfterRebase,
+        },
+        waits_for: running.map(|a| a.run.clone()),
     }
 }
 
@@ -612,7 +692,7 @@ impl Coordinator {
         rebased: Option<ReviewRequest>,
         caller_reviews: bool,
     ) {
-        self.review_after_rebase(&Key::of(target), rebased, caller_reviews);
+        self.review_after_change(&Key::of(target), rebased, caller_reviews);
     }
 
     /// Wakes when a run starts waiting, takes or frees a slot, or leaves
@@ -655,7 +735,7 @@ impl Coordinator {
     /// Holds a review as `run` until the rebase of its pull request ends
     /// (#580), in place of one held before.
     fn hold(&self, key: Key, run: &RunId, request: ReviewRequest, commit: CommitSha) {
-        info!(repo = %request.target.repo.path(), number = key.number, run = %run, "a review waits for the rebase of its pull request");
+        info!(repo = %request.target.repo.path(), number = key.number, run = %run, "a review waits for the run changing its pull request");
         let waits = Held {
             run: run.clone(),
             request,
@@ -1001,6 +1081,65 @@ impl Coordinator {
         requester: Option<String>,
         tell: Option<oneshot::Sender<anyhow::Result<RebaseReport>>>,
     ) -> (Decision, RunId) {
+        let asked = Changing {
+            work: Work::Rebase,
+            target,
+            trigger,
+            requester,
+        };
+        self.submit_change(asked, tell, |coordinator, request, cancel| async move {
+            run_rebase(&coordinator.app, request, cancel).await
+        })
+    }
+
+    /// Starts a fix of a pull request's failing checks in the background
+    /// (#583), as the only run on it. A review of the pull request running
+    /// is superseded and one asked for meanwhile waits for it; a rebase
+    /// supersedes the fix, and a fix asked for during a rebase or another
+    /// fix joins that run. Returns the decision and the run it concerns.
+    ///
+    /// When the fix pushes, the fixed head is reviewed in a run of its own,
+    /// as after a rebase.
+    pub fn submit_fix_ci(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (Decision, RunId) {
+        let asked = Changing {
+            work: Work::FixCi,
+            target,
+            trigger,
+            requester,
+        };
+        let tell: Option<oneshot::Sender<anyhow::Result<FixCiReport>>> = None;
+        self.submit_change(asked, tell, |coordinator, request, cancel| async move {
+            run_fix_ci(&coordinator.app, request, cancel).await
+        })
+    }
+
+    /// Submits a run that changes a pull request's head (a rebase or a fix
+    /// of its checks): the only run on it (#580), after the decision of
+    /// [`decide`] about what is running there. `start` makes the run, given
+    /// the request for it. `tell` hears how it ended, when the caller waits.
+    fn submit_change<R, Run, Fut>(
+        self: &Arc<Self>,
+        asked: Changing,
+        tell: Option<oneshot::Sender<anyhow::Result<R>>>,
+        start: Run,
+    ) -> (Decision, RunId)
+    where
+        R: Changed + Send + 'static,
+        Run: FnOnce(Arc<Self>, R::Request, CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<R>> + Send,
+    {
+        let Changing {
+            work,
+            target,
+            trigger,
+            requester,
+        } = asked;
+        let what = work.priority().as_str();
         let key = Key::of(&target);
         let generation = self.next_generation();
         let run = new_run_id();
@@ -1009,22 +1148,22 @@ impl Coordinator {
                 error!("coordinator lock poisoned");
                 return (Decision::Start, run);
             };
-            let decision = decide(active.get(&key).map(|a| &a.work), &Work::Rebase);
+            let decision = decide(active.get(&key).map(|a| &a.work), &work);
             let mut predecessor = None;
             match decision {
                 Decision::Join => {
                     let joined = active
                         .get(&key)
                         .map_or_else(|| run.clone(), |a| a.run.clone());
-                    info!(repo = %target.repo.path(), number = key.number, run = %joined, "joined the waiting or running rebase");
+                    info!(repo = %target.repo.path(), number = key.number, run = %joined, "joined the waiting or running {what}");
                     return (Decision::Join, joined);
                 }
                 Decision::Supersede => {
                     if let Some(old) = active.remove(&key) {
-                        warn!(repo = %target.repo.path(), number = key.number, old = %old.run, "a rebase supersedes the review");
-                        // A review still waiting hands its place to the
-                        // rebase, which moves up to where rebases wait.
-                        self.review_slots.replace(&old.run, &run, Priority::Rebase);
+                        warn!(repo = %target.repo.path(), number = key.number, old = %old.run, "a {what} supersedes the run before it");
+                        // A review still waiting hands its place to this run,
+                        // which moves up to where its priority waits.
+                        self.review_slots.replace(&old.run, &run, work.priority());
                         if !self.app.cancels.supersede_for_rebase(&old.run, &run) {
                             old.cancel.cancel();
                         }
@@ -1033,7 +1172,7 @@ impl Coordinator {
                 }
                 Decision::Start | Decision::After => predecessor = self.still_ending(&key),
             }
-            let asked = Asked {
+            let tracked = Asked {
                 repo: target.repo.path(),
                 trigger: trigger.clone(),
                 requester: requester.clone(),
@@ -1041,20 +1180,15 @@ impl Coordinator {
             let (cancel, started, ended_tx) = self.track(
                 &mut active,
                 key.clone(),
-                (run.clone(), Work::Rebase, generation),
-                asked,
+                (run.clone(), work.clone(), generation),
+                tracked,
             );
             (decision, cancel, started, ended_tx, predecessor)
         };
-        self.review_slots.join(&run, Priority::Rebase);
+        self.review_slots.join(&run, work.priority());
         self.slots_changed.send_replace(());
 
-        let request = RebaseRequest {
-            target,
-            trigger,
-            run: Some(run.clone()),
-            requester: requester.clone(),
-        };
+        let request = R::request(target, trigger, run.clone(), requester.clone());
         let coordinator = Arc::clone(self);
         let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
         let queued = run.clone();
@@ -1075,7 +1209,7 @@ impl Coordinator {
             coordinator.slots_changed.send_replace(());
             // Cancelled before it had a slot, it still runs, to record that
             // and say so; it stops before it reads anything.
-            let report = run_rebase(&coordinator.app, request, cancel).await;
+            let report = start(Arc::clone(&coordinator), request, cancel).await;
             drop(permit);
             drop(cancellable);
             ended(predecessor.as_ref()).await;
@@ -1085,19 +1219,20 @@ impl Coordinator {
                 generation,
                 &coordinator.slots_changed,
             );
-            let (rebased, caller_reviews) = after_report(report, tell, requester);
-            coordinator.review_after_rebase(&key, rebased, caller_reviews);
+            let (changed, caller_reviews) = after_report(report, tell, requester);
+            coordinator.review_after_change(&key, changed, caller_reviews);
         });
         (decision, run)
     }
 
-    /// Once a rebase of the pull request has ended: the review of the head
-    /// it pushed, or else the review asked for while it ran, if any.
+    /// Once a rebase or a fix of the pull request has ended: the review of
+    /// the head it pushed, or else the review asked for while it ran, if
+    /// any.
     ///
-    /// With `caller_reviews`, the run that asked for the rebase waited for
+    /// With `caller_reviews`, the run that asked for the change waited for
     /// it and reviews the head itself (#637): a review that waited for the
-    /// rebase was of the head it replaced, and is dropped.
-    fn review_after_rebase(&self, key: &Key, rebased: Option<ReviewRequest>, caller_reviews: bool) {
+    /// change was of the head it replaced, and is dropped.
+    fn review_after_change(&self, key: &Key, changed: Option<ReviewRequest>, caller_reviews: bool) {
         let waited = self
             .held
             .lock()
@@ -1105,14 +1240,14 @@ impl Coordinator {
             .and_then(|mut holding| holding.remove(key));
         if caller_reviews {
             if let Some(waited) = waited {
-                info!(run = %waited.run, "the review that waited for the rebase is dropped: the head it was of is gone");
+                info!(run = %waited.run, "the review that waited is dropped: the head it was of is gone");
             }
             return;
         }
-        match (rebased, waited) {
+        match (changed, waited) {
             (Some(review), waited) => {
                 if let Some(waited) = waited {
-                    info!(run = %waited.run, "the review of the rebased head replaces a review of the old one");
+                    info!(run = %waited.run, "the review of the pushed head replaces a review of the old one");
                 }
                 if let Some(commit) = review.commit.clone() {
                     self.submit_review(review, commit);

@@ -971,6 +971,9 @@ reviewer's first message tallies the CI, such as "CI: 7 passed, 1 failed
 (test), 1 running". Logs are written by the pull request's code, so the
 reviewer is told they are data, not instructions.
 
+The executor has the same three tools, and uses them only in a run that
+fixes failing checks (see "Fixing a pull request's failing checks").
+
 On GitHub the App needs `Checks: read` and `Actions: read`. On GitLab
 Henk reads pipelines and job traces through the REST API with
 `[gitlab].token_env`. Without that access the tools say so and the review
@@ -1091,6 +1094,32 @@ Rebasing needs `[roles.executor]` and is on for every repository; turn it
 off for one with `rebase = false` in its
 `[roles.executor.repositories."owner/name"]` entry. `henk config check`
 says which repositories are not rebased.
+
+### Fixing a pull request's failing checks
+
+Comment `@meneer-henk fix ci` on a pull request (GitLab: `@meneerhenk fix
+ci`) and Henk reads its failing checks and has the executor fix the code
+(spec §3.7, #583). The executor starts from the failing checks' annotations
+and the end of their logs, reads more with `list_ci_jobs`,
+`get_ci_job_log` and `get_ci_job_annotations`, and where the sandbox
+backend lets it run commands, runs the repository's own checks. It ends with
+`propose_fix`: the fix, or that the failure is not about the code (a lost
+runner, a service that was down, a rate limit). Henk pushes a fast-forward
+with the same guards as every push, never a fork, the default branch or a
+protected branch, and nothing if the branch moved meanwhile. He then says
+on the pull request what failed and what he changed, or why he pushed
+nothing, and asks for a review of the fix himself.
+
+Only a check that ended in failure is fixed. A check that was cancelled or
+ran out of time is not a problem in the code, and Henk says so. A fix is a
+run of its own on the pull request, like a rebase: it supersedes a running
+review, a rebase supersedes it, and a review asked for meanwhile waits.
+
+Fixing needs `[roles.executor]` with `propose_fix` in its tools (the
+default) and is on for every repository; turn it off for one with
+`fix_ci = false` in its `[roles.executor.repositories."owner/name"]`
+entry. `henk config check` says which repositories are not fixed and
+whether the executor's tools allow it. A fix may take 30 minutes.
 
 ### Sandbox host
 
@@ -1529,8 +1558,10 @@ line in `docs/SPEC.md` once the team confirms it.
 - §3.1 One run per pull/merge request at a time (#580): the same commit
   joins the running review, a newer commit supersedes it. A rebase
   supersedes a review of its pull request and waits for a slot ahead of
-  every review; a review asked for during a rebase starts after it. Reviews
-  and rebases share the `review.max_concurrent` slots.
+  every review; a review asked for during a rebase starts after it. A fix
+  of failing checks (#583) is the same kind of run, ahead of reviews and
+  behind rebases; a rebase supersedes it. Reviews, rebases and fixes share
+  the `review.max_concurrent` slots.
 - §3.2 A review is the reviewer and executor loop (#309): nothing is posted
   on the pull request, and the check's summary carries the loop's report.
 - §3.3 A session that reaches its round's time limit, or a loop that

@@ -101,6 +101,32 @@ pub struct CiJob {
     pub has_log: bool,
 }
 
+impl CiJob {
+    /// Whether it ended: the platform has a conclusion for it.
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.status == CiStatus::Completed
+    }
+
+    /// Whether it failed in a way that is about the code: it ended
+    /// `Failure`. An allowed failure is not one.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.finished() && self.conclusion == Some(CiConclusion::Failure)
+    }
+
+    /// Whether it did not run to its end for a reason that is not about the
+    /// code: it was cancelled or ran out of time.
+    #[must_use]
+    pub fn interrupted(&self) -> bool {
+        self.finished()
+            && matches!(
+                self.conclusion,
+                Some(CiConclusion::Cancelled | CiConclusion::TimedOut)
+            )
+    }
+}
+
 /// A job's log, or the end of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CiLog {
@@ -214,7 +240,43 @@ impl Tail {
 
 #[cfg(test)]
 mod tests {
-    use super::Tail;
+    use super::{CiConclusion, CiJob, CiJobId, CiStatus, Tail};
+
+    fn job(status: CiStatus, conclusion: Option<CiConclusion>) -> CiJob {
+        CiJob {
+            id: CiJobId("1".to_owned()),
+            name: "test".to_owned(),
+            workflow: None,
+            status,
+            conclusion,
+            started_at: None,
+            completed_at: None,
+            url: None,
+            has_log: true,
+        }
+    }
+
+    #[test]
+    fn only_a_finished_failure_is_a_failure_about_the_code() {
+        let done = CiStatus::Completed;
+        let failed = job(done, Some(CiConclusion::Failure));
+        assert!(failed.failed() && failed.finished() && !failed.interrupted());
+        for conclusion in [CiConclusion::Cancelled, CiConclusion::TimedOut] {
+            let stopped = job(done, Some(conclusion));
+            assert!(stopped.interrupted() && !stopped.failed(), "{conclusion:?}");
+        }
+        for conclusion in [
+            CiConclusion::Success,
+            CiConclusion::Skipped,
+            CiConclusion::AllowedFailure,
+            CiConclusion::Neutral,
+        ] {
+            let other = job(done, Some(conclusion));
+            assert!(!other.failed() && !other.interrupted(), "{conclusion:?}");
+        }
+        let running = job(CiStatus::InProgress, Some(CiConclusion::Failure));
+        assert!(!running.failed() && !running.finished() && !running.interrupted());
+    }
 
     #[test]
     fn a_tail_keeps_the_last_whole_lines() {

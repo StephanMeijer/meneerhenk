@@ -1244,6 +1244,9 @@ pub struct ExecutorRepositoryConfig {
     /// Whether Henk rebases this repository's pull requests onto their
     /// base branch. Default on.
     pub rebase: Option<bool>,
+    /// Whether Henk fixes the failing checks of this repository's pull
+    /// requests (#583). Default on.
+    pub fix_ci: Option<bool>,
 }
 
 impl ExecutorRepositoryConfig {
@@ -1289,6 +1292,16 @@ impl ExecutorConfig {
     pub fn rebases(&self, repo: &RepoRef) -> bool {
         self.repository(repo)
             .and_then(|config| config.rebase)
+            .unwrap_or(true)
+    }
+
+    /// Whether Henk fixes the failing checks of `repo`'s pull requests
+    /// (#583): yes, unless its `[roles.executor.repositories]` entry says
+    /// `fix_ci = false`.
+    #[must_use]
+    pub fn fixes_ci(&self, repo: &RepoRef) -> bool {
+        self.repository(repo)
+            .and_then(|config| config.fix_ci)
             .unwrap_or(true)
     }
 
@@ -3281,6 +3294,13 @@ impl Settings {
                 executor.max_changed_files
             );
             Self::describe_commits(executor, out);
+            let fixes = match Role::Executor.missing_fix_ci_handoff(&executor.tools()) {
+                None => "when asked (@meneer-henk fix ci)".to_owned(),
+                Some(tool) => format!(
+                    "not available: [roles.executor] tools leave out {tool}, which fixing needs"
+                ),
+            };
+            let _ = writeln!(out, "Failing checks:  fixed {fixes}");
         }
         self.describe_skills(out);
     }
@@ -3361,7 +3381,12 @@ impl Settings {
                 } else {
                     "; not rebased"
                 };
-                let _ = writeln!(out, "  {key}: {}{rebase}", describe_policy(policy));
+                let fixes = if address.fixes_ci(&repo) {
+                    ""
+                } else {
+                    "; failing checks not fixed"
+                };
+                let _ = writeln!(out, "  {key}: {}{rebase}{fixes}", describe_policy(policy));
             }
         }
     }
@@ -4571,6 +4596,39 @@ github_owners = ["docspec"]
             address("", "[roles.executor.trailers]\nrebase = false\n").is_err(),
             "rebasing is per repository, not a trailer"
         );
+    }
+
+    #[test]
+    fn fixing_failing_checks_is_on_unless_a_repository_turns_it_off() {
+        let settings = address(
+            "",
+            "[roles.executor.repositories.\"docspec/kept\"]\nfix_ci = false\n",
+        )
+        .unwrap();
+        let config = settings.roles.executor.as_ref().unwrap();
+        let kept = RepoRef::parse(Platform::GitHub, "DocSpec/Kept").unwrap();
+        let other = RepoRef::parse(Platform::GitHub, "docspec/other").unwrap();
+        assert!(!config.fixes_ci(&kept));
+        assert!(config.fixes_ci(&other));
+        assert!(config.rebases(&kept), "rebasing is its own switch");
+        let described = settings.describe();
+        assert!(
+            described.contains("  docspec/kept: ")
+                && described.contains("; failing checks not fixed"),
+            "{described}"
+        );
+        assert!(
+            described.contains("Failing checks:  fixed when asked (@meneer-henk fix ci)"),
+            "{described}"
+        );
+
+        let narrowed = address("", "tools = [\"edit_file\", \"read_file\"]\n").unwrap();
+        let described = narrowed.describe();
+        assert!(
+            described.contains("Failing checks:  fixed not available: [roles.executor] tools leave out propose_fix, which fixing needs"),
+            "{described}"
+        );
+        assert!(henk_domain::text::is_in_style(&described), "{described}");
     }
 
     #[test]

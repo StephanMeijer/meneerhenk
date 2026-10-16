@@ -222,6 +222,14 @@ pub fn fix_subject() -> String {
     "Fix review findings".to_owned()
 }
 
+/// The subject of a fix of failing checks (§3.7, #583) when the executor
+/// proposed no usable commits: `Fix failing checks`. The commit's
+/// `Henk-Run` trailer points back to the run, which names the checks.
+#[must_use]
+pub fn fix_ci_subject() -> String {
+    "Fix failing checks".to_owned()
+}
+
 /// A body of `- note` lines, one per note, each on one line.
 #[must_use]
 pub fn bullet_body(notes: &[String]) -> String {
