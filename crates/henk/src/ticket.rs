@@ -930,6 +930,14 @@ requester_id = 3
         fn noreply_host(&self) -> Result<String, henk_platform::PlatformError> {
             Err(unused())
         }
+        async fn open_pulls_behind(
+            &self,
+            _: &RepoRef,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<henk_platform::push::BehindPull>, henk_platform::PlatformError> {
+            Err(unused())
+        }
         async fn open_pull_request(
             &self,
             _: &RepoRef,
