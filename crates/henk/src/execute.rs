@@ -36,7 +36,7 @@ use crate::config::{EditFormat, ExecutionConfig, ExecutorConfig, ModelFileConfig
 use crate::edit_tools::{EditContext, EditState, edit_tools};
 use crate::execute_review::{self, Parts};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
-use crate::git::{Checkout, ScratchDir};
+use crate::git::{Checkout, GitError, ScratchDir};
 use crate::ids::new_run_id;
 use crate::issue_runs::{Comments, IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
@@ -120,9 +120,39 @@ pub(crate) fn no_pull(why: impl Into<String>) -> anyhow::Error {
     NoPullRequest(why.into()).into()
 }
 
+/// Up to [`MOST_NAMED`] of `paths` in code quotes, and how many more there
+/// are.
+fn name_files(paths: &[&str]) -> String {
+    let named: Vec<String> = paths
+        .iter()
+        .take(MOST_NAMED)
+        .map(|path| format!("`{path}`"))
+        .collect();
+    match paths.len().saturating_sub(MOST_NAMED) {
+        0 => named.join(", "),
+        more => format!("{} and {more} more", named.join(", ")),
+    }
+}
+
+/// Whether `error` is a checkout finding that the branch is no longer at the
+/// head that was read.
+fn is_head_moved(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<GitError>(),
+        Some(GitError::HeadMoved { .. })
+    )
+}
+
 /// The most names an execute run tries for its branch: the issue's own,
 /// then with `-2` up to this.
 const BRANCH_TRIES: u32 = 10;
+
+/// How many times a run takes the default branch again when it moved on
+/// while the executor worked (#634): it can move again, so not for ever.
+const BASE_RETRIES: usize = 2;
+
+/// The most files a message about a moved default branch names.
+const MOST_NAMED: usize = 5;
 
 /// Takes one issue to a pull request, end to end. Every execute run ends
 /// (§4a): either the pull request is open, or a comment on the issue says
@@ -467,20 +497,10 @@ impl Work<'_> {
             run,
             requester: requester.as_ref(),
         };
-        let credential = writer
-            .git_credential()
-            .await
-            .context("getting a credential for git")?;
-        let name = format!("henk-execute-{run}-push");
-        let checkout = pusher
-            .checkout(
-                &name,
-                &base.remote,
-                &base.default_branch,
-                &base.head,
-                credential,
-            )
+        let (checkout, base) = self
+            .checkout_base(&pusher, writer, base, changes, cancel)
             .await?;
+        let base = &base;
         let to = PushTo::NewBranch { branch, base };
         let commits = self.commits(&pusher, &reference, proposal, changes).await;
         let shas = match pusher
@@ -529,6 +549,120 @@ impl Work<'_> {
             commit,
             url: opened.url,
         })
+    }
+
+    /// The default branch checked out to commit on, and the head it is at.
+    ///
+    /// That is the head the run read, unless the default branch moved on
+    /// while the executor worked: someone's pull request was merged (#634).
+    /// Then the changes go onto its new head, provided that head changed none
+    /// of the files they change (they are whole files, so one that changed
+    /// would be overwritten), and the timeline says so. Henk takes the branch
+    /// again at most [`BASE_RETRIES`] times, since it can move again. A move
+    /// that touches the changes' files, or that rewrote the branch, leaves the
+    /// run without a pull request, and the issue says which files. Henk runs
+    /// no checks of his own: the pull request's CI decides whether the changes
+    /// fit the new head (§3.5).
+    ///
+    /// Only the default branch is handled so: the run's own branch is new and
+    /// the push refuses one that exists.
+    async fn checkout_base(
+        &self,
+        pusher: &Pusher<'_>,
+        writer: &Arc<dyn PushWriter>,
+        base: &RepoHead,
+        changes: &[henk_domain::workspace::Change],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<(Checkout, RepoHead)> {
+        let credential = writer
+            .git_credential()
+            .await
+            .context("getting a credential for git")?;
+        let name = format!("henk-execute-{}-push", self.run);
+        let first = pusher
+            .checkout(
+                &name,
+                &base.remote,
+                &base.default_branch,
+                &base.head,
+                credential,
+            )
+            .await;
+        match first {
+            Ok(checkout) => return Ok((checkout, base.clone())),
+            Err(error) if is_head_moved(&error) => {}
+            Err(error) => return Err(error),
+        }
+        for attempt in 1..=BASE_RETRIES {
+            stop_if_cancelled(cancel)?;
+            if tokio::time::Instant::now() >= self.deadline {
+                return Err(no_pull(
+                    "the run's time was up before the default branch, which moved, could be taken again",
+                ));
+            }
+            let now = writer
+                .repo_head(&self.request.target.repo)
+                .await
+                .context("reading the default branch again")?;
+            let credential = writer
+                .git_credential()
+                .await
+                .context("getting a credential for git")?;
+            let dir = ScratchDir::new(&format!("henk-execute-{}-push-{attempt}", self.run))
+                .context("making the checkout directory")?;
+            let taken = Checkout::clone_moved(
+                dir,
+                &now.remote,
+                &now.default_branch,
+                (&base.head, &now.head),
+                credential,
+            )
+            .await;
+            let checkout = match taken {
+                Ok(checkout) => checkout,
+                Err(GitError::HeadMoved { .. }) => continue,
+                Err(error) => {
+                    return Err(no_pull(format!(
+                        "{} moved while I worked and cannot be taken again: {error}",
+                        base.default_branch
+                    )));
+                }
+            };
+            let moved = checkout
+                .changed_between(&base.head, &now.head)
+                .await
+                .context("comparing the default branch with the head the work began on")?;
+            let mut touched: Vec<&str> = changes
+                .iter()
+                .map(|change| change.path.as_str())
+                .filter(|path| moved.contains(*path))
+                .collect();
+            touched.sort_unstable();
+            let steps = format!(
+                "{} moved from {} to {} while I worked",
+                base.default_branch,
+                base.head.short(),
+                now.head.short()
+            );
+            if !touched.is_empty() {
+                let named = name_files(&touched);
+                return Err(no_pull(format!(
+                    "{steps} and changed {named}, which my changes also touch; nothing was pushed"
+                )));
+            }
+            pusher
+                .note(&format!(
+                    "{steps}; it changed none of the {} file(s) I changed, so I commit on its new head. The pull request's checks decide whether the two fit.",
+                    changes.len()
+                ))
+                .await;
+            return Ok((checkout, now));
+        }
+        Err(no_pull(format!(
+            "{} moved {} times while I worked; nothing was pushed",
+            base.default_branch,
+            BASE_RETRIES + 1
+        )))
     }
 
     /// The commits for `changes`: the executor's, when they hold every
@@ -729,8 +863,8 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::git::tests::{
-        bare_remote, remote_branch_file, remote_branch_log, remote_branches, remote_commits,
-        remote_feature,
+        bare_remote, push_files, remote_branch_file, remote_branch_log, remote_branches,
+        remote_commits, remote_feature,
     };
     use crate::plan_tools::tests::FakeIssueWriter;
     use crate::workspace::fake::FakeProvider;
@@ -769,6 +903,20 @@ requester_id = 3
     struct IssueHub {
         remote: std::path::PathBuf,
         opened: Mutex<Vec<NewPull>>,
+        /// Somebody pushing meanwhile: how many times git has been asked for
+        /// a credential, and the pushes due at each of those times.
+        drift: Mutex<(usize, Vec<Drift>)>,
+    }
+
+    /// A push to the remote, made when git is asked for a credential for the
+    /// `at`th time. A run asks once when it begins, once when it checks the
+    /// default branch out to commit on, and once more for each time it takes
+    /// that branch again.
+    #[derive(Clone)]
+    struct Drift {
+        at: usize,
+        branch: &'static str,
+        files: Vec<(&'static str, Option<&'static str>)>,
     }
 
     fn unused() -> PlatformError {
@@ -789,6 +937,21 @@ requester_id = 3
             })
         }
         async fn git_credential(&self) -> Result<Option<GitCredential>, PlatformError> {
+            let due: Vec<Drift> = {
+                let mut drift = self.drift.lock().unwrap();
+                drift.0 += 1;
+                let now = drift.0;
+                drift.1.iter().filter(|d| d.at == now).cloned().collect()
+            };
+            for (n, push) in due.iter().enumerate() {
+                push_files(
+                    &self.remote,
+                    push.branch,
+                    &format!("drift-{}-{n}", push.at),
+                    &push.files,
+                )
+                .await;
+            }
             Ok(None)
         }
         async fn commit_identity(&self) -> Result<CommitIdentity, PlatformError> {
@@ -857,6 +1020,7 @@ requester_id = 3
         let hub = Arc::new(IssueHub {
             remote: remote.path().to_path_buf(),
             opened: Mutex::default(),
+            drift: Mutex::default(),
         });
         let app = App {
             settings,
@@ -1213,6 +1377,159 @@ requester_id = 3
         head
     }
 
+    /// Has the default branch get `pushes` while the run works, and runs it.
+    async fn run_while_drifting(
+        name: &str,
+        pushes: Vec<Drift>,
+        run: &str,
+    ) -> (Fixture, anyhow::Result<ExecuteReport>) {
+        let f = fixture(name, vec![write_csv(), propose(), done()]).await;
+        f.hub.drift.lock().unwrap().1.extend(pushes);
+        let report = run_execute(&f.app, request(run), CancellationToken::new()).await;
+        (f, report)
+    }
+
+    async fn events(f: &Fixture, run: &str) -> Vec<String> {
+        let events = f.app.store.events(&RunId::parse(run).unwrap()).await;
+        events.unwrap().into_iter().map(|e| e.message).collect()
+    }
+
+    /// #634: the default branch moved while the executor worked, in files the
+    /// executor did not change. The changes go onto its new head, the pull
+    /// request opens, and the timeline says what happened.
+    #[tokio::test]
+    async fn a_default_branch_that_moved_in_other_files_gets_the_work_on_its_new_head() {
+        let moved = Drift {
+            at: 2,
+            branch: "feature",
+            files: vec![("src/other.rs", Some("pub fn other() {}\n"))],
+        };
+        let (f, report) =
+            run_while_drifting("henk-exec-base-moved", vec![moved], "r-exec-m1").await;
+        let report = report.unwrap();
+        assert_eq!(report.pull.target.number, 12);
+
+        let remote = &f.hub.remote;
+        let (tip, _) = remote_feature(remote).await;
+        let log = remote_branch_log(remote, "henk/9-export-runs", "%H%n%P").await;
+        assert!(
+            log.lines().nth(1) == Some(tip.as_str()),
+            "the branch is built on the new head {tip}: {log}"
+        );
+        assert_eq!(
+            remote_branch_file(remote, "henk/9-export-runs", "src/csv.rs").await,
+            "pub fn export() {}\n"
+        );
+        assert_eq!(
+            remote_branch_file(remote, "henk/9-export-runs", "src/other.rs").await,
+            "pub fn other() {}\n",
+            "what the base gained is kept"
+        );
+        assert_eq!(f.hub.opened.lock().unwrap()[0].base, "feature");
+        let events = events(&f, "r-exec-m1").await;
+        assert!(
+            events.iter().any(|e| e.contains("feature moved from")
+                && e.contains("changed none of the 1 file(s) I changed")),
+            "{events:?}"
+        );
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+    }
+
+    /// The base can move again: it is taken again, twice at most.
+    #[tokio::test]
+    async fn a_default_branch_that_moves_again_is_taken_again_up_to_twice() {
+        let moves = |ats: &[usize]| {
+            ats.iter()
+                .map(|&at| Drift {
+                    at,
+                    branch: "feature",
+                    files: vec![(["src/o1.rs", "src/o2.rs", "src/o3.rs"][at - 2], Some("o\n"))],
+                })
+                .collect::<Vec<_>>()
+        };
+        let (f, report) =
+            run_while_drifting("henk-exec-base-twice", moves(&[2, 3]), "r-exec-m2").await;
+        report.unwrap();
+        for file in ["src/o1.rs", "src/o2.rs", "src/csv.rs"] {
+            remote_branch_file(&f.hub.remote, "henk/9-export-runs", file).await;
+        }
+
+        let (f, report) =
+            run_while_drifting("henk-exec-base-thrice", moves(&[2, 3, 4]), "r-exec-m3").await;
+        report.unwrap_err();
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert!(
+            comments[0].contains("feature moved 3 times while I worked; nothing was pushed"),
+            "{comments:?}"
+        );
+        assert!(f.hub.opened.lock().unwrap().is_empty());
+        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
+    }
+
+    /// A move that changed a file the executor changed is not replayed onto:
+    /// the changes would overwrite it. The issue says which files.
+    #[tokio::test]
+    async fn a_default_branch_that_changed_the_executors_files_gets_nothing_pushed() {
+        let moved = Drift {
+            at: 2,
+            branch: "feature",
+            files: vec![
+                ("src/csv.rs", Some("pub fn somebody_elses() {}\n")),
+                ("src/other.rs", Some("o\n")),
+            ],
+        };
+        let (f, report) =
+            run_while_drifting("henk-exec-base-clash", vec![moved], "r-exec-m4").await;
+        report.unwrap_err();
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert!(
+            comments[0].contains("I opened no pull request for this issue: feature moved from")
+                && comments[0].contains(
+                    "and changed `src/csv.rs`, which my changes also touch; nothing was pushed"
+                ),
+            "{comments:?}"
+        );
+        assert!(f.hub.opened.lock().unwrap().is_empty());
+        assert_eq!(remote_branches(&f.hub.remote).await, ["feature"]);
+        assert_eq!(
+            remote_branch_file(&f.hub.remote, "feature", "src/csv.rs").await,
+            "pub fn somebody_elses() {}\n",
+            "the base keeps what it gained"
+        );
+    }
+
+    /// Only the default branch is replayed onto. The run's own branch
+    /// appearing meanwhile is not a move of the base: the push still refuses
+    /// it, and the run does not try again.
+    #[tokio::test]
+    async fn the_runs_own_branch_appearing_meanwhile_still_ends_the_run() {
+        let theirs = Drift {
+            at: 2,
+            branch: "henk/9-export-runs",
+            files: vec![("src/theirs.rs", Some("t\n"))],
+        };
+        let (f, report) =
+            run_while_drifting("henk-exec-own-branch", vec![theirs], "r-exec-m5").await;
+        report.unwrap_err();
+        let comments = f.tracker.comments.lock().unwrap().clone();
+        assert!(
+            comments[0].contains("the branch henk/9-export-runs already exists"),
+            "{comments:?}"
+        );
+        assert!(f.hub.opened.lock().unwrap().is_empty());
+        assert!(
+            !events(&f, "r-exec-m5")
+                .await
+                .iter()
+                .any(|e| e.contains("moved from")),
+            "no retry"
+        );
+        assert_eq!(
+            remote_branch_file(&f.hub.remote, "henk/9-export-runs", "src/theirs.rs").await,
+            "t\n"
+        );
+    }
+
     /// A run for an issue that has a branch already (an earlier run's after
     /// a failed push or a closed pull request, or somebody's) takes the
     /// next free name and never pushes over the branch that is there.
@@ -1556,6 +1873,43 @@ model = "r"
     /// Everything the model was sent, as one string.
     fn sent(model: &ScriptedClient) -> String {
         format!("{:?}", model.requests())
+    }
+
+    /// #634: the requirements review diffs the executor's changes against the
+    /// commit the work began on, so a default branch that has moved on by the
+    /// time the review starts does not end the run before its first turn.
+    #[tokio::test]
+    async fn a_requirements_review_reads_the_changes_against_the_head_the_work_began_on() {
+        let (f, reviewer) = reviewed(
+            "henk-exec-req-moved",
+            3,
+            vec![write_csv(), propose(), done()],
+            vec![
+                call("list_changed_files", json!({})),
+                finish_round(),
+                done(),
+            ],
+        )
+        .await;
+        f.hub.drift.lock().unwrap().1.push(Drift {
+            at: 2,
+            branch: "feature",
+            files: vec![("src/other.rs", Some("o\n"))],
+        });
+        let report = run_execute(
+            &f.app,
+            request("r-exec-req-moved"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.pull.target.number, 12);
+        let read = sent(&reviewer);
+        assert!(read.contains("src/csv.rs"), "{read}");
+        assert!(
+            !read.contains("src/other.rs"),
+            "the base's own change is not the executor's: {read}"
+        );
     }
 
     #[tokio::test]

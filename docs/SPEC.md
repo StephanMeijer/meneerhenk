@@ -440,6 +440,20 @@ Henk then:
    is never pushed over: the run picks the name before the session, and
    when origin has it, takes `-2`, `-3` and on. With ten names taken it
    stops before the session and says so on the issue.
+
+   The default branch may move while the executor works, because another
+   pull request is merged (#634). Henk then takes it again at its new head
+   and commits the executor's changes on that, provided the move changed
+   none of the files they change, and the run's timeline says so. The
+   changes are whole files, so one the move changed would be overwritten.
+   He takes the branch again twice at most, as it can move again. A move
+   that changed one of the executor's files, or that rewrote the branch,
+   ends the run with no pull request, and the issue names the files. Only
+   the default branch is handled so: the run's own branch is new, and one
+   that exists is never pushed over. Henk does not run the repository's
+   checks again on the new head; the pull request's CI decides whether the
+   change fits it.
+
 6. **Opens a pull request** of that branch into the default branch, ready
    for review. Its description closes the issue and says what was done and
    what was left out, how the requirements review went when there was one,
@@ -450,7 +464,8 @@ Henk then:
 
 **Every execute run ends.** Either the pull request is open, or one comment
 on the issue says why there is none (nothing changed, the branch exists,
-the requirements review did not accept the changes, with the points still
+the default branch moved onto the files the executor changed, the
+requirements review did not accept the changes, with the points still
 open), with a link to the run. A review that is not satisfied in time
 discards the executor's work: nothing is pushed. A cancel says so on the issue; a
 run that does not finish within its time limit has failed.
@@ -1034,6 +1049,16 @@ surprising reading of the earlier wording; veto any that is wrong.
   file is in exactly one commit and refuses a trailer in a body; the
   trailers stay his. Without a usable proposal the change is one commit,
   as before, whose subject names the findings fixed.
+
+## Revision notes (2026-10-16)
+
+- §4a: an execute run whose default branch moved while the executor worked
+  (#634) commits on the new head when the move changed none of the files
+  the executor changed, instead of failing with "the branch moved" and
+  losing the work; the requirements review reads the changes against the
+  commit the work began on, not against the branch's tip. A move onto the
+  executor's files, or a rewritten branch, ends the run with the files
+  named.
 
 ## Revision notes (2026-10-07)
 
