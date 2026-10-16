@@ -208,6 +208,41 @@ fn round(started_at: &str) -> RoundRecord {
     }
 }
 
+/// #216: of two reviews that started in the same second, the one that started
+/// 0.4 s later is the newer, though its time sorts before the other as text.
+#[tokio::test]
+async fn the_newest_review_of_the_session_endings_is_the_newest_as_a_time() {
+    let file = File::new();
+    let store = SqliteStore::open(&file.0).unwrap();
+    for (id, at) in [
+        ("r-b", "2026-10-07T12:00:00Z"),
+        ("r-a", "2026-10-07T12:00:00.4Z"),
+    ] {
+        let run = new_run(id, 7);
+        store.create_run(&run).await.unwrap();
+        store
+            .start_session(&run.id, "reviewer", SessionRole::Reviewer, "m")
+            .await
+            .unwrap();
+        store
+            .finish_run(&run.id, RunStatus::Finished, None, None)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(&file.0)
+            .unwrap()
+            .execute("UPDATE runs SET started_at = ?1 WHERE id = ?2", [at, id])
+            .unwrap();
+    }
+
+    let newest = store.session_endings(None, 1).await.unwrap();
+
+    let ids: Vec<&str> = newest.iter().map(|e| e.run_id.as_str()).collect();
+    assert_eq!(ids, ["r-a"], "0.4 s later is newer, whatever the text says");
+    let both = store.session_endings(None, 2).await.unwrap();
+    let ids: Vec<&str> = both.iter().map(|e| e.run_id.as_str()).collect();
+    assert_eq!(ids, ["r-a", "r-b"], "newest first");
+}
+
 #[tokio::test]
 async fn a_time_that_is_not_rfc_3339_is_refused_not_stored() {
     let store = SqliteStore::in_memory().unwrap();
