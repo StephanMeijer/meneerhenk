@@ -1029,6 +1029,7 @@ pub fn kind_name(kind: RunKind) -> &'static str {
         RunKind::Plan => "plan",
         RunKind::Execute => "execute",
         RunKind::Rebase => "rebase",
+        RunKind::FixCi => "fix_ci",
         RunKind::Ticket => "ticket",
         RunKind::DiscordTurn => "discord_turn",
         RunKind::MailReply => "mail_reply",

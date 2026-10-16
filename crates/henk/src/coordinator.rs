@@ -253,6 +253,7 @@ fn waiting(key: &Key, active: &Active) -> Waiting {
         kind: match active.work {
             Work::Review(_) => RunKind::Review,
             Work::Rebase => RunKind::Rebase,
+            Work::FixCi => RunKind::FixCi,
         },
         priority: active.work.priority(),
         platform: key.platform,

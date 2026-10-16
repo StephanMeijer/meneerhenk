@@ -44,7 +44,9 @@ const REVIEWER: &[&str] = &[
 /// What only the executor has: editing, its side of the handoff, and
 /// proposing the pull request for an issue (#329). It runs the
 /// repository's checks with `bash` (#396). It answers the points of a
-/// requirements review with the plan pairing's tools (#535).
+/// requirements review with the plan pairing's tools (#535). To fix a pull
+/// request's failing checks (#583) it reads their CI as the reviewer does
+/// and proposes the fix, or says the failure is not about the code.
 const EXECUTOR: &[&str] = &[
     "edit_file",
     "apply_patch",
@@ -53,8 +55,12 @@ const EXECUTOR: &[&str] = &[
     "give_verdict",
     "propose_commits",
     "propose_pull_request",
+    "propose_fix",
     "list_points",
     "answer_point",
+    "list_ci_jobs",
+    "get_ci_job_log",
+    "get_ci_job_annotations",
 ];
 /// What only the planner has: the tracker tools, which draft until the
 /// review is done, and its side of the plan's handoff.
@@ -182,6 +188,26 @@ impl Role {
             Self::Reviewer => &["raise_point", "finish_round"],
             Self::Executor => &["answer_point"],
         }
+    }
+
+    /// The tool the role needs in a run that fixes failing checks (#583):
+    /// without `propose_fix` the executor can neither hand over a fix nor
+    /// say the failure is not about the code. The others have none.
+    #[must_use]
+    pub fn fix_ci_handoff(self) -> &'static [&'static str] {
+        match self {
+            Self::Planner | Self::Reviewer => &[],
+            Self::Executor => &["propose_fix"],
+        }
+    }
+
+    /// The first fix-CI handoff tool of the role's that `granted` leaves out.
+    #[must_use]
+    pub fn missing_fix_ci_handoff(self, granted: &[String]) -> Option<&'static str> {
+        self.fix_ci_handoff()
+            .iter()
+            .copied()
+            .find(|tool| !granted.iter().any(|g| g == tool))
     }
 
     /// The first requirements handoff tool of the role's that `granted`
@@ -528,15 +554,16 @@ mod tests {
     }
 
     #[test]
-    fn the_reviewer_reads_ci_by_default_and_may_leave_it_out() {
+    fn the_reviewer_and_the_executor_read_ci_by_default_and_may_leave_it_out() {
         for tool in ["list_ci_jobs", "get_ci_job_log", "get_ci_job_annotations"] {
             assert!(
                 Role::Reviewer.default_tools().contains(&tool.to_owned()),
                 "{tool}"
             );
+            // The executor reads the failing checks it fixes (#583).
             assert!(
-                !Role::Executor.allows(tool),
-                "{tool}: not the executor's yet"
+                Role::Executor.default_tools().contains(&tool.to_owned()),
+                "{tool}"
             );
             assert!(!Role::Planner.allows(tool), "{tool}");
         }
@@ -548,6 +575,21 @@ mod tests {
             ])))
             .unwrap();
         assert!(!without.contains(&"list_ci_jobs".to_owned()));
+    }
+
+    #[test]
+    fn only_the_executor_proposes_a_fix_and_a_fix_needs_it() {
+        assert!(Role::Executor.allows("propose_fix"));
+        assert!(!Role::Reviewer.allows("propose_fix"));
+        assert!(!Role::Planner.allows("propose_fix"));
+        let defaults = Role::Executor.default_tools();
+        assert_eq!(Role::Executor.missing_fix_ci_handoff(&defaults), None);
+        let without = tools(&["edit_file", "list_ci_jobs"]);
+        assert_eq!(
+            Role::Executor.missing_fix_ci_handoff(&without),
+            Some("propose_fix")
+        );
+        assert_eq!(Role::Reviewer.missing_fix_ci_handoff(&without), None);
     }
 
     #[test]
