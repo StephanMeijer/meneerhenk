@@ -106,20 +106,22 @@ impl Store {
 
     /// The connection, opened on first use.
     pub(crate) async fn connection(&self) -> Result<&DatabaseConnection, StoreError> {
-        self.db
-            .get_or_try_init(|| async {
-                let db = match &self.source {
-                    Source::Sqlite(path) => connect_sqlite(path).await?,
-                    Source::Postgres(url) => connect_postgres(url).await?,
-                };
-                if self.migrate {
-                    migrator::migrate(&db)
-                        .await
-                        .map_err(|error| StoreError::Migration(error.to_string()))?;
-                }
-                Ok(db)
-            })
-            .await
+        // Boxed: connecting and migrating is a large future, and it would
+        // otherwise be part of every future that can reach the first query.
+        self.db.get_or_try_init(|| Box::pin(self.open())).await
+    }
+
+    async fn open(&self) -> Result<DatabaseConnection, StoreError> {
+        let db = match &self.source {
+            Source::Sqlite(path) => connect_sqlite(path).await?,
+            Source::Postgres(url) => connect_postgres(url).await?,
+        };
+        if self.migrate {
+            migrator::migrate(&db)
+                .await
+                .map_err(|error| StoreError::Migration(error.to_string()))?;
+        }
+        Ok(db)
     }
 
     /// The dialect of the database, which opens it if it is not yet.

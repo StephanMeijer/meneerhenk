@@ -3200,7 +3200,18 @@ requester_id = 3
         let (report, ()) = tokio::join!(
             run_review(&f.app, request(&run), CancellationToken::new()),
             async {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                // Make room once the review has said it waits, however long
+                // it takes to get there.
+                for _ in 0..1000 {
+                    if messages(&f.app, &run)
+                        .await
+                        .iter()
+                        .any(|m| m.starts_with("waiting for a sandbox host"))
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 held.close().await;
             }
         );
