@@ -53,6 +53,8 @@ const AGENT_NAME: &str = "Henk";
 const CALLBACK_PATH: &str = "/auth/callback";
 /// How long one connection to the listener may take to send its request.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The pause after a failed accept, so a persistent error is not a busy loop.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 /// How long OpenAI may take to answer.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -221,24 +223,16 @@ impl SignIn {
             ("code_challenge_method", "S256"),
             ("code_challenge", &challenge),
         ];
-        let hints;
+        // The URL is printed and handed to the browser opener, so no token
+        // goes into it. The account's email is the only hint.
         match &existing {
             None => query.push(("agent_name_hint", AGENT_NAME)),
             Some(existing) => {
-                hints = (
-                    existing
-                        .id_token
-                        .as_ref()
-                        .map(|token| token.expose_secret().to_owned()),
-                    existing
-                        .account
-                        .as_deref()
-                        .filter(|account| account.contains('@')),
-                );
-                if let Some(token) = &hints.0 {
-                    query.push(("id_token_hint", token));
-                }
-                if let Some(account) = hints.1 {
+                if let Some(account) = existing
+                    .account
+                    .as_deref()
+                    .filter(|account| account.contains('@'))
+                {
                     query.push(("login_hint", account));
                 }
             }
@@ -391,8 +385,15 @@ impl Pending {
     /// sign-in's state.
     async fn wait_for_callback(&self) -> Callback {
         loop {
-            let Ok((mut stream, _)) = self.listener.accept().await else {
-                continue;
+            let (mut stream, _) = match self.listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    // A persistent error such as EMFILE returns at once;
+                    // pause so the wait is not a busy loop.
+                    warn!("the sign-in listener could not accept a connection: {error}");
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                    continue;
+                }
             };
             let Some(request) = tokio::time::timeout(CONNECTION_TIMEOUT, read_request(&mut stream))
                 .await

@@ -275,7 +275,13 @@ async fn a_repeated_sign_in_reuses_the_client_and_host_and_names_the_account() {
     assert_eq!(query["client_id"], ISSUED);
     assert!(!query.contains_key("agent_name_hint"));
     assert_eq!(query["ext_agent_host_id"], existing().ext_agent_host_id);
-    assert_eq!(query["id_token_hint"], "id-token-old");
+    assert!(
+        !query.contains_key("id_token_hint"),
+        "no token goes into a URL that is printed"
+    );
+    assert!(!url.contains("id-token-old"));
+    assert!(!url.contains("refresh-old"));
+    assert!(!url.contains("access-old"));
     assert_eq!(query["login_hint"], "someone@example.com");
 
     openai
