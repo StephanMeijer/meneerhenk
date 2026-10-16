@@ -969,6 +969,49 @@ github_owners = ["docspec"]
         );
     }
 
+    /// #583: `POST /fix-ci` is an event like the other starts, for a pull
+    /// request, with the token checked first.
+    #[tokio::test]
+    async fn api_publishes_a_fix_ci_request_as_an_event() {
+        let app = test_app().await;
+        let body = r#"{"url":"https://github.com/docspec/app/pull/9"}"#;
+        let no_token = Request::post("/fix-ci").body(Body::from(body)).unwrap();
+        assert_eq!(
+            call(composed(&app).router, no_token).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let fix = Request::post("/fix-ci")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(body))
+            .unwrap();
+        let (status, body) = call(composed(&app).router, fix).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let event = serde_json::from_str::<Value>(&body).unwrap()["event"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(wait_for_outcomes(&app, &event, 7).await, 7);
+        let recorded = app
+            .store
+            .inbound_event(&EventId::parse(event).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.kind, "fix_ci_requested");
+        assert_eq!(recorded.source, "api");
+        let issue = Request::post("/fix-ci")
+            .header("authorization", "Bearer apitok")
+            .body(Body::from(
+                r#"{"url":"https://github.com/docspec/app/issues/9"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            call(composed(&app).router, issue).await.0,
+            StatusCode::BAD_REQUEST,
+            "an issue has no checks to fix"
+        );
+    }
+
     /// #536: `POST /ticket` is an event like the other starts, for an issue.
     #[tokio::test]
     async fn api_publishes_a_ticket_request_as_an_event() {

@@ -249,19 +249,29 @@ fn sandbox_host_rows(now: &crate::workspace::SandboxHosts) -> Vec<(String, Strin
 }
 
 /// The slots in words: `2 running, 1 waiting (limit 2)`, and how many of
-/// the waiting are rebases, which start first (#580): `2 running, 3
-/// waiting, 1 rebase first (limit 2)`.
+/// the waiting are rebases and fixes of failing checks, which start before
+/// the reviews (#580, #583): `2 running, 4 waiting, 1 rebase first, 1 fix
+/// first (limit 2)`.
 fn reviews_line(slots: &crate::coordinator::Slots) -> String {
-    let rebases = slots
-        .waiting
-        .iter()
-        .filter(|w| w.priority == henk_domain::queue::Priority::Rebase)
-        .count();
-    let first = match rebases {
-        0 => String::new(),
-        1 => ", 1 rebase first".to_owned(),
-        n => format!(", {n} rebases first"),
+    use henk_domain::queue::Priority;
+    let count = |priority| {
+        slots
+            .waiting
+            .iter()
+            .filter(|w| w.priority == priority)
+            .count()
     };
+    let mut first = String::new();
+    for (n, one, many) in [
+        (count(Priority::Rebase), "rebase", "rebases"),
+        (count(Priority::Fix), "fix", "fixes"),
+    ] {
+        match n {
+            0 => {}
+            1 => first.push_str(&format!(", 1 {one} first")),
+            n => first.push_str(&format!(", {n} {many} first")),
+        }
+    }
     format!(
         "{} running, {} waiting{first} (limit {})",
         slots.in_use,
@@ -311,6 +321,16 @@ mod tests {
         assert_eq!(
             reviews_line(&slots),
             "2 running, 2 waiting, 1 rebase first (limit 2)"
+        );
+        slots
+            .waiting
+            .insert(1, waiting(Priority::Fix, RunKind::FixCi));
+        slots
+            .waiting
+            .insert(2, waiting(Priority::Fix, RunKind::FixCi));
+        assert_eq!(
+            reviews_line(&slots),
+            "2 running, 4 waiting, 1 rebase first, 2 fixes first (limit 2)"
         );
     }
 

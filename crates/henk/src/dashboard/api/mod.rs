@@ -209,6 +209,7 @@ async fn me(State(dashboard): State<Arc<Dashboard>>, ApiViewer(viewer): ApiViewe
         ("plan", settings.planning.is_some()),
         ("execute", settings.execution.is_some()),
         ("rebase", settings.roles.executor.is_some()),
+        ("fix_ci", settings.roles.executor.is_some()),
         ("ticket", settings.autonomous.is_some()),
     ]
     .into_iter()

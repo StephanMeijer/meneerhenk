@@ -169,7 +169,7 @@ OpenBao.
 | `GITLAB_PERSONAL_ACCESS_TOKEN` | Both GitLab MCP sessions, and reviews on GitLab: git push and three REST reads |
 | `HENK_GITHUB_WEBHOOK_SECRET` | `POST /webhooks/github` |
 | `HENK_GITLAB_WEBHOOK_TOKEN` | `POST /webhooks/gitlab` |
-| `HENK_API_TOKEN` | `POST /review`, `/plan`, `/execute`, `/ticket`, `/rebase` |
+| `HENK_API_TOKEN` | `POST /review`, `/plan`, `/execute`, `/ticket`, `/rebase`, `/fix-ci` |
 | `HENK_DASHBOARD_CLIENT_ID`, `HENK_DASHBOARD_CLIENT_SECRET` | The GitHub OAuth App the dashboard signs in with |
 | `HENK_DASHBOARD_SESSION_KEY` | Signs dashboard sessions; at least 32 random bytes, such as `openssl rand -base64 48` |
 | `HENK_DATABASE_URL` | Whatever `[database].url_env` names, with `backend = "postgres"`: the connection URL, password included |
@@ -736,8 +736,8 @@ decide. GitHub sends `pull_request`, `issue_comment` and
 Point them at `/webhooks/github` and `/webhooks/gitlab` behind a reverse
 proxy that terminates TLS. `POST /review {"url", "commit"?}` and
 `POST /plan {"url", "note"?}`, `POST /execute {"url", "note"?}`,
-`POST /ticket {"url", "note"?}` and `POST /rebase {"url"}` with
-`Authorization: Bearer $HENK_API_TOKEN`
+`POST /ticket {"url", "note"?}`, `POST /rebase {"url"}` and
+`POST /fix-ci {"url"}` with `Authorization: Bearer $HENK_API_TOKEN`
 publish events too and answer `202 {"event": id}`.
 
 Every inbound event is recorded in Henk's own database with what each listener
@@ -1015,7 +1015,8 @@ says which repositories are not rebased.
 ### Fixing a pull request's failing checks
 
 Comment `@meneer-henk fix ci` on a pull request (GitLab: `@meneerhenk fix
-ci`) and Henk reads its failing checks and has the executor fix the code
+ci`), or start it from the dashboard, MCP `start_fix_ci` or `POST /fix-ci
+{"url"}`, and Henk reads its failing checks and has the executor fix the code
 (spec §3.7, #583). The executor starts from the failing checks' annotations
 and the end of their logs, reads more with `list_ci_jobs`,
 `get_ci_job_log` and `get_ci_job_annotations`, and where the sandbox
@@ -1353,7 +1354,8 @@ serves `/dashboard`, a single-page app (Svelte, Vite and TypeScript, in
   workspaces their profile asks for;
 - a form that starts what this Henk is configured for: a review, a plan,
   an issue taken to a pull request (#329), an issue taken through plan,
-  build and review (#536), or a rebase (#579); and a
+  build and review (#536), a rebase (#579), or a fix of a pull request's
+  failing checks (#583); and a
   button that cancels a running one.
 
 Starting works exactly like `POST /review`, `/plan`, `/execute`, `/ticket`
@@ -1420,8 +1422,8 @@ With `[mcp_server] enabled = true` and at least one token, `henk serve` also
 serves the Model Context Protocol at `/mcp` (Streamable HTTP), so an agent
 such as Claude Code can work with Henk:
 - `start_review`, `start_plan`, `start_execute`, `start_ticket`,
-  `start_rebase`: start work, exactly as `POST /review`, `/plan`,
-  `/execute`, `/ticket` and `/rebase` do. The request becomes an event,
+  `start_rebase`, `start_fix_ci`: start work, exactly as `POST /review`,
+  `/plan`, `/execute`, `/ticket`, `/rebase` and `/fix-ci` do. The request becomes an event,
   the listeners apply the allowlist and every refusal, and the tool answers
   with the run id and link, or why nothing started;
 - `cancel_run`, and `move_queued_run`, which moves a review waiting for a

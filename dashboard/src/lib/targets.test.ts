@@ -61,6 +61,14 @@ describe('checkUrl', () => {
     });
   });
 
+  it("reads a fix of failing checks as a pull request (#583)", () => {
+    expect(checkUrl('fix_ci', 'https://github.com/docspec/app/pull/7')).toEqual({ ok: 'pull request docspec/app #7' });
+    expect(checkUrl('fix_ci', 'https://gitlab.com/g/p/-/merge_requests/5')).toEqual({ ok: 'merge request g/p #5' });
+    expect(checkUrl('fix_ci', 'https://github.com/docspec/app/issues/7')).toEqual({
+      problem: 'This is an issue. Fixing the failing checks needs a pull request URL.',
+    });
+  });
+
   it('reads a ticket run as an issue (#536)', () => {
     expect(checkUrl('ticket', 'https://github.com/docspec/app/issues/52')).toEqual({ ok: 'issue docspec/app #52' });
     expect(checkUrl('ticket', 'https://github.com/docspec/app/pull/52')).toEqual({

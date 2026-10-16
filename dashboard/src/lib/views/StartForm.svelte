@@ -41,6 +41,11 @@
       label: 'Rebase a pull request',
       line: 'Henk replays it onto its base branch, has the executor resolve conflicts, pushes with a lease and reviews it.',
     },
+    {
+      kind: 'fix_ci',
+      label: "Fix a pull request's failing checks",
+      line: 'The executor reads the checks that failed and fixes the code, Henk pushes the fix and reviews it. A failure that is not about the code pushes nothing.',
+    },
   ];
   const BUTTONS: Record<Start, string> = {
     review: 'Start review',
@@ -48,6 +53,7 @@
     execute: 'Take it on',
     ticket: 'Start the run',
     rebase: 'Rebase it',
+    fix_ci: 'Fix the checks',
   };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
@@ -130,7 +136,7 @@
       <span>Commit <span class="muted">optional</span></span>
       <input name="commit" autocomplete="off" bind:value={commit} placeholder="default: the head">
     </label>
-  {:else if kind !== 'rebase'}
+  {:else if kind !== 'rebase' && kind !== 'fix_ci'}
     <label class="field">
       <span>Note <span class="muted">optional, Henk reads it with the issue</span></span>
       <textarea name="note" rows="3" bind:value={note}></textarea>

@@ -1,4 +1,5 @@
-//! The HTTP API: `POST /review`, `/plan`, `/execute`, `/ticket` and `/rebase`
+//! The HTTP API: `POST /review`, `/plan`, `/execute`, `/ticket`, `/rebase` and
+//! `/fix-ci`
 //! behind a bearer token.
 //! Each request becomes an event like any webhook; the listeners do the rest.
 
@@ -84,6 +85,7 @@ impl HttpHook for ApiHook {
             .route("/execute", post(execute))
             .route("/ticket", post(ticket))
             .route("/rebase", post(rebase))
+            .route("/fix-ci", post(fix_ci))
             .with_state(self)
     }
 }
@@ -164,6 +166,13 @@ async fn ticket(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Byte
 async fn rebase(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes) -> Response {
     match serde_json::from_slice::<UrlBody>(&body) {
         Ok(request) => start(&hook, &headers, Start::Rebase, &request.url, None, None),
+        Err(error) => bad_body(&hook, &headers, &error),
+    }
+}
+
+async fn fix_ci(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes) -> Response {
+    match serde_json::from_slice::<UrlBody>(&body) {
+        Ok(request) => start(&hook, &headers, Start::FixCi, &request.url, None, None),
         Err(error) => bad_body(&hook, &headers, &error),
     }
 }
