@@ -750,6 +750,27 @@ impl Coordinator {
         self.slots_changed.send_replace(());
     }
 
+    /// Holds a new review of `commit` for the fix that replaced the review
+    /// `old` of it. Most fixes push nothing (the checks are running, or the
+    /// failure is not the code's), and then `old` would be gone for nothing:
+    /// the review held here starts when the fix ends without a push, and a
+    /// push replaces it with the review of the pushed head (#583). Called
+    /// with `active` locked.
+    fn hold_replaced(&self, key: &Key, target: &ReviewTarget, old: &Active, commit: &CommitSha) {
+        let run = new_run_id();
+        let request = ReviewRequest {
+            target: target.clone(),
+            commit: Some(commit.clone()),
+            trigger: format!("restarted: a fix replaced run {}", old.run),
+            requester: old.requester.clone(),
+            acknowledge: None,
+            run: Some(run.clone()),
+            submitted_at: None,
+            queued_check: None,
+        };
+        self.hold(key.clone(), &run, request, commit.clone());
+    }
+
     /// Forgets the review held for a rebase of the pull request, when a
     /// newer review takes it as `newer`: the rebase it waited for may have
     /// been cancelled, and the held one would otherwise start later and
@@ -1164,8 +1185,20 @@ impl Coordinator {
                         // A review still waiting hands its place to this run,
                         // which moves up to where its priority waits.
                         self.review_slots.replace(&old.run, &run, work.priority());
-                        if !self.app.cancels.supersede_for_rebase(&old.run, &run) {
+                        // A rebase replaces the commit the review is of, and
+                        // the review says so; a fix may replace nothing.
+                        let told = if work == Work::Rebase {
+                            self.app.cancels.supersede_for_rebase(&old.run, &run)
+                        } else {
+                            self.app.cancels.supersede(&old.run, &run)
+                        };
+                        if !told {
                             old.cancel.cancel();
+                        }
+                        if work == Work::FixCi
+                            && let Work::Review(commit) = &old.work
+                        {
+                            self.hold_replaced(&key, &target, &old, commit);
                         }
                         predecessor = Some(old.ended);
                     }
