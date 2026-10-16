@@ -182,6 +182,19 @@ pub enum EventKind {
         /// Who asked, as a stable id.
         requester: Option<String>,
     },
+    /// A repository's default branch was pushed to (#579): what moves the
+    /// base of every open pull request on it. A push to any other branch, a
+    /// tag or a deletion is [`EventKind::Ignored`].
+    BranchPushed {
+        /// Repository.
+        repo: RepoRef,
+        /// The branch pushed to: the repository's default branch.
+        branch: String,
+        /// Its head commit after the push.
+        head: CommitSha,
+        /// Who pushed.
+        sender: Sender,
+    },
     /// A delivery of a kind no parser models. The payload is on the event.
     Unmodelled {
         /// The platform's name for the event.
@@ -203,6 +216,7 @@ impl EventKind {
             Self::ExecuteRequested { .. } => "execute_requested",
             Self::TicketRequested { .. } => "ticket_requested",
             Self::RebaseRequested { .. } => "rebase_requested",
+            Self::BranchPushed { .. } => "branch_pushed",
             Self::Unmodelled { .. } => "unmodelled",
             Self::Ignored(_) => "ignored",
         }
@@ -221,7 +235,7 @@ impl EventKind {
             Self::PlanRequested { target, .. }
             | Self::ExecuteRequested { target, .. }
             | Self::TicketRequested { target, .. } => Some((&target.repo, target.number)),
-            Self::Unmodelled { .. } | Self::Ignored(_) => None,
+            Self::BranchPushed { .. } | Self::Unmodelled { .. } | Self::Ignored(_) => None,
         }
     }
 }
