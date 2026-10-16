@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 
 use crate::app::App;
 use crate::cancel::is_cancelled;
-use crate::review::Interrupted;
+use crate::review::{CancelledBy, Interrupted};
 use crate::stages;
 
 /// Issue `target`, when it is one Henk works on: open, and not a pull
@@ -47,18 +47,44 @@ pub(crate) trait Thread: Send + Sync {
     async fn comment(&self, body: &str) -> Result<(), PlatformError>;
 }
 
+/// Who tells the issue how a plan or an execute run ended (#536).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comments {
+    /// The run does: a failure, and a person's cancel, get a comment.
+    Own,
+    /// Whoever drove the run does, once for all the runs they drove. The
+    /// run still ends in the store with its reason and posts nothing.
+    Caller,
+}
+
 /// An issue, through the issue writer.
 #[derive(Clone, Copy)]
 pub(crate) struct IssueThread<'a> {
     pub(crate) writer: &'a Arc<dyn IssueWriter>,
     pub(crate) target: &'a IssueTarget,
+    /// Whether the run says how it ended on the issue itself.
+    pub(crate) comments: Comments,
 }
 
 #[async_trait::async_trait]
 impl Thread for IssueThread<'_> {
     async fn comment(&self, body: &str) -> Result<(), PlatformError> {
+        if self.comments == Comments::Caller {
+            return Ok(());
+        }
         self.writer.comment(self.target, body).await.map(|_| ())
     }
+}
+
+/// That a run failed, and why: what [`OnRun::failed`] returns, so whoever
+/// drove the run can read the reason instead of parsing a message.
+#[derive(Debug, thiserror::Error)]
+#[error("{what} failed: {reason}")]
+pub(crate) struct RunFailed {
+    /// What the run did: `planning`, `execution`.
+    pub(crate) what: &'static str,
+    /// Why, in Henk's own words.
+    pub(crate) reason: String,
 }
 
 /// A pull or merge request's conversation, through the platform writer.
@@ -134,8 +160,9 @@ impl<T: Thread> OnRun<'_, T> {
     }
 
     /// A person cancelled the run (#69): one comment saying who, no failure,
-    /// and the run ends `cancelled`.
-    async fn cancelled(&self, by: &str) -> anyhow::Error {
+    /// and the run ends `cancelled`. The error is [`CancelledBy`], with the
+    /// same words as before.
+    pub(crate) async fn cancelled(&self, by: &str) -> anyhow::Error {
         let reason = crate::cancel::cancelled_reason(by);
         info!(run = %self.run, by, "{} {reason}", self.what);
         let body = self
@@ -153,12 +180,12 @@ impl<T: Thread> OnRun<'_, T> {
         {
             return store_error.into();
         }
-        anyhow!(reason)
+        CancelledBy(by.to_owned()).into()
     }
 
     /// Stopped by Ctrl-C or a shutdown: not Henk's failure, so nothing is
     /// posted; the run ends with the reason (#7).
-    async fn interrupted(&self) -> anyhow::Error {
+    pub(crate) async fn interrupted(&self) -> anyhow::Error {
         warn!(run = %self.run, "{} interrupted", self.what);
         let store = &*self.app.store;
         stages::end(
@@ -201,6 +228,10 @@ impl<T: Thread> OnRun<'_, T> {
         {
             return store_error.into();
         }
-        anyhow!("{} failed: {reason}", self.what)
+        RunFailed {
+            what: self.what,
+            reason: reason.to_owned(),
+        }
+        .into()
     }
 }

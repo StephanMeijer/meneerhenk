@@ -163,6 +163,16 @@ pub enum EventKind {
         /// Who asked, as a stable id.
         requester: Option<String>,
     },
+    /// An issue was asked to be driven through a plan, an execute run and a
+    /// review by one autonomous run (#536): API, dashboard or MCP.
+    TicketRequested {
+        /// The issue.
+        target: IssueTarget,
+        /// A note from the requester.
+        note: Option<String>,
+        /// Who asked, as a stable id.
+        requester: Option<String>,
+    },
     /// A pull/merge request was asked to be rebased onto its base branch
     /// (#579): API, dashboard or MCP. A comment asking for it is a
     /// [`EventKind::Comment`].
@@ -191,6 +201,7 @@ impl EventKind {
             Self::ReviewRequested { .. } => "review_requested",
             Self::PlanRequested { .. } => "plan_requested",
             Self::ExecuteRequested { .. } => "execute_requested",
+            Self::TicketRequested { .. } => "ticket_requested",
             Self::RebaseRequested { .. } => "rebase_requested",
             Self::Unmodelled { .. } => "unmodelled",
             Self::Ignored(_) => "ignored",
@@ -207,9 +218,9 @@ impl EventKind {
             Self::ReviewRequested { target, .. } | Self::RebaseRequested { target, .. } => {
                 Some((&target.repo, target.number))
             }
-            Self::PlanRequested { target, .. } | Self::ExecuteRequested { target, .. } => {
-                Some((&target.repo, target.number))
-            }
+            Self::PlanRequested { target, .. }
+            | Self::ExecuteRequested { target, .. }
+            | Self::TicketRequested { target, .. } => Some((&target.repo, target.number)),
             Self::Unmodelled { .. } | Self::Ignored(_) => None,
         }
     }

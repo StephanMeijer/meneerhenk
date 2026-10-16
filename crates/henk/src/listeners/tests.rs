@@ -23,7 +23,8 @@ use henk_store::RunStore;
 
 use super::testing::{FakeWriter, FakeWriters};
 use super::{
-    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, Writers,
+    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, TicketListener,
+    Writers,
 };
 use crate::app::App;
 use crate::config::Config;
@@ -91,6 +92,7 @@ impl Harness {
                 )),
                 Arc::new(PlanListener::new(Arc::clone(&coordinator))),
                 Arc::new(ExecuteListener::new(Arc::clone(&coordinator))),
+                Arc::new(TicketListener::new(Arc::clone(&coordinator))),
             ],
         );
         Self {
@@ -253,7 +255,7 @@ async fn a_pull_request_change_starts_a_review_and_is_recorded() {
     assert_eq!(recorded.repo.as_deref(), Some("docspec/app"));
     assert_eq!(recorded.target, Some(7));
     let outcomes = h.store.outcomes(&out.id).await.unwrap();
-    assert_eq!(outcomes.len(), 5, "one per listener");
+    assert_eq!(outcomes.len(), 6, "one per listener");
     let started = outcomes.iter().find(|o| o.listener == "review").unwrap();
     assert_eq!(started.outcome, "started");
     assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
@@ -565,6 +567,54 @@ async fn an_execute_request_starts_an_execute_run_where_execution_is_configured(
     assert!(matches!(outside.of("execute"), Handled::Ignored(r) if r.contains("allowlist")));
     let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
     assert_eq!(recorded.kind, "execute_requested");
+}
+
+fn ticket_request(owner: &str) -> EventKind {
+    EventKind::TicketRequested {
+        target: IssueTarget {
+            repo: repo(&format!("{owner}/app")),
+            number: 9,
+        },
+        note: None,
+        requester: Some("github:1234".into()),
+    }
+}
+
+/// #536: a ticket request starts a ticket run where `[autonomous]` is
+/// configured, for an issue on the allowlist, and nothing else does.
+#[tokio::test]
+async fn a_ticket_request_starts_a_ticket_run_where_autonomous_is_configured() {
+    let h = Harness::new().await;
+    let off = h.deliver(ticket_request("docspec")).await;
+    assert!(
+        matches!(off.of("ticket"), Handled::Ignored(r) if r == "autonomous runs are not configured"),
+        "{:?}",
+        off.by_listener
+    );
+
+    // App::build reads the model's key: PATH is set wherever tests run.
+    let agents = "[endpoints.m]\nprovider = \"openai\"\nbase_url = \"https://x.test/v1\"\napi_key_env = \"PATH\"\n[models.m]\nendpoint = \"m\"\nmodel = \"m\"\n[planning]\nrequester_id = 3\n[execution]\n[review.loop]\n[autonomous]\n[roles.planner]\nmodel = \"m\"\n[roles.reviewer]\nmodel = \"m\"\n[roles.executor]\nmodel = \"m\"\nrequester_id = 3\n";
+    let h = Harness::configured(
+        FakeWriter {
+            head: SHA.to_owned(),
+            ..FakeWriter::default()
+        },
+        &format!("{CONFIG}{agents}"),
+    )
+    .await;
+    let out = h.deliver(ticket_request("docspec")).await;
+    assert!(
+        matches!(out.of("ticket"), Handled::Started(_)),
+        "{:?}",
+        out.by_listener
+    );
+    for other in ["review", "plan", "execute", "rebase", "mention"] {
+        assert!(matches!(out.of(other), Handled::Ignored(_)), "{other}");
+    }
+    let outside = h.deliver(ticket_request("evil")).await;
+    assert!(matches!(outside.of("ticket"), Handled::Ignored(r) if r.contains("allowlist")));
+    let recorded = h.store.inbound_event(&out.id).await.unwrap().unwrap();
+    assert_eq!(recorded.kind, "ticket_requested");
 }
 
 /// #579: `@meneer-henk rebase` starts a rebase where the executor is

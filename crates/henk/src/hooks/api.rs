@@ -1,5 +1,5 @@
-//! The HTTP API: `POST /review`, `/plan`, `/execute` and `/rebase` behind a
-//! bearer token.
+//! The HTTP API: `POST /review`, `/plan`, `/execute`, `/ticket` and `/rebase`
+//! behind a bearer token.
 //! Each request becomes an event like any webhook; the listeners do the rest.
 
 use std::sync::Arc;
@@ -82,6 +82,7 @@ impl HttpHook for ApiHook {
             .route("/review", post(review))
             .route("/plan", post(plan))
             .route("/execute", post(execute))
+            .route("/ticket", post(ticket))
             .route("/rebase", post(rebase))
             .with_state(self)
     }
@@ -138,6 +139,20 @@ async fn execute(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Byt
             &hook,
             &headers,
             Start::Execute,
+            &request.url,
+            None,
+            request.note,
+        ),
+        Err(error) => bad_body(&hook, &headers, &error),
+    }
+}
+
+async fn ticket(State(hook): State<Arc<ApiHook>>, headers: HeaderMap, body: Bytes) -> Response {
+    match serde_json::from_slice::<NoteBody>(&body) {
+        Ok(request) => start(
+            &hook,
+            &headers,
+            Start::Ticket,
             &request.url,
             None,
             request.note,

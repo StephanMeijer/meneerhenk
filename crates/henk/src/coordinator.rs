@@ -3,7 +3,7 @@
 //! decided in `henk_domain::queue`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use henk_domain::allowlist::Platform;
 use henk_domain::queue::{Decision, Priority, Work, decide};
@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use crate::app::App;
 use crate::execute::{ExecuteRequest, run_execute};
 use crate::ids::new_run_id;
+use crate::issue_runs::Comments;
 use crate::plan::{PlanRequest, run_plan};
 use crate::rebase::{RebaseRequest, run_rebase};
 use crate::review::{
@@ -24,6 +25,7 @@ use crate::review::{
     report_cancelled_while_queued, report_interrupted_while_queued, run_review,
 };
 use crate::slot_queue::{NotWaiting, Slot, SlotQueue};
+use crate::ticket::{Limits, Live, TicketRequest, run_ticket};
 
 /// One pull or merge request, as the coordinator tells them apart. The
 /// repository path is lowercase: neither platform's paths are
@@ -44,6 +46,51 @@ impl Key {
             repo: target.repo.path().to_ascii_lowercase(),
             number: target.number,
         }
+    }
+}
+
+/// One issue, as the coordinator tells ticket runs apart: like [`Key`], for
+/// an issue (#536). A pull request and an issue of one number are not the
+/// same thing, so it is not [`Key`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IssueKey {
+    platform: Platform,
+    repo: String,
+    number: u64,
+}
+
+impl IssueKey {
+    fn of(target: &IssueTarget) -> Self {
+        Self {
+            platform: target.repo.platform(),
+            repo: target.repo.path().to_ascii_lowercase(),
+            number: target.number,
+        }
+    }
+}
+
+/// What a request for a ticket run came to (#536).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submitted {
+    /// A ticket run started.
+    Started(RunId),
+    /// The issue already has one going; this is its id.
+    Joined(RunId),
+}
+
+/// Keeps an issue's place among the running ticket runs until dropped, so
+/// it frees however the run ends.
+struct TicketPlace {
+    tickets: Arc<Mutex<HashMap<IssueKey, RunId>>>,
+    key: IssueKey,
+}
+
+impl Drop for TicketPlace {
+    fn drop(&mut self) {
+        self.tickets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.key);
     }
 }
 
@@ -395,6 +442,8 @@ pub struct Coordinator {
     /// run on their pull request takes a slot only once they have (#580).
     /// Locked after `active`, never before.
     ending: Mutex<HashMap<Key, watch::Receiver<()>>>,
+    /// The ticket runs going, one per issue (#536).
+    tickets: Arc<Mutex<HashMap<IssueKey, RunId>>>,
     /// The slots for runs on pull requests, and the order runs wait for
     /// them in (#401, #580).
     review_slots: Arc<SlotQueue>,
@@ -424,6 +473,7 @@ impl Coordinator {
             active: Arc::new(Mutex::new(HashMap::new())),
             held: Mutex::new(HashMap::new()),
             ending: Mutex::new(HashMap::new()),
+            tickets: Arc::new(Mutex::new(HashMap::new())),
             generation: Mutex::new(0),
             slots_changed,
         }
@@ -440,6 +490,16 @@ impl Coordinator {
     #[must_use]
     pub fn tracked_reviews(&self) -> usize {
         self.active.lock().map_or(0, |m| m.len())
+    }
+
+    /// Ticket runs going right now: what a shutdown waits for, so each
+    /// writes its ending (#536).
+    #[must_use]
+    pub fn tracked_tickets(&self) -> usize {
+        self.tickets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Runs on pull requests that hold a slot right now (#251: a waiting
@@ -614,10 +674,6 @@ impl Coordinator {
     /// waits on: the receiver is closed and the run id names that run. A
     /// closed receiver after `Start` means the coordinator refused or the
     /// run's task died, and nothing says how it ended.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the ticket run waits on its review (#536)")
-    )]
     pub fn submit_review_awaited(
         &self,
         request: ReviewRequest,
@@ -835,6 +891,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester: requester.clone(),
+            comments: Comments::Own,
         };
         let coordinator = Arc::clone(self);
         let cancel = self.app.shutdown.child_token();
@@ -989,6 +1046,61 @@ impl Coordinator {
         }
     }
 
+    /// Starts an autonomous ticket run in the background (#536): the issue
+    /// goes through a plan, an execute run and a review, with nobody
+    /// starting each step. An issue has one at a time: asked again while it
+    /// runs, the request joins it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when autonomous runs are not configured.
+    pub fn submit_ticket(
+        self: &Arc<Self>,
+        target: IssueTarget,
+        note: Option<String>,
+        trigger: String,
+        requester: Option<String>,
+    ) -> anyhow::Result<Submitted> {
+        let limits = Limits::from_settings(&self.app.settings)?;
+        let key = IssueKey::of(&target);
+        let run = new_run_id();
+        let place = {
+            let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(going) = tickets.get(&key) {
+                info!(repo = %target.repo.path(), issue = target.number, run = %going, "joined the running ticket run");
+                self.record_joined(going, &trigger);
+                return Ok(Submitted::Joined(going.clone()));
+            }
+            tickets.insert(key.clone(), run.clone());
+            TicketPlace {
+                tickets: Arc::clone(&self.tickets),
+                key,
+            }
+        };
+        let request = TicketRequest {
+            target,
+            note,
+            trigger,
+            run: Some(run.clone()),
+            requester,
+        };
+        let coordinator = Arc::clone(self);
+        let cancel = self.app.shutdown.child_token();
+        let cancellable = self.app.cancels.register(run.clone(), cancel.clone());
+        tokio::spawn(async move {
+            // Dropped last: the end of this task is the end of the ticket run.
+            let _place = place;
+            let _cancellable = cancellable;
+            let stages = Live::new(Arc::clone(&coordinator));
+            if let Err(error) =
+                run_ticket(coordinator.app(), &stages, request, cancel, limits).await
+            {
+                warn!(%error, "autonomous run ended with an error");
+            }
+        });
+        Ok(Submitted::Started(run))
+    }
+
     /// Starts a plan in the background and returns its run id.
     /// `requester` is who asked, for the run record, when known.
     pub fn submit_plan(
@@ -1005,6 +1117,7 @@ impl Coordinator {
             trigger,
             run: Some(run.clone()),
             requester,
+            comments: Comments::Own,
         };
         let app = Arc::clone(&self.app);
         let cancel = app.shutdown.child_token();

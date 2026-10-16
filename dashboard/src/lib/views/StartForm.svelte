@@ -36,12 +36,18 @@
       label: 'Rebase a pull request',
       line: 'Henk replays it onto its base branch, has the executor resolve conflicts, pushes with a lease and reviews it.',
     },
+    {
+      kind: 'ticket',
+      label: 'Take an issue through plan, pull request and review',
+      line: 'Henk plans the issue, the executor makes the change and opens the pull request, and Henk reviews it, with no one starting each step.',
+    },
   ];
   const BUTTONS: Record<Start, string> = {
     review: 'Start review',
     plan: 'Start plan',
     execute: 'Take it on',
     rebase: 'Rebase it',
+    ticket: 'Run the ticket',
   };
 
   let choices = $derived(CHOICES.filter((choice) => startable.includes(choice.kind)));
@@ -73,7 +79,7 @@
         kind,
         url: url.trim(),
         commit: kind === 'review' && commit.trim() !== '' ? commit.trim() : null,
-        note: (kind === 'plan' || kind === 'execute') && note.trim() !== '' ? note.trim() : null,
+        note: (kind === 'plan' || kind === 'execute' || kind === 'ticket') && note.trim() !== '' ? note.trim() : null,
       });
       go(eventPath(started.event_id));
     } catch (error) {

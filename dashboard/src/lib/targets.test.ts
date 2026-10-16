@@ -55,6 +55,7 @@ describe('checkUrl', () => {
     expect(checkUrl('review', 'https://gitlab.com/g/p/-/merge_requests/5')).toEqual({ ok: 'merge request g/p #5' });
     expect(checkUrl('plan', 'https://github.com/docspec/api/issues/52')).toEqual({ ok: 'issue docspec/api #52' });
     expect(checkUrl('execute', 'https://gitlab.com/g/p/-/issues/4')).toEqual({ ok: 'issue g/p #4' });
+    expect(checkUrl('ticket', 'https://github.com/docspec/api/issues/52')).toEqual({ ok: 'issue docspec/api #52' });
     expect(checkUrl('rebase', 'https://github.com/docspec/app/pull/7')).toEqual({ ok: 'pull request docspec/app #7' });
     expect(checkUrl('rebase', 'https://github.com/docspec/app/issues/7')).toEqual({
       problem: 'This is an issue. A rebase needs a pull request URL.',
@@ -64,6 +65,9 @@ describe('checkUrl', () => {
   it('says why when it does not', () => {
     expect(checkUrl('plan', 'https://github.com/docspec/api/pull/52')).toEqual({
       problem: 'This is a pull request. A plan needs an issue URL.',
+    });
+    expect(checkUrl('ticket', 'https://github.com/docspec/api/pull/52')).toEqual({
+      problem: 'This is a pull request. A ticket run needs an issue URL.',
     });
     expect(checkUrl('review', 'https://github.com/docspec/api/issues/52')).toEqual({
       problem: 'This is an issue. A review needs a pull request URL.',

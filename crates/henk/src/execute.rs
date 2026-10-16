@@ -38,7 +38,7 @@ use crate::execute_review::{self, Parts};
 use crate::execute_tools::{Proposal, ProposePullRequest, Proposed, propose_continuation};
 use crate::git::{Checkout, ScratchDir};
 use crate::ids::new_run_id;
-use crate::issue_runs::{IssueThread, OnIssue, open_issue};
+use crate::issue_runs::{Comments, IssueThread, OnIssue, open_issue};
 use crate::liveness::KeepAlive;
 use crate::plan_review_tools::{AnswerPoint, ListPoints, PlanHandoff};
 use crate::push::{PushTo, Pusher, stop_if_cancelled};
@@ -61,6 +61,8 @@ pub struct ExecuteRequest {
     /// Who asked, for the run record, when not the executor's Team Lead:
     /// `github:<id>` from the dashboard, `mcp:<token>` over MCP.
     pub requester: Option<String>,
+    /// Who says on the issue how it ended when it did not end well.
+    pub comments: Comments,
 }
 
 /// The pull request an execute run opened, for the review that follows.
@@ -177,6 +179,7 @@ pub async fn run_execute(
         thread: IssueThread {
             writer: &issues,
             target: &request.target,
+            comments: request.comments,
         },
         run: &run,
         link: &link,
@@ -930,6 +933,7 @@ requester_id = 3
             trigger: "test".to_owned(),
             run: Some(RunId::parse(run).unwrap()),
             requester: Some("github:1234".to_owned()),
+            comments: Comments::Own,
         }
     }
 
@@ -1262,6 +1266,58 @@ requester_id = 3
             !stages.iter().any(|s| s.stage.as_str() == "session"),
             "no session: {stages:?}"
         );
+    }
+
+    /// #536: an execute run its caller drives ends in the store with its
+    /// reason, and the caller can read the reason; the issue hears nothing
+    /// from it.
+    #[tokio::test]
+    async fn a_quiet_execute_run_that_fails_ends_in_the_store_without_a_word_on_the_issue() {
+        let f = fixture("henk-exec-quiet", vec![propose(), done()]).await;
+        let quiet = ExecuteRequest {
+            comments: Comments::Caller,
+            ..request("r-exec-quiet")
+        };
+        let error = run_execute(&f.app, quiet, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let failed = error
+            .downcast_ref::<crate::issue_runs::RunFailed>()
+            .expect("the failure is typed");
+        assert_eq!(failed.what, "execution");
+        assert!(
+            failed.reason.contains("the executor changed nothing"),
+            "{}",
+            failed.reason
+        );
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        let record = record(&f, "r-exec-quiet").await;
+        assert_eq!(record.status, RunStatus::Failed);
+        assert_eq!(record.error.as_deref(), Some(failed.reason.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_quiet_execute_run_cancelled_by_a_person_ends_cancelled_without_a_word() {
+        let f = fixture(
+            "henk-exec-quiet-cancel",
+            vec![write_csv(), propose(), done()],
+        )
+        .await;
+        let run = RunId::parse("r-exec-quiet-9").unwrap();
+        let cancel = CancellationToken::new();
+        let _cancellable = f.app.cancels.register(run.clone(), cancel.clone());
+        assert!(f.app.cancels.cancel(&run, "github:1234".to_owned()));
+        let quiet = ExecuteRequest {
+            comments: Comments::Caller,
+            ..request("r-exec-quiet-9")
+        };
+        run_execute(&f.app, quiet, cancel).await.unwrap_err();
+        assert!(f.tracker.comments.lock().unwrap().is_empty());
+        assert_eq!(
+            record(&f, "r-exec-quiet-9").await.status,
+            RunStatus::Cancelled
+        );
+        assert!(f.hub.opened.lock().unwrap().is_empty());
     }
 
     /// The executor is told of `bash` only when it has it: on a backend
