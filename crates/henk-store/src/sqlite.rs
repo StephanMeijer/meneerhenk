@@ -41,26 +41,52 @@ pub struct SqliteStore {
     _temporary: Option<TemporaryFile>,
 }
 
-/// A database file under the temp directory, removed (with its WAL files)
-/// when it is dropped.
+/// A database file in a private directory of its own under the temp
+/// directory. The directory is new (created, never reused, mode 0700 on
+/// Unix), so nothing stale or planted can be there; it is removed with the
+/// WAL files when this is dropped.
 #[derive(Debug)]
-struct TemporaryFile(PathBuf);
+struct TemporaryFile {
+    directory: PathBuf,
+    file: PathBuf,
+}
 
 impl TemporaryFile {
-    fn new() -> Self {
+    fn new() -> Result<Self, StoreError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        Self(std::env::temp_dir().join(format!("henk-store-memory-{}-{n}.db", std::process::id())))
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let directory = std::env::temp_dir().join(format!(
+                "henk-store-memory-{}-{n}-{nanos:x}",
+                std::process::id()
+            ));
+            // `create` fails when the path exists, and does not follow a
+            // symlink there, so a planted name is skipped, not used.
+            match builder.create(&directory) {
+                Ok(()) => {
+                    let file = directory.join("store.db");
+                    return Ok(Self { directory, file });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(StoreError::Connect(format!(
+                        "temporary database directory: {e}"
+                    )));
+                }
+            }
+        }
     }
 }
 
 impl Drop for TemporaryFile {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.0.clone().into_os_string();
-            path.push(suffix);
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -132,9 +158,9 @@ impl SqliteStore {
     ///
     /// Returns [`StoreError`] when SQLite cannot create the database.
     pub fn in_memory() -> Result<Self, StoreError> {
-        let file = TemporaryFile::new();
-        let connection = Connection::open(&file.0)?;
-        let store = Store::sqlite(&file.0);
+        let file = TemporaryFile::new()?;
+        let connection = Connection::open(&file.file)?;
+        let store = Store::sqlite(&file.file);
         Self::migrated(connection, None, store, Some(file))
     }
 
@@ -1327,7 +1353,7 @@ fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::used_underscore_binding)]
 
     use henk_domain::allowlist::Platform;
     use henk_domain::run::RunKind;
@@ -1346,6 +1372,44 @@ mod tests {
             trigger: "opened".into(),
             link: format!("https://henk.example/runs/{id}"),
         }
+    }
+
+    /// A stale file at a name an earlier version would have used does not
+    /// leak into a new in-memory store, and the store's directory is private
+    /// and gone with it.
+    #[tokio::test]
+    async fn an_in_memory_store_is_new_whatever_is_left_in_the_temp_directory() {
+        let stale =
+            std::env::temp_dir().join(format!("henk-store-memory-{}-0.db", std::process::id()));
+        std::fs::write(&stale, b"not a database").unwrap();
+
+        let store = SqliteStore::in_memory().unwrap();
+        store.create_run(&new_run("r-fresh")).await.unwrap();
+        let directory = store._temporary.as_ref().unwrap().directory.clone();
+        assert!(directory.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "the directory is private");
+        }
+        let other = SqliteStore::in_memory().unwrap();
+        assert_ne!(
+            directory,
+            other._temporary.as_ref().unwrap().directory,
+            "every store has a directory of its own"
+        );
+        assert!(
+            other
+                .with(|c| Ok(c.query_row("SELECT count(*) FROM runs", [], |r| r.get::<_, i64>(0))?))
+                .unwrap()
+                == 0
+        );
+
+        drop(store);
+        assert!(!directory.exists(), "the directory goes with the store");
+        assert_eq!(std::fs::read(&stale).unwrap(), b"not a database");
+        std::fs::remove_file(&stale).unwrap();
     }
 
     /// #160: the newest review of a pull request is found by time, also
