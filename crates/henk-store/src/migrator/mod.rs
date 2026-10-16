@@ -135,22 +135,26 @@ async fn adopt<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     }
     // `install` is what the migrator does first; do it here so the table exists.
     Migrator::install(db).await?;
-    if !Migrator::get_migration_models(db).await?.is_empty() {
-        return Ok(()); // adopted before
-    }
-    for name in LEGACY_FINAL {
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            match backend {
-                DbBackend::Postgres => {
-                    "INSERT INTO seaql_migrations (version, applied_at) VALUES ($1, $2)"
-                }
-                _ => "INSERT INTO seaql_migrations (version, applied_at) VALUES (?, ?)",
-            },
-            [name.into(), 0_i64.into()],
-        ))
+    // One statement, so it is atomic on SQLite too, where `migrate` holds no
+    // lock; `DO NOTHING` makes it harmless to repeat, to race with another
+    // Henk, or to run over a table that already holds some of the steps.
+    let rows = vec!["(?, ?)"; LEGACY_FINAL.len()].join(", ");
+    let sql = format!(
+        "INSERT INTO seaql_migrations (version, applied_at) VALUES {rows} \
+         ON CONFLICT (version) DO NOTHING"
+    );
+    let sql = if backend == DbBackend::Postgres {
+        // Postgres numbers its placeholders.
+        (1..=LEGACY_FINAL.len() * 2).fold(sql, |sql, n| sql.replacen('?', &format!("${n}"), 1))
+    } else {
+        sql
+    };
+    let values: Vec<sea_orm::Value> = LEGACY_FINAL
+        .iter()
+        .flat_map(|name| [(*name).into(), 0_i64.into()])
+        .collect();
+    db.execute_raw(Statement::from_sql_and_values(backend, sql, values))
         .await?;
-    }
     Ok(())
 }
 

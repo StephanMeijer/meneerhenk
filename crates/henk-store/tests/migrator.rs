@@ -491,6 +491,35 @@ mod sqlite {
     }
 
     #[tokio::test]
+    async fn a_half_adopted_database_is_adopted_the_rest_of_the_way() {
+        let file = File::new();
+        made_by_the_old_store(&file);
+        let db = connect(&file.0).await;
+        // As if a Henk died after recording the first step and before the rest.
+        db.execute_unprepared(
+            "CREATE TABLE seaql_migrations (version varchar NOT NULL PRIMARY KEY, \
+             applied_at bigint NOT NULL); \
+             INSERT INTO seaql_migrations (version, applied_at) VALUES ('m001_baseline', 0)",
+        )
+        .await
+        .unwrap();
+
+        migrate(&db).await.unwrap();
+
+        let steps = applied(&db).await;
+        assert_eq!(
+            steps
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>(),
+            step_names()
+        );
+        for (name, at) in &steps[..3] {
+            assert_eq!(*at, 0, "{name} is recorded as adopted, not run");
+        }
+    }
+
+    #[tokio::test]
     async fn a_database_at_another_version_of_the_old_history_is_refused_and_left_alone() {
         for version in [1, 10, 19] {
             let file = File::new();
