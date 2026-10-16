@@ -27,6 +27,7 @@
     plan: 'Plan',
     execute: 'Execute',
     review: 'Review',
+    land: 'Land',
     diff: 'Diff',
     checkout: 'Checkout',
     workspace: 'Workspace',

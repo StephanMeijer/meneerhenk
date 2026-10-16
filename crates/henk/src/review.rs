@@ -2763,6 +2763,89 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #637: a run that waited for its rebase reviews what it pushed
+    /// itself, so the coordinator asks for no review of the rebased head
+    /// and drops the review that waited for the rebase: it was of the head
+    /// the rebase replaced. A rebase nobody waited for is followed by the
+    /// review of its head, as before.
+    #[tokio::test]
+    async fn a_rebase_its_caller_waited_for_is_followed_by_no_review_of_its_own() {
+        use henk_domain::queue::Decision;
+        use henk_domain::run::RunKind;
+
+        use crate::coordinator::Reason;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-rebase-awaited", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        // The only slot is taken, so the rebase waits and a review asked for
+        // meanwhile is held for it.
+        let _taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let target = request(&placeholder).target;
+        let rebased = |run: &RunId| ReviewRequest {
+            trigger: format!("rebased by run {run}"),
+            commit: Some(commit.clone()),
+            ..request(&placeholder)
+        };
+
+        for (caller_reviews, review_follows) in [(true, false), (false, true)] {
+            let (decision, rebase, _ended) =
+                coordinator.submit_rebase_awaited(target.clone(), "asked".to_owned(), None);
+            assert_eq!(decision, Decision::Start);
+            let (decision, held) = coordinator.submit_review(request(&placeholder), commit.clone());
+            assert_eq!(decision, Decision::After);
+            let waits = |kind| {
+                coordinator
+                    .slots()
+                    .waiting
+                    .iter()
+                    .filter(|w| w.kind == kind)
+                    .count()
+            };
+            assert_eq!(waits(RunKind::Review), 1, "the review is held");
+            assert!(
+                coordinator
+                    .slots()
+                    .waiting
+                    .iter()
+                    .any(|w| w.reason == Reason::AfterRebase && w.run == held)
+            );
+
+            coordinator.after_rebase_of(
+                &target,
+                review_follows.then(|| rebased(&rebase)),
+                caller_reviews,
+            );
+            if review_follows {
+                // The review of the rebased head was asked for; it queues
+                // behind the rebase that still holds its pull request here.
+                assert_eq!(waits(RunKind::Review), 1, "the review of the new head");
+            } else {
+                assert_eq!(
+                    waits(RunKind::Review),
+                    0,
+                    "the review that waited is dropped, and none is asked for"
+                );
+            }
+            assert!(
+                app.store.run(&held).await.unwrap().is_none(),
+                "the held review never ran"
+            );
+            assert!(coordinator.cancel(&rebase, "test".to_owned()));
+            for _ in 0..200 {
+                if coordinator.tracked_reviews() == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        app.shutdown.cancel();
+    }
+
     /// #580: a rebase waits ahead of every review, takes the place of the
     /// review of its pull request, and a review asked for meanwhile starts
     /// after it, as the run it was promised.

@@ -17,6 +17,11 @@
 //!   still replaces it. A pull request that a person took over, or that
 //!   another run reviews, hands the ticket run over: it ends well.
 //!
+//! * With `[autonomous] land` on, the run does not stop at a passed review:
+//!   the land stage (`land.rs`, #637) keeps the pull request landable,
+//!   rebasing it when the base has moved and reviewing the new head, until
+//!   the platform would merge it.
+//!
 //! The ticket run leaves exactly one comment on the issue when a step fails
 //! or hits a limit, saying which and why: the plan and execute runs are
 //! started quiet (`Comments::Caller`) and the review posts nothing on the
@@ -24,18 +29,21 @@
 //! on top of each step's own. A stage told to stop, by a person's cancel or
 //! the limit, is always waited for, so it writes its own ending.
 
+mod land;
+
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use henk_domain::land::Standing;
 use henk_domain::marker::ModelId;
 use henk_domain::plan_review::PlanStop;
 use henk_domain::queue::Decision;
 use henk_domain::review::{CheckConclusion, CommitSha, Stopped};
 use henk_domain::run::{RunId, RunKind};
-use henk_platform::{IssueTarget, IssueWriter};
+use henk_platform::{CiJob, IssueTarget, IssueWriter, ReviewTarget};
 use henk_store::{NewRun, RunStatus, Stage, StageState};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -51,6 +59,7 @@ use crate::ids::new_run_id;
 use crate::issue_runs::{Comments, IssueThread, OnIssue, RunFailed, open_issue};
 use crate::liveness::KeepAlive;
 use crate::plan::{PlanReport, PlanRequest, run_plan};
+use crate::rebase::RebaseReport;
 use crate::review::{
     CancelledBy, Interrupted, NotReviewable, ReviewReport, ReviewRequest, Superseded,
 };
@@ -88,6 +97,20 @@ pub struct Limits {
     pub run: Duration,
     /// For a stage told to stop to write its ending.
     pub grace: Duration,
+    /// The land stage's own, when it is on (#637).
+    pub land: Option<Land>,
+}
+
+/// What the land stage is allowed (#637).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Land {
+    /// For the whole stage, from when it starts: it waits for checks and
+    /// for other pull requests, so it has a time of its own.
+    pub timeout: Duration,
+    /// Between two looks at the pull request.
+    pub poll: Duration,
+    /// Rebases in all.
+    pub max_rebases: u32,
 }
 
 impl Limits {
@@ -104,6 +127,11 @@ impl Limits {
         Ok(Self {
             run: Duration::from_secs(autonomous.run_timeout_secs),
             grace: STOP_GRACE,
+            land: autonomous.land.then(|| Land {
+                timeout: Duration::from_secs(autonomous.land_timeout_secs),
+                poll: Duration::from_secs(autonomous.land_poll_secs),
+                max_rebases: autonomous.land_max_rebases,
+            }),
         })
     }
 }
@@ -117,10 +145,13 @@ pub enum Step {
     Execute,
     /// The reviewer and the executor review that pull request.
     Review,
+    /// The pull request is kept landable until it is ready to merge
+    /// (#637); only when `[autonomous] land` is on.
+    Land,
 }
 
 impl Step {
-    const ALL: [Self; 3] = [Self::Plan, Self::Execute, Self::Review];
+    const ALL: [Self; 4] = [Self::Plan, Self::Execute, Self::Review, Self::Land];
 
     /// The ticket run's stage for it.
     fn stage(self) -> Stage {
@@ -128,6 +159,7 @@ impl Step {
             Self::Plan => Stage::Plan,
             Self::Execute => Stage::Execute,
             Self::Review => Stage::Review,
+            Self::Land => Stage::Land,
         }
     }
 
@@ -137,6 +169,7 @@ impl Step {
             Self::Plan => "planning",
             Self::Execute => "execution",
             Self::Review => "the review",
+            Self::Land => "keeping the pull request landable",
         }
     }
 }
@@ -146,6 +179,9 @@ impl Step {
 pub enum Ending {
     /// The pull request was reviewed and the review passed.
     Passed,
+    /// The pull request was kept landable until the platform would merge
+    /// it (#637).
+    Ready,
     /// A person's work, or another run's, took over the pull request, so
     /// the ticket run's job is done; why.
     HandedOver(String),
@@ -166,7 +202,7 @@ impl Ending {
     /// Whether the ticket run did what it was asked.
     #[must_use]
     pub fn is_well(&self) -> bool {
-        matches!(self, Self::Passed | Self::HandedOver(_))
+        matches!(self, Self::Passed | Self::Ready | Self::HandedOver(_))
     }
 }
 
@@ -174,6 +210,7 @@ impl fmt::Display for Ending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Passed => f.write_str("the pull request was reviewed and the review passed"),
+            Self::Ready => f.write_str("the pull request is ready to merge"),
             Self::HandedOver(why) => write!(f, "handed over: {why}"),
             Self::Stopped { step, why } => {
                 write!(f, "stopped during {}: {why}", step.doing())
@@ -217,6 +254,26 @@ pub(crate) trait Stages: Send + Sync {
         RunId,
         oneshot::Receiver<anyhow::Result<ReviewReport>>,
     );
+
+    /// Rebases the pull request and leaves the review of what it pushed to
+    /// the caller (#637). The receiver answers when the decision is `Start`
+    /// or `Supersede`, as for [`Self::review`].
+    fn rebase(
+        &self,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<RebaseReport>>,
+    );
+
+    /// Where the pull request stands on the platform now (#637).
+    async fn standing(&self, target: &ReviewTarget) -> anyhow::Result<Standing>;
+
+    /// The checks on `head` (#637), without Henk's own.
+    async fn ci_jobs(&self, target: &ReviewTarget, head: &CommitSha) -> anyhow::Result<Vec<CiJob>>;
 
     /// Cancels a stage's run on behalf of `by`, as a person's cancel does.
     /// False when the run is not one running here.
@@ -270,6 +327,30 @@ impl Stages for Live {
         oneshot::Receiver<anyhow::Result<ReviewReport>>,
     ) {
         self.coordinator.submit_review_awaited(request, commit)
+    }
+
+    fn rebase(
+        &self,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<RebaseReport>>,
+    ) {
+        self.coordinator
+            .submit_rebase_awaited(target, trigger, requester)
+    }
+
+    async fn standing(&self, target: &ReviewTarget) -> anyhow::Result<Standing> {
+        let writer = self.coordinator.app().push_writer(&target.repo)?;
+        Ok(writer.pull_standing(target).await?)
+    }
+
+    async fn ci_jobs(&self, target: &ReviewTarget, head: &CommitSha) -> anyhow::Result<Vec<CiJob>> {
+        let reader = self.coordinator.app().ci_reader(&target.repo)?;
+        Ok(reader.jobs(target, head).await?)
     }
 
     fn stop(&self, run: &RunId, by: String) -> bool {
@@ -531,7 +612,12 @@ impl Ticket<'_> {
         );
         self.settled(Step::Execute, detail).await;
 
-        // The review of that pull request.
+        self.review_and_land(&opened, &pull).await
+    }
+
+    /// The review of the pull request the execute run opened, and with the
+    /// land stage on, what follows a passed one.
+    async fn review_and_land(&self, opened: &ExecuteReport, pull: &OpenedPullRequest) -> Ending {
         if let Some(ending) = self.halted(Step::Review) {
             return ending;
         }
@@ -552,9 +638,25 @@ impl Ticket<'_> {
                 .await
                 .unwrap_or_else(|_| Err(anyhow!("the review ended without a report")))
         };
-        match self.step(Step::Review, &review_run, work).await {
-            Stepped::Stopped(ending) => self.ended(Step::Review, ending).await,
-            Stepped::Returned(result) => self.ended(Step::Review, review_ending(result)).await,
+        let result = match self.step(Step::Review, &review_run, work).await {
+            Stepped::Stopped(ending) => return self.ended(Step::Review, ending).await,
+            Stepped::Returned(result) => result,
+        };
+        match (reviewed(result), self.limits.land) {
+            // With the land stage on, a passed review is not the end: the
+            // pull request is kept landable from here (#637). A review a
+            // newer commit or a rebase replaced goes on the same way: the
+            // stage looks at what the head is now.
+            (Reviewed::Passed(commit), Some(land)) => {
+                self.settled(Step::Review, "the review passed".to_owned())
+                    .await;
+                self.land(land, pull, Some(commit)).await
+            }
+            (Reviewed::Replaced(why), Some(land)) => {
+                self.settled(Step::Review, why).await;
+                self.land(land, pull, None).await
+            }
+            (reviewed, _) => self.ended(Step::Review, reviewed.into_ending()).await,
         }
     }
 
@@ -566,6 +668,17 @@ impl Ticket<'_> {
         &self,
         step: Step,
         child: &RunId,
+        work: impl Future<Output = anyhow::Result<T>>,
+    ) -> Stepped<T> {
+        self.step_until(step, child, self.deadline, work).await
+    }
+
+    /// [`Self::step`] with a time limit of its own: the land stage's.
+    async fn step_until<T>(
+        &self,
+        step: Step,
+        child: &RunId,
+        deadline: Instant,
         work: impl Future<Output = anyhow::Result<T>>,
     ) -> Stepped<T> {
         let mut work = std::pin::pin!(work);
@@ -580,7 +693,7 @@ impl Ticket<'_> {
                 // A shutdown has reached the stage's own token already.
                 None => Cause::Shutdown,
             },
-            () = tokio::time::sleep_until(self.deadline) => {
+            () = tokio::time::sleep_until(deadline) => {
                 self.stages.stop(child, LIMIT_BY.to_owned());
                 Cause::Limit
             }
@@ -601,16 +714,27 @@ impl Ticket<'_> {
             Cause::Shutdown => Ending::Interrupted,
             Cause::Limit => Ending::Stopped {
                 step,
-                why: format!(
-                    "the time limit of {}s for the whole run was reached",
-                    self.limits.run.as_secs()
-                ),
+                why: match (step, self.limits.land) {
+                    (Step::Land, Some(land)) => format!(
+                        "the time limit of {}s for keeping the pull request landable was reached",
+                        land.timeout.as_secs()
+                    ),
+                    _ => format!(
+                        "the time limit of {}s for the whole run was reached",
+                        self.limits.run.as_secs()
+                    ),
+                },
             },
         }
     }
 
     /// Whether the run has to stop before `step` starts.
     fn halted(&self, step: Step) -> Option<Ending> {
+        self.halted_until(step, self.deadline)
+    }
+
+    /// [`Self::halted`] with a time limit of its own: the land stage's.
+    fn halted_until(&self, step: Step, deadline: Instant) -> Option<Ending> {
         if self.cancel.is_cancelled() {
             return Some(
                 self.ending_for(
@@ -622,7 +746,7 @@ impl Ticket<'_> {
                 ),
             );
         }
-        (Instant::now() >= self.deadline).then(|| self.ending_for(step, Cause::Limit))
+        (Instant::now() >= deadline).then(|| self.ending_for(step, Cause::Limit))
     }
 
     /// What the stage runs record as their trigger.
@@ -666,6 +790,7 @@ impl Ticket<'_> {
     async fn ended(&self, step: Step, ending: Ending) -> Ending {
         let (state, detail) = match &ending {
             Ending::Passed => (StageState::Done, "the review passed".to_owned()),
+            Ending::Ready => (StageState::Done, "ready to merge".to_owned()),
             Ending::HandedOver(why) => (StageState::Done, why.clone()),
             Ending::Stopped { why, .. } => (StageState::Failed, why.clone()),
             Ending::Cancelled(by) => (StageState::Skipped, cancelled_reason(by)),
@@ -679,11 +804,17 @@ impl Ticket<'_> {
     async fn conclude(&self, ending: &Ending, progress: &Progress) -> anyhow::Result<()> {
         let store = &*self.app.store;
         match ending {
-            Ending::Passed | Ending::HandedOver(_) => {
+            Ending::Passed | Ending::Ready | Ending::HandedOver(_) => {
                 let summary = match (ending, &progress.pull) {
                     (Ending::Passed, Some(pull)) => {
                         format!(
                             "pull request #{} reviewed and passed: {}",
+                            pull.target.number, pull.url
+                        )
+                    }
+                    (Ending::Ready, Some(pull)) => {
+                        format!(
+                            "pull request #{} is ready to merge: {}",
                             pull.target.number, pull.url
                         )
                     }
@@ -717,6 +848,9 @@ impl Ticket<'_> {
         let store = &*self.app.store;
         let begun = store.stages(&self.run).await.unwrap_or_default();
         for step in Step::ALL {
+            if step == Step::Land && self.limits.land.is_none() {
+                continue;
+            }
             if !begun.iter().any(|s| s.stage == step.stage()) {
                 stages::mark(
                     store,
@@ -767,19 +901,43 @@ fn from_error(step: Step, error: &anyhow::Error) -> Ending {
     Ending::Stopped { step, why }
 }
 
-/// How a review's report, or error, ends the ticket run.
-fn review_ending(result: anyhow::Result<ReviewReport>) -> Ending {
-    let stopped = |why: String| Ending::Stopped {
-        step: Step::Review,
-        why,
+/// How the review stage went.
+enum Reviewed {
+    /// The review passed, at this commit.
+    Passed(CommitSha),
+    /// A newer commit or a rebase replaced the review; the pull request goes
+    /// on. Why, for the stage.
+    Replaced(String),
+    /// Anything else ends the ticket run so.
+    Ended(Ending),
+}
+
+impl Reviewed {
+    /// The ending of a ticket run that goes no further than the review.
+    fn into_ending(self) -> Ending {
+        match self {
+            Self::Passed(_) => Ending::Passed,
+            Self::Replaced(why) => Ending::HandedOver(why),
+            Self::Ended(ending) => ending,
+        }
+    }
+}
+
+/// How a review's report, or error, ends the review stage.
+fn reviewed(result: anyhow::Result<ReviewReport>) -> Reviewed {
+    let stopped = |why: String| {
+        Reviewed::Ended(Ending::Stopped {
+            step: Step::Review,
+            why,
+        })
     };
     match result {
         Ok(report) => match report.outcome {
-            Some(outcome) if outcome.stopped == Some(Stopped::Superseded) => Ending::HandedOver(
+            Some(outcome) if outcome.stopped == Some(Stopped::Superseded) => Reviewed::Replaced(
                 "a newer commit replaced the review of the pull request".to_owned(),
             ),
             Some(outcome) if outcome.check_conclusion() == CheckConclusion::Success => {
-                Ending::Passed
+                Reviewed::Passed(outcome.commit)
             }
             Some(outcome) => stopped(outcome.headline()),
             None => stopped(
@@ -790,11 +948,11 @@ fn review_ending(result: anyhow::Result<ReviewReport>) -> Ending {
         },
         Err(error) => {
             if let Some(CancelledBy(by)) = error.downcast_ref::<CancelledBy>() {
-                Ending::Cancelled(by.clone())
+                Reviewed::Ended(Ending::Cancelled(by.clone()))
             } else if error.is::<Interrupted>() {
-                Ending::Interrupted
+                Reviewed::Ended(Ending::Interrupted)
             } else if error.is::<Superseded>() {
-                Ending::HandedOver(
+                Reviewed::Replaced(
                     "a newer commit or a rebase replaced the review of the pull request".to_owned(),
                 )
             } else if let Some(NotReviewable(why)) = error.downcast_ref::<NotReviewable>() {
@@ -850,7 +1008,7 @@ mod tests {
     use crate::listeners::testing::FakeWriter;
     use crate::plan_tools::tests::FakeIssueWriter;
 
-    const CONFIG: &str = r#"
+    pub(super) const CONFIG: &str = r#"
 [discord]
 channel_id = 1
 henk_user_id = 2
@@ -893,7 +1051,7 @@ model = "m"
 requester_id = 3
 "#;
 
-    const TICKET: &str = "r-ticket";
+    pub(super) const TICKET: &str = "r-ticket";
 
     /// The repository's way in, which a ticket run only checks is there.
     struct NoPush;
@@ -950,12 +1108,12 @@ requester_id = 3
         }
     }
 
-    struct Fixture {
-        app: App,
-        issue: Arc<FakeIssueWriter>,
+    pub(super) struct Fixture {
+        pub(super) app: App,
+        pub(super) issue: Arc<FakeIssueWriter>,
     }
 
-    fn fixture_on(config: &str) -> Fixture {
+    pub(super) fn fixture_on(config: &str) -> Fixture {
         let settings = Config::parse(config)
             .and_then(Config::into_settings)
             .unwrap_or_else(|e| panic!("{e}"));
@@ -995,15 +1153,15 @@ requester_id = 3
         }
     }
 
-    fn fixture() -> Fixture {
+    pub(super) fn fixture() -> Fixture {
         fixture_on(CONFIG)
     }
 
-    fn repo() -> RepoRef {
+    pub(super) fn repo() -> RepoRef {
         RepoRef::parse(Platform::GitHub, "o/r").unwrap()
     }
 
-    fn request() -> TicketRequest {
+    pub(super) fn request() -> TicketRequest {
         TicketRequest {
             target: IssueTarget {
                 repo: repo(),
@@ -1020,14 +1178,15 @@ requester_id = 3
         Limits {
             run: Duration::from_mins(1),
             grace: Duration::from_millis(100),
+            land: None,
         }
     }
 
-    fn sha() -> CommitSha {
+    pub(super) fn sha() -> CommitSha {
         CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap()
     }
 
-    fn converged() -> PlanReport {
+    pub(super) fn converged() -> PlanReport {
         PlanReport {
             run: RunId::parse("r-plan").unwrap(),
             planned: true,
@@ -1036,7 +1195,7 @@ requester_id = 3
         }
     }
 
-    fn opened() -> ExecuteReport {
+    pub(super) fn opened() -> ExecuteReport {
         ExecuteReport {
             run: RunId::parse("r-exec").unwrap(),
             pull: OpenedPullRequest {
@@ -1051,7 +1210,7 @@ requester_id = 3
     }
 
     /// A review that passed: nothing in the diff left to review.
-    fn passed() -> ReviewReport {
+    pub(super) fn passed() -> ReviewReport {
         ReviewReport {
             run: RunId::parse("r-review").unwrap(),
             outcome: Some(ReviewOutcome {
@@ -1231,6 +1390,27 @@ requester_id = 3
             }
         }
 
+        fn rebase(
+            &self,
+            _: ReviewTarget,
+            _: String,
+            _: Option<String>,
+        ) -> (
+            Decision,
+            RunId,
+            oneshot::Receiver<anyhow::Result<RebaseReport>>,
+        ) {
+            unreachable!("these tests run without the land stage");
+        }
+
+        async fn standing(&self, _: &ReviewTarget) -> anyhow::Result<Standing> {
+            unreachable!("these tests run without the land stage");
+        }
+
+        async fn ci_jobs(&self, _: &ReviewTarget, _: &CommitSha) -> anyhow::Result<Vec<CiJob>> {
+            unreachable!("these tests run without the land stage");
+        }
+
         fn stop(&self, run: &RunId, by: String) -> bool {
             self.stopped.lock().unwrap().push((run.clone(), by.clone()));
             if let Some(tell) = self.held.lock().unwrap().take() {
@@ -1255,7 +1435,7 @@ requester_id = 3
             .unwrap()
     }
 
-    async fn record(f: &Fixture) -> henk_store::RunRecord {
+    pub(super) async fn record(f: &Fixture) -> henk_store::RunRecord {
         f.app
             .store
             .run(&RunId::parse(TICKET).unwrap())
@@ -1264,7 +1444,7 @@ requester_id = 3
             .unwrap()
     }
 
-    async fn stage_states(f: &Fixture) -> Vec<(Stage, StageState)> {
+    pub(super) async fn stage_states(f: &Fixture) -> Vec<(Stage, StageState)> {
         f.app
             .store
             .stages(&RunId::parse(TICKET).unwrap())
@@ -1275,7 +1455,7 @@ requester_id = 3
             .collect()
     }
 
-    fn comments(f: &Fixture) -> Vec<String> {
+    pub(super) fn comments(f: &Fixture) -> Vec<String> {
         f.issue.comments.lock().unwrap().clone()
     }
 
@@ -1737,6 +1917,7 @@ requester_id = 3
         let limits = Limits {
             run: Duration::from_secs(1),
             grace: Duration::from_secs(5),
+            land: None,
         };
         let report = run_ticket(&f.app, &stages, request(), cancel, limits)
             .await

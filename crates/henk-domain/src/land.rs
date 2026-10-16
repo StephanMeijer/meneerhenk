@@ -78,14 +78,23 @@ pub struct Facts {
 pub struct Ledger {
     /// The head a review passed.
     pub reviewed: Option<CommitSha>,
-    /// The head Henk's last rebase left: the platform may take a while to
-    /// see it, and a second rebase of the same head would change nothing.
+    /// The head Henk's last rebase left: the platform may take a moment to
+    /// see it, and a second rebase of the same head right away would change
+    /// nothing.
     pub rebased: Option<CommitSha>,
+    /// Looks at the pull request since that rebase. The base may move again,
+    /// so the head is rebased again once the platform has had
+    /// [`REBASE_LAG_LOOKS`] looks to catch up.
+    pub rebase_looks: u32,
     /// Rebases made.
     pub rebases: u32,
     /// Fixes of failing checks made.
     pub ci_fixes: u32,
 }
+
+/// Looks at a pull request after a rebase before a branch the platform still
+/// says must catch up counts as behind again.
+pub const REBASE_LAG_LOOKS: u32 = 2;
 
 /// How many times the stage tries each thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +155,9 @@ pub fn decide(facts: &Facts, ledger: &Ledger, limits: &Limits) -> Action {
             return Action::End(End::HandedOver("it was made a draft".to_owned()));
         }
         MergeState::NeedsRebase | MergeState::Conflicts => {
-            if ledger.rebased.as_ref() == Some(&standing.head) {
+            if ledger.rebased.as_ref() == Some(&standing.head)
+                && ledger.rebase_looks < REBASE_LAG_LOOKS
+            {
                 return Action::Wait("the platform has not yet seen the rebased branch".to_owned());
             }
             if !facts.rebases_allowed {
@@ -332,19 +343,27 @@ mod tests {
     #[test]
     fn the_head_a_rebase_left_is_not_rebased_again_while_the_platform_catches_up() {
         let behind = with_state(MergeState::NeedsRebase);
-        let rebased = Ledger {
+        let rebased = |rebase_looks| Ledger {
             rebased: Some(sha('a')),
             rebases: 1,
+            rebase_looks,
             ..Ledger::default()
         };
-        assert!(matches!(
-            decide(&behind, &rebased, &LIMITS),
-            Action::Wait(_)
-        ));
-        // A new head after that is rebased again.
+        for looks in 0..REBASE_LAG_LOOKS {
+            assert!(
+                matches!(decide(&behind, &rebased(looks), &LIMITS), Action::Wait(_)),
+                "look {looks}"
+            );
+        }
+        // The base may have moved again meanwhile: after that it is rebased.
+        assert_eq!(
+            decide(&behind, &rebased(REBASE_LAG_LOOKS), &LIMITS),
+            Action::Rebase
+        );
+        // A new head is rebased at once.
         let mut moved = behind;
         moved.standing.head = sha('b');
-        assert_eq!(decide(&moved, &rebased, &LIMITS), Action::Rebase);
+        assert_eq!(decide(&moved, &rebased(0), &LIMITS), Action::Rebase);
     }
 
     #[test]
