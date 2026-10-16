@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.13](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.12...v0.4.13) - 2026-10-16
+
+### Added
+
+- *(events)* a push to the default branch is an event ([#579](https://github.com/StephanMeijer/meneerhenk/pull/579))
+
+### Fixed
+
+- *(events)* a GitLab tag push is ignored as not a branch
+
+### Other
+
+- Merge pull request #602 from StephanMeijer/feat/push-event
+
 ## [0.4.12](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.11...v0.4.12) - 2026-10-16
 
 ### Added
