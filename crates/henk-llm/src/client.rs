@@ -208,7 +208,8 @@ pub struct ModelConfig {
     pub token_source: Option<Arc<dyn TokenSource>>,
     /// The model name sent to the endpoint.
     pub model: String,
-    /// Default output cap when a request sets none.
+    /// Default output cap when a request sets none. Not sent with a
+    /// `token_source`: a ChatGPT plan takes no cap.
     pub max_tokens: u32,
     /// Per-attempt timeout.
     pub timeout: Duration,

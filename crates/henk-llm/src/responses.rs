@@ -248,8 +248,9 @@ fn failure(error: Option<&Value>) -> LlmError {
 ///
 /// Returns [`LlmError::RateLimited`], [`LlmError::Server`] or
 /// [`LlmError::BadRequest`] for a response whose `status` is `failed`
-/// (the first two are retried), and [`LlmError::Decode`] when it has no
-/// `output` or an unreadable item.
+/// (the first two are retried), [`LlmError::PlanUsageExhausted`] or
+/// [`LlmError::PlanNotEligible`] for the codes of a ChatGPT plan, and
+/// [`LlmError::Decode`] when it has no `output` or an unreadable item.
 pub fn decode(response: &Value) -> Result<Completion, LlmError> {
     let status = response.get("status").and_then(Value::as_str);
     if status == Some("failed") {
