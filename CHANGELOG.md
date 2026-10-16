@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.12](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.11...v0.4.12) - 2026-10-16
+
+### Added
+
+- *(store)* the runs and stages on the new layer ([#605](https://github.com/StephanMeijer/meneerhenk/pull/605))
+
+### Fixed
+
+- *(store)* give an in-memory SqliteStore a new private directory
+- *(store)* refuse PostgreSQL sslmode prefer, allow and unset
+- *(store)* box the first connection, and let a test wait for the event it needs ([#605](https://github.com/StephanMeijer/meneerhenk/pull/605))
+
+### Other
+
+- Merge pull request #616 from StephanMeijer/feat/store-runs
+- two tests that assumed the store answers at once ([#605](https://github.com/StephanMeijer/meneerhenk/pull/605))
+
 ## [0.4.11](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.10...v0.4.11) - 2026-10-16
 
 ### Fixed
