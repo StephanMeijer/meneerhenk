@@ -17,8 +17,13 @@
 //!   never rebases a head twice while the platform catches up.
 //! * **Never "ready" by guessing.** It is ready when the platform says the
 //!   pull request can merge, the head's review passed and its checks are
-//!   green. Failing checks stop the stage for now: Henk cannot fix them yet
-//!   (#583).
+//!   green.
+//! * **Failing checks are fixed, a few times.** A check that ended in failure
+//!   has the executor read it and fix the code (`fix_ci.rs`, #583); the
+//!   stage reviews the fix like any head and waits for the new checks. A fix
+//!   that pushes nothing, a failure the executor calls not about the code,
+//!   checks that were cancelled or timed out, and the limit all stop the
+//!   stage, with a comment saying which.
 //!
 //! The stage ends in "ready to merge"; merging stays a person's.
 
@@ -29,13 +34,14 @@ use anyhow::anyhow;
 use henk_domain::land::{Action, CiState, End, Facts, Ledger, Limits as Tries, MergeState, decide};
 use henk_domain::queue::Decision;
 use henk_domain::review::CommitSha;
-use henk_platform::{CiConclusion, CiJob, CiStatus, ReviewTarget};
+use henk_platform::{CiJob, ReviewTarget};
 use henk_store::{Stage, StageState};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
 use super::{Ending, Land, Reviewed, Step, Stepped, Ticket, from_error, reviewed};
 use crate::execute::OpenedPullRequest;
+use crate::fix_ci::FixOutcome;
 use crate::review::ReviewRequest;
 use crate::stages;
 
@@ -81,8 +87,7 @@ impl Ticket<'_> {
         let target = &pull.target;
         let tries = Tries {
             max_rebases: land.max_rebases,
-            // Henk cannot fix failing checks yet (#583).
-            max_ci_fixes: 0,
+            max_ci_fixes: land.max_ci_fixes,
         };
         let mut known = HashSet::from([pull.commit.clone()]);
         known.extend(reviewed.clone());
@@ -134,11 +139,13 @@ impl Ticket<'_> {
                 }
                 Action::End(End::Stuck(why)) => return self.stuck(why).await,
                 Action::FixCi(names) => {
-                    let why = format!(
-                        "checks failed: {}; fixing them is not available yet",
-                        names.join(", ")
-                    );
-                    return self.stuck(why).await;
+                    watch.waited_for = None;
+                    if let Some(ending) = self
+                        .fix_ci(land, deadline, target, (&head, &names), &mut watch)
+                        .await
+                    {
+                        return ending;
+                    }
                 }
                 Action::Wait(why) => {
                     self.waiting(&mut watch, &why, &head).await;
@@ -198,6 +205,11 @@ impl Ticket<'_> {
                 watch.ledger.reviewed = Some(head.clone());
             }
         }
+        // A head Henk pushed from another run, such as a fix asked for by a
+        // person, is his own whoever started that run.
+        if self.app.own_pushes.has(head.as_str()) {
+            watch.known.insert(head.clone());
+        }
         let needs_rebase = matches!(
             standing.state,
             MergeState::NeedsRebase | MergeState::Conflicts
@@ -214,18 +226,15 @@ impl Ticket<'_> {
         } else {
             CiState::None
         };
-        let rebases_allowed = self
-            .app
-            .settings
-            .roles
-            .executor
-            .as_ref()
-            .is_some_and(|executor| executor.rebases(&target.repo));
+        let executor = self.app.settings.roles.executor.as_ref();
+        let rebases_allowed = executor.is_some_and(|executor| executor.rebases(&target.repo));
+        let fixes_allowed = executor.is_some_and(|executor| executor.fixes_ci(&target.repo));
         Ok(Facts {
             head_is_ours: watch.known.contains(&head),
             standing,
             ci,
             rebases_allowed,
+            fixes_allowed,
         })
     }
 
@@ -285,6 +294,89 @@ impl Ticket<'_> {
                 watch.ledger.rebased = Some(left);
                 watch.ledger.rebase_looks = 0;
                 None
+            }
+        }
+    }
+
+    /// Has the executor fix the failing checks `failing` of `head` and waits
+    /// for it. `None` to look again, or the ending.
+    ///
+    /// Every try counts, whatever came of it: the limit is on the tries. A
+    /// fix that pushed has its head reviewed on the next look, and its checks
+    /// read after that. One that pushed nothing ends the stage, since the
+    /// same head would only be tried again.
+    async fn fix_ci(
+        &self,
+        land: Land,
+        deadline: Instant,
+        target: &ReviewTarget,
+        (head, failing): (&CommitSha, &[String]),
+        watch: &mut Watch,
+    ) -> Option<Ending> {
+        let (decision, run, ended) = self.stages.fix_ci(
+            target.clone(),
+            self.trigger(),
+            self.request.requester.clone(),
+        );
+        if matches!(decision, Decision::Join | Decision::After) {
+            // Another run is changing this pull request's head: a rebase, or
+            // a fix somebody asked for. Its result shows in the next look.
+            self.nap(land.poll, deadline).await;
+            return None;
+        }
+        self.link_land_child(&run).await;
+        self.mark_land(
+            StageState::Running,
+            format!("fixing failing checks ({}): run {run}", failing.join(", ")),
+        )
+        .await;
+        let work = async move {
+            ended
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("the fix ended without a report")))
+        };
+        match self.step_until(Step::Land, &run, deadline, work).await {
+            Stepped::Stopped(ending) => Some(self.ended(Step::Land, ending).await),
+            Stepped::Returned(Err(error)) => {
+                Some(self.ended(Step::Land, from_error(Step::Land, &error)).await)
+            }
+            Stepped::Returned(Ok(report)) => {
+                watch.ledger.ci_fixes += 1;
+                let named = failing.join(", ");
+                match report.outcome {
+                    FixOutcome::Pushed {
+                        head: fixed,
+                        commits,
+                        ..
+                    } => {
+                        self.note(&format!(
+                            "land: fixed the failing checks ({named}), run {run}: {commits} commit(s), head {} is now {}",
+                            head.short(),
+                            fixed.short()
+                        ))
+                        .await;
+                        watch.known.insert(fixed);
+                        None
+                    }
+                    FixOutcome::Idle(why) => {
+                        self.note(&format!(
+                            "land: fix run {run} found nothing to fix on {}: {why}",
+                            head.short()
+                        ))
+                        .await;
+                        None
+                    }
+                    FixOutcome::NotCode { reason, .. } => Some(
+                        self.stuck(format!(
+                            "checks failed: {named}; they do not look like a problem in the code: {reason}"
+                        ))
+                        .await,
+                    ),
+                    FixOutcome::NoFix { why, .. } => Some(
+                        self.stuck(format!("checks failed: {named}; I could not fix them: {why}"))
+                            .await,
+                    ),
+                }
             }
         }
     }
@@ -431,22 +523,24 @@ fn ci_state(jobs: &[CiJob], age: Duration) -> CiState {
             CiState::None
         };
     }
-    let red: Vec<String> = jobs
-        .iter()
-        .filter(|job| {
-            job.status == CiStatus::Completed
-                && matches!(
-                    job.conclusion,
-                    Some(CiConclusion::Failure | CiConclusion::Cancelled | CiConclusion::TimedOut)
-                )
-        })
-        .map(|job| job.name.clone())
-        .collect();
-    if !red.is_empty() {
-        return CiState::Red(red);
+    let names = |wanted: fn(&CiJob) -> bool| -> Vec<String> {
+        jobs.iter()
+            .filter(|job| wanted(job))
+            .map(|job| job.name.clone())
+            .collect()
+    };
+    let failed = names(CiJob::failed);
+    if !failed.is_empty() {
+        return CiState::Red(failed);
     }
-    if jobs.iter().any(|job| job.status != CiStatus::Completed) {
+    if jobs.iter().any(|job| !job.finished()) {
         return CiState::Pending;
+    }
+    // Only now: a check cancelled by a newer run of the same workflow is
+    // followed by that run's checks, which are pending until they end.
+    let interrupted = names(CiJob::interrupted);
+    if !interrupted.is_empty() {
+        return CiState::Interrupted(interrupted);
     }
     CiState::Green
 }
@@ -468,16 +562,18 @@ mod tests {
     use henk_domain::land::{REBASE_LAG_LOOKS, Standing};
     use henk_domain::review::ReviewOutcome;
     use henk_domain::run::RunId;
-    use henk_platform::CiJobId;
+    use henk_platform::{CiConclusion, CiJobId, CiStatus};
     use henk_store::RunStatus;
     use tokio::sync::oneshot;
 
     use super::super::tests::{
-        TICKET, comments, converged, fixture, opened, record, request, sha, stage_states,
+        CONFIG, TICKET, comments, converged, fixture, fixture_on, opened, record, request, sha,
+        stage_states,
     };
     use super::super::{Limits, Stages, TicketReport, run_ticket};
     use super::*;
     use crate::execute::{ExecuteReport, ExecuteRequest};
+    use crate::fix_ci::FixCiReport;
     use crate::issue_runs::RunFailed;
     use crate::plan::{PlanReport, PlanRequest};
     use crate::rebase::RebaseReport;
@@ -517,13 +613,36 @@ mod tests {
             CiState::Green,
             "a failure the pipeline allows is not red"
         );
-        for (name, conclusion) in [("x", Failure), ("y", Cancelled), ("z", TimedOut)] {
-            assert_eq!(
-                ci_state(&[done("ok", Success), done(name, conclusion)], old),
-                CiState::Red(vec![name.to_owned()]),
-                "{conclusion:?}"
-            );
-        }
+        assert_eq!(
+            ci_state(&[done("ok", Success), done("x", Failure)], old),
+            CiState::Red(vec!["x".to_owned()])
+        );
+        // Not the code's fault, so not red: a person looks.
+        assert_eq!(
+            ci_state(
+                &[
+                    done("ok", Success),
+                    done("y", Cancelled),
+                    done("z", TimedOut)
+                ],
+                old
+            ),
+            CiState::Interrupted(vec!["y".to_owned(), "z".to_owned()])
+        );
+        // A failure is fixed even beside a cancelled check, and a cancelled
+        // check beside a running one is not given up on: the newer run that
+        // cancelled it is still going.
+        assert_eq!(
+            ci_state(&[done("y", Cancelled), done("x", Failure)], old),
+            CiState::Red(vec!["x".to_owned()])
+        );
+        assert_eq!(
+            ci_state(
+                &[done("y", Cancelled), job("b", CiStatus::Queued, None)],
+                old
+            ),
+            CiState::Pending
+        );
         assert_eq!(
             ci_state(
                 &[done("a", Success), job("b", CiStatus::InProgress, None)],
@@ -571,8 +690,20 @@ mod tests {
         Replaced,
     }
 
-    /// A pull request whose head moves with each rebase, and the runs the
-    /// land stage asks for.
+    /// How a scripted fix of failing checks ends.
+    enum Fix {
+        /// Pushes a commit: the head moves.
+        Pushes,
+        /// Ends with this outcome and pushes nothing.
+        Ends(FixOutcome),
+        /// Joins a run that is under way: nobody here waits for it.
+        Joins,
+        /// Fails.
+        Fails(&'static str),
+    }
+
+    /// A pull request whose head moves with each rebase and each fix, and
+    /// the runs the land stage asks for.
     struct Landing {
         /// How many rebases made the head.
         rebased: Mutex<usize>,
@@ -584,6 +715,14 @@ mod tests {
         jobs: Mutex<Vec<CiJob>>,
         reviews: Mutex<VecDeque<Review>>,
         rebases: Mutex<VecDeque<anyhow::Result<()>>>,
+        /// How the fixes of failing checks end, in order.
+        fixes: Mutex<VecDeque<Fix>>,
+        /// The checks on the head each pushed fix leaves, in order; green
+        /// when there are none left.
+        checks_after_fix: Mutex<VecDeque<Vec<CiJob>>>,
+        /// Somebody else pushes a commit at this read of the platform: the
+        /// head moves and its checks are green.
+        pushed_at_read: Mutex<Option<u32>>,
         calls: Mutex<Vec<String>>,
         reviewed: Mutex<Vec<CommitSha>>,
         merged: Mutex<bool>,
@@ -603,6 +742,9 @@ mod tests {
                 jobs: Mutex::new(vec![green()]),
                 reviews: Mutex::new(VecDeque::new()),
                 rebases: Mutex::new(VecDeque::new()),
+                fixes: Mutex::new(VecDeque::new()),
+                checks_after_fix: Mutex::new(VecDeque::new()),
+                pushed_at_read: Mutex::new(None),
                 calls: Mutex::new(Vec::new()),
                 reviewed: Mutex::new(Vec::new()),
                 merged: Mutex::new(false),
@@ -622,6 +764,15 @@ mod tests {
 
         fn reviewed(&self) -> Vec<CommitSha> {
             self.reviewed.lock().unwrap().clone()
+        }
+
+        fn with_fix(self, fix: Fix) -> Self {
+            self.fixes.lock().unwrap().push_back(fix);
+            self
+        }
+
+        fn fixes_asked(&self) -> usize {
+            self.calls().iter().filter(|c| *c == "fix_ci").count()
         }
 
         fn with_review(self, review: Review) -> Self {
@@ -727,8 +878,72 @@ mod tests {
             (Decision::Start, run, ended)
         }
 
+        fn fix_ci(
+            &self,
+            _: ReviewTarget,
+            trigger: String,
+            _: Option<String>,
+        ) -> (
+            Decision,
+            RunId,
+            oneshot::Receiver<anyhow::Result<FixCiReport>>,
+        ) {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push("fix_ci".to_owned());
+            assert!(trigger.contains(TICKET), "{trigger}");
+            let run = RunId::parse(format!("r-fix-{}", calls.len())).unwrap();
+            let (tell, ended) = oneshot::channel();
+            let fix = self
+                .fixes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a fix is scripted");
+            let report = |outcome| FixCiReport {
+                run: run.clone(),
+                target: opened().pull.target,
+                outcome,
+            };
+            let checks = vec!["clippy".to_owned()];
+            match fix {
+                Fix::Joins => return (Decision::Join, run, ended),
+                Fix::Fails(why) => {
+                    let _ = tell.send(Err(anyhow!(why)));
+                }
+                Fix::Ends(outcome) => {
+                    let _ = tell.send(Ok(report(outcome)));
+                }
+                Fix::Pushes => {
+                    let mut moved = self.rebased.lock().unwrap();
+                    *moved += 1;
+                    let after = self
+                        .checks_after_fix
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or_else(|| vec![green()]);
+                    *self.jobs.lock().unwrap() = after;
+                    let _ = tell.send(Ok(report(FixOutcome::Pushed {
+                        checks,
+                        summary: "It returns 3 now.".to_owned(),
+                        head: head(*moved),
+                        commits: 1,
+                    })));
+                }
+            }
+            (Decision::Start, run, ended)
+        }
+
         async fn standing(&self, _: &ReviewTarget) -> anyhow::Result<Standing> {
-            *self.reads.lock().unwrap() += 1;
+            let read = {
+                let mut reads = self.reads.lock().unwrap();
+                *reads += 1;
+                *reads
+            };
+            if *self.pushed_at_read.lock().unwrap() == Some(read) {
+                *self.rebased.lock().unwrap() = 1;
+                *self.jobs.lock().unwrap() = vec![green()];
+            }
             {
                 let mut unreadable = self.unreadable.lock().unwrap();
                 if *unreadable > 0 {
@@ -772,6 +987,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             poll: Duration::from_millis(5),
             max_rebases: 3,
+            max_ci_fixes: 3,
         }
     }
 
@@ -924,12 +1140,237 @@ mod tests {
         assert!(comments(&f).is_empty());
     }
 
+    async fn land_events(f: &super::super::tests::Fixture) -> Vec<String> {
+        f.app
+            .store
+            .events(&RunId::parse(TICKET).unwrap())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|event| event.message)
+            .filter(|message| message.starts_with("land: "))
+            .collect()
+    }
+
+    /// #583: failing checks have the executor fix the code; the fixed head
+    /// is reviewed like any other and its checks decide.
+    #[tokio::test]
+    async fn failing_checks_are_fixed_the_fix_reviewed_and_the_stage_ends_ready() {
+        let f = fixture();
+        let stages = Landing::mergeable().with_fix(Fix::Pushes);
+        *stages.jobs.lock().unwrap() = vec![green(), red("clippy")];
+        let report = go(&f, &stages, quick()).await;
+
+        assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
+        assert_eq!(
+            stages.calls(),
+            ["plan", "execute", "review", "fix_ci", "review"]
+        );
+        assert_eq!(
+            stages.reviewed(),
+            [head(0), head(1)],
+            "the fixed head is reviewed, not the old one"
+        );
+        let events = land_events(&f).await;
+        assert!(
+            events[0].starts_with("land: fixed the failing checks (clippy), run r-fix-"),
+            "{events:?}"
+        );
+        assert!(events[0].contains("1 commit(s)"), "{events:?}");
+        assert!(comments(&f).is_empty(), "{:?}", comments(&f));
+        assert_eq!(record(&f).await.status, RunStatus::Finished);
+    }
+
+    /// A fix that pushes nothing, or a failure the executor says is not the
+    /// code's, ends the stage at once, since the same head would only be
+    /// tried again; the comment says why.
+    #[tokio::test]
+    async fn a_fix_that_pushes_nothing_stops_the_stage_with_the_reason() {
+        let checks = vec!["clippy".to_owned()];
+        for (outcome, says) in [
+            (
+                FixOutcome::NoFix {
+                    checks: checks.clone(),
+                    why: "the executor ended without proposing a fix".to_owned(),
+                },
+                "checks failed: clippy; I could not fix them: the executor ended without proposing a fix",
+            ),
+            (
+                FixOutcome::NotCode {
+                    checks: checks.clone(),
+                    reason: "the runner was lost.".to_owned(),
+                },
+                "checks failed: clippy; they do not look like a problem in the code: the runner was lost.",
+            ),
+        ] {
+            let f = fixture();
+            let stages = Landing::mergeable().with_fix(Fix::Ends(outcome));
+            *stages.jobs.lock().unwrap() = vec![green(), red("clippy")];
+            let report = go(&f, &stages, quick()).await;
+
+            assert!(
+                matches!(&report.ending, Ending::Stopped { step: Step::Land, why } if why.contains(says)),
+                "{:?}",
+                report.ending
+            );
+            assert_eq!(stages.fixes_asked(), 1);
+            assert_eq!(stages.reviewed(), [head(0)], "nothing new to review");
+            let posted = comments(&f);
+            assert_eq!(posted.len(), 1, "{posted:?}");
+            assert!(posted[0].contains(says), "{}", posted[0]);
+            assert_eq!(record(&f).await.status, RunStatus::Failed);
+        }
+    }
+
+    #[tokio::test]
+    async fn fixes_stop_at_the_limit_and_the_comment_counts_them() {
+        let f = fixture();
+        // Every fix pushes, and the checks stay red.
+        let stages = Landing::mergeable()
+            .with_fix(Fix::Pushes)
+            .with_fix(Fix::Pushes);
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        stages
+            .checks_after_fix
+            .lock()
+            .unwrap()
+            .extend([vec![red("clippy")], vec![red("clippy")]]);
+        let two = Land {
+            max_ci_fixes: 2,
+            ..quick()
+        };
+        let report = go(&f, &stages, two).await;
+
+        assert_eq!(
+            report.ending,
+            Ending::Stopped {
+                step: Step::Land,
+                why: "checks failed after 2 fixes: clippy".to_owned()
+            }
+        );
+        assert_eq!(
+            stages.calls(),
+            [
+                "plan", "execute", "review", "fix_ci", "review", "fix_ci", "review"
+            ]
+        );
+        assert_eq!(stages.reviewed(), [head(0), head(1), head(2)]);
+        assert_eq!(comments(&f).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_timed_out_checks_stop_the_stage_without_a_fix() {
+        let f = fixture();
+        let stages = Landing::mergeable();
+        *stages.jobs.lock().unwrap() = vec![
+            green(),
+            job("test", CiStatus::Completed, Some(CiConclusion::Cancelled)),
+        ];
+        let report = go(&f, &stages, quick()).await;
+
+        assert!(
+            matches!(&report.ending, Ending::Stopped { step: Step::Land, why } if why.starts_with("checks did not finish: test;")),
+            "{:?}",
+            report.ending
+        );
+        assert_eq!(stages.fixes_asked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_turned_fixing_off_is_not_fixed() {
+        let off = format!("{CONFIG}[roles.executor.repositories.\"o/r\"]\nfix_ci = false\n");
+        let f = fixture_on(&off);
+        let stages = Landing::mergeable();
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        let report = go(&f, &stages, quick()).await;
+
+        assert_eq!(
+            report.ending,
+            Ending::Stopped {
+                step: Step::Land,
+                why: "checks failed: clippy, and fixing checks is off for this repository"
+                    .to_owned()
+            }
+        );
+        assert_eq!(stages.fixes_asked(), 0);
+    }
+
+    /// A fix asked for by a person is under way, or a rebase: the stage does
+    /// not wait for it, looks again, and the try does not count.
+    #[tokio::test]
+    async fn a_fix_that_joins_another_run_is_looked_at_again_and_costs_no_try() {
+        let f = fixture();
+        let stages = Landing::mergeable()
+            .with_fix(Fix::Joins)
+            .with_fix(Fix::Joins)
+            .with_fix(Fix::Pushes);
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        let one = Land {
+            max_ci_fixes: 1,
+            ..quick()
+        };
+        let report = go(&f, &stages, one).await;
+
+        assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
+        assert_eq!(stages.fixes_asked(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_fix_that_fails_ends_the_stage_with_what_went_wrong() {
+        let f = fixture();
+        let stages =
+            Landing::mergeable().with_fix(Fix::Fails("the branch moved to abc while I worked"));
+        *stages.jobs.lock().unwrap() = vec![red("clippy")];
+        let report = go(&f, &stages, quick()).await;
+
+        assert!(
+            matches!(&report.ending, Ending::Stopped { step: Step::Land, why } if why.contains("the branch moved to abc")),
+            "{:?}",
+            report.ending
+        );
+        assert_eq!(stages.fixes_asked(), 1);
+    }
+
+    /// A head Henk pushed from a run somebody else started, such as
+    /// `@meneer-henk fix ci`, is his own: the stage reviews it and goes on
+    /// instead of handing the pull request over.
+    #[tokio::test]
+    async fn a_head_henk_pushed_for_somebody_else_is_still_his() {
+        // The checks run on the first look; at the second the head has moved.
+        let waiting = || {
+            let stages = Landing::mergeable();
+            *stages.jobs.lock().unwrap() = vec![job("test", CiStatus::InProgress, None)];
+            *stages.pushed_at_read.lock().unwrap() = Some(2);
+            stages
+        };
+        let f = fixture();
+        let stages = waiting();
+        f.app.own_pushes.record(head(1).as_str());
+        let report = go(&f, &stages, quick()).await;
+
+        assert_eq!(report.ending, Ending::Ready, "{:?}", report.ending);
+        assert_eq!(stages.reviewed(), [head(0), head(1)]);
+
+        let g = fixture();
+        let stages = waiting();
+        let report = go(&g, &stages, quick()).await;
+        assert_eq!(
+            report.ending,
+            Ending::HandedOver("somebody else pushed to its branch".to_owned()),
+            "a push nobody recorded is a person's"
+        );
+    }
+
     #[tokio::test]
     async fn failing_checks_stop_the_stage_with_one_comment_naming_them() {
         let f = fixture();
         let stages = Landing::mergeable();
         *stages.jobs.lock().unwrap() = vec![green(), red("clippy")];
-        let report = go(&f, &stages, quick()).await;
+        let never_fix = Land {
+            max_ci_fixes: 0,
+            ..quick()
+        };
+        let report = go(&f, &stages, never_fix).await;
 
         assert_eq!(
             report.ending,
@@ -938,6 +1379,7 @@ mod tests {
                 why: "checks failed: clippy".to_owned()
             }
         );
+        assert_eq!(stages.fixes_asked(), 0);
         let posted = comments(&f);
         assert_eq!(posted.len(), 1, "{posted:?}");
         assert!(

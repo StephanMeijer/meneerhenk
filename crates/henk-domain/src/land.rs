@@ -54,8 +54,11 @@ pub enum CiState {
     Pending,
     /// All are done and none failed.
     Green,
-    /// Some failed, were cancelled or ran out of time: their names.
+    /// Some ended in failure: their names. The code can be at fault.
     Red(Vec<String>),
+    /// Nothing failed or runs, but some were cancelled or ran out of time:
+    /// their names. A change to the code does not fix those.
+    Interrupted(Vec<String>),
 }
 
 /// Everything one look at the pull request found out.
@@ -71,6 +74,9 @@ pub struct Facts {
     /// Whether this repository lets Henk rebase (`rebase = false` turns it
     /// off).
     pub rebases_allowed: bool,
+    /// Whether this repository lets Henk fix failing checks (`fix_ci =
+    /// false` turns it off).
+    pub fixes_allowed: bool,
 }
 
 /// What the stage has done so far.
@@ -88,7 +94,7 @@ pub struct Ledger {
     pub rebase_looks: u32,
     /// Rebases made.
     pub rebases: u32,
-    /// Fixes of failing checks made.
+    /// Fixes of failing checks tried, whatever came of them.
     pub ci_fixes: u32,
 }
 
@@ -101,7 +107,7 @@ pub const REBASE_LAG_LOOKS: u32 = 2;
 pub struct Limits {
     /// Rebases in all.
     pub max_rebases: u32,
-    /// Fixes of failing checks in all; 0 while Henk cannot make them.
+    /// Fixes of failing checks in all; 0 for none.
     pub max_ci_fixes: u32,
 }
 
@@ -179,13 +185,30 @@ pub fn decide(facts: &Facts, ledger: &Ledger, limits: &Limits) -> Action {
         return Action::Review;
     }
     if let CiState::Red(names) = &facts.ci {
+        let failed = names.join(", ");
+        if !facts.fixes_allowed {
+            return Action::End(End::Stuck(format!(
+                "checks failed: {failed}, and fixing checks is off for this repository"
+            )));
+        }
         if ledger.ci_fixes < limits.max_ci_fixes {
             return Action::FixCi(names.clone());
         }
-        return Action::End(End::Stuck(format!("checks failed: {}", names.join(", "))));
+        let after = if ledger.ci_fixes == 0 {
+            String::new()
+        } else {
+            format!(" after {} fixes", ledger.ci_fixes)
+        };
+        return Action::End(End::Stuck(format!("checks failed{after}: {failed}")));
     }
     if facts.ci == CiState::Pending {
         return Action::Wait("checks are running".to_owned());
+    }
+    if let CiState::Interrupted(names) = &facts.ci {
+        return Action::End(End::Stuck(format!(
+            "checks did not finish: {}; they were cancelled or ran out of time, which a change to the code does not fix",
+            names.join(", ")
+        )));
     }
     match &standing.state {
         MergeState::Mergeable => Action::Ready,
@@ -222,6 +245,7 @@ mod tests {
             ci: CiState::Green,
             head_is_ours: true,
             rebases_allowed: true,
+            fixes_allowed: true,
         }
     }
 
@@ -395,14 +419,58 @@ mod tests {
             decide(&red, &ledger(), &can_fix),
             Action::FixCi(vec!["test".to_owned(), "clippy".to_owned()])
         );
-        let spent = Ledger {
-            ci_fixes: 3,
+        let tried = |n| Ledger {
+            ci_fixes: n,
             ..ledger()
         };
         assert!(matches!(
-            decide(&red, &spent, &can_fix),
-            Action::End(End::Stuck(_))
+            decide(&red, &tried(2), &can_fix),
+            Action::FixCi(_)
         ));
+        let Action::End(End::Stuck(why)) = decide(&red, &tried(3), &can_fix) else {
+            panic!("three fixes are the limit");
+        };
+        assert_eq!(why, "checks failed after 3 fixes: test, clippy");
+    }
+
+    #[test]
+    fn a_repository_that_does_not_want_its_checks_fixed_is_not_fixed() {
+        let mut off = facts();
+        off.ci = CiState::Red(vec!["test".to_owned()]);
+        off.fixes_allowed = false;
+        let can_fix = Limits {
+            max_ci_fixes: 3,
+            ..LIMITS
+        };
+        let Action::End(End::Stuck(why)) = decide(&off, &ledger(), &can_fix) else {
+            panic!("fixing is off");
+        };
+        assert_eq!(
+            why,
+            "checks failed: test, and fixing checks is off for this repository"
+        );
+    }
+
+    #[test]
+    fn checks_that_were_cancelled_or_timed_out_are_not_fixed_in_code() {
+        let mut stopped = facts();
+        stopped.ci = CiState::Interrupted(vec!["test".to_owned(), "docs".to_owned()]);
+        let can_fix = Limits {
+            max_ci_fixes: 3,
+            ..LIMITS
+        };
+        let Action::End(End::Stuck(why)) = decide(&stopped, &ledger(), &can_fix) else {
+            panic!("a person has to look");
+        };
+        assert!(
+            why.starts_with("checks did not finish: test, docs; they were cancelled"),
+            "{why}"
+        );
+        // A head that is not reviewed yet is still reviewed first.
+        assert_eq!(
+            decide(&stopped, &Ledger::default(), &can_fix),
+            Action::Review
+        );
     }
 
     #[test]

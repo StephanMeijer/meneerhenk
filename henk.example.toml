@@ -240,13 +240,19 @@ requirements_max_rounds = 3
 # "ready to merge", and merging stays a person's. It looks every
 # land_poll_secs, rebases at most land_max_rebases times, and has
 # land_timeout_secs in all from when it starts. A push by somebody else, a
-# merge or a close ends it. Failing checks stop it with a comment for now.
+# merge or a close ends it. When checks fail, the executor reads them and
+# fixes the code (@meneer-henk fix ci does the same on request): the stage has
+# the fix reviewed and waits for the new checks, at most land_max_ci_fixes
+# times (0 for never; not in a repository with fix_ci = false). Checks that
+# were cancelled or timed out, and a failure that is not about the code, stop
+# it with a comment.
 # [autonomous]
 # run_timeout_secs = 7200
 # land = false
 # land_timeout_secs = 14400
 # land_poll_secs = 60
 # land_max_rebases = 3
+# land_max_ci_fixes = 3
 
 # Skills: the team's own instructions for one kind of work, one folder per
 # skill with a SKILL.md (front matter with name and description, then

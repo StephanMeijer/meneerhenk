@@ -55,6 +55,7 @@ use crate::cancel::cancelled_reason;
 use crate::config::Settings;
 use crate::coordinator::Coordinator;
 use crate::execute::{ExecuteReport, ExecuteRequest, OpenedPullRequest, run_execute};
+use crate::fix_ci::FixCiReport;
 use crate::ids::new_run_id;
 use crate::issue_runs::{Comments, IssueThread, OnIssue, RunFailed, open_issue};
 use crate::liveness::KeepAlive;
@@ -111,6 +112,8 @@ pub struct Land {
     pub poll: Duration,
     /// Rebases in all.
     pub max_rebases: u32,
+    /// Fixes of failing checks in all (#583); 0 for none.
+    pub max_ci_fixes: u32,
 }
 
 impl Limits {
@@ -131,6 +134,7 @@ impl Limits {
                 timeout: Duration::from_secs(autonomous.land_timeout_secs),
                 poll: Duration::from_secs(autonomous.land_poll_secs),
                 max_rebases: autonomous.land_max_rebases,
+                max_ci_fixes: autonomous.land_max_ci_fixes,
             }),
         })
     }
@@ -269,6 +273,21 @@ pub(crate) trait Stages: Send + Sync {
         oneshot::Receiver<anyhow::Result<RebaseReport>>,
     );
 
+    /// Has the executor fix the failing checks of the pull request and
+    /// leaves the review of what it pushed to the caller (#583). The
+    /// receiver answers when the decision is `Start` or `Supersede`, as for
+    /// [`Self::review`].
+    fn fix_ci(
+        &self,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<FixCiReport>>,
+    );
+
     /// Where the pull request stands on the platform now (#637).
     async fn standing(&self, target: &ReviewTarget) -> anyhow::Result<Standing>;
 
@@ -341,6 +360,20 @@ impl Stages for Live {
     ) {
         self.coordinator
             .submit_rebase_awaited(target, trigger, requester)
+    }
+
+    fn fix_ci(
+        &self,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<FixCiReport>>,
+    ) {
+        self.coordinator
+            .submit_fix_ci_awaited(target, trigger, requester)
     }
 
     async fn standing(&self, target: &ReviewTarget) -> anyhow::Result<Standing> {
@@ -1399,6 +1432,19 @@ requester_id = 3
             Decision,
             RunId,
             oneshot::Receiver<anyhow::Result<RebaseReport>>,
+        ) {
+            unreachable!("these tests run without the land stage");
+        }
+
+        fn fix_ci(
+            &self,
+            _: ReviewTarget,
+            _: String,
+            _: Option<String>,
+        ) -> (
+            Decision,
+            RunId,
+            oneshot::Receiver<anyhow::Result<FixCiReport>>,
         ) {
             unreachable!("these tests run without the land stage");
         }
