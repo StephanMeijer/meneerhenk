@@ -9,9 +9,10 @@
 //!   model's reasoning from turn to turn;
 //! - [`anthropic`]: the Anthropic Messages API.
 //!
-//! All are non-streaming. Retries with backoff live in [`http`] and apply to
-//! all. Nothing in this crate knows about MCP, reviews or Henk; it is a
-//! small, testable HTTP client.
+//! All are non-streaming, except the Responses adapter when a ChatGPT
+//! sign-in pays for it (#620). Retries with backoff live in [`http`] and
+//! apply to all. Nothing in this crate knows about MCP, reviews or Henk; it
+//! is a small, testable HTTP client.
 
 pub mod anthropic;
 pub mod chatgpt;
@@ -22,6 +23,7 @@ pub mod models;
 pub mod openai;
 pub mod responses;
 pub mod schema;
+mod sse;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod types;

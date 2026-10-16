@@ -200,8 +200,12 @@ pub struct ModelConfig {
     /// Anthropic style: the host only.
     pub base_url: String,
     /// The credential. Sent as `Authorization: Bearer` (OpenAI style) or
-    /// `x-api-key` (Anthropic style).
+    /// `x-api-key` (Anthropic style). Not read when `token_source` is set.
     pub api_key: SecretString,
+    /// A sign-in that renews itself, instead of `api_key` (#620). Only the
+    /// OpenAI Responses API takes it, and with it the client calls the API
+    /// the way a ChatGPT plan is used: streamed, without an output cap.
+    pub token_source: Option<Arc<dyn TokenSource>>,
     /// The model name sent to the endpoint.
     pub model: String,
     /// Default output cap when a request sets none.
@@ -265,6 +269,13 @@ pub fn client_with(
     if config.api == Api::Responses && config.provider != Provider::OpenAi {
         return Err(LlmError::InvalidConfig(
             "the Responses API is OpenAI's; an Anthropic endpoint has none".to_owned(),
+        ));
+    }
+    if config.token_source.is_some()
+        && (config.provider, config.api) != (Provider::OpenAi, Api::Responses)
+    {
+        return Err(LlmError::InvalidConfig(
+            "a ChatGPT sign-in works with the OpenAI Responses API only".to_owned(),
         ));
     }
     if let Some(effort) = config.effort

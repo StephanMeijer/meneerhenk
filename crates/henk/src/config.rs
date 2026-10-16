@@ -2769,6 +2769,7 @@ impl Settings {
             api: endpoint.api.unwrap_or_default(),
             base_url: endpoint.base_url.clone(),
             api_key: key.into(),
+            token_source: None,
             model: String::new(),
             max_tokens: default_max_tokens(),
             timeout: Duration::from_secs(default_model_timeout_secs()),
