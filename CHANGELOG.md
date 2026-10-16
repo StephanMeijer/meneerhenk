@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.16](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.15...v0.4.16) - 2026-10-16
+
+### Fixed
+
+- *(rebase)* give each conflict session of a rebase run a name of its own ([#630](https://github.com/StephanMeijer/meneerhenk/pull/630))
+
+### Other
+
+- Merge pull request #648 from StephanMeijer/fix/execute-base-moved
+- Merge pull request #647 from StephanMeijer/fix/rebase-session-names
+- Merge pull request #645 from StephanMeijer/feat/fix-ci-start
+
 ## [0.4.15](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.14...v0.4.15) - 2026-10-16
 
 ### Added
