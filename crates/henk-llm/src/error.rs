@@ -83,6 +83,26 @@ pub enum LlmError {
         /// sign-in file yet. Never a token.
         reason: String,
     },
+    /// The ChatGPT plan has no usage left (#620): HTTP 429 with
+    /// `subscription_sharing_usage_limit_exceeded`, or the same code in a
+    /// failed response. Not retried: asking again cannot help before the
+    /// plan's own limit resets, and OpenAI says when that is nowhere, so
+    /// none is guessed.
+    #[error(
+        "the ChatGPT plan's usage limit is reached; the plan's usage is under Settings in ChatGPT, and the run can go on once OpenAI lets the plan be used again"
+    )]
+    PlanUsageExhausted,
+    /// The signed-in ChatGPT account may not use its plan through an app
+    /// (#620): HTTP 403 with `subscription_sharing_user_not_eligible`. Not
+    /// retried, and signing in again does not change it.
+    #[error(
+        "this ChatGPT account cannot use its plan through an app (subscription_sharing_user_not_eligible); a plan that includes it, or an API key, is needed"
+    )]
+    PlanNotEligible,
+    /// A streamed response ended before the response was complete (#620).
+    /// Retried: the request is stateless, so it can be sent again.
+    #[error("the response stream ended before the response was complete: {0}")]
+    StreamInterrupted(String),
     /// The file that holds an endpoint's ChatGPT sign-in cannot be read or
     /// written (#620). Not retried.
     #[error("the sign-in file of endpoint {endpoint} cannot be used: {problem}")]
@@ -99,7 +119,10 @@ impl LlmError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::RateLimited { .. } | Self::Overloaded | Self::Server { .. } => true,
+            Self::RateLimited { .. }
+            | Self::Overloaded
+            | Self::Server { .. }
+            | Self::StreamInterrupted(_) => true,
             Self::Transport(error) => {
                 error.is_timeout() || error.is_connect() || error.is_request()
             }
@@ -109,6 +132,8 @@ impl LlmError {
             | Self::Decode(_)
             | Self::RetriesExhausted { .. }
             | Self::InvalidConfig(_)
+            | Self::PlanUsageExhausted
+            | Self::PlanNotEligible
             | Self::SignedOut { .. }
             | Self::CredentialFile { .. } => false,
         }

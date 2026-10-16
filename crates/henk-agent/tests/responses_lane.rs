@@ -96,6 +96,7 @@ async fn a_lane_runs_turns_on_the_responses_api_with_its_reasoning_carried() {
         api: Api::Responses,
         base_url: format!("{}/v1", server.uri()),
         api_key: "k".to_owned().into(),
+        token_source: None,
         model: "test-model".to_owned(),
         max_tokens: 1024,
         timeout: Duration::from_secs(5),

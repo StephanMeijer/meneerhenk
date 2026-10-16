@@ -195,9 +195,6 @@ trait Changed {
         requester: Option<String>,
     ) -> Self::Request;
 
-    /// Whether it pushed a head.
-    fn pushed(&self) -> bool;
-
     /// The review of the head it pushed, when it pushed one.
     fn review(&self, requester: Option<String>) -> Option<ReviewRequest>;
 }
@@ -217,10 +214,6 @@ impl Changed for RebaseReport {
             run: Some(run),
             requester,
         }
-    }
-
-    fn pushed(&self) -> bool {
-        self.pushed.is_some()
     }
 
     fn review(&self, requester: Option<String>) -> Option<ReviewRequest> {
@@ -243,10 +236,6 @@ impl Changed for FixCiReport {
             run: Some(run),
             requester,
         }
-    }
-
-    fn pushed(&self) -> bool {
-        Self::pushed(self).is_some()
     }
 
     fn review(&self, requester: Option<String>) -> Option<ReviewRequest> {
@@ -353,6 +342,35 @@ fn waiting(key: &Key, active: &Active) -> Waiting {
         position: 0,
         reason: Reason::NoSlot,
         waits_for: None,
+    }
+}
+
+/// What follows a rebase or a fix that ended: the review of its head for the
+/// coordinator to ask for, and whether the caller that waited reviews it
+/// (#637). A caller whose receiver is gone, or none, cannot review, so the
+/// coordinator asks for the review itself.
+fn after_report<R: Changed>(
+    report: anyhow::Result<R>,
+    tell: Option<oneshot::Sender<anyhow::Result<R>>>,
+    requester: Option<String>,
+) -> (Option<ReviewRequest>, bool) {
+    match (report, tell) {
+        (Ok(report), None) => (report.review(requester), false),
+        (Ok(report), Some(tell)) => {
+            let follow_up = report.review(requester);
+            if tell.send(Ok(report)).is_ok() {
+                (None, follow_up.is_some())
+            } else {
+                (follow_up, false)
+            }
+        }
+        (Err(error), tell) => {
+            warn!(%error, "a run changing a pull request ended with an error");
+            if let Some(tell) = tell {
+                let _ = tell.send(Err(error));
+            }
+            (None, false)
+        }
     }
 }
 
@@ -1235,21 +1253,7 @@ impl Coordinator {
                 generation,
                 &coordinator.slots_changed,
             );
-            let (changed, caller_reviews) = match (report, tell) {
-                (Ok(report), None) => (report.review(requester), false),
-                (Ok(report), Some(tell)) => {
-                    let pushed = report.pushed();
-                    let _ = tell.send(Ok(report));
-                    (None, pushed)
-                }
-                (Err(error), tell) => {
-                    warn!(%error, "{what} ended with an error");
-                    if let Some(tell) = tell {
-                        let _ = tell.send(Err(error));
-                    }
-                    (None, false)
-                }
-            };
+            let (changed, caller_reviews) = after_report(report, tell, requester);
             coordinator.review_after_change(&key, changed, caller_reviews);
         });
         (decision, run)
@@ -1430,5 +1434,41 @@ mod tests {
             },
         );
         assert_eq!(waiting(&key, &active).repo, "Owner/Repo");
+    }
+
+    fn report(pushed: bool) -> RebaseReport {
+        RebaseReport {
+            run: new_run_id(),
+            target: target(Platform::GitHub, "o/r", 7),
+            pushed: pushed.then(|| CommitSha::parse(&"b".repeat(40)).unwrap()),
+        }
+    }
+
+    /// #637: a caller that is gone cannot review what the rebase pushed, so
+    /// the coordinator asks for that review, as when nobody waits.
+    #[test]
+    fn a_rebase_whose_caller_is_gone_is_followed_by_the_review_of_its_head() {
+        let (tell, ended) = oneshot::channel();
+        drop(ended);
+        let (review, caller_reviews) = after_report(Ok(report(true)), Some(tell), None);
+        assert!(!caller_reviews);
+        assert_eq!(
+            review.and_then(|r| r.commit),
+            Some(CommitSha::parse(&"b".repeat(40)).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_rebase_its_caller_still_waits_for_is_reviewed_by_the_caller() {
+        let (tell, mut ended) = oneshot::channel();
+        let (review, caller_reviews) = after_report(Ok(report(true)), Some(tell), None);
+        assert!(review.is_none());
+        assert!(caller_reviews);
+        assert!(ended.try_recv().is_ok());
+
+        let (tell, _ended) = oneshot::channel();
+        let (review, caller_reviews) = after_report(Ok(report(false)), Some(tell), None);
+        assert!(review.is_none());
+        assert!(!caller_reviews, "nothing was pushed, nothing to review");
     }
 }
