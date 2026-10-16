@@ -2,6 +2,7 @@
 //! health view shows. Nothing here starts a process or calls a model; that
 //! is `henk doctor --probe`.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use axum::Json;
@@ -266,11 +267,11 @@ fn reviews_line(slots: &crate::coordinator::Slots) -> String {
         (count(Priority::Rebase), "rebase", "rebases"),
         (count(Priority::Fix), "fix", "fixes"),
     ] {
-        match n {
-            0 => {}
-            1 => first.push_str(&format!(", 1 {one} first")),
-            n => first.push_str(&format!(", {n} {many} first")),
-        }
+        let _ = match n {
+            0 => Ok(()),
+            1 => write!(first, ", 1 {one} first"),
+            n => write!(first, ", {n} {many} first"),
+        };
     }
     format!(
         "{} running, {} waiting{first} (limit {})",
