@@ -19,10 +19,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
+use henk_store::migrator::Migrator;
 use henk_store::{
     NewRun, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore,
     Stage, StageState, StageWrite, StoreError, TokenUsage, TranscriptRecord,
 };
+use sea_orm_migration::MigratorTrait as _;
 
 fn new_run(id: &str, target: u64) -> NewRun {
     NewRun {
@@ -114,7 +116,11 @@ async fn the_first_calls_at_once_open_and_migrate_the_database_once() {
         call.await.unwrap().unwrap();
     }
 
-    assert_eq!(sqlite_steps(&file.0), 5, "every step recorded once");
+    assert_eq!(
+        sqlite_steps(&file.0),
+        i64::try_from(Migrator::migrations().len()).unwrap(),
+        "every step recorded once"
+    );
     assert_eq!(store.count_runs(&RunFilter::default()).await.unwrap(), 16);
 }
 

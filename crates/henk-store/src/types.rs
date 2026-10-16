@@ -1352,16 +1352,6 @@ pub enum OutcomeFilter {
     Problems,
 }
 
-impl OutcomeFilter {
-    /// The text a query parameter takes.
-    pub(crate) fn param(filter: Option<&Self>) -> Option<&str> {
-        filter.map(|f| match f {
-            Self::Is(outcome) => outcome.as_str(),
-            Self::Problems => "problems",
-        })
-    }
-}
-
 /// Where a tool call sits in a newest-first listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallKey {

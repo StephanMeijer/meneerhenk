@@ -12,10 +12,14 @@
 //! here, `SqliteStore` and `PgStore` implement the trait and hand the moved
 //! methods to a [`Store`] that opens the same database.
 
+mod calls;
 mod dialect;
+mod findings;
+mod inbound;
 mod runs;
 mod sessions;
 mod stages;
+mod stats;
 mod timeline;
 
 use std::fmt;
