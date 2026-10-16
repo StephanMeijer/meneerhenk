@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.8...v0.4.9) - 2026-10-16
+
+### Added
+
+- *(store)* the schema once, in sea-orm migrations ([#604](https://github.com/StephanMeijer/meneerhenk/pull/604))
+
+### Fixed
+
+- *(store)* adopt the legacy migration steps in one idempotent insert
+
+### Other
+
+- update Cargo.lock dependencies
+- *(store)* CI runs the PostgreSQL goldens, say so in the golden test
+- *(store)* golden fixtures of what the run store returns ([#601](https://github.com/StephanMeijer/meneerhenk/pull/601))
+
 ## [0.4.8](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.7...v0.4.8) - 2026-10-15
 
 ### Added
