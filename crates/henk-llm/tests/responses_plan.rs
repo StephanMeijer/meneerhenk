@@ -591,3 +591,31 @@ async fn an_answer_that_is_not_an_event_stream_is_not_retried() {
     );
     assert_eq!(requests(&server).await.len(), 1);
 }
+
+#[tokio::test]
+async fn the_models_a_plan_lists_come_with_its_bearer_and_a_refusal_is_renewed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer old"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("no"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer new"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+            {"id": "gpt-6.1-sol", "visibility": "list"},
+            {"id": "internal", "visibility": "hide"},
+        ]})))
+        .mount(&server)
+        .await;
+    let source = Source::new(&["old", "new"], false);
+
+    let ids = henk_llm::list_models(&config(&format!("{}/v1", server.uri()), &source))
+        .await
+        .unwrap();
+
+    assert_eq!(ids, ["gpt-6.1-sol"]);
+    assert_eq!(source.refused(), ["old"]);
+}
