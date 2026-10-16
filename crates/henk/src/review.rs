@@ -2763,6 +2763,44 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #579: a rebase Henk starts himself leaves the running review of its
+    /// pull request alone: nobody would notice it cancelled for a rebase that
+    /// then pushes nothing.
+    #[tokio::test]
+    async fn an_automatic_rebase_leaves_the_running_review_alone() {
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-rebase-auto-leaves", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, review) = coordinator.submit_review(request(&placeholder), commit.clone());
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&review).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        let target = request(&placeholder).target;
+        let (decision, run) =
+            coordinator.submit_rebase_automatic(target, "moved".to_owned(), commit);
+        assert_eq!(decision, henk_domain::queue::Decision::Join);
+        assert_eq!(run, review, "it names the review that stands");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(coordinator.tracked_reviews(), 1, "no rebase took its place");
+        assert_eq!(
+            app.store.run(&review).await.unwrap().map(|r| r.status),
+            Some(RunStatus::Running),
+            "the review was not superseded"
+        );
+        app.shutdown.cancel();
+    }
+
     /// #580: a rebase waits ahead of every review, takes the place of the
     /// review of its pull request, and a review asked for meanwhile starts
     /// after it, as the run it was promised.
