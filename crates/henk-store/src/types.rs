@@ -773,6 +773,9 @@ pub enum Stage {
     /// A ticket run's review stage: the review run of that pull request and
     /// how it ended (#536).
     Review,
+    /// A ticket run's land stage: the pull request kept landable, rebased
+    /// and reviewed again, until it is ready to merge (#637).
+    Land,
     /// The diff was read.
     Diff,
     /// The review's workspaces were checked out.
@@ -815,6 +818,7 @@ impl Stage {
             Self::Plan => "plan",
             Self::Execute => "execute",
             Self::Review => "review",
+            Self::Land => "land",
             Self::Diff => "diff",
             Self::Checkout => "checkout",
             Self::Workspace => "workspace",
@@ -839,6 +843,7 @@ impl Stage {
             "plan" => Self::Plan,
             "execute" => Self::Execute,
             "review" => Self::Review,
+            "land" => Self::Land,
             "diff" => Self::Diff,
             "checkout" => Self::Checkout,
             "workspace" => Self::Workspace,

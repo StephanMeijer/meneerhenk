@@ -759,6 +759,20 @@ with `ticket:time-limit` as the canceller when the time is up) is waited for,
 so it writes its own ending. Only the ticket run comments on the issue, once,
 through the same `OnRun` the plan and the execute run end with.
 
+With `[autonomous] land = true` the ticket run has a fourth stage, `land`
+(`ticket/land.rs`, #637), after a passed review. It is a loop over facts, not
+over events: each pass reads the pull request through `Stages::standing`
+(`PushWriter::pull_standing`: GitHub's `mergeable_state`, GitLab's
+`detailed_merge_status`, as one `MergeState`) and the checks through
+`Stages::ci_jobs`, hands them to `henk_domain::land::decide`, and does the
+one thing it answers. A rebase goes through `Coordinator::submit_rebase_awaited`
+and a review through `submit_review_awaited`, so the stage waits for each and
+knows how it ended; the coordinator asks for no review of a rebase whose caller
+waits. What the stage knows about the head (`Ledger`: the reviewed head, the
+head the last rebase left, the counts) is in memory for the length of the run.
+It names only its latest child run in `run_children`; each rebase and review
+is a line on the ticket run's timeline.
+
 ## 8. Run records
 
 ```mermaid

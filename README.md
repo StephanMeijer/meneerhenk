@@ -826,6 +826,7 @@ one on its own, and the only human step left is merging the pull request.
 ```toml
 [autonomous]
 run_timeout_secs = 7200   # the time one ticket run has in all
+# land = true             # keep the pull request landable (below)
 ```
 
 The section being there turns it on, since it lets Henk write and push code
@@ -851,6 +852,20 @@ and shows the three as stages.
   the whole run, including the wait for a review slot.
 - **One at a time per issue.** Asking again while one runs joins it. A
   ticket run is not resumed after a restart; it ends as interrupted.
+- **Keeping the pull request landable (`land = true`, #637).** A passed
+  review is not the end then. Other pull requests merge meanwhile, so the
+  run looks at its pull request every `land_poll_secs` (60) and does what the
+  platform says it needs: when the branch must catch up (GitHub reports that
+  only where branch protection demands an up-to-date branch) or conflicts, it
+  rebases it (not where the repository has `rebase = false`), has the new head
+  reviewed, and waits for the checks. When the platform would merge it, its
+  review passed and its checks are green, the run ends **ready to merge**;
+  merging stays yours. The stage has `land_timeout_secs` (14400) of its own,
+  rebases at most `land_max_rebases` (3) times, and stops with one comment
+  on the issue when it hits a limit or when checks fail: Henk cannot fix
+  those yet. Somebody else's push, a merge, a close or a draft ends it well
+  and Henk pushes nothing. Each look costs a few platform requests, so keep
+  `land_poll_secs` generous when many tickets run at once. Off by default.
 
 ### The reviewer reads CI
 

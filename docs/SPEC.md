@@ -437,7 +437,7 @@ the pull request.
 A **ticket run** is a run of its own that owns three. The plan, the execute
 run and the review keep their own runs, stages and sessions; the ticket run
 starts them in order, links them, and records where it stands in stages of
-its own: `plan`, `execute` and `review`.
+its own: `plan`, `execute` and `review`, and `land` when it is on (below).
 
 1. **The plan** (§4), with its review. The run goes on only if that review
    converged: the reviewer raised nothing more. A plan published with its
@@ -451,10 +451,45 @@ its own: `plan`, `execute` and `review`.
    with fresh sessions. It is asked for through the same queue as any
    review, so it waits for a slot, and a newer commit replaces it.
 
+**The land stage** (#637). With `[autonomous] land = true`, a passed review
+is not the end: the ticket run keeps the pull request landable until the
+platform would merge it. It looks at the pull request again and again, at
+most every `land_poll_secs` (60), and each time does one thing:
+
+- the base has moved and the platform says the branch must catch up, or the
+  branch conflicts: **rebase** it (§3.6), unless the repository has turned
+  rebasing off. GitHub says "must catch up" only where branch protection
+  demands an up-to-date branch, so a repository that does not demand it is
+  not rebased for nothing. The rebase is the run of §3.6, and the ticket run
+  waits for it;
+- the head is not one a review passed: **review** it, as a run of its own
+  that the ticket run waits for. The head a rebase left is reviewed; the
+  head the review loop itself pushed counts as reviewed, since the loop
+  checked it in its rounds;
+- the checks are running, or the platform has not worked it out, or
+  something else stands in the way, such as a required review: **wait**;
+- the platform would merge it, its head's review passed and its checks are
+  green: the stage ends **ready to merge**. Merging stays a person's (§8.2).
+
+It is bounded. The stage has a time of its own, `land_timeout_secs` (four
+hours), from when it starts, since it waits for checks and for other pull
+requests; at most `land_max_rebases` (3) rebases; and a head a rebase just
+left is not rebased again for two looks, while the platform catches up.
+Failing checks stop the stage with one comment naming them: Henk cannot fix
+them yet.
+
+A person wins. A head that is none Henk made (the execute run's, its
+rebases', the review loop's), a merge, a close or a draft ends the stage well
+with nothing pushed. A rebase or a review of the pull request that somebody
+else asked for while the stage runs is theirs: the stage waits for it and
+looks again.
+
 **How it ends.**
 
 - **The review passed.** Nothing more is said; the pull request closes the
-  issue. A person merges it: Henk never does (§8.2).
+  issue. A person merges it: Henk never does (§8.2). With the land stage on,
+  the run goes on to keep it landable, and ends **ready to merge** when the
+  platform would merge it.
 - **A person or another run took over the pull request.** A newer commit,
   a rebase or another review of the same commit replaced or covers the
   review. The ticket run's job is done and it ends well, saying so.
@@ -911,6 +946,13 @@ surprising reading of the earlier wording; veto any that is wrong.
   when a step fails or hits a limit. Off unless `[autonomous]` is
   configured. No person is asked between the steps: the only human step is
   merging.
+
+- §4b: a ticket run can keep its pull request landable (#637). After a
+  passed review, with `[autonomous] land = true`, it rebases the pull
+  request when the platform says it must catch up or conflicts, has the new
+  head reviewed, and waits for the checks, until the platform would merge it;
+  it then ends ready to merge. Bounded by its own time, a limit on rebases
+  and the person-wins rule. Off by default. Merging stays out.
 
 - §3.1, §3.6: one run per pull request at a time, of any kind (#580). A
   rebase waits for a slot ahead of every review, supersedes a review of
