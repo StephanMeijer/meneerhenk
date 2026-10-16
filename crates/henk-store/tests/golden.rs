@@ -6,12 +6,13 @@
 //! moves onto another database layer (#598): the new code has to render
 //! exactly what the old code rendered here, on SQLite in the plain test
 //! run and on `PostgreSQL` when `HENK_TEST_DATABASE_URL` names a server
-//! (`cargo test -p henk-store --test golden -- --ignored`). The `postgres`
-//! CI job runs the ignored test against a `PostgreSQL` 17 service, so CI
-//! guards both sets of files.
+//! (`cargo test -p henk-store --test golden -- --ignored`). Nothing in CI
+//! starts a `PostgreSQL` server (#598), so the `PostgreSQL` files are checked
+//! by hand, before a release and before merging a change to the store; the
+//! commands are in `src/migrator/README.md`.
 //!
 //! `HENK_BLESS=1` writes the files instead of comparing with them. Record
-//! the `PostgreSQL` files against the major version CI uses (17). Each
+//! the `PostgreSQL` files against `postgres:17-alpine`. Each
 //! database has its own directory, because the two do not return alike
 //! today. The goldens record what the stores do, including where they
 //! differ:
@@ -25,7 +26,7 @@
 //!
 //! A store that returns the same on both is what #598 is after; when the
 //! goldens of the two databases become one, these are the lines that move.
-//! CI guards the `PostgreSQL` files until then.
+//! Until then the `PostgreSQL` files are only as good as the last hand run.
 //!
 //! The rows are `golden/seed.sql`, plain INSERTs with fixed times and no ids
 //! (`PostgreSQL`'s identity columns refuse one), so the dataset does not

@@ -130,7 +130,7 @@ HENK_TEST_DATABASE_URL='postgres://postgres:henk-ci@127.0.0.1:55436/postgres?ssl
   cargo test -p henk-store --all-features --locked -- --ignored
 ```
 
-The goldens of #612 and the conformance suite's PostgreSQL scenarios are the checks. Until #612 is merged, only the conformance suite is on this tree, and the command above runs just that. The spike ran them on PostgreSQL 17.11 (`postgres:17-alpine`). With one implementation the PostgreSQL scenarios stay as `#[ignore]`d twins.
+The `postgres` job that ran them in `ci.yml` was removed ahead of #608, so nothing in CI starts a PostgreSQL server now. The goldens of #612 and the conformance suite's PostgreSQL scenarios are the checks. Until #612 is merged, only the conformance suite is on this tree, and the command above runs just that. The spike ran them on PostgreSQL 17.11 (`postgres:17-alpine`). With one implementation the PostgreSQL scenarios stay as `#[ignore]`d twins.
 
 ## What changes in the sub-issues
 
