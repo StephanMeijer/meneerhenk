@@ -59,6 +59,11 @@ pub const REQUIREMENTS_REVIEWER: &str = include_str!("../prompts/requirements_re
 /// and `{{edit_tool}}` are filled in.
 pub const REBASE: &str = include_str!("../prompts/rebase.md");
 
+/// Instructions for the executor fixing a pull request's failing checks
+/// (#583). `{{ref}}`, `{{repo}}`, `{{branch}}`, `{{max_files}}`,
+/// `{{edit_tool}}` and `{{recent_commits}}` are filled in.
+pub const FIX_CI: &str = include_str!("../prompts/fix_ci.md");
+
 /// The skills block appended to an agent's system prompt when it has
 /// skills. `{{catalogue}}` lists them.
 pub const SKILLS: &str = include_str!("../prompts/skills.md");
@@ -111,6 +116,7 @@ mod tests {
         assert!(henk_domain::text::is_in_style(PLAN_REVIEWER));
         assert!(henk_domain::text::is_in_style(EXECUTE));
         assert!(henk_domain::text::is_in_style(REBASE));
+        assert!(henk_domain::text::is_in_style(FIX_CI));
         assert!(henk_domain::text::is_in_style(EXECUTE_REQUIREMENTS));
         assert!(henk_domain::text::is_in_style(REQUIREMENTS_REVIEWER));
         for tool in ["raise_point", "finish_round", "reopens", "get_file_diff"] {
@@ -127,6 +133,24 @@ mod tests {
         }
         for placeholder in ["{{base}}", "{{files}}", "{{edit_tool}}", "`write_file`"] {
             assert!(REBASE.contains(placeholder), "{placeholder}");
+        }
+        for placeholder in [
+            "{{ref}}",
+            "{{repo}}",
+            "{{branch}}",
+            "{{max_files}}",
+            "{{edit_tool}}",
+            "{{recent_commits}}",
+        ] {
+            assert!(FIX_CI.contains(placeholder), "{placeholder}");
+        }
+        for tool in [
+            "propose_fix",
+            "get_ci_job_log",
+            "get_ci_job_annotations",
+            "write_file",
+        ] {
+            assert!(FIX_CI.contains(&format!("`{tool}`")), "{tool}");
         }
         for tool in ["{{edit_tool}}", "write_file", "propose_pull_request"] {
             assert!(EXECUTE.contains(&format!("`{tool}`")), "{tool}");

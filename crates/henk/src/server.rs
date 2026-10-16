@@ -25,8 +25,8 @@ use crate::coordinator::Coordinator;
 use crate::dashboard::{self, Dashboard, DashboardSecrets};
 use crate::hooks::{ApiHook, GitHubHook, GitLabHook, HttpHook};
 use crate::listeners::{
-    ExecuteListener, MentionListener, PlanListener, RebaseListener, ReviewListener, TicketListener,
-    Writers,
+    ExecuteListener, FixCiListener, MentionListener, PlanListener, RebaseListener, ReviewListener,
+    TicketListener, Writers,
 };
 use crate::pages;
 use crate::recorder::StoreRecorder;
@@ -148,6 +148,10 @@ pub fn compose_with_secrets(
                 Arc::clone(&writers),
             )),
             Arc::new(RebaseListener::new(
+                Arc::clone(&coordinator),
+                Arc::clone(&writers),
+            )),
+            Arc::new(FixCiListener::new(
                 Arc::clone(&coordinator),
                 Arc::clone(&writers),
             )),

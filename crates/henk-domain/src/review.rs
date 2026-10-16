@@ -101,7 +101,7 @@ pub const fn handle(platform: Platform) -> &'static str {
 /// mention (§3.4), not a request.
 #[must_use]
 pub fn is_review_request(platform: Platform, body: &str) -> bool {
-    is_command(platform, body, "review")
+    is_command(platform, body, &["review"])
 }
 
 /// Whether a comment asks Henk to rebase the pull request onto its base
@@ -109,19 +109,26 @@ pub fn is_review_request(platform: Platform, body: &str) -> bool {
 /// `@meneerhenk rebase`), read as [`is_review_request`] reads its command.
 #[must_use]
 pub fn is_rebase_request(platform: Platform, body: &str) -> bool {
-    is_command(platform, body, "rebase")
+    is_command(platform, body, &["rebase"])
 }
 
-/// Whether a comment's whole text is Henk's handle and then `command`.
-fn is_command(platform: Platform, body: &str, command: &str) -> bool {
+/// Whether a comment asks Henk to fix the pull request's failing checks
+/// (§3.7, #583): its whole text is `@meneer-henk fix ci` (GitLab:
+/// `@meneerhenk fix ci`), read as [`is_review_request`] reads its command.
+#[must_use]
+pub fn is_fix_ci_request(platform: Platform, body: &str) -> bool {
+    is_command(platform, body, &["fix", "ci"])
+}
+
+/// Whether a comment's whole text is Henk's handle and then the words of
+/// `command`.
+fn is_command(platform: Platform, body: &str, command: &[&str]) -> bool {
     let mut words = body.split_whitespace();
-    let (Some(first), Some(second), None) = (words.next(), words.next(), words.next()) else {
-        return false;
-    };
-    first
-        .strip_prefix('@')
+    words
+        .next()
+        .and_then(|first| first.strip_prefix('@'))
         .is_some_and(|login| login.eq_ignore_ascii_case(handle(platform)))
-        && second == command
+        && words.eq(command.iter().copied())
 }
 
 /// Whether a comment mentions Henk on a platform (§3.4).
@@ -594,6 +601,27 @@ mod tests {
             "@meneer-henk rebase please"
         ));
         assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk review"));
+    }
+
+    #[test]
+    fn a_fix_ci_request_is_the_handle_and_fix_ci_only() {
+        assert!(is_fix_ci_request(
+            Platform::GitHub,
+            "  @Meneer-Henk fix ci\n"
+        ));
+        assert!(is_fix_ci_request(Platform::GitLab, "@meneerhenk fix  ci"));
+        assert!(!is_fix_ci_request(Platform::GitLab, "@meneer-henk fix ci"));
+        for body in [
+            "@meneer-henk fix",
+            "@meneer-henk ci",
+            "@meneer-henk fix ci please",
+            "@meneer-henk rebase",
+            "fix ci",
+        ] {
+            assert!(!is_fix_ci_request(Platform::GitHub, body), "{body}");
+        }
+        assert!(!is_rebase_request(Platform::GitHub, "@meneer-henk fix ci"));
+        assert!(!is_review_request(Platform::GitHub, "@meneer-henk fix ci"));
     }
 
     #[test]
