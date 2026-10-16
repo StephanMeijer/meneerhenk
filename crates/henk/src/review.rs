@@ -1917,6 +1917,125 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #583: a fix asked for while a review runs replaces it, and the review
+    /// is not lost when the fix pushes nothing, as most fixes do not: it is
+    /// held for the fix, then runs again. It ends superseded by the fix, and
+    /// does not say a rebase replaced it.
+    #[tokio::test]
+    async fn a_fix_that_replaces_a_running_review_gives_it_back_when_it_pushes_nothing() {
+        use henk_domain::queue::Decision;
+        use henk_domain::run::RunKind;
+
+        use crate::coordinator::Reason;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-fix-gives-back", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let (_, review) = coordinator.submit_review(request(&placeholder), commit);
+        let mut status = None;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = app.store.run(&review).await.unwrap().map(|r| r.status);
+            if status == Some(RunStatus::Running) {
+                break;
+            }
+        }
+        assert_eq!(status, Some(RunStatus::Running), "the review started");
+
+        let target = request(&placeholder).target;
+        let (decision, fix) = coordinator.submit_fix_ci(target, "asked".to_owned(), None);
+        assert_eq!(decision, Decision::Supersede);
+        let held = coordinator
+            .slots()
+            .waiting
+            .iter()
+            .find(|w| w.kind == RunKind::Review && w.reason == Reason::AfterFix)
+            .map(|w| w.run.clone())
+            .expect("the replaced review is held for the fix");
+        for _ in 0..500 {
+            let gone = app.store.run(&review).await.unwrap().map(|r| r.status);
+            if gone == Some(RunStatus::Superseded) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let record = app.store.run(&review).await.unwrap().unwrap();
+        assert_eq!(record.status, RunStatus::Superseded);
+        assert_eq!(record.superseded_by, Some(fix.clone()));
+        assert_ne!(
+            record.error.as_deref(),
+            Some("superseded by a rebase"),
+            "no rebase is involved"
+        );
+
+        // The fix ends having pushed nothing (it has no executor here): the
+        // held review takes its place.
+        let mut started = false;
+        for _ in 0..500 {
+            if app.store.run(&held).await.unwrap().is_some() {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(started, "the review the fix replaced runs again as {held}");
+        app.shutdown.cancel();
+    }
+
+    /// #583: one run changes a pull request's head at a time. A review asked
+    /// for during a fix waits for it, and says so; a second fix joins the
+    /// first; a rebase supersedes the fix, whose head it is about to replace.
+    #[tokio::test]
+    async fn a_fix_holds_the_reviews_of_its_pull_request_joins_a_second_fix_and_yields_to_a_rebase()
+    {
+        use henk_domain::queue::Decision;
+        use henk_domain::run::RunKind;
+
+        use crate::coordinator::Reason;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-fix-holds", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        // The only slot is taken, so the fix waits and the review asked for
+        // meanwhile is held for it.
+        let _taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let target = request(&placeholder).target;
+
+        let (decision, fix) = coordinator.submit_fix_ci(target.clone(), "asked".to_owned(), None);
+        assert_eq!(decision, Decision::Start);
+        let (decision, held) = coordinator.submit_review(request(&placeholder), commit);
+        assert_eq!(decision, Decision::After);
+        let waiting = coordinator.slots().waiting;
+        let held_row = waiting.iter().find(|w| w.run == held).unwrap();
+        assert_eq!(held_row.reason, Reason::AfterFix);
+        assert_eq!(held_row.waits_for.as_ref(), Some(&fix));
+        let fix_row = waiting.iter().find(|w| w.run == fix).unwrap();
+        assert_eq!(fix_row.kind, RunKind::FixCi);
+
+        let (decision, joined) =
+            coordinator.submit_fix_ci(target.clone(), "again".to_owned(), None);
+        assert_eq!((decision, &joined), (Decision::Join, &fix));
+
+        let (decision, rebase) = coordinator.submit_rebase(target, "asked".to_owned(), None);
+        assert_eq!(decision, Decision::Supersede);
+        assert_ne!(rebase, fix);
+        let kinds: Vec<RunKind> = coordinator.slots().waiting.iter().map(|w| w.kind).collect();
+        assert!(
+            !kinds.contains(&RunKind::FixCi),
+            "the fix left the queue: {kinds:?}"
+        );
+        assert!(coordinator.cancel(&rebase, "github:1234".to_owned()));
+        app.shutdown.cancel();
+    }
+
     /// #637, #583: a run that waited for its fix reviews what it pushed
     /// itself, so the coordinator drops the review that waited for the fix,
     /// which was of the head the fix replaced, and asks for none of its own.
