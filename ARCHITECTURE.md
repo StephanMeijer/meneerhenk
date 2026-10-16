@@ -132,16 +132,21 @@ flowchart TB
 | `henk-session` | `lib`: `SessionSpec`, `run_session`, `platform_tools` | domain, llm, mcp, agent, store |
 | `henk-events` | `event`, `github`, `gitlab`, `bus` | domain, tokio |
 | `henk-platform` | `webhook`, `writer`, `push`, `issue`, `github/{app,api,writer,push,issues}`, `gitlab/{writer,push,issues}` | domain, llm, mcp, ring, hmac |
-| `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/` | rusqlite (bundled), tokio-postgres with deadpool, rustls (ring) |
+| `henk-store` | `store` (the async `RunStore` trait), `sqlite`, `postgres`, `migrations/{sqlite,postgres}/`, `migrator/` | rusqlite (bundled), tokio-postgres with deadpool, sea-orm (the migrator), rustls (ring) |
 | `henk` | `main`, `config`, `app`, `hooks/{github,gitlab,api}`, `listeners/{filter,review,mention,plan,execute}`, `recorder`, `review`, `review_loop`, `loop_tools`, `diff_tools`, `code_tools`, `edit_tools`, `workspace`, `git`, `push`, `plan`, `plan_tools`, `plan_pairing`, `plan_review_tools`, `execute`, `execute_tools`, `issue_runs`, `skills`, `skill_tools`, `web_fetch`, `coordinator`, `server`, `pages`, `dashboard/{auth,session,api,app}`, `urls`, `doctor`, `ids` | all of the above, axum |
 
 `henk-platform` depends on `henk-llm` for one function, `ensure_tls_provider`,
 so every HTTPS client in the process shares the same rustls setup.
 
-`henk-store` has two implementations today. The proposal to replace them with
+`henk-store` has two implementations today. The decision to replace them with
 one over sea-orm, and why, is in
 [`docs/decisions/0001-run-store-layer.md`](docs/decisions/0001-run-store-layer.md)
-(#598); its status is proposed, and this paragraph changes when that does.
+(#598). The schema of the one implementation exists already, in
+`crates/henk-store/src/migrator/` (#604): a single sequence of steps for SQLite
+and PostgreSQL, `m001_baseline.rs` onwards, which also adopts a database the
+old migrations made; its README says how to add a step. Until the old stores
+are removed (#608) they still run `migrations/{sqlite,postgres}/`, so a schema
+change is written in both places.
 
 ## 3. A review, end to end
 

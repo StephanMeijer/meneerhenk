@@ -4,6 +4,7 @@
 //! callers hold; [`SqliteStore`] keeps records in one local file and
 //! [`PgStore`] in a `PostgreSQL` database.
 
+pub mod migrator;
 mod postgres;
 mod sqlite;
 mod store;
