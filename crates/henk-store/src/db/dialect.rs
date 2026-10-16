@@ -82,6 +82,22 @@ impl Dialect {
         })
     }
 
+    /// A time a caller gave as RFC 3339 text, to store; empty means now.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] naming `column` when `text` is not a time.
+    pub(crate) fn time_text(self, column: &'static str, text: &str) -> Result<Value, StoreError> {
+        if text.is_empty() {
+            return Ok(self.now());
+        }
+        let at = OffsetDateTime::parse(text, &Rfc3339).map_err(|_| StoreError::Corrupt {
+            column,
+            value: text.to_owned(),
+        })?;
+        Ok(self.time(at))
+    }
+
     /// A time to store: RFC 3339 text on SQLite, a timestamp on `PostgreSQL`.
     pub(crate) fn time(self, at: OffsetDateTime) -> Value {
         match self {

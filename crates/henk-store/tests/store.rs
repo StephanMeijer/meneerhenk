@@ -20,7 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use henk_domain::allowlist::Platform;
 use henk_domain::run::{RunId, RunKind};
 use henk_store::{
-    NewRun, RunFilter, RunStatus, RunStore, SqliteStore, Stage, StageState, StageWrite, StoreError,
+    NewRun, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore,
+    Stage, StageState, StageWrite, StoreError, TokenUsage, TranscriptRecord,
 };
 
 fn new_run(id: &str, target: u64) -> NewRun {
@@ -143,6 +144,27 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
                         .await
                         .unwrap();
                     store
+                        .start_session(&run.id, "reviewer", SessionRole::Reviewer, "m")
+                        .await
+                        .unwrap();
+                    store.event(&run.id, "info", "started").await.unwrap();
+                    store.joined(&run.id, "comment").await.unwrap();
+                    store
+                        .record_transcript(&run.id, &transcript("reviewer", "{}"))
+                        .await
+                        .unwrap();
+                    store
+                        .finish_session(
+                            &run.id,
+                            "reviewer",
+                            SessionStatus::Finished,
+                            3,
+                            TokenUsage::default(),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                    store
                         .finish_run(&run.id, RunStatus::Finished, Some("done"), None)
                         .await
                         .unwrap();
@@ -154,6 +176,63 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
         writer.await.unwrap();
     }
     assert_eq!(store.count_runs(&RunFilter::default()).await.unwrap(), 160);
+    let run = RunId::parse("w3-7").unwrap();
+    assert_eq!(store.sessions(&run).await.unwrap().len(), 1);
+    assert_eq!(store.events(&run).await.unwrap().len(), 1);
+    assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
+}
+
+fn transcript(session: &str, body: &str) -> TranscriptRecord {
+    TranscriptRecord {
+        at: String::new(),
+        session: session.into(),
+        model: "m".into(),
+        stop: "EndTurn".into(),
+        turns: 1,
+        bytes: u64::try_from(body.len()).unwrap(),
+        body: body.into(),
+    }
+}
+
+fn round(started_at: &str) -> RoundRecord {
+    RoundRecord {
+        session: "reviewer".into(),
+        role: SessionRole::Reviewer,
+        round: 1,
+        started_at: started_at.into(),
+        ended_at: None,
+        first_turn: 1,
+        turns: 0,
+        handover: String::new(),
+        handover_len: 0,
+    }
+}
+
+#[tokio::test]
+async fn a_time_that_is_not_rfc_3339_is_refused_not_stored() {
+    let store = SqliteStore::in_memory().unwrap();
+    store.create_run(&new_run("r-1", 7)).await.unwrap();
+    let run = RunId::parse("r-1").unwrap();
+
+    let mut late = transcript("reviewer", "{}");
+    late.at = "yesterday".into();
+    let error = store.record_transcript(&run, &late).await.unwrap_err();
+    assert!(matches!(error, StoreError::Corrupt { .. }), "{error:?}");
+    let error = store.start_round(&run, &round("noon")).await.unwrap_err();
+    assert!(matches!(error, StoreError::Corrupt { .. }), "{error:?}");
+
+    // An empty time means now, and a real one is kept.
+    store
+        .record_transcript(&run, &transcript("a", "{}"))
+        .await
+        .unwrap();
+    store
+        .start_round(&run, &round("2026-10-01T10:00:00.4Z"))
+        .await
+        .unwrap();
+    let rounds = store.rounds(&run).await.unwrap();
+    assert_eq!(rounds[0].started_at, "2026-10-01T10:00:00.4Z");
+    assert_eq!(store.transcripts(&run).await.unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

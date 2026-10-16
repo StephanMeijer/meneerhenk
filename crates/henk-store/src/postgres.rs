@@ -18,14 +18,12 @@ use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES,
-    MOST_SESSION_REVIEWS, NewRun, OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts,
-    RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord, SessionRole,
-    SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
-    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
-    TranscriptSummary, attach_outcomes, draft_verdict, event_id, merge_days, round_record,
-    run_kind, run_platform, session_dots, session_endings, session_role, session_status, to_i64,
-    to_u32, to_u64,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES, NewRun,
+    OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RoundRecord, RunFilter, RunRecord,
+    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
+    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
+    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
+    event_id, merge_days, run_kind, run_platform, to_i64, to_u32, to_u64,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -399,29 +397,7 @@ impl RunStore for PgStore {
         &self,
         runs: &[RunId],
     ) -> Result<Vec<(RunId, String, SessionRole, SessionStatus)>, StoreError> {
-        if runs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ids: Vec<&str> = runs.iter().map(RunId::as_str).collect();
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT run_id, name, role, status FROM sessions WHERE run_id = ANY($1) ORDER BY run_id, name",
-                &[&ids],
-            )
-            .await?
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get(0)?,
-                    row.try_get(1)?,
-                    row.try_get(2)?,
-                    row.try_get(3)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        session_dots(rows)
+        self.store.sessions_of(runs).await
     }
 
     async fn session_endings(
@@ -429,35 +405,7 @@ impl RunStore for PgStore {
         since: Option<OffsetDateTime>,
         reviews: u32,
     ) -> Result<Vec<SessionEnding>, StoreError> {
-        let reviews = i64::from(reviews.min(MOST_SESSION_REVIEWS));
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT r.id, r.started_at, s.name, s.role, s.model, s.status, s.error
-                 FROM (SELECT id, started_at FROM runs
-                       WHERE kind = 'review' AND status NOT IN ('running', 'superseded', 'cancelled')
-                         AND ($1::timestamptz IS NULL OR started_at >= $1)
-                       ORDER BY started_at DESC, id DESC LIMIT $2) r
-                 JOIN sessions s ON s.run_id = r.id
-                 ORDER BY r.started_at DESC, r.id DESC, s.name",
-                &[&since, &reviews],
-            )
-            .await?
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get(0)?,
-                    text(row.try_get(1)?),
-                    row.try_get(2)?,
-                    row.try_get(3)?,
-                    row.try_get(4)?,
-                    row.try_get(5)?,
-                    row.try_get(6)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        session_endings(rows)
+        self.store.session_endings(since, reviews).await
     }
 
     async fn stages_of(
@@ -499,21 +447,7 @@ impl RunStore for PgStore {
         role: SessionRole,
         model: &str,
     ) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO sessions (run_id, name, role, model, status, started_at) VALUES ($1, $2, $3, $4, $5, $6)",
-                &[
-                    &run.as_str(),
-                    &name,
-                    &role.as_str(),
-                    &model,
-                    &SessionStatus::Running.as_str(),
-                    &now(),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.start_session(run, name, role, model).await
     }
 
     async fn finish_session(
@@ -525,60 +459,13 @@ impl RunStore for PgStore {
         tokens: TokenUsage,
         error: Option<&str>,
     ) -> Result<(), StoreError> {
-        // Counts beyond i64 cannot happen; saturate like the SQLite store.
-        let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-        self.client()
-            .await?
-            .execute(
-                "UPDATE sessions SET status = $3, turns = $4, input_tokens = $5, output_tokens = $6, finished_at = $7, error = $8,
-                 cache_read_tokens = $9, cache_write_tokens = $10, reasoning_tokens = $11
-                 WHERE run_id = $1 AND name = $2",
-                &[
-                    &run.as_str(),
-                    &name,
-                    &status.as_str(),
-                    &count(turns),
-                    &count(tokens.input),
-                    &count(tokens.output),
-                    &now(),
-                    &error,
-                    &count(tokens.cache_read),
-                    &count(tokens.cache_write),
-                    &count(tokens.reasoning),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store
+            .finish_session(run, name, status, turns, tokens, error)
+            .await
     }
 
     async fn sessions(&self, run: &RunId) -> Result<Vec<SessionRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT name, model, status, turns, input_tokens, output_tokens, error, started_at, finished_at, cache_read_tokens, cache_write_tokens, role, reasoning_tokens FROM sessions WHERE run_id = $1 ORDER BY name",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(SessionRecord {
-                    name: row.try_get(0)?,
-                    role: session_role(row.try_get(11)?)?,
-                    model: row.try_get(1)?,
-                    status: session_status(row.try_get(2)?)?,
-                    turns: to_u64("sessions.turns", row.try_get(3)?)?,
-                    input_tokens: to_u64("sessions.input_tokens", row.try_get(4)?)?,
-                    output_tokens: to_u64("sessions.output_tokens", row.try_get(5)?)?,
-                    cache_read_tokens: to_u64("sessions.cache_read_tokens", row.try_get(9)?)?,
-                    cache_write_tokens: to_u64("sessions.cache_write_tokens", row.try_get(10)?)?,
-                    reasoning_tokens: to_u64("sessions.reasoning_tokens", row.try_get(12)?)?,
-                    error: row.try_get(6)?,
-                    started_at: text(row.try_get(7)?),
-                    finished_at: row.try_get::<_, Option<OffsetDateTime>>(8)?.map(text),
-                })
-            })
-            .collect()
+        self.store.sessions(run).await
     }
 
     async fn record_finding(
@@ -705,47 +592,11 @@ impl RunStore for PgStore {
         run: &RunId,
         transcript: &TranscriptRecord,
     ) -> Result<(), StoreError> {
-        let at = parse_time("transcripts.recorded_at", &transcript.at)?;
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO transcripts (run_id, session, model, stop, turns, bytes, body, recorded_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &run.as_str(),
-                    &transcript.session,
-                    &transcript.model,
-                    &transcript.stop,
-                    &i64::from(transcript.turns),
-                    &i64::try_from(transcript.bytes).unwrap_or(i64::MAX),
-                    &transcript.body,
-                    &at,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.record_transcript(run, transcript).await
     }
 
     async fn start_round(&self, run: &RunId, round: &RoundRecord) -> Result<(), StoreError> {
-        let at = parse_time("session_rounds.started_at", &round.started_at)?;
-        let handover_len = to_i64("session_rounds.handover_len", round.handover_len)?;
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO session_rounds (run_id, session, role, round, started_at, first_turn, handover, handover_len)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &run.as_str(),
-                    &round.session,
-                    &round.role.as_str(),
-                    &i64::from(round.round),
-                    &at,
-                    &i64::from(round.first_turn),
-                    &round.handover,
-                    &handover_len,
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.start_round(run, round).await
     }
 
     async fn end_round(
@@ -755,71 +606,15 @@ impl RunStore for PgStore {
         round: u32,
         turns: u32,
     ) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "UPDATE session_rounds SET ended_at = $4, turns = $5
-                 WHERE run_id = $1 AND session = $2 AND round = $3",
-                &[
-                    &run.as_str(),
-                    &session,
-                    &i64::from(round),
-                    &now(),
-                    &i64::from(turns),
-                ],
-            )
-            .await?;
-        Ok(())
+        self.store.end_round(run, session, round, turns).await
     }
 
     async fn rounds(&self, run: &RunId) -> Result<Vec<RoundRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT session, role, round, started_at, ended_at, first_turn, turns, handover, handover_len
-                 FROM session_rounds WHERE run_id = $1 ORDER BY started_at, session, round",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                round_record((
-                    row.try_get(0)?,
-                    row.try_get(1)?,
-                    row.try_get(2)?,
-                    text(row.try_get(3)?),
-                    row.try_get::<_, Option<OffsetDateTime>>(4)?.map(text),
-                    row.try_get(5)?,
-                    row.try_get(6)?,
-                    row.try_get(7)?,
-                    row.try_get(8)?,
-                ))
-            })
-            .collect()
+        self.store.rounds(run).await
     }
 
     async fn transcripts(&self, run: &RunId) -> Result<Vec<TranscriptSummary>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT recorded_at, session, model, stop, turns, bytes FROM transcripts WHERE run_id = $1 ORDER BY id",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(TranscriptSummary {
-                    at: text(row.try_get(0)?),
-                    session: row.try_get(1)?,
-                    model: row.try_get(2)?,
-                    stop: row.try_get(3)?,
-                    turns: to_u32("transcripts.turns", row.try_get(4)?)?,
-                    bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
-                })
-            })
-            .collect()
+        self.store.transcripts(run).await
     }
 
     async fn transcript(
@@ -827,27 +622,7 @@ impl RunStore for PgStore {
         run: &RunId,
         session: &str,
     ) -> Result<Option<TranscriptRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT recorded_at, session, model, stop, turns, bytes, body FROM transcripts WHERE run_id = $1 AND session = $2 ORDER BY id DESC LIMIT 1",
-                &[&run.as_str(), &session],
-            )
-            .await?;
-        rows.first()
-            .map(|row| {
-                Ok(TranscriptRecord {
-                    at: text(row.try_get(0)?),
-                    session: row.try_get(1)?,
-                    model: row.try_get(2)?,
-                    stop: row.try_get(3)?,
-                    turns: to_u32("transcripts.turns", row.try_get(4)?)?,
-                    bytes: u64::try_from(row.try_get::<_, i64>(5)?).unwrap_or_default(),
-                    body: row.try_get(6)?,
-                })
-            })
-            .transpose()
+        self.store.transcript(run, session).await
     }
 
     async fn record_tool_call(&self, run: &RunId, call: &ToolCallRecord) -> Result<(), StoreError> {
@@ -1042,45 +817,15 @@ impl RunStore for PgStore {
     }
 
     async fn event(&self, run: &RunId, level: &str, message: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO events (run_id, at, level, message) VALUES ($1, $2, $3, $4)",
-                &[&run.as_str(), &now(), &level, &message],
-            )
-            .await?;
-        Ok(())
+        self.store.event(run, level, message).await
     }
 
     async fn events(&self, run: &RunId) -> Result<Vec<EventRecord>, StoreError> {
-        let rows = self
-            .client()
-            .await?
-            .query(
-                "SELECT at, level, message FROM events WHERE run_id = $1 ORDER BY id",
-                &[&run.as_str()],
-            )
-            .await?;
-        rows.iter()
-            .map(|row| {
-                Ok(EventRecord {
-                    at: text(row.try_get(0)?),
-                    level: row.try_get(1)?,
-                    message: row.try_get(2)?,
-                })
-            })
-            .collect()
+        self.store.events(run).await
     }
 
     async fn joined(&self, run: &RunId, source: &str) -> Result<(), StoreError> {
-        self.client()
-            .await?
-            .execute(
-                "INSERT INTO requests (run_id, at, source) VALUES ($1, $2, $3)",
-                &[&run.as_str(), &now(), &source],
-            )
-            .await?;
-        Ok(())
+        self.store.joined(run, source).await
     }
 
     async fn record_event(&self, event: &InboundEvent) -> Result<(), StoreError> {
