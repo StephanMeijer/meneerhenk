@@ -1261,11 +1261,38 @@ model = "r"
         assert!(!system.contains("{{tools}}"), "{system}");
     }
 
+    /// #419: on the ssh backend a profile that leaves `plan` out gets the
+    /// planner a copy of the repository and `bash`.
     #[tokio::test]
-    async fn without_plan_in_the_profile_the_planner_keeps_its_tools() {
+    async fn without_a_plan_key_on_the_ssh_backend_the_planner_gets_a_workspace() {
+        let p = planned(
+            "henk-plan-default",
+            "",
+            vec![write_plan("## Goal\n\nExport runs."), done()],
+            0,
+        )
+        .await;
+        let report = run_plan(
+            &p.f.app,
+            request("r-plan-default"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(report.planned);
+        let (names, _, system) = seen(&p.f.model);
+        for tool in ["list_files", "read_file", "search", "bash", "write_plan"] {
+            assert!(names.iter().any(|n| n == tool), "{tool}: {names:?}");
+        }
+        assert!(system.contains("Your copy of the repository"), "{system}");
+        assert_eq!(p.provider.opened(), 1);
+    }
+
+    #[tokio::test]
+    async fn with_plan_false_the_planner_keeps_its_tools() {
         let p = planned(
             "henk-plan-nows",
-            "",
+            "plan = false\n",
             vec![write_plan("## Goal\n\nExport runs."), done()],
             0,
         )

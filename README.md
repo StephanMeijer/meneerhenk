@@ -1173,17 +1173,21 @@ changes how a review runs; `config check` still lists it and refuses it on
 the `host` backend, and the dashboard's health page counts how many recent
 reviews under such a profile got their workspace.
 
-With `plan = true` on a profile, the planner gets a workspace too (#172):
-one copy of the repository at its default branch, fetched by the sha Henk
-read, set up as above and never exported, with the same code tools and
-`bash` and a prompt that asks it to ground the plan in what it read. The
-platform's tools stay for issues, pull requests and history. The executor
-gets `bash` on any backend apart from Henk, and runs the repository's own
-checks with it: one test while it works, the full set its CI runs before
-it finishes, where every file it changes is part of the commit. Neither is
-available on the `host` backend, where those commands would run as Henk's
-own user: `plan = true` is refused there, and the executor there runs no
-checks, so CI decides.
+On a profile whose backend is `ssh` or `kubernetes`, the planner gets a
+workspace too (#172, on by default since #419): one copy of the repository
+at its default branch, fetched by the sha Henk read, set up as above and
+never exported, with the same code tools and `bash` and a prompt that asks
+it to ground the plan in what it read. The platform's tools stay for issues,
+pull requests and history. `plan = false` on the profile (or under
+`[workspace]`) turns the copy off; the planner then plans from the platform's
+tools alone. Setting up the copy runs the profile's `toolchain` and `setup`
+first, so a plan takes longer, and it uses a workspace of the sandbox like
+any other run. The executor gets `bash` on any backend apart from Henk, and
+runs the repository's own checks with it: one test while it works, the full
+set its CI runs before it finishes, where every file it changes is part of
+the commit. Neither is available on the `host` backend, where those commands
+would run as Henk's own user: the planner never gets a copy there, `plan =
+true` is refused, and the executor there runs no checks, so CI decides.
 `henk doctor --probe` says when `grep -P` on the host is missing or does
 not read Unicode as the `search` tool needs.
 
