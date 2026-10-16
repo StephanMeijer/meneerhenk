@@ -717,7 +717,7 @@ github_owners = ["docspec"]
             .to_owned();
         assert_eq!(
             wait_for_outcomes(&app, &event).await,
-            6,
+            7,
             "every listener recorded an outcome"
         );
         let recorded = app
@@ -978,7 +978,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 7);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1032,7 +1032,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 7);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
@@ -1056,7 +1056,7 @@ github_owners = ["docspec"]
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(wait_for_outcomes(&app, &event).await, 6);
+        assert_eq!(wait_for_outcomes(&app, &event).await, 7);
         let recorded = app
             .store
             .inbound_event(&EventId::parse(event).unwrap())
