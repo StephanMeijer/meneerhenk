@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.9...v0.4.10) - 2026-10-16
+
+### Added
+
+- *(ticket)* start a ticket run from the API and MCP ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- *(ticket)* drive an issue through plan, execute and review on its own ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+
+### Fixed
+
+- *(ticket)* give the NoPush test double open_pulls_behind ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+
+### Other
+
+- *(runs)* a plan or an execute run can leave the comment to its caller ([#536](https://github.com/StephanMeijer/meneerhenk/pull/536))
+- stop running PostgreSQL in CI ([#598](https://github.com/StephanMeijer/meneerhenk/pull/598))
+
 ## [0.4.9](https://github.com/StephanMeijer/meneerhenk/compare/v0.4.8...v0.4.9) - 2026-10-16
 
 ### Added
