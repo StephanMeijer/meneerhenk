@@ -768,8 +768,11 @@ over events: each pass reads the pull request through `Stages::standing`
 one thing it answers. A rebase goes through `Coordinator::submit_rebase_awaited`
 and a review through `submit_review_awaited`, so the stage waits for each and
 knows how it ended; the coordinator asks for no review of a rebase whose caller
-waits. What the stage knows about the head (`Ledger`: the reviewed head, the
-head the last rebase left, the counts) is in memory for the length of the run.
+waits. Failing checks go through `Coordinator::submit_fix_ci_awaited` the same
+way: the run (`fix_ci.rs`, #583) reads the checks of the head, has the executor
+fix the code in a workspace and pushes a fast-forward, and the stage reviews the
+head it left. What the stage knows about the head (`Ledger`: the reviewed head,
+the head the last rebase left, the counts) is in memory for the length of the run.
 It names only its latest child run in `run_children`; each rebase and review
 is a line on the ticket run's timeline.
 

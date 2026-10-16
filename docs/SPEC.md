@@ -500,6 +500,10 @@ most every `land_poll_secs` (60), and each time does one thing:
   that the ticket run waits for. The head a rebase left is reviewed; the
   head the review loop itself pushed counts as reviewed, since the loop
   checked it in its rounds;
+- a check ended in failure: **fix** it (§3.7). The ticket run has the
+  executor read the failing checks and fix the code, and waits for it; the
+  fixed head is then reviewed like any other and its checks read again.
+  Not where the repository has turned fixing off;
 - the checks are running, or the platform has not worked it out, or
   something else stands in the way, such as a required review: **wait**;
 - the platform would merge it, its head's review passed and its checks are
@@ -507,16 +511,23 @@ most every `land_poll_secs` (60), and each time does one thing:
 
 It is bounded. The stage has a time of its own, `land_timeout_secs` (four
 hours), from when it starts, since it waits for checks and for other pull
-requests; at most `land_max_rebases` (3) rebases; and a head a rebase just
-left is not rebased again for two looks, while the platform catches up.
-Failing checks stop the stage with one comment naming them: Henk cannot fix
-them yet.
+requests; at most `land_max_rebases` (3) rebases; at most `land_max_ci_fixes`
+(3) tries to fix failing checks, each counted when it pushed a fix (a run that
+finds no check failing, because the checks changed since the stage read them,
+is no try: the stage looks again after a pause); and a head
+a rebase just left is not rebased again for two looks, while the platform
+catches up. The stage stops with one comment when the tries are spent, when
+a fix pushes nothing or the executor says the failure is not about the code
+(a fix is not tried twice on one head), when the only checks that did not
+pass were cancelled or ran out of time, and when fixing is off for the
+repository.
 
 A person wins. A head that is none Henk made (the execute run's, its
-rebases', the review loop's), a merge, a close or a draft ends the stage well
-with nothing pushed. A rebase or a review of the pull request that somebody
-else asked for while the stage runs is theirs: the stage waits for it and
-looks again.
+rebases', its fixes', the review loop's), a merge, a close or a draft ends
+the stage well with nothing pushed. A rebase, a fix or a review of the pull
+request that somebody else asked for while the stage runs is theirs: the
+stage waits for it and looks again. A head Henk pushed in such a run of
+somebody else's, such as a fix someone asked for, is still Henk's.
 
 **How it ends.**
 
@@ -959,6 +970,13 @@ surprising reading of the earlier wording; veto any that is wrong.
   stay readable.
 
 ## Revision notes (2026-10-16)
+
+- §3.7, §4b: the land stage fixes failing checks (#583). A check that ended
+  in failure has the executor read it and fix the code, the fixed head is
+  reviewed and its checks read again, at most `land_max_ci_fixes` (3) times.
+  A fix that pushes nothing, a failure the executor calls not about the code,
+  and checks that were cancelled or ran out of time stop the stage with a
+  comment. A cancelled check beside a running one is no longer called red.
 
 - §3.7, §8 hard rule 2: Henk fixes a pull request's failing checks on
   request (#583): the executor reads the failing checks, fixes the code in a

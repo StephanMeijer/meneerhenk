@@ -1127,13 +1127,47 @@ impl Coordinator {
         trigger: String,
         requester: Option<String>,
     ) -> (Decision, RunId) {
+        self.submit_fix_ci_as(target, trigger, requester, None)
+    }
+
+    /// [`Self::submit_fix_ci`] for a caller that waits for the fix and
+    /// reviews what it pushed itself (#637), as for
+    /// [`Self::submit_rebase_awaited`]: the coordinator asks for no review of
+    /// the fixed head, and drops a review that waited for the fix, since it
+    /// was of the head the fix replaced.
+    ///
+    /// The receiver answers only when the decision is `Start` or
+    /// `Supersede`. On `Join` the fix, or the rebase it joined, is another
+    /// run's, which nobody here waits on: the receiver is closed and the run
+    /// id names that run.
+    pub fn submit_fix_ci_awaited(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+    ) -> (
+        Decision,
+        RunId,
+        oneshot::Receiver<anyhow::Result<FixCiReport>>,
+    ) {
+        let (tell, ended) = oneshot::channel();
+        let (decision, run) = self.submit_fix_ci_as(target, trigger, requester, Some(tell));
+        (decision, run, ended)
+    }
+
+    fn submit_fix_ci_as(
+        self: &Arc<Self>,
+        target: ReviewTarget,
+        trigger: String,
+        requester: Option<String>,
+        tell: Option<oneshot::Sender<anyhow::Result<FixCiReport>>>,
+    ) -> (Decision, RunId) {
         let asked = Changing {
             work: Work::FixCi,
             target,
             trigger,
             requester,
         };
-        let tell: Option<oneshot::Sender<anyhow::Result<FixCiReport>>> = None;
         self.submit_change(asked, tell, |coordinator, request, cancel| async move {
             run_fix_ci(&coordinator.app, request, cancel).await
         })

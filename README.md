@@ -947,11 +947,15 @@ and shows the three as stages.
   rebases it (not where the repository has `rebase = false`), has the new head
   reviewed, and waits for the checks. When the platform would merge it, its
   review passed and its checks are green, the run ends **ready to merge**;
-  merging stays yours. The stage has `land_timeout_secs` (14400) of its own,
-  rebases at most `land_max_rebases` (3) times, and stops with one comment
-  on the issue when it hits a limit or when checks fail: Henk cannot fix
-  those yet. Somebody else's push, a merge, a close or a draft ends it well
-  and Henk pushes nothing. Each look costs a few platform requests, so keep
+  merging stays yours. When a check fails it has the executor fix the code
+  (see "Fixing a pull request's failing checks"), reviews the fix and reads
+  the new checks. The stage has `land_timeout_secs` (14400) of its own,
+  rebases at most `land_max_rebases` (3) times, tries to fix failing checks
+  at most `land_max_ci_fixes` (3) times, and stops with one comment on the
+  issue when it hits a limit, when a fix pushes nothing or is not about the
+  code, or when the only checks that did not pass were cancelled or timed
+  out. Somebody else's push, a merge, a close or a draft ends it well and
+  Henk pushes nothing. Each look costs a few platform requests, so keep
   `land_poll_secs` generous when many tickets run at once. Off by default.
 
 ### The reviewer reads CI
@@ -1115,6 +1119,10 @@ ran out of time is not a problem in the code, and Henk says so. A fix is a
 run of its own on the pull request, like a rebase: it supersedes a running
 review (which starts again if the fix pushes nothing), a rebase supersedes
 it, and a review asked for meanwhile waits.
+
+A ticket run with `land = true` does this by itself when a check fails
+(`land_max_ci_fixes`, 3 tries); `@meneer-henk fix ci` is the same run on
+request.
 
 Fixing needs `[roles.executor]` with `propose_fix` in its tools (the
 default) and is on for every repository; turn it off for one with

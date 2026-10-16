@@ -2036,6 +2036,48 @@ requester_id = 3
         app.shutdown.cancel();
     }
 
+    /// #637, #583: a run that waited for its fix reviews what it pushed
+    /// itself, so the coordinator drops the review that waited for the fix,
+    /// which was of the head the fix replaced, and asks for none of its own.
+    #[tokio::test]
+    async fn a_fix_its_caller_waited_for_drops_the_review_that_waited_for_it() {
+        use henk_domain::queue::Decision;
+        use henk_domain::run::RunKind;
+
+        let model = ScriptedClient::new("scripted", converge()).with_delay(Duration::from_secs(30));
+        let mut f = fixture("henk-fix-awaited", DIFF, model).await;
+        f.app.settings.review.max_concurrent = 1;
+        f.app.settings.roles.executor = None;
+        let (app, commit, _remote) = (Arc::new(f.app), f.head, f.remote);
+        let coordinator = Arc::new(crate::coordinator::Coordinator::new(Arc::clone(&app)));
+        let _taken = coordinator.take_a_slot().unwrap();
+        let placeholder = RunId::parse("r-placeholder").unwrap();
+        let target = request(&placeholder).target;
+
+        let (decision, _fix, _ended) =
+            coordinator.submit_fix_ci_awaited(target.clone(), "asked".to_owned(), None);
+        assert_eq!(decision, Decision::Start);
+        let (decision, _held) = coordinator.submit_review(request(&placeholder), commit);
+        assert_eq!(decision, Decision::After);
+        let reviews = || {
+            coordinator
+                .slots()
+                .waiting
+                .iter()
+                .filter(|w| w.kind == RunKind::Review)
+                .count()
+        };
+        assert_eq!(reviews(), 1, "the review is held for the fix");
+
+        coordinator.after_rebase_of(&target, None, true);
+        assert_eq!(
+            reviews(),
+            0,
+            "dropped: its head is gone, the caller reviews"
+        );
+        app.shutdown.cancel();
+    }
+
     #[tokio::test]
     async fn an_awaited_review_stopped_by_a_shutdown_while_it_waits_is_told_it_was_interrupted() {
         let (app, _coordinator, _queued, ended, _remote) =

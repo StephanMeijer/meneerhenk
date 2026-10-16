@@ -1022,6 +1022,10 @@ pub struct AutonomousConfig {
     /// How many times the land stage rebases the pull request in all.
     #[serde(default = "default_land_max_rebases")]
     pub land_max_rebases: u32,
+    /// How many times the land stage has the executor fix failing checks
+    /// (#583) in all, whatever came of each. 0 for never.
+    #[serde(default = "default_land_max_ci_fixes")]
+    pub land_max_ci_fixes: u32,
 }
 
 /// The agents Henk runs (#322), one section each. The review loop needs
@@ -1883,6 +1887,9 @@ fn default_land_poll_secs() -> u64 {
     60
 }
 fn default_land_max_rebases() -> u32 {
+    3
+}
+fn default_land_max_ci_fixes() -> u32 {
     3
 }
 fn default_branch_prefix() -> String {
@@ -3280,8 +3287,9 @@ impl Settings {
             if autonomous.land {
                 let _ = writeln!(
                     out,
-                    "Land:            then the pull request is kept landable until it is ready to merge: rebased up to {} times, reviewed again, looked at every {}s, {}s at most",
+                    "Land:            then the pull request is kept landable until it is ready to merge: rebased up to {} times, failing checks fixed up to {} times, reviewed again, looked at every {}s, {}s at most",
                     autonomous.land_max_rebases,
+                    autonomous.land_max_ci_fixes,
                     autonomous.land_poll_secs,
                     autonomous.land_timeout_secs
                 );
@@ -3793,7 +3801,8 @@ github_owners = ["docspec"]
                 .replace("# land = false", "land = true")
                 .replace("# land_timeout_secs = 14400", "land_timeout_secs = 14400")
                 .replace("# land_poll_secs = 60", "land_poll_secs = 60")
-                .replace("# land_max_rebases = 3", "land_max_rebases = 3");
+                .replace("# land_max_rebases = 3", "land_max_rebases = 3")
+                .replace("# land_max_ci_fixes = 3", "land_max_ci_fixes = 3");
             assert_ne!(on, text, "the example has the section");
             let settings = Config::parse(&on)
                 .and_then(Config::into_settings)
@@ -3806,6 +3815,7 @@ github_owners = ["docspec"]
             assert_eq!(autonomous.land_timeout_secs, 14400);
             assert_eq!(autonomous.land_poll_secs, 60);
             assert_eq!(autonomous.land_max_rebases, 3);
+            assert_eq!(autonomous.land_max_ci_fixes, 3);
         }
     }
 
@@ -4477,15 +4487,19 @@ github_owners = ["docspec"]
             ),
             (14400, 60, 3)
         );
+        assert_eq!(config.land_max_ci_fixes, 3);
         let mut out = String::new();
         off.describe_agents(&mut out);
         assert!(!out.contains("Land:"), "{out}");
 
-        let on = autonomous("land = true\nland_poll_secs = 30\nland_max_rebases = 5\n").unwrap();
+        let on = autonomous(
+            "land = true\nland_poll_secs = 30\nland_max_rebases = 5\nland_max_ci_fixes = 2\n",
+        )
+        .unwrap();
         let mut out = String::new();
         on.describe_agents(&mut out);
         assert!(
-            out.contains("Land:            then the pull request is kept landable until it is ready to merge: rebased up to 5 times, reviewed again, looked at every 30s, 14400s at most"),
+            out.contains("Land:            then the pull request is kept landable until it is ready to merge: rebased up to 5 times, failing checks fixed up to 2 times, reviewed again, looked at every 30s, 14400s at most"),
             "{out}"
         );
         assert!(henk_domain::text::is_in_style(&out), "{out}");
