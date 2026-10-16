@@ -2,26 +2,29 @@
 //! async methods run them in place.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use henk_domain::run::{EventId, RunId};
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
+#[cfg(test)]
+use rusqlite::params;
 use rusqlite_migration::{M, Migrations};
 use time::OffsetDateTime;
+#[cfg(test)]
 use time::format_description::well_known::Rfc3339;
 
 use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RoundRecord, RunFilter, RunRecord,
-    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
-    event_id, merge_days, now, run_kind, run_platform, to_i64, to_u64,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
+    PruneCounts, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// The run store over SQLite.
@@ -32,6 +35,9 @@ use crate::types::{
 /// moves.
 #[derive(Debug)]
 pub struct SqliteStore {
+    /// For the unit tests, which read and change the database directly. The
+    /// store itself no longer uses it: it migrates through it when opened.
+    #[cfg(test)]
     connection: Mutex<Connection>,
     store: Store,
     /// The file behind [`SqliteStore::in_memory`], removed with the store.
@@ -86,23 +92,6 @@ impl Drop for TemporaryFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
-}
-
-/// A stored time column as an [`instant`], so it compares as a time.
-macro_rules! instant_of {
-    ($column:literal) => {
-        concat!(
-            "substr(",
-            $column,
-            ", 1, 19) || substr(CASE WHEN substr(",
-            $column,
-            ", 20, 1) = '.' THEN substr(",
-            $column,
-            ", 21, length(",
-            $column,
-            ") - 21) ELSE '' END || '000000000', 1, 9)"
-        )
-    };
 }
 
 fn migrations() -> Migrations<'static> {
@@ -194,12 +183,14 @@ impl SqliteStore {
             None => migrations().to_latest(&mut connection)?,
         }
         Ok(Self {
+            #[cfg(test)]
             connection: Mutex::new(connection),
             store,
             _temporary: temporary,
         })
     }
 
+    #[cfg(test)]
     fn with<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, StoreError>,
@@ -500,33 +491,6 @@ impl RunStore for SqliteStore {
     ) -> Result<Vec<EventWithOutcomes>, StoreError> {
         self.store.list_inbound_events(filter, page).await
     }
-}
-
-/// A caller-supplied time, as given; empty means now.
-fn at_or_now(at: &str) -> String {
-    if at.is_empty() { now() } else { at.to_owned() }
-}
-
-/// An RFC 3339 time as a fixed-width UTC text that sorts as the time does:
-/// `2026-10-07T12:00:00` and nine digits of nanoseconds. [`instant_of!`] turns
-/// a stored time (UTC, from [`now`]) into the same shape.
-fn instant(column: &'static str, value: &str) -> Result<String, StoreError> {
-    let at = OffsetDateTime::parse(value, &Rfc3339)
-        .map_err(|_| StoreError::Corrupt {
-            column,
-            value: value.to_owned(),
-        })?
-        .to_offset(time::UtcOffset::UTC);
-    Ok(format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{:09}",
-        at.year(),
-        u8::from(at.month()),
-        at.day(),
-        at.hour(),
-        at.minute(),
-        at.second(),
-        at.nanosecond()
-    ))
 }
 
 #[cfg(test)]

@@ -21,7 +21,10 @@ use henk_domain::allowlist::Platform;
 use henk_domain::run::{EventId, RunId, RunKind};
 use henk_store::migrator::Migrator;
 use henk_store::{
-    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventKey, EventWithOutcomes, FindingAction, InboundEvent, NewRun, OutcomeRecord, Page, RoundRecord, RunFilter, RunStatus, RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite, StoreError, TokenUsage, ToolCallRecord, TranscriptRecord,
+    DraftDecision, DraftRecord, DraftVerdict, EventFilter, EventKey, EventWithOutcomes,
+    FindingAction, InboundEvent, NewRun, OutcomeRecord, Page, RoundRecord, RunFilter, RunStatus,
+    RunStore, SessionRole, SessionStatus, SqliteStore, Stage, StageState, StageWrite, StoreError,
+    TokenUsage, ToolCallRecord, TranscriptRecord,
 };
 use sea_orm_migration::MigratorTrait as _;
 
@@ -317,6 +320,7 @@ async fn eight_writers(store: Arc<dyn RunStore>) {
                         )
                         .await
                         .unwrap();
+                    store
                         .record_finding(
                             &run.id,
                             "reviewer",

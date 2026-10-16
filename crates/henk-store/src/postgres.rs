@@ -9,7 +9,6 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use henk_domain::run::{EventId, RunId};
 use rustls_platform_verifier::BuilderVerifierExt as _;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio_postgres::config::Host;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -17,12 +16,11 @@ use crate::db::Store;
 use crate::store::RunStore;
 use crate::types::{
     DayCounts, DraftDecision, DraftRecord, EventFacets, EventFilter, EventRecord,
-    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, MAX_PAYLOAD_BYTES, NewRun,
-    OutcomeFilter, OutcomeRecord, OutcomeRow, Page, PruneCounts, RoundRecord, RunFilter, RunRecord,
-    RunStatus, SessionEnding, SessionRecord, SessionRole, SessionStatus, Stage, StageRecord,
-    StageState, StageWrite, StoreError, TokenUsage, ToolCallFilter, ToolCallListing,
-    ToolCallRecord, ToolUsage, TranscriptRecord, TranscriptSummary, attach_outcomes, draft_verdict,
-    event_id, merge_days, run_kind, run_platform, to_i64, to_u32, to_u64,
+    EventWithOutcomes, FindingAction, FindingRecord, InboundEvent, NewRun, OutcomeRecord, Page,
+    PruneCounts, RoundRecord, RunFilter, RunRecord, RunStatus, SessionEnding, SessionRecord,
+    SessionRole, SessionStatus, Stage, StageRecord, StageState, StageWrite, StoreError, TokenUsage,
+    ToolCallFilter, ToolCallListing, ToolCallRecord, ToolUsage, TranscriptRecord,
+    TranscriptSummary,
 };
 
 /// Schema migrations, applied in order. Only ever append.
@@ -57,9 +55,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The run store over `PostgreSQL`.
 #[derive(Debug)]
 pub struct PgStore {
-    pool: Pool,
-    /// The methods that have moved to the new layer (#598) go here, to a
-    /// second pool on the same database; the rest still use `pool`.
+    /// Every method of the trait goes here (#598). The old migrations ran
+    /// through a pool of their own when the store was connected, and it is
+    /// gone again.
     store: Store,
 }
 
@@ -112,7 +110,7 @@ impl PgStore {
         Self::migrate(&pool, version).await?;
         // The new layer second: it adopts what the migrations above leave.
         let store = Store::postgres(url, migrate_new).await?;
-        Ok(Self { pool, store })
+        Ok(Self { store })
     }
 
     /// Applies the migrations up to `upto` the database lacks.
@@ -157,10 +155,6 @@ impl PgStore {
         }
         transaction.commit().await?;
         Ok(())
-    }
-
-    async fn client(&self) -> Result<deadpool_postgres::Object, StoreError> {
-        Ok(self.pool.get().await?)
     }
 }
 
@@ -210,26 +204,6 @@ fn tls() -> Result<MakeRustlsConnect, StoreError> {
     .map_err(|error| StoreError::Connect(error.to_string()))?
     .with_no_client_auth();
     Ok(MakeRustlsConnect::new(config))
-}
-
-fn now() -> OffsetDateTime {
-    OffsetDateTime::now_utc()
-}
-
-fn text(at: OffsetDateTime) -> String {
-    at.format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
-}
-
-/// A caller-supplied RFC 3339 time; empty means now.
-fn parse_time(column: &'static str, value: &str) -> Result<OffsetDateTime, StoreError> {
-    if value.is_empty() {
-        return Ok(now());
-    }
-    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| StoreError::Corrupt {
-        column,
-        value: value.to_owned(),
-    })
 }
 
 #[async_trait]
